@@ -15,6 +15,7 @@ import {
   buildLaunchBody,
   launchSubmitLabel,
   launchResultMessage,
+  launchFailure,
   agentChatTargetFor,
   splitNdjson,
   runLaunchStream,
@@ -486,4 +487,26 @@ test('agentChatTargetFor: the path segment is URL-encoded, the state id is not',
   const r = agentChatTargetFor({ roles: [{ id: 'a b' }] }, 'acme');
   assert.equal(r.path, '/chats/acme-a%20b');
   assert.equal(r.state.revealAgentId, 'acme-a b');
+});
+
+// ─── launchFailure (#2658) ───────────────────────────────────────────────────
+
+test('launchFailure: a refusal before the plan created nothing — no rollback claim', () => {
+  const f = launchFailure({ message: 'Team name required', steps: null });
+  assert.deepEqual(f, { message: 'Team name required', rolledBack: false });
+  // A plan that never started a step is the same case.
+  assert.equal(launchFailure({ message: 'x', steps: [{ id: 'env', status: 'pending' }] }).rolledBack, false);
+});
+
+test('launchFailure: once a step ran, the rollback sentence applies', () => {
+  const steps = [{ id: 'env', status: 'done' }, { id: 'team', status: 'error' }];
+  assert.equal(launchFailure({ message: 'boom', steps }).rolledBack, true);
+  assert.equal(launchFailure({ message: 'boom', steps: [{ id: 'env', status: 'running' }] }).rolledBack, true);
+});
+
+test('launchFailure: the extend-missing-team API refusal is translated into UI terms', () => {
+  const f = launchFailure({ message: `Cannot extend: team 'acme' does not exist yet. Use mode: "create" first.` });
+  assert.equal(f.message, 'There is no team \'acme\' to add agents to yet — untick “Add to an existing team” to create it instead.');
+  assert.doesNotMatch(f.message, /mode:/);
+  assert.equal(launchFailure({}).message, '');
 });

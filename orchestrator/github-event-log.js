@@ -69,16 +69,16 @@ function buildEventEntry({ ghEvent, repoFullName, key, outcomes }) {
 // record `delivered` up front (label fast-path, manual re-fire):
 // - routed to a pool instance → stamp its `instanceId`, so the Event Log links
 //   the instance that ran it rather than the role template;
-// - held by the role's pause/drain/off control → `held` with that reason, so no
-//   link points at a session that never ran.
-// A non-pooled dispatch (no `instanceId`, no `pool-*` hold) is returned
-// unchanged — its row looks exactly as before.
+// - held (the flow's WIP lane, or a pooled role's pause/drain/off control) →
+//   `held` with that reason (`'wip'` by default, plus `wipLimit`), mirroring the
+//   poller's fan-out, so no link points at a session that never ran.
+// A dispatch that ran with no `instanceId` (non-pooled) is returned unchanged.
 function applyPoolDecision(outcome, decision) {
   if (!outcome || outcome.status !== 'delivered' || !decision) return outcome;
   if (decision.held) {
-    return typeof decision.reason === 'string' && decision.reason.startsWith('pool-')
-      ? { ...outcome, status: 'held', reason: decision.reason }
-      : outcome;
+    const held = { ...outcome, status: 'held', reason: decision.reason || 'wip' };
+    if (decision.wipLimit != null) held.wipLimit = decision.wipLimit;
+    return held;
   }
   if (typeof decision.instanceId !== 'string' || !decision.instanceId) return outcome;
   return { ...outcome, instanceId: decision.instanceId };

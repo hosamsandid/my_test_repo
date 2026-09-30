@@ -181,11 +181,18 @@ function waitForExit(cid) {
 
 // ── Seam #2 helpers ─────────────────────────────────────────────────────────
 
+function sanitizeName(s) {
+  return String(s).replace(/[^a-zA-Z0-9_.-]/g, '_');
+}
+
 function perAgentNetworkName(agentId) {
   // Sanitize: podman network names are alnum + _-. Keep agent IDs short
   // (8-char hex from the orchestrator), so this rarely matters in practice.
-  const safe = String(agentId).replace(/[^a-zA-Z0-9_.-]/g, '_');
-  return `${PER_AGENT_NETWORK_PREFIX}${safe}`;
+  return `${PER_AGENT_NETWORK_PREFIX}${sanitizeName(agentId)}`;
+}
+
+function agentContainerName(instanceId, agentId) {
+  return `aee-${sanitizeName(instanceId)}-${sanitizeName(agentId)}`;
 }
 
 // Connecting a service container into a per-agent network races the service's
@@ -414,8 +421,12 @@ const AGENT_STOP_GRACE_POLLS = 8;      // ~8s for SIGTERM-driven autoremove
 const AGENT_STOP_GRACE_DELAY_MS = 1000;
 
 // List the agent's own container(s) by the aee.agent.id label, in any state.
-async function listAgentContainers(id) {
-  const filters = encodeURIComponent(JSON.stringify({ label: [`aee.agent.id=${id}`] }));
+// `instanceId` narrows it to this stack's containers (the aee.instance label),
+// for callers that must not touch a parallel instance sharing the socket.
+async function listAgentContainers(id, { instanceId = null } = {}) {
+  const label = [`aee.agent.id=${id}`];
+  if (instanceId) label.push(`${INSTANCE_LABEL_KEY}=${instanceId}`);
+  const filters = encodeURIComponent(JSON.stringify({ label }));
   try {
     const r = await libpodRequest('GET', `/containers/json?all=true&filters=${filters}`);
     if (r.status < 300 && Array.isArray(r.body)) {
@@ -438,17 +449,21 @@ async function listAgentContainers(id) {
 // which since #1962 (BriefingPack removal) is false for every supported role —
 // `bp-instance` was the only one that flushed a bound repo on shutdown. The
 // flag stays because it is the seam the next such role would use.
-async function ensureAgentContainerGone(id, { graceful = true } = {}) {
+//
+// `instanceId` scopes the wait/removal to this stack's containers — the spawn
+// path (#2601) uses it so a respawn never removes a parallel instance's
+// container that happens to carry the same agent id.
+async function ensureAgentContainerGone(id, { graceful = true, instanceId = null } = {}) {
   if (graceful) {
     for (let attempt = 0; attempt < AGENT_STOP_GRACE_POLLS; attempt++) {
-      if ((await listAgentContainers(id)).length === 0) return;
+      if ((await listAgentContainers(id, { instanceId })).length === 0) return;
       await sleep(AGENT_STOP_GRACE_DELAY_MS);
     }
   }
   // Nothing left (graceful exit already autoremoved it) — done.
   // Otherwise force-remove whatever remains. This also detaches it from the
   // per-agent network.
-  for (const cid of await listAgentContainers(id)) {
+  for (const cid of await listAgentContainers(id, { instanceId })) {
     const r = await libpodRequest('DELETE', `/containers/${cid}?force=true`);
     if (r.status >= 300 && r.status !== 404) {
       const blob = typeof r.body === 'string' ? r.body : JSON.stringify(r.body || '');
@@ -705,10 +720,19 @@ function spawnContainer({ id, env, contextMounts, image, toolchain = null }) {
       const memBytes = resolveMemLimitBytes(toolchain);
       if (memBytes) resourceLimits.memory = { limit: memBytes };
       if (AGENT_PIDS_LIMIT) resourceLimits.pids = { limit: AGENT_PIDS_LIMIT };
+      // #2601 AC4: the container name is fixed per (instance, agent), so the
+      // previous container must be gone before the create, or libpod answers
+      // 409 "name already in use". A restart only SIGTERMs the old container
+      // (stopAgentProcess, fire-and-forget) and spawns in the same tick, and
+      // autoremove is async — wait out its graceful exit, then force-remove a
+      // leftover (also one left by a crashed orchestrator). No old container
+      // (the normal first spawn) returns after one list call.
+      await ensureAgentContainerGone(id, { instanceId: INSTANCE_ID });
       const createBody = {
         // #1940 AC2: the RESOLVED image, never the module-level default — the
         // caller decided which toolchain (if any) this agent runs on.
         image,
+        name: agentContainerName(INSTANCE_ID, id),
         env: envMap,
         netns: { nsmode: 'bridge' },
         volumes,
@@ -802,5 +826,7 @@ module.exports = {
     parseBytes,
     resolveMemLimitBytes,
     AGENT_MEM_LIMIT_BYTES,
+    sanitizeName,
+    agentContainerName,
   },
 };

@@ -97,6 +97,13 @@ test('exactly one active run: none → refuse, two → ambiguous, end → back t
   assert.equal(r.active('a').reason, 'no-active-run');
 });
 
+test('a chat run carries the io.aee.author stamp through to the active run', () => {
+  const r = registry();
+  const { key } = r.issueKey('a');
+  r.begin('a', key, { kind: 'chat', roomId: '!r', eventId: '$1', sender: '@admin:local', author: { userId: 'u-1', subject: 'admin' } });
+  assert.deepEqual(r.active('a').run.author, { userId: 'u-1', subject: 'admin' });
+});
+
 test('a declaration older than the TTL is pruned (a crashed runner never sends its end)', () => {
   let now = 1000;
   const r = registry({ now: () => now });
@@ -131,6 +138,19 @@ test('chatSenderFromEvent: takes the sender from the server copy; refuses agent-
   assert.equal(chatSenderFromEvent({ ...ev, sender: '@agent:hs' }, opts).reason, 'sender-is-agent');
   assert.equal(chatSenderFromEvent({ ...ev, sender: '' }, opts).reason, 'no-sender');
   assert.equal(chatSenderFromEvent({ ...ev, origin_server_ts: now - CHAT_EVENT_MAX_AGE_MS - 1 }, opts).reason, 'event-too-old');
+});
+
+test('chatSenderFromEvent: surfaces the io.aee.author stamp when the event carries one', () => {
+  const now = 10_000_000;
+  const base = { type: 'm.room.message', room_id: '!r', sender: '@admin:local', origin_server_ts: now - 1000 };
+  const opts = { roomId: '!r', agentMatrixId: '@agent:hs', now };
+  // In the single-operator model the sender is the shared admin identity; the
+  // acting human is only named by the stamp.
+  const withStamp = { ...base, content: { body: 'hi', 'io.aee.author': { userId: 'u-1', subject: 'admin' } } };
+  assert.deepEqual(chatSenderFromEvent(withStamp, opts), { ok: true, sender: '@admin:local', author: { userId: 'u-1', subject: 'admin' } });
+  // A partial stamp keeps whichever half is present; a junk stamp is dropped.
+  assert.deepEqual(chatSenderFromEvent({ ...base, content: { 'io.aee.author': { subject: 'admin' } } }, opts).author, { userId: null, subject: 'admin' });
+  assert.equal(chatSenderFromEvent({ ...base, content: { 'io.aee.author': 'nope' } }, opts).author, undefined);
 });
 
 // ── the credential decision ─────────────────────────────────────────────────
@@ -168,6 +188,21 @@ test('decision: a chat run NEVER yields the service account (AC4/AC5/AC6)', () =
   assert.equal(d.code, 'untrusted-sender');
   assert.equal(d.status, 403);
   for (const x of [d]) assert.notEqual(x.mode, 'service');
+});
+
+test('decision: the untrusted-sender message tells "not a team member" apart from "could not identify the sender"', () => {
+  // a real account was found but is not on this agent's team → the honest
+  // cross-team message (never the misleading blame when the person IS a member)
+  const notMember = decideCredentialGrant({ active: chat, senderUserId: null, senderResolved: true, personalKeys: PERSONAL_KEYS, pluginName: 'Jira' });
+  assert.equal(notMember.code, 'untrusted-sender');
+  assert.match(notMember.message, /not a member of this agent's team/);
+  assert.doesNotMatch(notMember.message, /could not identify/);
+  // no account at all resolved from the sender (e.g. the shared admin identity
+  // with no author stamp) → say THAT, not "not a team member"
+  const unresolved = decideCredentialGrant({ active: chat, senderUserId: null, senderResolved: false, personalKeys: PERSONAL_KEYS, pluginName: 'Jira' });
+  assert.equal(unresolved.code, 'untrusted-sender');
+  assert.match(unresolved.message, /could not identify who sent this chat message/);
+  assert.doesNotMatch(unresolved.message, /not a member/);
 });
 
 test('decision: no run / ambiguous / revoked → refused with that reason', () => {

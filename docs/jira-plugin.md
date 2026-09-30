@@ -301,6 +301,16 @@ ask for a person's credential itself. That route checks the one active
 run, the sender's team trust (re-checked on every call) and the stored
 personal credential. The old `AEE_ACTING_SENDER` env var plays no part.
 
+**Who "the sender" is.** The acting human is taken from the event's platform
+author stamp (`io.aee.author`, written server-side from the authenticated
+console session), falling back to the raw Matrix sender id. This matters in the
+single-operator stack: there every human's message is sent under the ONE shared
+Matrix identity (`@admin:local`), which maps to no user record — so without the
+stamp a chat turn could never name the acting person and would always be refused
+`untrusted-sender`. The stamp is as unforgeable from inside the container as the
+sender is (the container holds only its own Matrix token, and a self-posted
+event is rejected before the stamp is even read).
+
 Every broker audit line records `identity` (the member's user id, or `service-account`)
 and `interactive`. `aee-jira whoami` shows both.
 
@@ -331,7 +341,8 @@ with the service account.
 | `aee-jira` exits 3 `broker-unreachable` | the sidecar isn't running, or you're on Kubernetes | `podman ps \| grep aee-plugin-jira`; on k8s the CLI is expected to fail (see platforms note) |
 | a call returns `personal-credential-required` | a chat turn, and the sender has no personal Jira credential | the sender adds it under Connections → Plugin Tokens |
 | a call returns `personal-credential-rejected` | Jira refused the sender's personal token (401) — expired or revoked | the sender renews it on Plugin Tokens |
-| a call returns `untrusted-sender` | the chat message came from someone not trusted for this agent | share the team with that person, or ask a member |
+| a call returns `untrusted-sender` (message: *not a member of this agent's team*) | the sender resolves to a real account, but one that is not on this agent's team | share the team with that person, or ask a member |
+| a call returns `untrusted-sender` (message: *could not identify who sent this chat message*) | the sender maps to no user record — e.g. an agent container from before author-stamp resolution, or a message with no author stamp | respawn the agent; ensure the message was sent through the console (which stamps the author) |
 | a call returns `no-active-run` / `ambiguous-run` / `run-key-revoked` | the call is not inside exactly one run the runner declared (e.g. a second Claude run in the same agent overlapped a chat turn — the call is refused rather than guessed), or something in the container requested a second run key | respawn the agent; do not run `aee-jira` from background processes that outlive the turn |
 | a chat turn returns `no-site` | the sender has a personal credential, but the team has no Jira site set | Team Admin sets the site in Agent Chat → Settings → Plugins (or a System Admin on the Plugins page) |
 | an automated run returns `no-service-account` | the team has no service-account credential set | Team Admin sets it in Agent Chat → Settings → Plugins (or a System Admin on the Plugins page) |

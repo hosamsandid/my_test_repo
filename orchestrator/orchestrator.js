@@ -6525,6 +6525,60 @@ function resolveActingSenderUserId(actingSenderMatrixId, cfg) {
   return credentialResolution.isActingSenderTrusted(cfg, userId, hasMembership) ? userId : null;
 }
 
+// The acting human for a PLUGIN credential grant on a chat turn (#2562). Unlike
+// the gh-as-agent path above — which only ever sees a raw Matrix sender id — a
+// plugin grant runs against the homeserver EVENT, so it also has the platform's
+// own `io.aee.author` stamp (`run.author`, resolved by `chatSenderFromEvent`).
+// That is what makes the single-operator model work: every human's message is
+// sent under the ONE shared Matrix identity (`@admin:local`), which resolves to
+// no user record, so the raw sender alone could never name the acting person and
+// a chat turn could NEVER use a personal plugin credential. The stamp is written
+// server-side from the authenticated session (never the request body, stripped
+// from the send route's pass-through), so it is trusted exactly as far as the
+// sender is — and the container cannot forge it (it holds only its own Matrix
+// token, and a self-posted event is already rejected as `sender-is-agent`).
+//
+// Resolution order: the stamp's userId (if it is a live user) → the stamp's
+// login subject → the raw Matrix sender id. Then the SAME trust boundary as the
+// gh path (`isActingSenderTrusted`). Returns { userId, resolved }:
+//   userId   — the acting user iff resolved AND trusted for this agent, else null
+//   resolved — a real platform account was found for the sender at all (trusted
+//              or not), letting the refusal tell "not a member of this team"
+//              apart from "could not identify who sent this message".
+function resolvePluginChatSender(run, cfg) {
+  let knownUsers = [];
+  try {
+    knownUsers = teamsStore.listUsers();
+  } catch {
+    knownUsers = [];
+  }
+  const author = run && run.author && typeof run.author === 'object' ? run.author : null;
+  let candidate = null;
+  if (author && author.userId) {
+    const hit = knownUsers.find((u) => u && String(u.id) === String(author.userId));
+    if (hit) candidate = String(hit.id);
+  }
+  if (!candidate && author && author.subject) {
+    const want = String(author.subject).trim().toLowerCase();
+    const hit = knownUsers.find((u) => u && typeof u.subject === 'string'
+      && u.subject.trim().toLowerCase() === want);
+    if (hit) candidate = String(hit.id);
+  }
+  if (!candidate) {
+    candidate = usageAttribution.userIdForMatrixId(knownUsers, run && run.sender) || null;
+  }
+  if (!candidate) return { userId: null, resolved: false };
+  const hasMembership = (teamId, uid) => {
+    try {
+      return teamsStore.listMemberships({ teamId, userId: uid }).length > 0;
+    } catch {
+      return false;
+    }
+  };
+  const trusted = credentialResolution.isActingSenderTrusted(cfg, candidate, hasMembership);
+  return { userId: trusted ? candidate : null, resolved: true };
+}
+
 // The `{ users, memberships }` snapshot `resolveBaselineOwnerId` (#2176, epic
 // #2166 B4) needs to find a team's CURRENT `team-admin`. Loaded fresh per call
 // like `loadLiveUserGate` — a succession must be picked up on the very next
@@ -16926,7 +16980,8 @@ async function main() {
             console.warn(`[Orchestrator] chat run declaration for ${id} refused: ${decided.reason}`);
             return sendJson(res, 403, decided);
           }
-          run = { kind: 'chat', roomId, eventId, sender: decided.sender };
+          run = { kind: 'chat', roomId, eventId, sender: decided.sender,
+            ...(decided.author ? { author: decided.author } : {}) };
         }
         const r = pluginRunRegistry.begin(id, payload.key, run);
         return sendJson(res, r.ok ? 200 : 403, r);
@@ -16978,11 +17033,14 @@ async function main() {
         const manifest = entry && entry.ok ? entry.manifest : null;
         const active = pluginRunRegistry.active(agentId);
         let senderUserId = null;
+        let senderResolved = false;
         let personalValues = null;
         if (active.ok && active.run.kind === 'chat') {
           // Fresh trust check on EVERY call — a sender removed from the team
           // mid-turn is refused on their next action.
-          senderUserId = resolveActingSenderUserId(active.run.sender, cfg);
+          const acting = resolvePluginChatSender(active.run, cfg);
+          senderUserId = acting.userId;
+          senderResolved = acting.resolved;
           if (senderUserId) {
             try { personalValues = (pluginCredentialStore.readPersonal(pluginId, senderUserId) || {}).values || null; }
             catch { personalValues = null; }
@@ -16991,6 +17049,7 @@ async function main() {
         const d = pluginRunIdentity.decideCredentialGrant({
           active,
           senderUserId,
+          senderResolved,
           personalValues,
           personalKeys: (manifest && manifest.personalCredentials) || [],
           pluginName: (manifest && manifest.name) || pluginId,

@@ -202,6 +202,7 @@ test("an agent reaches its own telemetry, knowledge, triggers, ticket and git ro
   const own = [
     ["POST", "/internal/agents/team-x-developer/status"],
     ["POST", "/internal/agents/team-x-developer/running-sessions"],
+    ["POST", "/internal/agents/team-x-developer/trigger-status"],
     ["POST", "/internal/agents/team-x-developer/session-events"],
     ["POST", "/internal/agents/team-x-developer/session-pointer"],
     ["POST", "/internal/agents/team-x-developer/usage"],

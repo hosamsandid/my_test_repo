@@ -6256,6 +6256,18 @@ app.get('/api/agents/:id/triggers', (req, res) => {
   res.json(Array.isArray(triggers) ? triggers : []);
 });
 
+// Per-trigger schedule status written by the agent's scheduler (#2628):
+// { timeZone, updatedAt, triggers: { <id>: { nextFireAt, lastFiredAt,
+// lastResult, invalid } } }. Empty object until the agent first reports.
+app.get('/api/agents/:id/trigger-status', (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const agentDir = safeAgentPath(id, '');
+  if (!agentDir) return res.status(404).json({ error: 'Agent not found' });
+  const status = readJsonFile(controlOrAgentPath(id, 'trigger-status.json'), {});
+  res.json(status && typeof status === 'object' && !Array.isArray(status) ? status : {});
+});
+
 // Read-only proxy to the orchestrator's allowlisted script content. Used by
 // the trigger UI to render baked-in helper scripts (e.g. multi-agent-bid)
 // inline so operators can see what the preCheckScript actually does.

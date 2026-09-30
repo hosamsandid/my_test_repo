@@ -16560,6 +16560,38 @@ async function main() {
       return;
     }
 
+    // ── Push: per-trigger schedule status (#2628) ─────────────────────────
+    // Agents POST their trigger-status.json ({timeZone, updatedAt, triggers:
+    // {<id>: {nextFireAt, lastFiredAt, lastResult, invalid}}}); we persist it
+    // to the control plane so the console's trigger list can show next/last
+    // run and scheduling errors under per-agent volume isolation.
+    const pushTriggerStatusMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/trigger-status$/);
+    if (pushTriggerStatusMatch) {
+      const id = decodeURIComponent(pushTriggerStatusMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', () => {
+        if (!isSafePathSeg(id)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+          return;
+        }
+        try {
+          const data = JSON.parse(body || '{}');
+          if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('expected an object');
+          const dir = controlAgentDir(id);
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(path.join(dir, 'trigger-status.json'), JSON.stringify(data));
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
     // ── Push: agent session-log lines (#185) ──────────────────────────────
     // Agents POST { roomId, baseOffset, dataB64 } where dataB64 is the raw
     // bytes appended to their local sessions/<roomId>.jsonl since baseOffset.

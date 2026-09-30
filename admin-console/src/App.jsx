@@ -69,6 +69,7 @@ const Briefings           = lazy(() => import('./pages/Briefings'));
 const KnowledgeFlow       = lazy(() => import('./pages/KnowledgeFlow'));
 const FlowControl         = lazy(() => import('./pages/FlowControl'));
 const About = lazy(() => import('./pages/About'));
+const NotFound            = lazy(() => import('./pages/NotFound'));
 
 // Keeps the browser tab title in step with the active route so tabs, history
 // and bookmarks are distinguishable (route-title.js). Renders nothing; lives
@@ -175,6 +176,10 @@ export default function App() {
           <Route path="/process/:teamId" element={<ProcessTeamRedirect />} />
           <Route path="/getting-started" element={<GettingStartedRedirect />} />
           <Route path="/about" element={<About />} />
+          {/* Catch-all (#2615): without it an unknown path rendered nothing and
+              the content area stayed blank. Keep it last; breadcrumbFor() labels
+              the same paths "Page not found". */}
+          <Route path="*" element={<NotFound />} />
         </Routes>
       </Suspense>
       </RouteErrorBoundary>

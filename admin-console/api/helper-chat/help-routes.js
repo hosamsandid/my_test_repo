@@ -139,6 +139,8 @@ const ALLOWLIST = new Set([
   '/plugins/:id/view',
   '/environments',
   '/my-credentials',
+  // The 404 catch-all (#2615): structural, no page help of its own.
+  '*',
 ]);
 
 // ── the shrinking exception list (E16 #1891, concept §3.4) ───────────────────

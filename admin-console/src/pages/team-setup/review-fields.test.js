@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildReviewFields, knowledgeLearningValue, knowledgeGateSummary } from './review-fields.js';
+import {
+  buildReviewFields, knowledgeLearningValue, knowledgeGateSummary, credentialValue, githubIdentityValue,
+} from './review-fields.js';
 
 // Minimal stand-ins for the constants the real KnowledgeLearningConfig module
 // exports (that module imports React, so it cannot be loaded under node:test).
@@ -72,12 +74,61 @@ test('empty / default states use — placeholders (#760 AC6)', () => {
     sshKeyId: null, githubTokenId: null, skills: [],
   };
   const v = byKey(buildReviewFields({ form, env: undefined, sshKey: undefined, ghToken: undefined, knowledgeMeta: KNOWLEDGE_META }));
-  assert.equal(v.environment, '—');
-  assert.equal(v.sshKey, '—');
-  assert.equal(v.githubToken, '—');
+  // #2658: a repo-less, environment-less team says so instead of " @ main".
+  assert.equal(v.environment, 'none (a fresh one is created for this team)');
+  assert.equal(v.repository, 'none (repo-less team)');
+  assert.equal(v.sshKey, 'none');
+  assert.equal(v.githubToken, 'none');
   assert.equal(v.skills, '—');
-  // Missing branch falls back to main.
-  assert.equal(v.repository, ' @ main');
+});
+
+test('a missing branch falls back to main', () => {
+  const v = byKey(buildReviewFields({ form: { ...baseForm, branch: '' }, env, sshKey, ghToken, knowledgeMeta: KNOWLEDGE_META }));
+  assert.equal(v.repository, 'git@github.com:acme/widgets.git @ main');
+});
+
+// ── #2658: credentials the caller cannot see ─────────────────────────────────
+
+test('a credential hidden from the caller reads from the env descriptor, never as none', () => {
+  const credentialRefs = {
+    k1: { id: 'k1', kind: 'ssh-key', tier: 'team', ownerLabel: 'Platform', visibleToCaller: false },
+    t1: { id: 't1', kind: 'github-token', tier: 'personal', ownerLabel: 'Thorsten', visibleToCaller: false },
+  };
+  const v = byKey(buildReviewFields({
+    form: baseForm, env, sshKey: undefined, ghToken: undefined, credentialRefs, knowledgeMeta: KNOWLEDGE_META,
+  }));
+  assert.equal(v.sshKey, 'team SSH key of Platform (hidden)');
+  assert.equal(v.githubToken, 'personal token of Thorsten (hidden)');
+});
+
+test('credentialValue covers system tier, a visible descriptor, and a not-yet-loaded descriptor', () => {
+  assert.equal(
+    credentialValue({ id: 't9', ref: { tier: 'system', ownerLabel: 'System', visibleToCaller: false }, noun: 'token' }),
+    'system token (hidden)',
+  );
+  assert.equal(
+    credentialValue({ id: 't9', ref: { tier: 'team', ownerLabel: 'Ops', visibleToCaller: true }, noun: 'token' }),
+    'team token of Ops',
+  );
+  assert.equal(credentialValue({ id: 't9', noun: 'token' }), 't9 (not visible to you)');
+  // The caller's own row wins over the descriptor.
+  assert.equal(
+    credentialValue({ id: 't1', visible: ghToken, ref: { tier: 'personal', ownerLabel: 'X' }, noun: 'token' }),
+    'ci-token',
+  );
+  assert.equal(credentialValue({ id: '', noun: 'token' }), 'none');
+});
+
+test('the effective GitHub identity row appears only when the caller\'s personal token differs', () => {
+  const personalToken = { id: 'p1', name: 'my-pat', scope: 'personal' };
+  const fields = buildReviewFields({ form: baseForm, env, sshKey, ghToken, personalToken, knowledgeMeta: KNOWLEDGE_META });
+  const keys = fields.map(f => f.key);
+  assert.equal(keys[keys.indexOf('githubToken') + 1], 'githubIdentity');
+  assert.match(byKey(fields).githubIdentity, /^your personal token my-pat \(used instead of the environment's token/);
+  // No personal token, or the env already uses it, or no repository → no row.
+  assert.equal(githubIdentityValue({ form: baseForm, personalToken: undefined }), null);
+  assert.equal(githubIdentityValue({ form: { ...baseForm, githubTokenId: 'p1' }, personalToken }), null);
+  assert.equal(githubIdentityValue({ form: { ...baseForm, repoUrl: '' }, personalToken }), null);
 });
 
 test('environment falls back to raw id when the lookup misses', () => {

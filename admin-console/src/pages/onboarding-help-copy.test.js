@@ -35,6 +35,7 @@ const quickstartPage = source('QuickStart.jsx');
 const quickstartView = source('quickstart-view.js');
 const wizard = source('TeamSetup.jsx');
 const stepProcess = source('team-setup/StepProcess.jsx');
+const goLive = source('team-setup/go-live-notice.js');
 const templates = source('RoleTemplates.jsx');
 
 const PAGES = [
@@ -212,10 +213,11 @@ test('the wizard step intros no longer restate what the wizard builds', () => {
 test('the go-live notice stays, minus its follow-up advice', () => {
   // A consequence stated before a consequential click stays on the page (same
   // rule as the Model-Provider single-user tick and the Token-Usage cost note).
+  // #2658 moved the sentence itself into the pure go-live-notice.js.
   assert.match(wizard, /What happens next/);
-  assert.match(wizard, /go live immediately/);
+  assert.match(goLive, /go live immediately/);
   assert.ok(
-    !/You can disable individual agents afterwards/.test(wizard),
+    !/You can disable individual agents afterwards/.test(wizard + goLive),
     'staging the rollout is topic content, not a pre-click warning',
   );
 });

@@ -227,6 +227,23 @@ export function launchResultMessage(result) {
   return `Team ${name} ready — ${n} agent(s) created.`;
 }
 
+// The failure card of a streamed launch (#2658). `message` is the server's error
+// text, `steps` the progress list (null when the server refused before sending
+// its plan). The rollback sentence is only true when a step actually ran — a
+// refusal before the plan created nothing, so claiming "every resource created
+// during this attempt was rolled back" would be noise. The one API-worded
+// refusal a UI user can reach (extend with a team id that does not exist yet) is
+// translated into the dialog's own terms.
+export function launchFailure({ message, steps } = {}) {
+  const msg = String(message || '');
+  const m = msg.match(/^Cannot extend: team '([^']*)' does not exist yet\./);
+  const text = m
+    ? `There is no team '${m[1]}' to add agents to yet — untick “Add to an existing team” to create it instead.`
+    : msg;
+  const ran = Array.isArray(steps) && steps.some(s => s && s.status && s.status !== 'pending');
+  return { message: text, rolledBack: ran };
+}
+
 // Split a decoded NDJSON buffer into complete parsed events + the trailing
 // partial line. Blank lines are skipped; unparseable lines are collected in
 // `errors` (callers log-and-continue). Pure so the stream handling both surfaces

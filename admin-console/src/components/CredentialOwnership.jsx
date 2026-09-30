@@ -33,6 +33,7 @@ export function ScopeTab({ active, onClick, children }) {
   return (
     <button
       type="button"
+      aria-pressed={!!active}
       onClick={onClick}
       style={{
         padding: 'var(--eb-space-2) var(--eb-space-3)',

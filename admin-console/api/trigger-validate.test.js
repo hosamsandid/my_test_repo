@@ -83,6 +83,27 @@ test('cronExpressionError: a day-of-month no selected month has can never fire',
   // One listed month that has the day is enough; a restricted weekday ORs in.
   assert.equal(cronExpressionError('0 9 31 4,5 *'), null);
   assert.equal(cronExpressionError('0 9 30 2 1'), null);
+  // #2661: more never-fire shapes the console refuses too.
+  assert.match(cronExpressionError('0 9 31 9,11 *'), /day 31 never occurs/);
+  assert.match(cronExpressionError('0 9 30,31 FEB *'), /day 30 never occurs/);
+  assert.ok(cronExpressionError('0 9 30-L 2 *'));
+});
+
+// #2661: the console validator (src/pages/agent-chat/cron-format.js) refuses
+// the same never-fire expressions and keeps the fireable neighbours valid.
+test('cronExpressionError: console and server agree on never-fire expressions', async () => {
+  const client = await import('../src/pages/agent-chat/cron-format.js');
+  for (const expr of [
+    '0 9 30 2 *', '0 9 31 2 *', '0 9 31 4 *', '0 9 31 APR,JUN *', '0 9 30,31 FEB *',
+    '0 9 15 * 1#2', '0 9 8 * 1#1', '0 9 L * 1#2', '0 9 1-30 * 1#2',
+  ]) {
+    assert.ok(cronExpressionError(expr), `server should reject ${expr}`);
+    assert.ok(client.cronExpressionError(expr), `console should reject ${expr}`);
+  }
+  for (const expr of ['0 9 29 2 *', '0 9 31 4,5 *', '0 9 30 2 1', '0 9 * * 1#2', '0 9 1-31 * 1#2', '0 9 L 2 *']) {
+    assert.equal(cronExpressionError(expr), null, `server should accept ${expr}`);
+    assert.equal(client.cronExpressionError(expr), null, `console should accept ${expr}`);
+  }
 });
 
 test('rawTriggerError: cron triggers are validated; an unchanged legacy expression passes an update', () => {

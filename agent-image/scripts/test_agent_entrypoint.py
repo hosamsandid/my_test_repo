@@ -1951,6 +1951,25 @@ class TriggerEditTakesEffect(unittest.IsolatedAsyncioTestCase):
             blocker.set()
             await task
 
+    async def test_loop_runner_runs_the_next_iteration_with_the_edited_trigger(self):
+        # Drives the real `_loop_runner` (review S1): an edit that `_sync`
+        # stores in the loop's map entry between iterations reaches the next
+        # `_execute` call, not only the map.
+        scheduler = self._scheduler()
+        v1 = {"id": "lp", "type": "loop", "enabled": True,
+              "maxIterations": 2, "prompt": "v1"}
+        scheduler._loop_tasks["lp"] = {"trigger": v1}
+        prompts = []
+
+        async def fake_execute(trig, *args, **kwargs):
+            prompts.append(trig["prompt"])
+            scheduler._loop_tasks["lp"] = {"trigger": {**v1, "prompt": "v2"}}
+
+        with patch.object(scheduler, "_execute", side_effect=fake_execute), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._loop_runner(v1)
+        self.assertEqual(prompts, ["v1", "v2"])
+
     def test_latest_trigger_falls_back_to_the_runner_copy(self):
         own = {"id": "c1", "prompt": "own"}
         self.assertIs(entrypoint.TriggerScheduler._latest_trigger({}, "c1", own), own)

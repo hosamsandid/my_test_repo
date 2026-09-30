@@ -10,6 +10,8 @@ import {
   normalizeGrantEntries,
   effectiveGrantFor,
   hasExpandableDetail,
+  uninstalledGrantRows,
+  UNINSTALLED_GRANT_STATUS,
 } from './plugin-grant-view.js';
 
 const TEAM_ONLY = { id: 'p', name: 'P', scopes: ['team'], platforms: ['any'] };
@@ -164,4 +166,29 @@ test('hasExpandableDetail: a granted row is expandable (Scope/quota controls)', 
 test('hasExpandableDetail tolerates junk', () => {
   assert.equal(hasExpandableDetail(null), false);
   assert.equal(hasExpandableDetail(undefined), false);
+});
+
+// ---- uninstalledGrantRows (#2651) -------------------------------------------
+
+test('a grant whose plugin is not installed becomes a revocable row', () => {
+  const installed = [{ id: 'p', ok: true, manifest: TEAM_ONLY }];
+  const rows = uninstalledGrantRows(['p', { id: 'patterns-catalog', scopeGranularity: 'agent' }], installed);
+  assert.deepEqual(rows, [{
+    id: 'patterns-catalog',
+    granularity: 'agent',
+    status: UNINSTALLED_GRANT_STATUS,
+    revokeLabel: 'Revoke the patterns-catalog grant',
+  }]);
+});
+
+test('an installed entry with an invalid manifest counts as not installed (the server refuses it too)', () => {
+  const rows = uninstalledGrantRows(['p'], [{ id: 'p', ok: false, manifest: null }]);
+  assert.deepEqual(rows.map((r) => r.id), ['p']);
+});
+
+test('no grant, or every grant installed, yields no rows', () => {
+  const installed = [{ id: 'p', ok: true, manifest: TEAM_ONLY }];
+  assert.deepEqual(uninstalledGrantRows([], installed), []);
+  assert.deepEqual(uninstalledGrantRows(['p'], installed), []);
+  assert.deepEqual(uninstalledGrantRows(null, null), []);
 });

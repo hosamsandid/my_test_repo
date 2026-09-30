@@ -49,7 +49,7 @@ import ShareTeamPanel from '../agent-chat/ShareTeamPanel.jsx';
 import McpServerRows from '../../components/McpServerRows';
 import PageHelpButton from '../../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from '../agent-chat/agent-chat-help-sections.js';
-import { effectiveGrantFor } from '../plugin-grant-view.js';
+import { effectiveGrantFor, uninstalledGrantRows, UNINSTALLED_GRANT_HINT } from '../plugin-grant-view.js';
 import { pluginRegistryRow } from '../plugin-registry-view.js';
 import {
   labelStyle, inputStyle, helpTextStyle, PrimaryBtn, SecondaryBtn,
@@ -103,6 +103,9 @@ export function PluginGrantSection({ agent, parentTeam, alwaysVisible = false })
   React.useEffect(() => { setGrant(serverGrant); }, [serverGrant]);
 
   const installed = (data && data.installed) || [];
+  // Grants left behind by an uninstall (#2651): the picker lists installed
+  // plugins only, so these get their own rows with a Revoke.
+  const orphans = React.useMemo(() => uninstalledGrantRows(grant, installed), [grant, installed]);
 
   // The quota ceiling for "per agent" granularity is only honest if it counts
   // the members that would actually carry the grant, so a team's members are
@@ -154,7 +157,36 @@ export function PluginGrantSection({ agent, parentTeam, alwaysVisible = false })
   // disappears depending on installation state is itself a puzzle, and a
   // Team Admin cannot resolve "nothing installed" anyway (System-Admin-only).
   // Every other caller keeps the pre-#2236 self-hide.
-  if (installed.length === 0) {
+  const orphanList = orphans.length > 0 && (
+    <div style={{ marginTop: 'var(--eb-space-3)' }}>
+      <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>{UNINSTALLED_GRANT_HINT}</div>
+      {orphans.map((row) => (
+        <div
+          key={row.id}
+          style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) 0', fontSize: 'var(--eb-text-sm)' }}
+        >
+          <span style={{ fontWeight: 600 }}>{row.id}</span>
+          <span style={{ color: 'var(--eb-status-warning)', fontSize: 'var(--eb-text-xs)' }}>{row.status}</span>
+          <button
+            type="button"
+            aria-label={row.revokeLabel}
+            title={row.revokeLabel}
+            disabled={busy}
+            onClick={() => onToggle(row.id, false, row.granularity)}
+            style={{
+              marginLeft: 'auto', padding: '2px var(--eb-space-3)', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+              background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)', cursor: busy ? 'default' : 'pointer',
+            }}
+          >
+            Revoke
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+
+  if (installed.length === 0 && !orphanList) {
     if (!alwaysVisible) return null;
     return (
       <div>
@@ -191,6 +223,7 @@ export function PluginGrantSection({ agent, parentTeam, alwaysVisible = false })
         memberCount={memberCount}
         disabled={busy}
       />
+      {orphanList}
     </div>
   );
 }

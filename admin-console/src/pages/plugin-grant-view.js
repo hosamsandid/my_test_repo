@@ -144,3 +144,29 @@ export function pluginGrantRow(manifest, grant, { memberCount = 1, stackRuntime 
   };
 }
 
+
+// Grants whose plugin is not installed (or whose manifest no longer validates)
+// — #2651. Uninstalling a plugin deliberately keeps its grants, but the picker
+// renders one row per INSTALLED plugin, so such a grant was invisible and could
+// only be revoked by re-installing the plugin first. These rows let the
+// Plugins tab show it and offer a Revoke, which the server accepts without a
+// manifest. `installed` is the /api/plugins `installed` list ({ id, ok, manifest }).
+export const UNINSTALLED_GRANT_STATUS = 'Plugin not installed';
+export const UNINSTALLED_GRANT_HINT =
+  'The plugin was uninstalled while this grant was active. Its broker is gone, so the '
+  + 'command cannot work; revoking removes the command and the capability note from the '
+  + 'agent. Re-installing the plugin would restore the grant instead.';
+
+export function uninstalledGrantRows(grant, installed) {
+  const live = new Set((Array.isArray(installed) ? installed : [])
+    .filter((p) => p && p.ok && p.manifest)
+    .map((p) => p.id));
+  return normalizeGrantEntries(grant)
+    .filter((g) => !live.has(g.id))
+    .map((g) => ({
+      id: g.id,
+      granularity: g.scopeGranularity,
+      status: UNINSTALLED_GRANT_STATUS,
+      revokeLabel: `Revoke the ${g.id} grant`,
+    }));
+}

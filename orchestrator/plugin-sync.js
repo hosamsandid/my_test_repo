@@ -34,6 +34,10 @@ const BIN_DIR = path.posix.join(STATE_DIR, 'bin');
 const PLUGINS_DIR = path.posix.join(STATE_DIR, 'plugins');
 const CONFIG_MODE = 0o600; // token lives here — never group/other readable
 const BIN_MODE = 0o755;
+// Mirror of plugin-manifest.js CLI_NAME_RE. A CLI name that did NOT come from a
+// validated manifest (a revoke of an uninstalled plugin, #2651) is checked
+// against it before it becomes a path to delete.
+const CLI_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 // Where a plugin's CLI and per-agent config live in a granted workspace.
 function agentPluginPaths(pluginId, cliName) {
@@ -142,13 +146,32 @@ function planWorkspaceSync({
     // the grant so an uninstalled plugin can still be cleaned up.
     const manifest = manifests[id];
     if (manifest && !manifest.cli) continue; // command-only plugin — no bin/config/network to remove
-    const cliName = (manifest && manifest.cli && manifest.cli.name) || grant.cliName || id;
+    const stored = typeof grant.cliName === 'string' && CLI_NAME_RE.test(grant.cliName) ? grant.cliName : null;
+    const cliName = (manifest && manifest.cli && manifest.cli.name) || stored || id;
     const { binPath, configPath } = agentPluginPaths(id, cliName);
     remove.push(binPath, configPath);
     if (network) disconnect.push({ pluginId: id, network });
   }
 
   return { write, remove, connect, disconnect };
+}
+
+// Carry the CLI name onto the revoked entries of a PREVIOUS grant whose plugin
+// is no longer installed (#2651). Without a manifest, planWorkspaceSync would
+// fall back to the plugin id as the bin name (`.agent-studio/bin/<pluginId>`),
+// which is not the file that was seeded, so the real CLI would stay on the
+// agent's PATH. The seeded config file (`pluginConfigFile`) recorded `cliName`
+// at grant time; `readStoredConfig(pluginId)` returns that parsed file or null.
+// The file lives in the agent-writable workspace, so a name that is not a
+// plain CLI slug is ignored rather than trusted as a path.
+function withStoredCliNames(prevGrant, manifests = {}, readStoredConfig) {
+  return (prevGrant || []).map((g) => {
+    if (!g || !g.id || manifests[g.id] || g.cliName) return g;
+    let stored = null;
+    try { stored = typeof readStoredConfig === 'function' ? readStoredConfig(g.id) : null; } catch { stored = null; }
+    const cliName = stored && typeof stored.cliName === 'string' ? stored.cliName : null;
+    return cliName && CLI_NAME_RE.test(cliName) ? { ...g, cliName } : g;
+  });
 }
 
 // Which of ONE agent's granted CLI copies differ from the registry. The grant
@@ -191,4 +214,5 @@ module.exports = {
   pluginConfigFile,
   planWorkspaceSync,
   planCliRefresh,
+  withStoredCliNames,
 };

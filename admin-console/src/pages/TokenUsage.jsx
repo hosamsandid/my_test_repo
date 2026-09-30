@@ -9,7 +9,7 @@ import InfoTip from '../components/InfoTip';
 import PageHelpButton from '../components/PageHelpButton';
 import { TOKEN_USAGE_HELP_SECTIONS } from './token-usage-help-sections.js';
 import { toRows as agentModelRows, modelOptions, filterRowsByModel, isCurrentModel } from './agent-models-view.js';
-import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, isClassVisible, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, loadHiddenClasses, saveHiddenClasses, userLabelIndex, userGroupCell, providerTierCell, secondaryGroupOptions, groupValueCell } from './token-usage-view.js';
+import { TOKEN_CLASSES, CLASS_COLOR, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, isClassVisible, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, loadHiddenClasses, saveHiddenClasses, userLabelIndex, userGroupCell, providerTierCell, secondaryGroupOptions, groupValueCell } from './token-usage-view.js';
 
 // Trigger a browser download of an export URL. The endpoints are behind the
 // auth-cookie gate, so a same-origin anchor navigation carries the session.
@@ -48,15 +48,6 @@ const RANGE_PRESETS = [
   { key: '30d', label: 'Last 30 days', hours: 24 * 30 },
   { key: 'all', label: 'All time', hours: null },
 ];
-
-// One stable colour per token class (shared by cards, chart, legend). Uses the
-// design-token status palette so it tracks the light/dark theme.
-const CLASS_COLOR = {
-  input: 'var(--eb-status-info)',
-  output: 'var(--eb-status-success)',
-  cacheCreationInput: 'var(--eb-status-warning)',
-  cacheReadInput: 'var(--eb-accent, var(--eb-status-info))',
-};
 
 /* ── Summary card ──────────────────────────────────────────────────── */
 // `help`, when set, adds an InfoTip "?" affordance next to the label (#832):

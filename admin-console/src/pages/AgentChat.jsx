@@ -25,6 +25,7 @@ import { resolveTeamConfigTab } from './agent-lifecycle/team-config-tabs-view.js
 import PageHelpButton from '../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat/agent-chat-help-sections.js';
 import { buildSessionJumpRequest } from './agent-chat/session-jump.js';
+import { agentNotFoundState, agentNotFoundFrom, agentNotFoundCopy } from './agent-chat/agent-not-found.js';
 
 // Page-action header buttons (#1956). Copied from the convention the other
 // #1847/#1912-migrated pages share (`Briefings.jsx`): accent for the page's
@@ -708,15 +709,17 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   // user has open, and D2 wants the chat to stay put with an inline notice,
   // not an auto-navigate away. A route that never named a real agent (bad
   // deep link, or the initial load for one) still bounces to /chats exactly
-  // as before.
+  // as before — carrying the requested id so the empty state can say it was
+  // not found instead of silently showing "pick an agent" (#2619).
   useEffect(() => {
     if (!loading && agentId && agents && !agents.find(a => a.id === agentId)) {
       if (seenAgentIdRef.current === agentId) return;
       // #2521: a just-created agent the roster has not picked up yet.
       if (awaitingReveal) return;
-      navigate('/chats', { replace: true });
+      navigate('/chats', { replace: true, state: agentNotFoundState(agentId) });
     }
   }, [agentId, agents, loading, navigate, awaitingReveal]);
+  const notFoundAgentId = agentId ? null : agentNotFoundFrom(location.state);
 
   // Restore last-opened agent on mount when no `:agentId` is in the URL and
   // a stored value still exists in the loaded agent list. We use `replace`
@@ -724,12 +727,14 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   useEffect(() => {
     if (loading || agentId) return;
     if (!agents || agents.length === 0) return;
+    // #2619: stay on the "not found" notice rather than hopping to another chat.
+    if (notFoundAgentId) return;
     let stored = null;
     try { stored = localStorage.getItem(LAST_AGENT_KEY); } catch { /* ignore */ }
     if (stored && agents.find(a => a.id === stored)) {
       navigate(`/chats/${stored}`, { replace: true });
     }
-  }, [loading, agentId, agents, navigate]);
+  }, [loading, agentId, agents, navigate, notFoundAgentId]);
 
   // Track the active agent so we can update localStorage even when the user
   // arrived via a deep link (e.g. /chats/<id> bookmarked).
@@ -994,6 +999,7 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
                 // a not-yet-provisioned stub (it has no chat to open).
                 waitingForNewAgent={awaitingReveal}
                 stubAgent={routedAgent && agentState(routedAgent) === 'stub' ? routedAgent : null}
+                notFoundAgentId={notFoundAgentId}
               />
             )}
           </div>
@@ -1190,10 +1196,12 @@ function FilterSelect({ agents, filter, onChange }) {
  * Mirrors the empty-state design of other admin-console pages: lucide icon,
  * primary line, secondary help text, all on a soft surface with a subtle
  * border so it doesn't feel like a 404 page. #2521 swaps the copy while a
- * just-created agent is awaited, or when the routed agent is a stub.
+ * just-created agent is awaited, or when the routed agent is a stub; #2619
+ * when a deep link named an agent that isn't in the viewer's roster.
  */
-function EmptyState({ waitingForNewAgent = false, stubAgent = null }) {
-  const copy = revealEmptyStateCopy({ waiting: waitingForNewAgent, stubAgent });
+function EmptyState({ waitingForNewAgent = false, stubAgent = null, notFoundAgentId = null }) {
+  const copy = revealEmptyStateCopy({ waiting: waitingForNewAgent, stubAgent })
+    || (notFoundAgentId ? agentNotFoundCopy(notFoundAgentId) : null);
   return (
     <div style={{
       flex: 1,

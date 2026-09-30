@@ -9,6 +9,7 @@ const {
   pluginConfigFile,
   planWorkspaceSync,
   planCliRefresh,
+  withStoredCliNames,
   CONFIG_MODE,
   BIN_MODE,
 } = require('./plugin-sync');
@@ -233,4 +234,45 @@ test('planCliRefresh: skips uninstalled, command-only and registry-unreadable pl
   // dummy-echo's registry file is unreadable (null) → not planned; the other two have no CLI at all.
   assert.deepEqual(plan, []);
   assert.deepEqual(planCliRefresh({ grant: [], manifests, workspaceDigest: () => null, registryDigest: () => 'x' }), []);
+});
+
+// ---- withStoredCliNames (#2651): revoking a grant whose plugin is uninstalled
+
+test('an uninstalled prev grant gets the cliName its seeded config recorded', () => {
+  const reads = [];
+  const out = withStoredCliNames(
+    [{ id: 'patterns-catalog', scopeGranularity: 'team' }, { id: 'dummy-echo', scopeGranularity: 'team' }],
+    MANIFESTS,
+    (id) => { reads.push(id); return { pluginId: id, cliName: 'aee-patterns' }; },
+  );
+  assert.deepEqual(out, [
+    { id: 'patterns-catalog', scopeGranularity: 'team', cliName: 'aee-patterns' },
+    { id: 'dummy-echo', scopeGranularity: 'team' }, // installed: the manifest names the CLI
+  ]);
+  assert.deepEqual(reads, ['patterns-catalog']);
+});
+
+test('the enriched grant makes the revoke remove the seeded CLI, not a bin named after the plugin id', () => {
+  const prevGrant = withStoredCliNames([{ id: 'patterns-catalog', scopeGranularity: 'team' }], {}, () => ({ cliName: 'aee-patterns' }));
+  const out = planWorkspaceSync({ agentCfg: MEMBER, prevGrant, nextGrant: [], manifests: {}, resolveScopeId, mintToken, networkNameFor });
+  assert.deepEqual(out.remove.sort(), ['.agent-studio/bin/aee-patterns', '.agent-studio/plugins/patterns-catalog.json']);
+});
+
+test('a missing, unreadable or non-slug stored cliName is ignored (the file is agent-writable)', () => {
+  const g = [{ id: 'gone', scopeGranularity: 'team' }];
+  assert.deepEqual(withStoredCliNames(g, {}, () => null), g);
+  assert.deepEqual(withStoredCliNames(g, {}, () => { throw new Error('ENOENT'); }), g);
+  assert.deepEqual(withStoredCliNames(g, {}, () => ({ cliName: '../../../etc/passwd' })), g);
+  assert.deepEqual(withStoredCliNames(g, {}, () => ({ cliName: 42 })), g);
+});
+
+test('a revoke never turns a non-slug grant.cliName into a path to delete', () => {
+  const out = planWorkspaceSync({
+    agentCfg: MEMBER,
+    prevGrant: [{ id: 'gone', scopeGranularity: 'team', cliName: '../../secrets' }],
+    nextGrant: [],
+    manifests: {},
+    resolveScopeId, mintToken, networkNameFor,
+  });
+  assert.deepEqual(out.remove.sort(), ['.agent-studio/bin/gone', '.agent-studio/plugins/gone.json']);
 });

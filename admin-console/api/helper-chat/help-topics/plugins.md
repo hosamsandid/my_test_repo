@@ -179,6 +179,14 @@ Uninstalling also removes the plugin's card from the Installed section, and with
 it the team-assignment control on that card, so the page stops offering a grant
 it could not act on.
 
+A grant left behind this way is still listed in the team's (or agent's)
+**Settings → Plugins** as **Plugin not installed**, with a **Revoke** button.
+Until you revoke it, the agent keeps the plugin's command and the capability note
+in its instructions, even though the broker behind them is gone. Revoking works
+without reinstalling the plugin: it removes the command, its config file and the
+capability note, exactly like revoking an installed plugin. Reinstalling
+instead brings the grant back into use.
+
 ### Which build is installed and running
 
 Every card shows the **build identity** of the plugin: the short **commit hash**

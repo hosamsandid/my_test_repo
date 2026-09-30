@@ -11,7 +11,8 @@
 //
 // Input is the `GET /api/teams/:teamId/flow-board` response:
 //   { stages[{id,label,roles}], rows[], needsHuman[], sessions[], pools[],
-//     held[], config, canManage, generatedAt, stale, warning, maintenance }
+//     held[], removed[], config, canManage, generatedAt, stale, warning,
+//     maintenance }
 
 // ---------------------------------------------------------------------------
 // Durations
@@ -68,11 +69,13 @@ function prLinks(prs, singleRepo) {
   }));
 }
 
+// `draft` is stage 0: nobody released the item yet and no agent is on it, so
+// the sub-label says a person has to act (#2637) — never "released".
 const STATUS_TEXT = {
   working: 'working',
   queued: 'up next',
   idle: 'waiting',
-  ready: 'released',
+  draft: 'awaiting release',
   done: 'done',
 };
 
@@ -103,6 +106,47 @@ export function rowView(row, stages, { now = Date.now(), singleRepo = true } = {
     inStage: since(row.since, now),
     done: !!row.done,
     blocked: !!row.needsHuman,
+    removable: !!row.removable,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Remove from board (#2637)
+// ---------------------------------------------------------------------------
+
+// Said before anything is removed: only the board entry goes, the GitHub item
+// stays as it is. `help-topics/flow-control.md` quotes the same promise.
+export const REMOVE_CONFIRM_TEXT = 'Only the board entry is removed — the GitHub ticket stays unchanged. The item comes back on its own as soon as the flow picks it up again, and you can restore it from Removed at any time.';
+
+export function removeDialogTitle(ref) {
+  return ref ? `Remove ${ref} from the board?` : 'Remove this item from the board?';
+}
+
+export function removedView(entry, { now = Date.now(), singleRepo = true } = {}) {
+  const ref = entry.issue
+    ? itemRef(entry.issue.repo, entry.issue.number, singleRepo)
+    : Array.isArray(entry.prs) && entry.prs[0]
+      ? `PR ${itemRef(entry.prs[0].repo, entry.prs[0].number, singleRepo)}`
+      : '';
+  return {
+    id: entry.id,
+    removalId: entry.removalId || entry.id,
+    ref,
+    title: entry.title || '(untitled)',
+    url: entry.url || null,
+    removedAgo: since(entry.removedAt, now),
+  };
+}
+
+// The rows left once `ids` are taken off — so a removal shows at once, before
+// the next snapshot arrives (AC6).
+export function withoutRows(data, ids) {
+  if (!data || !Array.isArray(data.rows)) return data;
+  const gone = new Set(ids);
+  return {
+    ...data,
+    rows: data.rows.filter((r) => !gone.has(r.id)),
+    needsHuman: Array.isArray(data.needsHuman) ? data.needsHuman.filter((n) => !gone.has(n.id)) : data.needsHuman,
   };
 }
 
@@ -229,6 +273,7 @@ export function boardView(data, now = Date.now()) {
   const doneRows = rows.filter((r) => r.done);
   const doneRetentionHours = d.doneRetentionHours ?? (d.config && d.config.doneRetentionHours) ?? null;
   const needs = (Array.isArray(d.needsHuman) ? d.needsHuman : []).map((n) => needsYouView(n, opts));
+  const removed = (Array.isArray(d.removed) ? d.removed : []).map((r) => removedView(r, opts));
   return {
     stages,
     roles: Array.isArray(d.roles) ? d.roles : [],
@@ -238,6 +283,8 @@ export function boardView(data, now = Date.now()) {
     needsYou: needs.length ? needs : null,
     activeRows,
     doneRows,
+    removed,
+    removedLabel: `Removed (${removed.length})`,
     empty: activeRows.length === 0,
     emptyText: EMPTY_TEXT,
     warning: d.warning || null,
@@ -296,7 +343,7 @@ export function writeAutoRefresh(username, on, store) {
 
 // The editable form of the config: one entry per role in the order the graph
 // derives (`roles` from the board response — before any rename/merge/hide, so
-// a hidden or merged role can be brought back). Ready and Done are fixed frames
+// a hidden or merged role can be brought back). Draft and Done are fixed frames
 // and never appear here.
 export function configFormRows(roles, config) {
   const cfg = (config && config.stages) || {};

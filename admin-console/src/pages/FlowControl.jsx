@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
-  AlertTriangle, RefreshCw, ExternalLink, Info, Pause, Play, Waves, Zap, Power, Columns, UserRound,
+  AlertTriangle, RefreshCw, ExternalLink, Info, Pause, Play, Waves, Zap, Power, Columns, UserRound, EyeOff, RotateCcw,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
@@ -9,6 +9,7 @@ import Modal from '../components/Modal';
 import { usePageActions } from '../context/PageActionsContext';
 import {
   boardView, updatedAgo, AUTO_REFRESH_MS, readAutoRefresh, writeAutoRefresh, configFormRows, configFromForm,
+  withoutRows, REMOVE_CONFIRM_TEXT, removeDialogTitle,
 } from './process/flow-control-view';
 import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections';
 
@@ -22,7 +23,8 @@ import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections';
 // `flow-control-view.js`. The page itself decides nothing.
 //
 // The only writes are the pool controls (pause/drain/switch on, force
-// dispatch) and the optional per-team column configuration.
+// dispatch), the optional per-team column configuration and "Remove from
+// board" / Restore (#2637) — none of them touches a GitHub item.
 
 const PAGE_DESCRIPTION = 'Who is working on what, where you are needed, and how far each item has come.';
 
@@ -44,6 +46,8 @@ export default function FlowControl() {
   const [autoRefresh, setAutoRefresh] = useState(() => readAutoRefresh(username));
   const [now, setNow] = useState(() => Date.now());
   const [columnsOpen, setColumnsOpen] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState(null);
+  const [removedOpen, setRemovedOpen] = useState(false);
   const loadSeq = useRef(0);
 
   // Default to the first team once the list arrives; never override a choice.
@@ -126,6 +130,29 @@ export default function FlowControl() {
     'Failed to save the columns',
   ), [teamId, mutate]);
 
+  // The row leaves the board at once; the reload that follows confirms it (or
+  // brings it back when the orchestrator refused).
+  const removeRow = useCallback((row) => {
+    setRemoveTarget(null);
+    setState((s) => ({ ...s, data: withoutRows(s.data, [row.id]) }));
+    return mutate(
+      async () => {
+        try {
+          await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/flow-board-removed`, { action: 'remove', rowId: row.id });
+        } catch (err) {
+          load(true);
+          throw err;
+        }
+      },
+      'Failed to remove the item from the board',
+    );
+  }, [teamId, mutate, load]);
+
+  const restoreRow = useCallback((entry) => mutate(
+    () => apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/flow-board-removed`, { action: 'restore', rowId: entry.removalId }),
+    'Failed to restore the item',
+  ), [teamId, mutate]);
+
   const view = useMemo(() => boardView(state.data, now), [state.data, now]);
 
   // Hooks must run before any early return, so the portal is built here and
@@ -184,7 +211,10 @@ export default function FlowControl() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
               <TeamPicker teams={teams} value={teamId} onChange={setTeamId} />
               {view.canManage && (
-                <span style={{ marginLeft: 'auto' }}>
+                <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 'var(--eb-space-2)' }}>
+                  {view.removed.length > 0 && (
+                    <HeaderButton icon={EyeOff} label={view.removedLabel} title="Items taken off the board — restore them here" onClick={() => setRemovedOpen(true)} />
+                  )}
                   <HeaderButton icon={Columns} label="Columns" title="Rename, merge or hide stages" onClick={() => setColumnsOpen(true)} />
                 </span>
               )}
@@ -217,8 +247,10 @@ export default function FlowControl() {
               <>
                 <WorkingNow view={view} busy={busy} onSetState={setRoleState} onForceDispatch={forceDispatch} />
                 {view.needsYou && <NeedsYou items={view.needsYou} />}
-                <InProgress view={view} />
-                {view.doneRows.length > 0 && <RecentlyCompleted rows={view.doneRows} hint={view.retentionHint} />}
+                <InProgress view={view} busy={busy} onRemove={setRemoveTarget} />
+                {view.doneRows.length > 0 && (
+                  <RecentlyCompleted rows={view.doneRows} hint={view.retentionHint} canManage={view.canManage} busy={busy} onRemove={setRemoveTarget} />
+                )}
               </>
             )}
           </>
@@ -231,6 +263,32 @@ export default function FlowControl() {
           busy={busy}
           onClose={() => setColumnsOpen(false)}
           onSave={saveColumns}
+        />
+      )}
+      {removeTarget && (
+        <Modal
+          open
+          onClose={() => setRemoveTarget(null)}
+          title={removeDialogTitle(removeTarget.ref)}
+          maxWidth={480}
+          footer={(
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
+              <HeaderButton icon={EyeOff} label="Remove from board" title="Take this item off the board" disabled={busy} onClick={() => removeRow(removeTarget)} />
+            </div>
+          )}
+        >
+          <p style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>{removeTarget.title}</p>
+          <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+            {REMOVE_CONFIRM_TEXT}
+          </p>
+        </Modal>
+      )}
+      {removedOpen && (
+        <RemovedDialog
+          items={view.removed}
+          busy={busy}
+          onClose={() => setRemovedOpen(false)}
+          onRestore={restoreRow}
         />
       )}
     </>
@@ -418,7 +476,7 @@ function NeedsYou({ items }) {
 
 /* ── area ③: in progress ───────────────────────────────────────────── */
 
-function InProgress({ view }) {
+function InProgress({ view, busy, onRemove }) {
   return (
     <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
       <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.states} helpLabel="Where the stages come from">
@@ -427,7 +485,7 @@ function InProgress({ view }) {
       {view.empty ? (
         <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>{view.emptyText}</p>
       ) : (
-        <BoardTable rows={view.activeRows} />
+        <BoardTable rows={view.activeRows} canManage={view.canManage} busy={busy} onRemove={onRemove} />
       )}
     </section>
   );
@@ -437,19 +495,19 @@ function InProgress({ view }) {
 
 // Closed issues and merged PRs, kept for the team's retention window. Only
 // mounted when there is something to show.
-function RecentlyCompleted({ rows, hint }) {
+function RecentlyCompleted({ rows, hint, canManage, busy, onRemove }) {
   return (
     <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
       <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.states} helpLabel="Where the stages come from">
         Recently completed ({rows.length})
       </AreaHeading>
       <p style={{ margin: 0, ...mutedStyle }}>{hint}</p>
-      <BoardTable rows={rows} />
+      <BoardTable rows={rows} canManage={canManage} busy={busy} onRemove={onRemove} />
     </section>
   );
 }
 
-function BoardTable({ rows }) {
+function BoardTable({ rows, canManage, busy, onRemove }) {
   return (
     <div style={{ overflowX: 'auto' }}>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-sm)' }}>
@@ -459,10 +517,11 @@ function BoardTable({ rows }) {
             <th style={cellStyle}>Progress</th>
             <th style={cellStyle}>Stage</th>
             <th style={cellStyle}>In stage</th>
+            {canManage && <th style={cellStyle} aria-label="Actions" />}
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => <BoardRow key={r.id} row={r} />)}
+          {rows.map((r) => <BoardRow key={r.id} row={r} canManage={canManage} busy={busy} onRemove={onRemove} />)}
         </tbody>
       </table>
     </div>
@@ -471,7 +530,7 @@ function BoardTable({ rows }) {
 
 const cellStyle = { padding: 'var(--eb-space-2) var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)', verticalAlign: 'top' };
 
-function BoardRow({ row }) {
+function BoardRow({ row, canManage, busy, onRemove }) {
   return (
     <tr style={{ opacity: row.done ? 0.65 : 1 }}>
       <td style={cellStyle}>
@@ -493,6 +552,19 @@ function BoardRow({ row }) {
         <div style={mutedStyle}>{row.statusText}</div>
       </td>
       <td style={{ ...cellStyle, whiteSpace: 'nowrap', ...mutedStyle }}>{row.done ? '' : row.inStage}</td>
+      {canManage && (
+        <td style={{ ...cellStyle, whiteSpace: 'nowrap', textAlign: 'right' }}>
+          {row.removable && (
+            <SmallButton
+              icon={EyeOff}
+              label="Remove from board"
+              title="Remove from board — the GitHub ticket stays unchanged"
+              disabled={busy}
+              onClick={() => onRemove(row)}
+            />
+          )}
+        </td>
+      )}
     </tr>
   );
 }
@@ -544,7 +616,7 @@ function ColumnsDialog({ roles, config, busy, onClose, onSave }) {
       )}
     >
       <p style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-        The stages come from the team&apos;s flow. Rename, merge or hide them here; Ready and Done are always shown.
+        The stages come from the team&apos;s flow. Rename, merge or hide them here; Draft and Done are always shown.
         <PageHelpButton label="Changing the columns" size={12} section={FLOW_CONTROL_HELP_SECTIONS.columns} style={{ padding: 0, marginLeft: 4 }} />
       </p>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-sm)' }}>
@@ -581,6 +653,32 @@ function ColumnsDialog({ roles, config, busy, onClose, onSave }) {
         <input style={{ ...inputStyle, width: 70 }} type="number" min="0" value={retention} onChange={(e) => setRetention(e.target.value)} />
         hours
       </label>
+    </Modal>
+  );
+}
+
+/* ── removed items (#2637) ──────────────────────────────────────────── */
+
+function RemovedDialog({ items, busy, onClose, onRestore }) {
+  return (
+    <Modal open onClose={onClose} title={`Removed from the board (${items.length})`} maxWidth={640}>
+      <p style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+        These items are hidden from the board; their GitHub tickets are unchanged. Each one comes back on its own
+        as soon as the flow picks it up again, or when you restore it.
+        <PageHelpButton label="Removing items from the board" size={12} section={FLOW_CONTROL_HELP_SECTIONS.remove} style={{ padding: 0, marginLeft: 4 }} />
+      </p>
+      {items.length === 0 ? (
+        <p style={{ margin: 0, ...mutedStyle }}>Nothing is removed.</p>
+      ) : items.map((r) => (
+        <div key={r.removalId} style={{ ...lineStyle, marginBottom: 'var(--eb-space-2)' }}>
+          <span style={{ fontFamily: 'var(--eb-font-mono)', ...mutedStyle }}>{r.ref}</span>
+          <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <Link href={r.url}>{r.title}</Link>
+          </span>
+          <span style={{ marginLeft: 'auto', whiteSpace: 'nowrap', ...mutedStyle }} title="Removed">{r.removedAgo} ago</span>
+          <SmallButton icon={RotateCcw} label="Restore" title="Put this item back on the board" disabled={busy} onClick={() => onRestore(r)} />
+        </div>
+      ))}
     </Modal>
   );
 }

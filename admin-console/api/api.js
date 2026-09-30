@@ -9038,6 +9038,32 @@ app.post('/api/teams/:teamId/flow-board-config', apiLimiter, async (req, res) =>
   }
 });
 
+// POST /api/teams/:teamId/flow-board-removed — "Remove from board" and its
+// Restore (#2637). Body `{ action: 'remove'|'restore', rowId }`. Changes what
+// every viewer of the team's board sees, so gated like the column config.
+// Only the board entry changes — the GitHub item is never touched.
+app.post('/api/teams/:teamId/flow-board-removed', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!canManageTeam(scope, teamId)) return denyAdmin(res, 'You may not manage this team');
+  const action = req.body && req.body.action;
+  const rowId = req.body && typeof req.body.rowId === 'string' ? req.body.rowId.trim() : '';
+  if (action !== 'remove' && action !== 'restore') return res.status(400).json({ error: 'action must be "remove" or "restore"' });
+  if (!rowId || rowId.length > 300) return res.status(400).json({ error: 'rowId is required' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/flow-board-removed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, rowId }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // GET /api/teams/:teamId/pool-control — board data for the Flow Control
 // board's pause/drain/force-dispatch controls (#2250 Phase 5, epic #2251).
 // Visibility-only like `tickets`/`flow-anomalies`: no `canManageTeam` gate on

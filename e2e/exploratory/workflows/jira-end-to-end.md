@@ -18,13 +18,19 @@ see Y?").
 - Personas: System Admin, Team Admin of a `uitest-` team, Member of that team,
   Outsider (see `../README.md`). Without `AUTH_ENABLED` only the System-Admin
   path can be walked; record that.
-- Podman runtime (the plugin is Podman-only).
+- Runtime: the manifest declares Podman and Kubernetes. On Kubernetes, check
+  first that the broker can reach the orchestrator (a CLI read such as
+  `aee-jira projects`, not only `whoami`) and that the installed manifest is
+  current (a stale plugin pool installs an old contract). Record the runtime
+  in the pass status.
 
 ## Steps and probes
 
 ### 1. Install (System Admin)
 
 - `/plugins` → install Jira. Status while the broker starts; failure display.
+- "Broker running" is not proof of a working plugin: the CLI path
+  (agent → broker → orchestrator credential grant) can still fail.
 - Member/Team Admin/Outsider: install not offered or refused with a reason.
 - Installing grants nothing: the `uitest-` team's agents have no `aee-jira` yet.
 

@@ -172,7 +172,8 @@ vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
 }
 ```
 
-- **Action types.** `setLabel` (apply a GitHub label — `label` required),
+- **Action types.** `setLabel` (apply a GitHub label — `label` required;
+  optional `target: 'issue' | 'pr'` says where it lands, see below),
   `openPr`, `openIssue` (absorb `github.producesPr/producesIssue`),
   `wakeAgent` (hand off directly to another role — see below), `none`
   (terminal, no outbound signal). An option may carry several actions.
@@ -182,6 +183,15 @@ vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
   `gate: 'human'`) — same rule as `gate-violation`. A `brake` label *is* allowed:
   a brake pauses the loop and is agent-applied (#928).
   `exactlyOne` with fewer than two options is valid (a phase-5 lint, not an error).
+- **`setLabel` target (#2629).** GitHub reports a label on a pull request only
+  as `pull_request.labeled` and on an issue only as `issues.labeled`, so a
+  consumer listening on the other event never wakes. Without an explicit
+  `target` the target is implied by an `openPr`/`openIssue` in the same option,
+  else by the producer's own github-event triggers when they react to only one
+  kind (all `pull_request*` or all `issues.*`); otherwise it is unknown. Any
+  other `target` value is a validation error. A consumer whose `labelFilter`
+  matches but whose `*.labeled` events miss the resolved target is flagged by
+  the `label-target-mismatch` warning lint.
 - **`{{var}}` substitution** applies to `label`, `when` and a `wakeAgent`'s
   `note` at materialise time, exactly like trigger fields. A `wakeAgent`'s `to`
   is **not** substituted — it is a role reference, remapped instead (below).

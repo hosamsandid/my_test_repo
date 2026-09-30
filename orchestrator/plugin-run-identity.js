@@ -211,12 +211,31 @@ function chatSenderFromEvent(event, { roomId, agentMatrixId, now = Date.now(), m
 //                       identify who sent this message" (default false)
 //   personalValues    — that user's stored personal values for the plugin, or null
 //   personalKeys      — the manifest's personalCredentials[] (required keys matter)
+//   teamSiteConfigured — whether the team scope's connection (Jira: site-url) is
+//                       set. `null`/undefined = the adapter didn't check (older
+//                       callers) → treated as configured, i.e. no site gating.
+//                       This is what lets ONE refusal list BOTH a missing
+//                       personal token and a missing team site, instead of the
+//                       user peeling them off one broker call at a time.
 //   pagePath          — where a person adds their token (for the message)
+//   teamSetupLocation — where a Team Admin sets the team connection (Jira: site)
 //   pluginName        — "Jira"
 // → { ok: true, mode: 'service', interactive: false }
 //   { ok: true, mode: 'personal', interactive: true, userId, values }
-//   { ok: false, status, code, message }
-function decideCredentialGrant({ active, senderUserId, senderResolved = false, personalValues, personalKeys, pagePath = '/plugin-tokens', pluginName = 'this plugin' }) {
+//   { ok: false, status, code, message, missing? }  — `missing[]` enumerates
+//     every setup item still outstanding, each { item, who, where }, so a caller
+//     (or the agent) can render the whole checklist at once.
+
+// pure: assemble one human message from the outstanding setup items.
+function buildSetupMessage(missing, pluginName) {
+  const lines = missing.map((m) => `• ${m.what} — ${m.how}`);
+  const head = missing.length > 1
+    ? `Before I can use ${pluginName} in this chat, a few things still need setting up:`
+    : `Before I can use ${pluginName} in this chat, one thing still needs setting up:`;
+  return `${head}\n${lines.join('\n')}\nOnce that is done, ask me again. Nothing was sent to ${pluginName}.`;
+}
+
+function decideCredentialGrant({ active, senderUserId, senderResolved = false, personalValues, personalKeys, teamSiteConfigured, pagePath = '/plugin-tokens', teamSetupLocation = 'Agent Chat → Settings → Plugins', pluginName = 'this plugin' }) {
   if (!active || !active.ok) {
     const reason = (active && active.reason) || 'no-active-run';
     return {
@@ -242,16 +261,41 @@ function decideCredentialGrant({ active, senderUserId, senderResolved = false, p
   }
   const values = personalValues && typeof personalValues === 'object' ? personalValues : {};
   const required = (Array.isArray(personalKeys) ? personalKeys : []).filter((k) => k && k.required === true).map((k) => k.key);
-  const missing = required.filter((k) => !(typeof values[k] === 'string' && values[k].trim()));
-  if (missing.length > 0 || Object.keys(values).length === 0) {
-    return {
-      ok: false,
-      status: 424,
-      code: 'personal-credential-required',
-      message: `You have no personal ${pluginName} credential yet. In a chat, ${pluginName} runs under YOUR own account — add your ${pluginName} e-mail and API token in the Admin Console under Connections → Plugin Tokens (${pagePath}), then ask again. Nothing was sent to ${pluginName}.`,
-    };
+  const missingPersonal = required.filter((k) => !(typeof values[k] === 'string' && values[k].trim()));
+  const personalIncomplete = missingPersonal.length > 0 || Object.keys(values).length === 0;
+  // `teamSiteConfigured === false` is the only value that gates; null/undefined
+  // (an older caller that didn't look) never invents a missing-site item.
+  const siteMissing = teamSiteConfigured === false;
+
+  if (!personalIncomplete && !siteMissing) {
+    return { ok: true, mode: 'personal', interactive: true, userId: senderUserId, values: { ...values } };
   }
-  return { ok: true, mode: 'personal', interactive: true, userId: senderUserId, values: { ...values } };
+
+  // Aggregate EVERY outstanding interactive prerequisite into one refusal — the
+  // acting user's own token (they fix it) and the team's connection (a Team
+  // Admin fixes it) — rather than surfacing them one failed call apart.
+  const missing = [];
+  if (personalIncomplete) {
+    missing.push({
+      item: 'personal-credential',
+      who: 'you',
+      what: `your personal ${pluginName} access`,
+      how: `add your ${pluginName} e-mail and API token in the Admin Console under Connections → Plugin Tokens (${pagePath}) — it is yours alone, nobody else can use or see it`,
+    });
+  }
+  if (siteMissing) {
+    missing.push({
+      item: 'team-site',
+      who: 'team-admin',
+      what: `your team's ${pluginName} site`,
+      how: `a Team Admin sets it in ${teamSetupLocation}`,
+    });
+  }
+  // Keep the single-cause codes stable (docs + broker parity); name the combined
+  // case distinctly so a caller can tell "just add your token" from "two things".
+  const code = personalIncomplete && siteMissing ? 'setup-required'
+    : (siteMissing ? 'no-site' : 'personal-credential-required');
+  return { ok: false, status: 424, code, missing, message: buildSetupMessage(missing, pluginName) };
 }
 
 module.exports = {
@@ -263,4 +307,5 @@ module.exports = {
   RunRegistry,
   chatSenderFromEvent,
   decideCredentialGrant,
+  buildSetupMessage,
 };

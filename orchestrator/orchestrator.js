@@ -17035,6 +17035,7 @@ async function main() {
         let senderUserId = null;
         let senderResolved = false;
         let personalValues = null;
+        let teamSiteConfigured; // undefined = not checked (plugin declares no interactive connection)
         if (active.ok && active.run.kind === 'chat') {
           // Fresh trust check on EVERY call — a sender removed from the team
           // mid-turn is refused on their next action.
@@ -17044,6 +17045,19 @@ async function main() {
           if (senderUserId) {
             try { personalValues = (pluginCredentialStore.readPersonal(pluginId, senderUserId) || {}).values || null; }
             catch { personalValues = null; }
+            // A team credential key marked `requiredFor: ['interactive', …]` is a
+            // connection an interactive turn needs too (Jira: `site-url`). We own
+            // the same store the broker reads, so we can fold a missing site into
+            // the SAME refusal as a missing personal token — no second round-trip.
+            const teamConnKeys = ((manifest && manifest.credentials) || [])
+              .filter((c) => Array.isArray(c.requiredFor) && c.requiredFor.includes('interactive'))
+              .map((c) => c.key);
+            if (teamConnKeys.length) {
+              let teamValues = {};
+              try { teamValues = (pluginCredentialStore.read(pluginId, scopeId) || {}).values || {}; }
+              catch { teamValues = {}; }
+              teamSiteConfigured = teamConnKeys.every((k) => typeof teamValues[k] === 'string' && teamValues[k].trim());
+            }
           }
         }
         const d = pluginRunIdentity.decideCredentialGrant({
@@ -17052,11 +17066,12 @@ async function main() {
           senderResolved,
           personalValues,
           personalKeys: (manifest && manifest.personalCredentials) || [],
+          teamSiteConfigured,
           pluginName: (manifest && manifest.name) || pluginId,
         });
         const who = d.ok ? (d.mode === 'personal' ? `person ${d.userId}` : 'service account') : `refused (${d.code})`;
         console.log(`[Orchestrator] plugin-credential-grant ${pluginId}/${scopeId} agent=${agentId} → ${who}`);
-        if (!d.ok) return sendJson(res, d.status, { ok: false, code: d.code, message: d.message, agentId });
+        if (!d.ok) return sendJson(res, d.status, { ok: false, code: d.code, message: d.message, agentId, ...(d.missing ? { missing: d.missing } : {}) });
         return sendJson(res, 200, {
           ok: true, mode: d.mode, interactive: d.interactive, agentId,
           ...(d.mode === 'personal' ? { userId: d.userId, values: d.values } : {}),

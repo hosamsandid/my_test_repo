@@ -13,6 +13,7 @@ const {
   RunRegistry,
   chatSenderFromEvent,
   decideCredentialGrant,
+  buildSetupMessage,
   DEFAULT_RUN_TTL_MS,
   CHAT_EVENT_MAX_AGE_MS,
 } = require('./plugin-run-identity');
@@ -188,6 +189,51 @@ test('decision: a chat run NEVER yields the service account (AC4/AC5/AC6)', () =
   assert.equal(d.code, 'untrusted-sender');
   assert.equal(d.status, 403);
   for (const x of [d]) assert.notEqual(x.mode, 'service');
+});
+
+test('decision: a chat turn with token AND team site both present → personal grant', () => {
+  const d = decideCredentialGrant({ active: chat, senderUserId: 'alice', personalValues: { email: 'a@b.c', 'api-token': 't' }, personalKeys: PERSONAL_KEYS, teamSiteConfigured: true });
+  assert.equal(d.ok, true);
+  assert.equal(d.mode, 'personal');
+});
+
+test('decision: interactive setup gaps are aggregated into ONE refusal with a full checklist', () => {
+  // both the personal token AND the team site are missing → one message, both items
+  const both = decideCredentialGrant({ active: chat, senderUserId: 'alice', personalValues: null, personalKeys: PERSONAL_KEYS, teamSiteConfigured: false, pluginName: 'Jira' });
+  assert.equal(both.ok, false);
+  assert.equal(both.status, 424);
+  assert.equal(both.code, 'setup-required');
+  assert.equal(both.missing.length, 2);
+  assert.deepEqual(both.missing.map((m) => m.item).sort(), ['personal-credential', 'team-site']);
+  assert.deepEqual(both.missing.map((m) => m.who).sort(), ['team-admin', 'you']);
+  assert.match(both.message, /Plugin Tokens \(\/plugin-tokens\)/);
+  assert.match(both.message, /Team Admin/);
+  assert.match(both.message, /Nothing was sent to Jira/);
+
+  // only the site missing (token present) → keeps the stable no-site code, one item
+  const siteOnly = decideCredentialGrant({ active: chat, senderUserId: 'alice', personalValues: { email: 'a@b.c', 'api-token': 't' }, personalKeys: PERSONAL_KEYS, teamSiteConfigured: false, pluginName: 'Jira' });
+  assert.equal(siteOnly.code, 'no-site');
+  assert.deepEqual(siteOnly.missing.map((m) => m.item), ['team-site']);
+  assert.doesNotMatch(siteOnly.message, /Plugin Tokens/);
+
+  // only the token missing, site present → keeps personal-credential-required
+  const tokenOnly = decideCredentialGrant({ active: chat, senderUserId: 'alice', personalValues: null, personalKeys: PERSONAL_KEYS, teamSiteConfigured: true, pluginName: 'Jira' });
+  assert.equal(tokenOnly.code, 'personal-credential-required');
+  assert.deepEqual(tokenOnly.missing.map((m) => m.item), ['personal-credential']);
+
+  // a plugin that declares no interactive connection (teamSiteConfigured undefined)
+  // is never gated on a site — unchanged behaviour for non-Jira plugins
+  const noSiteConcept = decideCredentialGrant({ active: chat, senderUserId: 'alice', personalValues: null, personalKeys: PERSONAL_KEYS, pluginName: 'Echo' });
+  assert.equal(noSiteConcept.code, 'personal-credential-required');
+});
+
+test('buildSetupMessage lists every item and adapts its lead-in to the count', () => {
+  const one = buildSetupMessage([{ what: 'X', how: 'do X' }], 'Jira');
+  assert.match(one, /one thing still needs/);
+  const two = buildSetupMessage([{ what: 'X', how: 'do X' }, { what: 'Y', how: 'do Y' }], 'Jira');
+  assert.match(two, /a few things still need/);
+  assert.match(two, /• X — do X/);
+  assert.match(two, /• Y — do Y/);
 });
 
 test('decision: the untrusted-sender message tells "not a team member" apart from "could not identify the sender"', () => {

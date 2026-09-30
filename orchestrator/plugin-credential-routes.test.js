@@ -211,3 +211,42 @@ test('personal routes: unknown plugin / no personal tier → 404; bad ids → 40
   assert.equal(bad.status, 400);
   assert.equal((await personalCall(wiring, 'GET', '/internal/users/alice/other')).handled, false);
 });
+
+test('personal GET: carries personal-field labels and the team-connection readiness', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pcr-conn-'));
+  const credentialStore = new PluginCredentialStore({ dir });
+  // A Jira-shaped manifest: site-url is the interactive team connection; personal
+  // fields carry labels.
+  const jira = {
+    id: 'jira', name: 'Jira',
+    credentials: [{ key: 'site-url', requiredFor: ['interactive', 'automated'], required: true }],
+    personalCredentials: [
+      { key: 'email', label: 'Your Atlassian e-mail', required: true, secret: false },
+      { key: 'api-token', label: 'Your API token', required: true },
+    ],
+  };
+  const wiring = createPluginCredentialWiring({
+    listAgentIds: () => ['team-1'],
+    loadAgentConfig: (id) => (id === 'team-1' ? { id: 'team-1', role: 'team', token: 't', plugins: [{ id: 'jira', scopeGranularity: 'team' }] } : null),
+    pluginRegistry: {
+      installedManifests: () => ({ jira }),
+      readPluginManifest: () => ({ ok: true, manifest: jira }),
+    },
+    pluginRuntime: { pushScopeCredentials: async () => {} },
+    effectivePlugins: (cfg) => (cfg && cfg.plugins) || [],
+    pluginGrantFor: (grants, id) => (grants || []).find((g) => g.id === id) || null,
+    resolveScopeId: (cfg) => cfg.id,
+    credentialStore,
+  });
+
+  // site not set yet → the personal page can warn
+  let r = await personalCall(wiring, 'GET', '/internal/users/alice/plugin-credentials');
+  const p = r.body.plugins[0];
+  assert.deepEqual(p.credentials.map((c) => c.label), ['Your Atlassian e-mail', 'Your API token']);
+  assert.deepEqual(p.teamConnection, { keys: ['site-url'], granted: true, configured: false });
+
+  // once a Team Admin sets the site, the readiness flips
+  credentialStore.write('jira', 'team-1', { 'site-url': 'acme' }, jira.credentials, { setBy: 'admin' });
+  r = await personalCall(wiring, 'GET', '/internal/users/alice/plugin-credentials');
+  assert.equal(r.body.plugins[0].teamConnection.configured, true);
+});

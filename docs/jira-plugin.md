@@ -301,6 +301,19 @@ ask for a person's credential itself. That route checks the one active
 run, the sender's team trust (re-checked on every call) and the stored
 personal credential. The old `AEE_ACTING_SENDER` env var plays no part.
 
+**One refusal lists every missing setup item.** Because the orchestrator owns
+both the personal store and the team credential store, an interactive refusal
+aggregates ALL outstanding prerequisites into one message rather than surfacing
+them one failed call at a time: a missing personal token (the sender fixes it,
+Connections → Plugin Tokens) and a missing team site (a Team Admin fixes it,
+Agent Chat → Settings → Plugins). Both missing → code `setup-required`; only one
+→ the stable single-cause code (`personal-credential-required` / `no-site`). The
+site check is driven by the manifest: a team credential marked
+`requiredFor: ['interactive', …]` (Jira's `site-url`) is one an interactive turn
+needs too. The service-account fields are `requiredFor: ['automated']` only, so
+they never gate a chat turn and an interactive-only team is not asked to fill
+them.
+
 **Who "the sender" is.** The acting human is taken from the event's platform
 author stamp (`io.aee.author`, written server-side from the authenticated
 console session), falling back to the raw Matrix sender id. This matters in the
@@ -339,7 +352,8 @@ with the service account.
 |---|---|---|
 | `aee-jira` exits 3 `not-granted` | the plugin isn't granted to this agent | grant it (Plugins page or agent Settings) |
 | `aee-jira` exits 3 `broker-unreachable` | the sidecar isn't running, or you're on Kubernetes | `podman ps \| grep aee-plugin-jira`; on k8s the CLI is expected to fail (see platforms note) |
-| a call returns `personal-credential-required` | a chat turn, and the sender has no personal Jira credential | the sender adds it under Connections → Plugin Tokens |
+| a call returns `setup-required` | a chat turn missing MORE than one interactive prerequisite (personal token AND team site) — the refusal message lists every item and who fixes each | the sender adds their token (Connections → Plugin Tokens); a Team Admin sets the site (Agent Chat → Settings → Plugins) |
+| a call returns `personal-credential-required` | a chat turn, the team site is set, but the sender has no personal Jira credential | the sender adds it under Connections → Plugin Tokens |
 | a call returns `personal-credential-rejected` | Jira refused the sender's personal token (401) — expired or revoked | the sender renews it on Plugin Tokens |
 | a call returns `untrusted-sender` (message: *not a member of this agent's team*) | the sender resolves to a real account, but one that is not on this agent's team | share the team with that person, or ask a member |
 | a call returns `untrusted-sender` (message: *could not identify who sent this chat message*) | the sender maps to no user record — e.g. an agent container from before author-stamp resolution, or a message with no author stamp | respawn the agent; ensure the message was sent through the console (which stamps the author) |

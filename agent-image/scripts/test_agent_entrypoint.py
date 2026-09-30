@@ -1926,7 +1926,7 @@ class TriggerEditTakesEffect(unittest.IsolatedAsyncioTestCase):
         self.assertIs(scheduler._cron_tasks["c1"]["task"], task)
         self.assertEqual(scheduler._cron_tasks["c1"]["expr"], self.EXPR)
         self.assertEqual(scheduler._cron_tasks["c1"]["trigger"]["prompt"], "first")
-        self.assertEqual(scheduler._duplicate_notified, {"c1"})
+        self.assertIn("dup:c1", scheduler._skipped_notified)
 
     async def test_running_loop_picks_up_the_edited_trigger(self):
         scheduler = self._scheduler()
@@ -4747,6 +4747,79 @@ class PluginRunIdentity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SkippedTriggerNotices(unittest.IsolatedAsyncioTestCase):
+    """#2626: an invalid cron or a duplicate trigger id is reported to the
+    user once (advisory DM), not only on stderr; the first of two enabled
+    triggers sharing an id keeps running instead of the two thrashing."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir",
+                               return_value=Path(self._tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    async def _sync(self, scheduler, triggers, runs=1):
+        with patch.object(entrypoint, "_load_triggers", return_value=triggers), \
+             patch.object(entrypoint, "_load_dm_room_id", return_value="!dm:local"), \
+             patch.object(scheduler, "_cron_runner", AsyncMock()) as runner_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            for _ in range(runs):
+                await scheduler._sync()
+            await entrypoint.asyncio.sleep(0)
+        return runner_mock
+
+    async def test_invalid_cron_is_reported_once_and_not_scheduled(self):
+        scheduler = self._scheduler()
+        runner = await self._sync(scheduler, [
+            {"id": "bad", "type": "cron", "enabled": True, "cron": "75 * * * *", "prompt": "x"},
+        ], runs=3)
+        runner.assert_not_called()
+        self.assertNotIn("bad", scheduler._cron_tasks)
+        scheduler._send_formatted.assert_awaited_once()
+        room, body = scheduler._send_formatted.await_args.args[:2]
+        self.assertEqual(room, "!dm:local")
+        self.assertIn("Trigger `bad` is not scheduled", body)
+        self.assertIn("`75 * * * *`", body)
+
+    async def test_a_changed_invalid_cron_is_reported_again(self):
+        scheduler = self._scheduler()
+        await self._sync(scheduler, [{"id": "bad", "type": "cron", "cron": "75 * * * *"}])
+        await self._sync(scheduler, [{"id": "bad", "type": "cron", "cron": "0 0 40 * *"}])
+        self.assertEqual(scheduler._send_formatted.await_count, 2)
+
+    async def test_duplicate_id_first_wins_and_is_reported_once(self):
+        scheduler = self._scheduler()
+        triggers = [
+            {"id": "x-dup", "type": "cron", "enabled": True, "cron": "0 9 * * *", "prompt": "daily"},
+            {"id": "x-dup", "type": "cron", "enabled": True, "cron": "0 9 * * 1", "prompt": "weekly"},
+        ]
+        runner = await self._sync(scheduler, triggers, runs=3)
+        # Scheduled once and never cancelled/rescheduled by the twin.
+        runner.assert_called_once()
+        self.assertEqual(runner.call_args.args[0]["prompt"], "daily")
+        self.assertEqual(scheduler._cron_tasks["x-dup"]["expr"], "0 9 * * *")
+        scheduler._send_formatted.assert_awaited_once()
+        self.assertIn("another enabled trigger already uses this id",
+                      scheduler._send_formatted.await_args.args[1])
+
+    async def test_a_disabled_twin_is_not_a_duplicate(self):
+        scheduler = self._scheduler()
+        runner = await self._sync(scheduler, [
+            {"id": "x-dup", "type": "cron", "enabled": False, "cron": "0 9 * * *"},
+            {"id": "x-dup", "type": "cron", "enabled": True, "cron": "0 9 * * 1"},
+        ])
+        runner.assert_called_once()
+        scheduler._send_formatted.assert_not_awaited()
 
 
 class NonconformantTriggerReasonTest(unittest.TestCase):

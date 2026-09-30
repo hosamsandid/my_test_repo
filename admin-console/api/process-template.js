@@ -30,6 +30,7 @@ const {
   outcomesToGithub, outcomeWakePairs,
 } = require('./outcomes');
 const { branchFilterError, parseBranchFilter } = require('./branch-filter');
+const { cronExpressionError } = require('./trigger-validate');
 // Legacy `transport` (#2578) — tolerated on input and dropped, never validated.
 const { withoutTransport } = require('./internal-transport-migration');
 
@@ -484,10 +485,20 @@ function claimError(claim, labelFilter, type) {
  * (the LegacyMultiEventNote migration flow keeps working); changing the events
  * of one must shrink it to a single event.
  *
+ * A `cron` trigger must carry a cron expression the agent will schedule
+ * (#2626, `cronExpressionError`); on an update, a stored expression passing
+ * through UNCHANGED is tolerated so a legacy entry can still be toggled or
+ * re-described.
+ *
  * Returns an actionable error string, or null when conformant.
  */
 function rawTriggerError(t, prev) {
-  if (!t || typeof t !== 'object' || t.type !== 'github-event') return null;
+  if (!t || typeof t !== 'object') return null;
+  if (t.type === 'cron') {
+    if (prev && prev.type === 'cron' && prev.cron === t.cron) return null;
+    return cronExpressionError(t.cron);
+  }
+  if (t.type !== 'github-event') return null;
   const events = Array.isArray(t.events) ? t.events : [];
   if (events.length > 1) {
     const prevEvents = prev && Array.isArray(prev.events) ? prev.events : null;

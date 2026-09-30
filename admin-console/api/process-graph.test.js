@@ -1334,6 +1334,19 @@ test('#1006: raw-trigger-nonconformant lint — visible deviation, advisory only
   assert.deepEqual(raws.map(l => l.triggerIds[0]).sort(), ['t-badclaim', 't-two']);
 });
 
+test('#2626: an invalid cron trigger lints as never firing, not as a tolerated deviation', () => {
+  const g = buildProcessGraph([
+    { id: 'sched', triggers: [
+      { id: 'bad', type: 'cron', cron: '75 * * * *', prompt: 'p' },
+      { id: 'good', type: 'cron', cron: '0 9 * * 1-5', prompt: 'p' },
+    ] },
+  ], {});
+  const raws = g.lints.filter(l => l.code === 'raw-trigger-nonconformant');
+  assert.deepEqual(raws.map(l => l.triggerIds[0]), ['bad']);
+  assert.match(raws[0].message, /`bad` never fires: Invalid cron expression "75 \* \* \* \*": minute must be 0–59/);
+  assert.doesNotMatch(raws[0].message, /still runs/);
+});
+
 test('#1008: derived channel/data-flow triggers are exempt from the raw-trigger lint', () => {
   // A derived listener is ENGINE-written and regenerated on every port
   // reconcile — the operator cannot "edit it to conform". The unlabelled

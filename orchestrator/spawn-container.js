@@ -181,11 +181,18 @@ function waitForExit(cid) {
 
 // ── Seam #2 helpers ─────────────────────────────────────────────────────────
 
+function sanitizeName(s) {
+  return String(s).replace(/[^a-zA-Z0-9_.-]/g, '_');
+}
+
 function perAgentNetworkName(agentId) {
   // Sanitize: podman network names are alnum + _-. Keep agent IDs short
   // (8-char hex from the orchestrator), so this rarely matters in practice.
-  const safe = String(agentId).replace(/[^a-zA-Z0-9_.-]/g, '_');
-  return `${PER_AGENT_NETWORK_PREFIX}${safe}`;
+  return `${PER_AGENT_NETWORK_PREFIX}${sanitizeName(agentId)}`;
+}
+
+function agentContainerName(instanceId, agentId) {
+  return `aee-${sanitizeName(instanceId)}-${sanitizeName(agentId)}`;
 }
 
 // Connecting a service container into a per-agent network races the service's
@@ -709,6 +716,7 @@ function spawnContainer({ id, env, contextMounts, image, toolchain = null }) {
         // #1940 AC2: the RESOLVED image, never the module-level default — the
         // caller decided which toolchain (if any) this agent runs on.
         image,
+        name: agentContainerName(INSTANCE_ID, id),
         env: envMap,
         netns: { nsmode: 'bridge' },
         volumes,
@@ -802,5 +810,7 @@ module.exports = {
     parseBytes,
     resolveMemLimitBytes,
     AGENT_MEM_LIMIT_BYTES,
+    sanitizeName,
+    agentContainerName,
   },
 };

@@ -9,7 +9,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { _internal } = require('./spawn-container');
-const { parseBytes, resolveMemLimitBytes, AGENT_MEM_LIMIT_BYTES } = _internal;
+const { parseBytes, resolveMemLimitBytes, AGENT_MEM_LIMIT_BYTES, sanitizeName, agentContainerName } = _internal;
 
 test('parseBytes accepts a human suffix and falls back to 0 on junk', () => {
   assert.equal(parseBytes('2g'), 2 * 1024 ** 3);
@@ -39,4 +39,19 @@ test('resolveMemLimitBytes falls back to the fleet default on an override that f
     resolveMemLimitBytes({ toolchainId: 'jvm', resources: { memoryLimit: 'not-a-quantity' } }),
     AGENT_MEM_LIMIT_BYTES,
   );
+});
+
+// #2601 — predictable container names
+test('sanitizeName replaces characters outside [a-zA-Z0-9_.-] with underscores (AC2)', () => {
+  assert.equal(sanitizeName('abc123'), 'abc123');
+  assert.equal(sanitizeName('agent-studio-314092'), 'agent-studio-314092');
+  assert.equal(sanitizeName('my/instance:tag'), 'my_instance_tag');
+  assert.equal(sanitizeName('hello world'), 'hello_world');
+  assert.equal(sanitizeName('abc.def_ghi-jkl'), 'abc.def_ghi-jkl');
+});
+
+test('agentContainerName produces aee-<sanitizedInstanceId>-<sanitizedAgentId> (AC1, AC2)', () => {
+  assert.equal(agentContainerName('my-instance', 'abc123'), 'aee-my-instance-abc123');
+  assert.equal(agentContainerName('inst/with:special', 'agent@id'), 'aee-inst_with_special-agent_id');
+  assert.equal(agentContainerName('agent-studio-314092', 'a1b2c3d4'), 'aee-agent-studio-314092-a1b2c3d4');
 });

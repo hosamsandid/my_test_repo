@@ -12,7 +12,9 @@
 //   - per field: `*`, `n`, `a-b`, `*/n`, `a/n`, `a-b/n` and comma lists of them
 //   - month names JAN–DEC, weekday names SUN–SAT (any case); weekday 7 = Sunday
 //   - `L` (last day of the month) in day-of-month, `d#n` (n-th weekday) in
-//     day-of-week
+//     day-of-week — a list either of `d#n` entries only (`1#2,3#4`; croniter
+//     rejects `2,1#2`) and only with an unrestricted day-of-month (croniter
+//     takes `0 9 15 * 1#2` but never fires it)
 //   - the croniter macros @yearly, @annually, @monthly, @weekly, @daily,
 //     @midnight and @hourly (@reboot has no meaning for a scheduler and is
 //     rejected)
@@ -64,7 +66,7 @@ function cronPartError(part, f) {
     if (d === null || d < f.min || d > f.max || Number(m[2]) < 1 || Number(m[2]) > 5) {
       return { error: `${f.name} "${part}" must be <weekday>#<1–5>` };
     }
-    return { values: null };
+    return { values: null, nth: true };
   }
   const [rangePart, stepPart, ...extra] = part.split('/');
   if (extra.length) return { error: `${f.name} "${part}" has more than one "/"` };
@@ -126,17 +128,29 @@ function cronExpressionError(expr) {
     const f = CRON_FIELDS[i];
     const vals = new Set();
     let any = false;
-    for (const part of fields[i].split(',')) {
+    let nth = 0;
+    const parts = fields[i].split(',');
+    for (const part of parts) {
       const r = cronPartError(part, f);
       if (r.error) return bad(r.error);
+      if (r.nth) nth++;
       if (r.values === null) any = true;
       else r.values.forEach(v => vals.add(v));
     }
-    selected.push({ raw: fields[i], values: vals, any });
+    if (nth && nth < parts.length) {
+      return bad(`${f.name} "${fields[i]}" mixes <weekday>#<n> with other entries — list only <weekday>#<n> entries`);
+    }
+    selected.push({ raw: fields[i], values: vals, any, nth: nth > 0 });
   }
   // Can-never-fire: a day-of-month restriction that no listed month has. Only
   // when day-of-week is `*` — with both restricted, cron fires on EITHER.
   const [, , dom, month, dow] = selected;
+  // `d#n` with a restricted day-of-month: croniter accepts it, but whether it
+  // ever finds a next run depends on the pair (`0 9 15 * 1#3` fires,
+  // `0 9 15 * 1#2` and `0 9 8 * 1#1` never do), so it is rejected outright.
+  if (dow.nth && (dom.any || dom.values.size < 31)) {
+    return bad(`day of week "${dow.raw}" (<weekday>#<n>) cannot be combined with a restricted day of month — set day of month to *`);
+  }
   if (dom.raw !== '*' && dow.raw === '*' && !dom.any && month.raw !== '*') {
     const firstDay = Math.min(...dom.values);
     const fits = [...month.values].some(m => firstDay <= MONTH_DAYS[m - 1]);

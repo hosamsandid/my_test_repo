@@ -24,3 +24,14 @@ test('#2626: triggerRowKey stays unique for rows sharing an id', () => {
   assert.deepEqual(keys, ['x-dup@1', 'x-dup@3', 'ok', '#3']);
   assert.equal(new Set(keys).size, keys.length);
 });
+
+// Review S2: edit-adapters.js cannot be imported under node:test (it pulls in
+// hooks/useApi), so a source-reading guard pins that liveOps forwards `position`
+// to triggerPath — dropping it would silently address the first duplicate.
+test('#2626: liveOps update/delete forward position to triggerPath', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const src = fs.readFileSync(path.join(import.meta.dirname, '../process/edit-adapters.js'), 'utf8');
+  assert.match(src, /updateTrigger: \(roleId, tid, body, position\) => apiCall\('PUT', triggerPath\(roleId, tid, position\), body\)/);
+  assert.match(src, /deleteTrigger: \(roleId, tid, position\) => apiCall\('DELETE', triggerPath\(roleId, tid, position\)\)/);
+});

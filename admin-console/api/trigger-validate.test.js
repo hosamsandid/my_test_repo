@@ -62,6 +62,20 @@ test('cronExpressionError: range, step, field-count and macro violations', () =>
   }
 });
 
+// Review B2/S1: croniter rejects a day-of-week list mixing `d#n` with other
+// entries, and never fires `d#n` with a restricted day-of-month.
+test('cronExpressionError: <weekday>#<n> only in an all-# list with day of month *', () => {
+  for (const expr of ['0 9 * * 2,1#2', '0 9 * * MON#2,FRI', '0 9 * * 1-5,1#2', '0 9 * * 1#1,2']) {
+    assert.match(cronExpressionError(expr), /mixes <weekday>#<n> with other entries/, expr);
+  }
+  for (const expr of ['0 9 15 * 1#2', '0 9 L * 1#2', '0 9 1-30 * 1#2', '0 9 15 * 1#2,3#1']) {
+    assert.match(cronExpressionError(expr), /cannot be combined with a restricted day of month/, expr);
+  }
+  for (const expr of ['0 9 * * 1#2,3#4', '0 9 * * MON#2', '0 9 */1 * 1#2', '0 9 1-31 * 1#2']) {
+    assert.equal(cronExpressionError(expr), null, expr);
+  }
+});
+
 test('cronExpressionError: a day-of-month no selected month has can never fire', () => {
   assert.match(cronExpressionError('0 9 30 2 *'), /day 30 never occurs .* can never fire/);
   assert.match(cronExpressionError('0 9 31 4 *'), /day 31 never occurs/);

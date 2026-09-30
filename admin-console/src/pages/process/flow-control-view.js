@@ -207,14 +207,27 @@ export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}
 
 export const EMPTY_TEXT = 'Nothing in progress';
 
-// Everything the page renders, in render order. Area ② is `null` when empty
-// so the page simply does not mount it (AC8).
+// The note under "Recently completed": how long a finished item stays on the
+// board. `doneRetentionHours` comes from the per-team column configuration.
+export function retentionHint(hours) {
+  const h = Number(hours);
+  if (hours == null || !Number.isFinite(h) || h <= 0) return 'Kept for a limited time · configurable in columns settings';
+  return `Kept for ${h} h · configurable in columns settings`;
+}
+
+// Everything the page renders, in render order. Area ② and "Recently
+// completed" are `null`/empty when there is nothing to show so the page simply
+// does not mount them (AC8, #2607). Finished rows (closed issue, merged PR) are
+// never mixed into "In progress": `empty` counts active rows only.
 export function boardView(data, now = Date.now()) {
   const d = data || {};
   const repos = Array.isArray(d.repos) ? d.repos : [];
   const opts = { now, singleRepo: repos.length <= 1 };
   const stages = Array.isArray(d.stages) ? d.stages : [];
   const rows = (Array.isArray(d.rows) ? d.rows : []).map((r) => rowView(r, stages, opts));
+  const activeRows = rows.filter((r) => !r.done);
+  const doneRows = rows.filter((r) => r.done);
+  const doneRetentionHours = d.doneRetentionHours ?? (d.config && d.config.doneRetentionHours) ?? null;
   const needs = (Array.isArray(d.needsHuman) ? d.needsHuman : []).map((n) => needsYouView(n, opts));
   return {
     stages,
@@ -223,8 +236,9 @@ export function boardView(data, now = Date.now()) {
     pools: (Array.isArray(d.pools) ? d.pools : []).map(poolView),
     held: Array.isArray(d.held) ? d.held : [],
     needsYou: needs.length ? needs : null,
-    rows,
-    empty: rows.length === 0,
+    activeRows,
+    doneRows,
+    empty: activeRows.length === 0,
     emptyText: EMPTY_TEXT,
     warning: d.warning || null,
     stale: !!d.stale,
@@ -232,7 +246,8 @@ export function boardView(data, now = Date.now()) {
     noRepos: !d.maintenance && repos.length === 0 && d.generatedAt != null,
     maintenance: !!d.maintenance,
     canManage: !!d.canManage,
-    doneRetentionHours: d.doneRetentionHours ?? (d.config && d.config.doneRetentionHours) ?? null,
+    doneRetentionHours,
+    retentionHint: retentionHint(doneRetentionHours),
   };
 }
 

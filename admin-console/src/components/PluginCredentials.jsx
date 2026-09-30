@@ -1,6 +1,7 @@
 import React from 'react';
 import { KeyRound, ChevronDown, ChevronRight } from 'lucide-react';
 import { apiCall } from '../hooks/useApi';
+import ConfirmDialog from './ConfirmDialog';
 import {
   fieldDescriptors,
   groupDescriptors,
@@ -9,6 +10,11 @@ import {
   buildCredentialSubmit,
   isCredentialDraftDirty,
   selectScopes,
+  hasStoredCredential,
+  clearConfirmation,
+  credentialTestTone,
+  credentialTestLine,
+  CREDENTIAL_ACTION_LABELS,
 } from '../pages/plugin-credentials-view.js';
 
 // Per-team Credentials section for an installed plugin that declares
@@ -19,6 +25,11 @@ import {
 // orchestrator re-pushes the per-scope map to the broker on save. Every
 // render/shape decision comes from the pure plugin-credentials-view.js.
 //
+// #2640: "Clear" asks first (it removes every stored value, possibly one
+// someone else set), and "Test connection" — also run right after a Save — has
+// the broker make one cheap read with the stored credential and shows whether
+// it works. The broker answers a status line; the value never comes back.
+//
 // Two surfaces share this one component:
 //   - the Plugins registry page (default): every team scope the viewer can see.
 //   - the Team-Settings service-account section (#2608): `onlyScopeId` pins it
@@ -28,13 +39,17 @@ const TONE = {
   ok: 'var(--eb-success-fg, #0a7)',
   warn: 'var(--eb-warn-fg, #8a6d00)',
   muted: 'var(--eb-text-muted)',
+  danger: 'var(--eb-danger-fg, #a00)',
 };
 
-function ScopeFields({ pluginId, credentials, scope, onSaved }) {
+function ScopeFields({ pluginId, pluginName, credentials, scope, onSaved }) {
   const [draft, setDraft] = React.useState({});
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState('');
   const [okMsg, setOkMsg] = React.useState('');
+  const [confirmClear, setConfirmClear] = React.useState(false);
+  const [testing, setTesting] = React.useState(false);
+  const [test, setTest] = React.useState(null); // { result, auto }
 
   const descriptors = React.useMemo(
     () => fieldDescriptors(credentials, (scope && scope.keys) || {}),
@@ -46,33 +61,54 @@ function ScopeFields({ pluginId, credentials, scope, onSaved }) {
   );
   const dirty = isCredentialDraftDirty(draft, descriptors);
   const canManage = !!(scope && scope.canManage);
+  const stored = hasStoredCredential(scope);
+  const scopeUrl = `/api/plugins/${encodeURIComponent(pluginId)}/credentials/${encodeURIComponent(scope.scopeId)}`;
+
+  async function runTest({ auto = false } = {}) {
+    setTesting(true);
+    try {
+      const r = await apiCall('POST', `${scopeUrl}/test`);
+      setTest({ result: (r && r.result) || null, auto });
+    } catch (e) {
+      setTest({ result: { ok: false, state: 'error', message: e.message || 'Test failed' }, auto });
+    } finally { setTesting(false); }
+  }
 
   async function save() {
     if (!dirty || busy) return;
     setBusy(true); setErr(''); setOkMsg('');
     try {
       const body = buildCredentialSubmit(draft, descriptors);
-      const r = await apiCall('PUT', `/api/plugins/${encodeURIComponent(pluginId)}/credentials/${encodeURIComponent(scope.scopeId)}`, body);
+      const r = await apiCall('PUT', scopeUrl, body);
       setDraft({});
+      setTest(null);
       setOkMsg(r && r.complete ? 'Saved — the broker has the credential.' : 'Saved — still incomplete.');
       if (onSaved) await onSaved();
     } catch (e) {
       setErr(e.message || 'Save failed');
+      return;
     } finally { setBusy(false); }
+    // Saved is not the same as working: check it straight away.
+    await runTest({ auto: true });
   }
 
+  // Only ever reached from the confirmation dialog's confirm button.
   async function clearAll() {
     if (busy) return;
     setBusy(true); setErr(''); setOkMsg('');
     try {
-      await apiCall('DELETE', `/api/plugins/${encodeURIComponent(pluginId)}/credentials/${encodeURIComponent(scope.scopeId)}`);
+      await apiCall('DELETE', scopeUrl);
       setDraft({});
+      setTest(null);
       setOkMsg('Cleared.');
       if (onSaved) await onSaved();
     } catch (e) {
       setErr(e.message || 'Clear failed');
-    } finally { setBusy(false); }
+    } finally { setBusy(false); setConfirmClear(false); }
   }
+
+  const confirm = clearConfirmation(scope, descriptors, pluginName);
+  const testLine = test ? credentialTestLine(test.result, { auto: test.auto }) : null;
 
   return (
     <div style={{ marginTop: 'var(--eb-space-2)', padding: 'var(--eb-space-3)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-app)' }}>
@@ -134,10 +170,25 @@ function ScopeFields({ pluginId, credentials, scope, onSaved }) {
             >
               {busy ? 'Saving…' : 'Save'}
             </button>
-            {Object.values((scope && scope.keys) || {}).some((k) => k && k.set) && (
+            {stored && (
               <button
                 type="button"
-                onClick={clearAll}
+                onClick={() => runTest()}
+                disabled={busy || testing}
+                style={{
+                  padding: 'var(--eb-space-1) var(--eb-space-3)', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+                  borderRadius: 'var(--eb-radius-sm)', border: '1px solid var(--eb-border-default)',
+                  background: 'none', color: 'var(--eb-text-primary)',
+                  cursor: (busy || testing) ? 'not-allowed' : 'pointer', opacity: (busy || testing) ? 0.5 : 1,
+                }}
+              >
+                {testing ? CREDENTIAL_ACTION_LABELS.testing : CREDENTIAL_ACTION_LABELS.test}
+              </button>
+            )}
+            {stored && (
+              <button
+                type="button"
+                onClick={() => setConfirmClear(true)}
                 disabled={busy}
                 style={{
                   padding: 'var(--eb-space-1) var(--eb-space-3)', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
@@ -145,12 +196,28 @@ function ScopeFields({ pluginId, credentials, scope, onSaved }) {
                   background: 'none', color: 'var(--eb-danger-fg, #a00)', cursor: busy ? 'not-allowed' : 'pointer',
                 }}
               >
-                Clear
+                {CREDENTIAL_ACTION_LABELS.clear}
               </button>
             )}
             {okMsg && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-success-fg, #0a7)' }}>{okMsg}</span>}
             {err && <span role="alert" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-danger-fg, #a00)' }}>{err}</span>}
           </div>
+          {testLine && (
+            <div role="status" style={{ marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: TONE[credentialTestTone(test.result)] }}>
+              {testLine}
+            </div>
+          )}
+
+          <ConfirmDialog
+            open={confirmClear}
+            title={confirm.title}
+            message={confirm.message}
+            confirmLabel={CREDENTIAL_ACTION_LABELS.clearConfirm}
+            variant="danger"
+            busy={busy}
+            onConfirm={clearAll}
+            onCancel={() => setConfirmClear(false)}
+          />
         </>
       )}
     </div>
@@ -219,6 +286,7 @@ export default function PluginCredentials({ row, onlyScopeId = null, label = nul
             <ScopeFields
               key={scope.scopeId}
               pluginId={row.id}
+              pluginName={row.name || row.id}
               credentials={credentials}
               scope={scope}
               onSaved={load}

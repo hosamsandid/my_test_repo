@@ -47,7 +47,7 @@ poller's, in `broker-sdk/event-cursor.js` (`github-poller.js` is untouched).
 | `viewer-headers.js` | §4.8 signed-viewer verify (byte-identical copy) + the `/admin` → team-admin role gate |
 | `broker-policy.js` | write authorisation (D3): `authorizeWrite` → SDK `authorizeAction` against the manifest `policy`; `requiresApproval` wired-but-empty |
 | `ui/` | the served `/` route (Board tab: issues / watch-health cards / inbox; Activity tab: the retained log) + `/admin` route (watch config with per-project status chips, team-admin). Dependency-free vanilla JS, `--eb-*` tokens, follows the console theme |
-| `server.js` | wiring: `/healthz`, `/internal/{teardown-scope,scope-credentials}`, `/cli/*` (`whoami`/`inbox` (peek / `?consume=<id,…>`)/`projects`/`statuses` (project-wide workflow statuses)/`list`/`search` (arbitrary JQL)/`show` (incl. `availableTransitions`)/`attachment` (content by id) + `comment`/`transition`/`update`/`set-field` (allow-listed custom-field write)/`attachment/add` (upload one file per call) POST), `/ui/*` (incl. `/ui/api/{watches,activity,admin/watch,admin/retry}`) |
+| `server.js` | wiring: `/healthz`, `/internal/{teardown-scope,scope-credentials,test-scope-credential}`, `/cli/*` (`whoami`/`inbox` (peek / `?consume=<id,…>`)/`projects`/`statuses` (project-wide workflow statuses)/`list`/`search` (arbitrary JQL)/`show` (incl. `availableTransitions`)/`attachment` (content by id) + `comment`/`transition`/`update`/`set-field` (allow-listed custom-field write)/`attachment/add` (upload one file per call) POST), `/ui/*` (incl. `/ui/api/{watches,activity,admin/watch,admin/retry}`) |
 
 
 ## Credentials
@@ -79,6 +79,17 @@ by their human name: `readable-custom-fields` (surfaced by default on
 `show`/`search`/`list`) and `writable-custom-fields` (settable via `set-field` —
 empty means every custom field is writable; a non-empty list restricts writes to
 only the named fields, refusing any other).
+
+**Test connection** (#2640): `POST /internal/test-scope-credential` `{scopeId}`
+(orchestrator `_internal` token only, like the push above) makes one cheap read
+with the credential the broker already holds — `GET /rest/api/3/myself` as the
+service account, or an anonymous `GET /rest/api/3/serverInfo` when only the
+site is set — and answers `{ok, state, message, account, httpStatus, checkedAt}`
+(`credential-check.js`), never the token or a raw Jira body. The console runs
+it on **Test connection** and right after a Save via
+`POST /api/plugins/:id/credentials/:scopeId/test` → orchestrator
+`POST /internal/plugins/:id/credentials/:scopeId/test`. The endpoint is
+optional per broker: a broker without it answers 404, shown as *not testable*.
 
 ## Delivery — the `plugin-event` wake
 

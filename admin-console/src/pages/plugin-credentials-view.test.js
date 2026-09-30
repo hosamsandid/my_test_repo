@@ -12,6 +12,10 @@ import {
   buildCredentialSubmit,
   isCredentialDraftDirty,
   selectScopes,
+  hasStoredCredential,
+  clearConfirmation,
+  credentialTestTone,
+  credentialTestLine,
 } from './plugin-credentials-view.js';
 
 // The Jira-shaped manifest after #jira-setup-ux: grouped + requiredFor-tagged.
@@ -166,4 +170,51 @@ test('selectScopes: null keeps all, an id pins to that one scope', () => {
   assert.deepEqual(selectScopes(scopes, 'team-b'), [{ scopeId: 'team-b', teamName: 'B' }]);
   assert.deepEqual(selectScopes(scopes, 'team-z'), []);
   assert.deepEqual(selectScopes(null, 'team-a'), []);
+});
+
+test('hasStoredCredential: any set key', () => {
+  assert.equal(hasStoredCredential(null), false);
+  assert.equal(hasStoredCredential({ keys: {} }), false);
+  assert.equal(hasStoredCredential({ keys: { a: { set: false } } }), false);
+  assert.equal(hasStoredCredential({ keys: { a: { set: false }, b: { set: true } } }), true);
+});
+
+test('clearConfirmation: names the team, the stored fields by label, and who set them (#2640)', () => {
+  const creds = [
+    { key: 'site-url', label: 'Jira site', secret: false },
+    { key: 'email', label: 'Service-account e-mail', secret: false },
+    { key: 'api-token', label: 'Service-account API token' },
+  ];
+  const scope = { scopeId: 'team-1', teamName: 'Team One', setBy: 'alice', keys: { 'site-url': { set: true }, 'api-token': { set: true, preview: '…abcd' } } };
+  const c = clearConfirmation(scope, fieldDescriptors(creds, scope.keys), 'Jira');
+  assert.equal(c.title, 'Clear the Jira credential for Team One?');
+  assert.deepEqual(c.keys, ['Jira site', 'Service-account API token']); // the unset e-mail is not named
+  assert.match(c.message, /removes Jira site, Service-account API token for Team One\./);
+  assert.match(c.message, /last set by alice/);
+  assert.match(c.message, /cannot restore/);
+
+  // falls back to the scope id / generic wording
+  const bare = clearConfirmation({ scopeId: 'team-9', keys: {} }, [], null);
+  assert.equal(bare.title, 'Clear the plugin credential for team-9?');
+  assert.match(bare.message, /every stored value/);
+  assert.doesNotMatch(bare.message, /last set by/);
+});
+
+test('credentialTestTone / credentialTestLine: ok, neutral and failed checks (#2640)', () => {
+  assert.equal(credentialTestTone(null), 'muted');
+  assert.equal(credentialTestTone({ ok: true, state: 'connected' }), 'ok');
+  assert.equal(credentialTestTone({ ok: true, state: 'site-reachable' }), 'ok');
+  for (const state of ['not-configured', 'not-testable', 'unsupported']) assert.equal(credentialTestTone({ ok: false, state }), 'muted');
+  for (const state of ['rejected', 'forbidden', 'not-found', 'unreachable', 'broker-unreachable', 'broker-error', 'inactive']) {
+    assert.equal(credentialTestTone({ ok: false, state }), 'danger', state);
+  }
+
+  assert.equal(credentialTestLine(null), null);
+  assert.equal(credentialTestLine({ ok: true, message: 'Connected as Bot.' }), 'Connected as Bot.');
+  assert.equal(credentialTestLine({ ok: false, state: 'rejected', message: 'Token rejected (401).' }, { auto: true }), 'Token rejected (401).');
+  // an automatic post-save check stays quiet when the plugin cannot test at all…
+  assert.equal(credentialTestLine({ ok: false, state: 'not-testable', message: 'This plugin cannot test its credential.' }, { auto: true }), null);
+  assert.equal(credentialTestLine({ ok: false, state: 'unsupported', message: 'x' }, { auto: true }), null);
+  // …but an explicit click on Test connection says so
+  assert.equal(credentialTestLine({ ok: false, state: 'not-testable', message: 'This plugin cannot test its credential.' }), 'This plugin cannot test its credential.');
 });

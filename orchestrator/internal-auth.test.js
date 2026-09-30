@@ -451,6 +451,7 @@ test("a plugin scope token is refused on EVERY other route — agent-facing or c
     ["DELETE", "/internal/agents/team-x-developer"],
     ["POST", "/internal/admin/users"],
     ["PUT", "/internal/plugins/jira/credentials"],
+    ["POST", "/internal/plugins/jira/credentials/team-a/test"],
   ]) {
     const d = decide(method, url, asPlugin(), PLUGIN_CONFIG);
     assert.equal(d.allowed, false, `${method} ${url}`);

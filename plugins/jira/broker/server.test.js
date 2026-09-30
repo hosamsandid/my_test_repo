@@ -908,6 +908,55 @@ test('teardown-scope reaps one scope\'s watch + inbox + credential, bearer-authe
   } finally { srv.close(); }
 });
 
+test('test-scope-credential: orchestrator-only; one /myself read with the pushed credential; token never returned (#2640)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'supersecrettoken' });
+  broker.scopeCredentials.set('team-2', { 'site-url': 'acme' }); // site only
+  const origFetch = global.fetch;
+  const seen = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    seen.push({ url: String(url), auth: opts && opts.headers && opts.headers.Authorization });
+    if (String(url).endsWith('/rest/api/3/myself')) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ accountId: 'a1', displayName: 'Jira Bot', active: true }) };
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify({ baseUrl: 'https://acme.atlassian.net' }) };
+  };
+  const srv = await listen();
+  try {
+    // bearer required, and a granted TEAM token is not enough — only `_internal`
+    assert.equal((await call(srv, 'POST', '/internal/test-scope-credential', { body: { scopeId: 'team-1' } })).status, 401);
+    assert.equal((await call(srv, 'POST', '/internal/test-scope-credential', { token: TOKEN, body: { scopeId: 'team-1' } })).status, 401);
+    assert.equal(seen.length, 0);
+    assert.equal((await call(srv, 'POST', '/internal/test-scope-credential', { token: INTERNAL, body: {} })).status, 400);
+
+    const r = await call(srv, 'POST', '/internal/test-scope-credential', { token: INTERNAL, body: { scopeId: 'team-1' } });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.scopeId, 'team-1');
+    assert.equal(r.body.ok, true);
+    assert.equal(r.body.state, 'connected');
+    assert.equal(r.body.account, 'Jira Bot');
+    assert.deepEqual(seen.map((s) => s.url), ['https://acme.atlassian.net/rest/api/3/myself']);
+    assert.equal(seen[0].auth, `Basic ${Buffer.from('a@b.c:supersecrettoken').toString('base64')}`);
+    assert.equal(JSON.stringify(r.body).includes('supersecrettoken'), false);
+
+    // site only → anonymous serverInfo, no Authorization header
+    const s = await call(srv, 'POST', '/internal/test-scope-credential', { token: INTERNAL, body: { scopeId: 'team-2' } });
+    assert.equal(s.body.state, 'site-reachable');
+    assert.equal(seen[1].url, 'https://acme.atlassian.net/rest/api/3/serverInfo');
+    assert.equal(seen[1].auth, undefined);
+
+    // unknown scope → not-configured, no Jira call
+    const n = await call(srv, 'POST', '/internal/test-scope-credential', { token: INTERNAL, body: { scopeId: 'team-9' } });
+    assert.equal(n.body.state, 'not-configured');
+    assert.equal(seen.length, 2);
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    broker.scopeCredentials.delete('team-2');
+    srv.close();
+  }
+});
+
 test('cli sprint: /sprint/list reads a board sprints; /sprint/create + /sprint/bulk-create write (#2450)', async () => {
   broker.scopeCredentials.set('team-1', { 'site-url': 'sprintco', email: 'a@b.c', 'api-token': 'tok' });
   const origFetch = global.fetch;

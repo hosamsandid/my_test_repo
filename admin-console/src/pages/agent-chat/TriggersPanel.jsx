@@ -31,6 +31,7 @@ import {
   knowledgeBranchNote, knowledgeBranchesForRepo,
 } from './branch-filter.js';
 import { DOW_LABELS, parseCronState, buildCron, describeCron } from './cron-format.js';
+import { triggerIssue, triggerRowKey } from './trigger-issues.js';
 import { triggerRepoOptions, environmentRepoOptions, triggerRepoWarning } from './trigger-repo-status.js';
 import {
   STOP_CONDITIONS,
@@ -314,6 +315,7 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
     ? Object.entries(trigger.preCheckEnv)
     : [];
   const isDataFlow = isDataFlowTrigger(trigger);
+  const issue = triggerIssue(trigger);
   // A plain (non-data-flow) github-event trigger gets a dedicated, wrapping
   // event/label summary below the header (AC1–AC5); the header `<code>` then
   // only carries the repo, which may ellipsize without hiding the summary (AC6).
@@ -337,7 +339,9 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
       ? summarizePushSchedule(trigger, nameOf)
       : (trigger.repo || 'any repo');
   } else if (trigger.cron) {
-    schedule = describeCron(parseCronState(trigger.cron)) || trigger.cron;
+    // A flagged row (#2626) shows the raw expression — "Every hour at :75"
+    // would describe a schedule that never runs.
+    schedule = (!triggerIssue(trigger) && describeCron(parseCronState(trigger.cron))) || trigger.cron;
   } else {
     schedule = trigger.at || '—';
   }
@@ -345,7 +349,7 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
   async function handleToggle(val) {
     setToggling(true);
     try {
-      await ops.updateTrigger(agentId, trigger.id, { enabled: val });
+      await ops.updateTrigger(agentId, trigger.id, { enabled: val }, trigger.position);
       onToggled();
     } catch { /* surface via refresh */ }
     finally { setToggling(false); }
@@ -431,6 +435,25 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
               </>
             )}
           </span>
+        </div>
+      )}
+
+      {/* #2626: a stored entry the API would now reject (invalid cron, shared
+          id) — flagged by the GET, never rewritten; Edit/Delete act on this row. */}
+      {issue && (
+        <div
+          role="alert"
+          style={{
+            display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+            padding: 'var(--eb-space-2)',
+            background: 'var(--eb-status-error-bg)',
+            border: '1px solid var(--eb-status-error)',
+            borderRadius: 'var(--eb-radius-sm)',
+            fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5,
+          }}
+        >
+          <AlertCircle size={12} style={{ color: 'var(--eb-status-error)', flexShrink: 0, marginTop: 2 }} />
+          <span style={{ overflowWrap: 'anywhere' }}>{issue}</span>
         </div>
       )}
 
@@ -1898,7 +1921,7 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
   async function handleEditSave(body) {
     setSaving(true);
     try {
-      await ops.updateTrigger(agentId, editTarget.id, body);
+      await ops.updateTrigger(agentId, editTarget.id, body, editTarget.position);
       setEditTarget(null);
       fetchTriggers(agentId);
       onChanged?.();
@@ -1912,7 +1935,7 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
   async function handleDelete() {
     if (!deleteTarget) return;
     try {
-      await ops.deleteTrigger(agentId, deleteTarget.id);
+      await ops.deleteTrigger(agentId, deleteTarget.id, deleteTarget.position);
       setDeleteTarget(null);
       fetchTriggers(agentId);
       onChanged?.();
@@ -2028,7 +2051,7 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
 
         {listedTriggers.map((t, i) => (
           <TriggerRow
-            key={t.id || i}
+            key={triggerRowKey(t, i)}
             trigger={t}
             agentId={agentId}
             ops={ops}

@@ -16,7 +16,7 @@ import {
   mostSpecificActivePath,
 } from './nav-model';
 import {
-  PLUGINS_CHANGED_EVENT, buildPluginNav, pluginsNeedingScopes,
+  PLUGINS_CHANGED_EVENT, buildPluginNav, pluginsNeedingScopes, pluginTitleMap,
 } from './plugin-nav';
 import BrandMark from './BrandMark';
 import AccountMenu from './AccountMenu';
@@ -261,6 +261,9 @@ export default function Shell({ children }) {
   // Plugins install/uninstall + the Agents plugin grant), so a revoked grant
   // still drops its entry without polling on navigation.
   const [uiPlugins, setUiPlugins] = useState([]);
+  // Display names of every installed UI plugin, so the breadcrumb on a
+  // /plugins/:id/view route reads the plugin's name, not its raw id (#2650).
+  const [pluginTitles, setPluginTitles] = useState({});
   useEffect(() => {
     let mounted = true;
     // Guard against out-of-order resolutions: only the newest run may write.
@@ -284,7 +287,10 @@ export default function Shell({ children }) {
             if (Array.isArray(sb.scopes)) scopesById[id] = sb.scopes;
           } catch { /* skip a plugin we cannot resolve scopes for */ }
         }
-        if (mounted && runId === latest) setUiPlugins(buildPluginNav(installed, scopesById));
+        if (mounted && runId === latest) {
+          setUiPlugins(buildPluginNav(installed, scopesById));
+          setPluginTitles(pluginTitleMap(installed));
+        }
       } catch { /* orchestrator/plugins unavailable — no dynamic entries */ }
     };
     load();
@@ -658,7 +664,7 @@ export default function Shell({ children }) {
             overflow: 'hidden',
             textOverflow: 'ellipsis',
           }}>
-            {breadcrumbFor(location.pathname)}
+            {breadcrumbFor(location.pathname, pluginTitles)}
           </h1>
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexShrink: 0 }}>
             {/* Page-actions slot: pages portal their primary action button(s)

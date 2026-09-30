@@ -34,7 +34,10 @@ test('AC5: a Title column renders via TitleCell and wraps (no fixed-width ellips
   // so this column carries the producer's note instead of a title and the
   // hover has to say which. The title binding itself is unchanged.
   assert.match(src, /label: 'Title', wrap: true, render: \(v, row\) => <TitleCell title={handoffNoteDisplay\(row\) \|\| v} hover={v} hint={handoffTitleHint\(row\)} \/>/);
-  assert.doesNotMatch(src, /textOverflow: 'ellipsis'/);
+  // #2614 caps Repository/Actor with an ellipsis, so this guard is scoped to
+  // the Title cell itself: a title is never truncated.
+  const titleCell = src.slice(src.indexOf('function TitleCell'), src.indexOf('function RepoCell'));
+  assert.doesNotMatch(titleCell, /ellipsis|cappedCellStyle/);
 });
 
 test('AC6: Repository is de-emphasised via RepoCell but stays sortable/filterable', () => {
@@ -67,6 +70,40 @@ test('#1898: short columns are NOT wrapped (stay single-line)', () => {
   assert.match(src, /key: 'ts', label: 'Time',(?![^}]*wrap: true)/);
   assert.match(src, /key: 'repo', label: 'Repository',(?![^}]*wrap: true)/);
   assert.match(src, /key: 'actor', label: 'Actor',(?![^}]*wrap: true)/);
+});
+
+// ── #2614: regression of #1898 — every column gets a bounded share ─────────
+// Auto table layout gives a nowrap column its full text width, while a wrap
+// column may shrink to ~one character. Once the nowrap columns alone filled
+// the container, Title and Outcomes collapsed and the table overflowed again.
+// Each guard below was checked to fail when its fix is reverted.
+test('#2614: Title, Event and Outcomes carry a width floor', () => {
+  assert.match(src, /const COL_FLOOR = \{ title: '\d+(\.\d+)?rem', event: '\d+(\.\d+)?rem', outcomes: '\d+(\.\d+)?rem' \}/);
+  const titleCell = src.slice(src.indexOf('function TitleCell'), src.indexOf('function RepoCell'));
+  assert.match(titleCell, /display: 'block', minWidth: COL_FLOOR\.title/);
+  const eventCol = src.slice(src.indexOf("{ key: 'event', label: 'Event'"), src.indexOf("{ key: 'actor'"));
+  assert.match(eventCol, /display: 'block', minWidth: COL_FLOOR\.event/);
+  const outcomesCol = src.slice(src.indexOf("{ key: 'outcomes', label: 'Outcomes'"));
+  assert.match(outcomesCol, /minWidth: COL_FLOOR\.outcomes/);
+  // The floor wraps the no-subscriber line as well, not only the outcome list.
+  assert.match(outcomesCol, /row\.noMatchingTrigger \? <NoMatchLine \/> : list\.map/);
+});
+
+test('#2614: the Event column wraps instead of claiming its full label width', () => {
+  assert.match(src, /key: 'event', label: 'Event', wrap: true/);
+});
+
+test('#2614: single-line Repository and Actor are capped with an ellipsis and a hover', () => {
+  assert.match(src, /const COL_CAP = \{ repo: '\d+(\.\d+)?rem', actor: '\d+(\.\d+)?rem' \}/);
+  const capped = src.slice(src.indexOf('const cappedCellStyle'), src.indexOf('/* ── Outcome line'));
+  assert.match(capped, /maxWidth: max/);
+  assert.match(capped, /textOverflow: 'ellipsis'/);
+  const repoCell = src.slice(src.indexOf('function RepoCell'), src.indexOf('function ActorCell'));
+  assert.match(repoCell, /title=\{repo\}/);
+  assert.match(repoCell, /cappedCellStyle\(COL_CAP\.repo\)/);
+  const actorCell = src.slice(src.indexOf('function ActorCell'), src.indexOf('function shortRef'));
+  assert.match(actorCell, /title=\{actor\} style=\{cappedCellStyle\(COL_CAP\.actor\)\}/);
+  assert.match(src, /key: 'actor', label: 'Actor', render: v => <ActorCell actor=\{v\} \/>/);
 });
 
 test('#1898: an outcome chip breaks long unbroken tokens instead of overflowing (AC5)', () => {

@@ -147,6 +147,12 @@ test('#2571 AC8: a producer-filter drop reads who pushed, or that the producer i
     'dropped (producer unknown) → t1-dev');
 });
 
+test('#2602 AC4: a knowledge-branch drop reads as the built-in rule, never as branch-filter', () => {
+  const l = outcomeLabel({ status: 'dropped', reason: 'knowledge-branch', agentId: 't1-dev' });
+  assert.equal(l, 'dropped (knowledge-base branch — never wakes push triggers) → t1-dev');
+  assert.doesNotMatch(l, /branch-filter/);
+});
+
 // #2596: a pooled delivery names the per-ticket instance that ran it.
 test('a pooled delivery names the instance, falling back to its id (AC3)', () => {
   assert.equal(

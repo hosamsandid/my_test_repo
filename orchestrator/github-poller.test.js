@@ -1640,7 +1640,7 @@ const pushSub = (over = {}) => ({
   ...over,
 });
 
-async function runBatch(poller, batches, subscribers) {
+async function runBatch(poller, batches, subscribers, knowledgeBranches) {
   const recorded = [];
   const enqueued = [];
   const origRecord = githubEventLog.record;
@@ -1650,7 +1650,9 @@ async function runBatch(poller, batches, subscribers) {
   poller._checkAndIncThrottle = () => ({ drop: false });
   poller._saveThrottleState = () => {};
   try {
-    for (const batch of batches) await poller._fanOutBatch("org/repo", batch, subscribers, "tok");
+    for (const batch of batches) {
+      await poller._fanOutBatch("org/repo", batch, subscribers, "tok", undefined, knowledgeBranches);
+    }
   } finally {
     githubEventLog.record = origRecord;
   }
@@ -2036,4 +2038,133 @@ test("_fanOutBatch (#2570 edge case): the synthetic PR-open push is matched on i
   const poller2 = new GitHubPoller();
   const r2 = await runBatch(poller2, [[prOpenedEvent("pr-2")]], [pushSub({ branchFilter: ["**"] })]);
   assert.equal(r2.enqueued.length, 1);
+});
+
+// ── Knowledge-base branch exclusion (#2602) ──────────────────────────────────
+
+test("computePollPlan (#2602 AC1): each bucket carries the KB branches of every team whose KB lives in that repo", () => {
+  const { computePollPlan } = require("./github-poller");
+  const trig = (id, repo) => ({ id, type: "github-event", enabled: true, repo, events: ["push"] });
+  const plan = computePollPlan({
+    allowNonGithubHost: false,
+    environments: [{
+      id: "env", githubTokenId: "tok",
+      repositories: [{ url: "git@github.com:acme/team.git" }, { url: "git@github.com:acme/other.git" }],
+    }],
+    agents: [{ id: "dev", config: { environmentId: "env" }, triggersMtime: null, triggers: [trig("a", "acme/team"), trig("b", "acme/other")] }],
+    knowledgeLocations: [
+      { url: "git@github.com:acme/team.git", branch: "agent-knowledge" },
+      { url: "https://github.com/acme/team.git", branch: "team-b-kb" },
+      { url: "git@github.com:acme/kb-store.git", branch: "agent-knowledge" },
+    ],
+  });
+  assert.deepEqual(plan.get("acme/team").knowledgeBranches, ["agent-knowledge", "team-b-kb"]);
+  // acme/other holds no KB (the separate KB repo is not the team repo).
+  assert.deepEqual(plan.get("acme/other").knowledgeBranches, []);
+});
+
+test("_fanOutBatch (#2602 AC1/AC10): a push to the default KB branch never wakes an unfiltered push trigger", async () => {
+  const poller = new GitHubPoller();
+  const { recorded, enqueued } = await runBatch(poller, [[
+    pushEvent("kb", { ref: "refs/heads/agent-knowledge", head: "h1" }),
+    pushEvent("feat", { ref: "refs/heads/feat/x", head: "h2" }),
+  ]], [pushSub()], ["agent-knowledge"]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["feat"]);
+  const kb = recorded.find((r) => r.eventId === "kb");
+  assert.deepEqual([kb.outcomes[0].status, kb.outcomes[0].reason], ["dropped", "knowledge-branch"]);
+  assert.equal(kb.ref, "refs/heads/agent-knowledge");
+});
+
+test("_fanOutBatch (#2602 AC1/AC10): a configured custom KB branch and another team's KB branch are both excluded", async () => {
+  const poller = new GitHubPoller();
+  const mine = pushSub({ agentId: "t1-dev", triggerId: "p1", teamId: "t1" });
+  const theirs = pushSub({ agentId: "t2-dev", triggerId: "p2", teamId: "t2" });
+  const { recorded, enqueued } = await runBatch(poller, [[
+    pushEvent("kb-t1", { ref: "refs/heads/kb/team-one", head: "h1" }),
+    pushEvent("kb-t2", { ref: "refs/heads/team-two-knowledge", head: "h2" }),
+    pushEvent("default", { ref: "refs/heads/agent-knowledge", head: "h3" }),
+  ]], [mine, theirs], ["kb/team-one", "team-two-knowledge"]);
+  // `agent-knowledge` is not in this repo's set (no team uses the default here).
+  assert.deepEqual(enqueued.map((e) => [e.agentId, e.entry.github.eventId]), [["t1-dev", "default"], ["t2-dev", "default"]]);
+  for (const id of ["kb-t1", "kb-t2"]) {
+    const row = recorded.find((r) => r.eventId === id);
+    assert.deepEqual(row.outcomes.map((o) => [o.agentId, o.reason]), [["t1-dev", "knowledge-branch"], ["t2-dev", "knowledge-branch"]]);
+  }
+});
+
+test("_fanOutBatch (#2602 AC10): a KB kept in a separate repo excludes nothing on the team repo", async () => {
+  // The poller hands each repo only its own KB branches: none for a team repo
+  // whose KB lives elsewhere, so a same-named branch there still wakes.
+  const poller = new GitHubPoller();
+  const { enqueued } = await runBatch(poller, [[
+    pushEvent("kb-named", { ref: "refs/heads/agent-knowledge", head: "h1" }),
+  ]], [pushSub()], []);
+  assert.equal(enqueued.length, 1);
+});
+
+test("_fanOutBatch (#2602 AC2): an explicit or wildcard branchFilter and a pushedBy filter do not opt out", async () => {
+  for (const branchFilter of [["agent-knowledge"], ["*"], ["**"], null]) {
+    for (const pushedBy of [null, ["t1-spec"]]) {
+      const poller = new GitHubPoller({ lookupPushProducer: () => ({ agentId: "t1-spec", teamId: "t1" }) });
+      const sub = pushSub({ branchFilter, pushedBy, teamId: "t1" });
+      const { recorded, enqueued } = await runBatch(poller, [[
+        pushEvent("kb", { ref: "refs/heads/agent-knowledge", head: "h1" }),
+      ]], [sub], ["agent-knowledge"]);
+      assert.equal(enqueued.length, 0, `filter=${JSON.stringify(branchFilter)} pushedBy=${JSON.stringify(pushedBy)}`);
+      assert.equal(recorded[0].outcomes[0].reason, "knowledge-branch");
+    }
+  }
+});
+
+test("_fanOutBatch (#2602 AC3): KB pushes never reach the burst cap or produce a digest", async () => {
+  const poller = new GitHubPoller();
+  const batch = [];
+  for (let i = 0; i < BURST_CAP + 3; i++) {
+    batch.push(pushEvent(`kb-${i}`, { ref: "refs/heads/agent-knowledge", head: `h${i}` }));
+  }
+  const { recorded, enqueued } = await runBatch(poller, [batch], [pushSub()], ["agent-knowledge"]);
+  assert.equal(enqueued.length, 0);
+  const outcomes = recorded.flatMap((r) => r.outcomes);
+  assert.equal(outcomes.length, BURST_CAP + 3);
+  assert.ok(outcomes.every((o) => o.status === "dropped" && o.reason === "knowledge-branch" && !o.digest));
+});
+
+test("_fanOutBatch (#2602 AC5): a synthetic PR-open push whose head is the KB branch is excluded", async () => {
+  const poller = new GitHubPoller();
+  const { recorded, enqueued } = await runBatch(poller, [[
+    prOpenedEvent("pr-kb", { ref: "agent-knowledge" }),
+  ]], [pushSub()], ["agent-knowledge"]);
+  assert.equal(enqueued.length, 0);
+  const row = recorded.find((r) => r.eventId === "prpush:pr-kb");
+  assert.equal(row.outcomes[0].reason, "knowledge-branch");
+});
+
+test("_fanOutBatch (#2602 AC6 / edge case): other branches and a tag named like the KB branch behave as before", async () => {
+  const poller = new GitHubPoller();
+  const { enqueued } = await runBatch(poller, [[
+    pushEvent("tag", { ref: "refs/tags/agent-knowledge", head: "h1" }),
+    pushEvent("near", { ref: "refs/heads/agent-knowledge-old", head: "h2" }),
+    pushEvent("main", { ref: "refs/heads/main", head: "h3" }),
+  ]], [pushSub()], ["agent-knowledge"]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["tag", "near", "main"]);
+  const filtered = await runBatch(new GitHubPoller(), [[
+    pushEvent("main", { ref: "refs/heads/main", head: "h4" }),
+    pushEvent("dev", { ref: "refs/heads/dev", head: "h5" }),
+  ]], [pushSub({ branchFilter: ["main"] })], ["agent-knowledge"]);
+  assert.deepEqual(filtered.enqueued.map((e) => e.entry.github.eventId), ["main"]);
+  assert.equal(filtered.recorded.find((r) => r.eventId === "dev").outcomes[0].reason, "branch-filter");
+});
+
+test("_fanOutBatch (#2602 scope): only push is affected — other events of a push trigger still wake", async () => {
+  const poller = new GitHubPoller();
+  const sub = pushSub({ events: new Set(["push", "issues.opened"]) });
+  const issueOpened = {
+    id: "io-kb", actor: { login: "dev" }, created_at: new Date().toISOString(), type: "IssuesEvent",
+    repo: { name: "org/repo" },
+    payload: { action: "opened", issue: { number: 9, title: "x", html_url: "https://github.com/org/repo/issues/9" } },
+  };
+  const { enqueued } = await runBatch(poller, [[
+    issueOpened, pushEvent("kb", { ref: "refs/heads/agent-knowledge", head: "h1" }),
+  ]], [sub], ["agent-knowledge"]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["io-kb"]);
 });

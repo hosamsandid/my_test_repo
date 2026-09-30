@@ -28,6 +28,7 @@ import {
 } from './trigger-summary.js';
 import {
   branchFilterFormError, branchFilterToInput, branchFilterBody, BRANCH_FILTER_PLACEHOLDER, BRANCH_FILTER_HELP,
+  knowledgeBranchNote, knowledgeBranchesForRepo,
 } from './branch-filter.js';
 import { DOW_LABELS, parseCronState, buildCron, describeCron } from './cron-format.js';
 import { triggerRepoOptions, environmentRepoOptions, triggerRepoWarning } from './trigger-repo-status.js';
@@ -775,6 +776,20 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     })();
     return () => { cancelled = true; };
   }, [form.type, agentId, availableRepos, isDraftMode, initialValues?.repo]);
+
+  // #2602: the poller's per-repo status names each repo's knowledge-base
+  // branches for the read-only note under Branches. Fetched once, only while
+  // the Branches field is shown; a draft or a failed read falls back to the
+  // default branch name.
+  const [kbStatusRows, setKbStatusRows] = useState(null);
+  useEffect(() => {
+    if (isDraftMode || !showBranchFilter || kbStatusRows !== null) return undefined;
+    let cancelled = false;
+    apiCall('GET', '/api/github-events/repo-status')
+      .then((body) => { if (!cancelled) setKbStatusRows(Array.isArray(body?.repos) ? body.repos : []); })
+      .catch(() => { if (!cancelled) setKbStatusRows([]); });
+    return () => { cancelled = true; };
+  }, [isDraftMode, showBranchFilter, kbStatusRows]);
 
   // A data-flow dependency always lives on the team repo — never an
   // agent-scoped one.
@@ -1593,6 +1608,9 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               />
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
                 {BRANCH_FILTER_HELP}
+              </div>
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                {knowledgeBranchNote(knowledgeBranchesForRepo(kbStatusRows, form.repo))}
               </div>
             </div>
           )}

@@ -455,6 +455,9 @@ token (replaces webhooks for local stacks).
   self-caused. Exception: a push trigger's optional `pushedBy` (same-team agent
   ids, set automatically on Flow-editor data-flow hand-offs) fires only on pushes
   the platform recorded via `gh-as-agent push`/`pr` (`push-attribution.js`).
+  Built-in, non-configurable: a push to any team's knowledge-base branch on the
+  repo never wakes a push trigger — dropped `knowledge-branch` before every
+  other gate (`knowledge-branch-exclusion.js`, resolved per tick).
 - Resilience: hard request deadline + stall watchdog (self-heals a stuck poll).
 - **Event-transparency log** (`github-event-log.js`): every fresh event recorded
   (delivered / dropped / digest / no-subscriber) → `GET /api/github-events`, the

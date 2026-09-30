@@ -287,7 +287,10 @@ test('#2528 AC1: an agent-scoped repo is in the plan with its agent’s environm
   assert.ok(plan.has('acme/agent-listening'));
   // Two agents in different environments attach it: one entry, the first
   // agent by id (scoped-a → env-e) supplies the token — deterministic.
-  assert.deepEqual({ ...plan.get('acme/agent-listening'), subscribers: undefined }, { tokenId: 'tok-a', envId: 'env-e', subscribers: undefined });
+  assert.deepEqual(
+    { ...plan.get('acme/agent-listening'), subscribers: undefined },
+    { tokenId: 'tok-a', envId: 'env-e', subscribers: undefined, knowledgeBranches: [] },
+  );
   assert.deepEqual(plan.get('acme/agent-listening').subscribers.map((s) => s.triggerId), ['sb']);
   const r = byRepo.get('acme/agent-listening');
   assert.equal(r.tokenEnvironment.id, 'env-e');
@@ -361,4 +364,17 @@ test('#2528: an invalid environment token id never becomes an agent-scoped token
   assert.equal(plan.has('acme/agent-bad'), false);
   const rows = buildRepoStatusView({ ...inputs, plan, state: {}, firstTickDone: true, tokenReadable: readable });
   assert.equal(rows.find((r) => r.repo === 'acme/agent-bad').status, STATUS.NO_TOKEN);
+});
+
+test('#2602: each row names the knowledge-base branches of every team whose KB lives in that repo', () => {
+  const inputs = fixture();
+  inputs.knowledgeLocations = [
+    { url: 'git@github.com:acme/listening.git', branch: 'agent-knowledge' },
+    { url: 'https://github.com/acme/listening.git', branch: 'kb/other-team' },
+  ];
+  const plan = computePollPlan(inputs);
+  const rows = buildRepoStatusView({ ...inputs, plan, state, firstTickDone: true, tokenReadable: readable });
+  assert.deepEqual(rows.find((r) => r.repo === 'acme/listening').knowledgeBranches, ['agent-knowledge', 'kb/other-team']);
+  assert.deepEqual(rows.find((r) => r.repo === 'acme/failing').knowledgeBranches, []);
+  assert.deepEqual(plan.get('acme/listening').knowledgeBranches, ['agent-knowledge', 'kb/other-team']);
 });

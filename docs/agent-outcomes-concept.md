@@ -99,7 +99,7 @@ A new declarative port on the agent/role — a sibling of `channels`, `dataFlow`
 
 | `type` | Fields | Semantics |
 |---|---|---|
-| `setLabel` | `label` | Apply this GitHub label (to the issue/PR the run concerns). |
+| `setLabel` | `label`, `target?` | Apply this GitHub label (to the issue/PR the run concerns). Optional `target: 'issue' \| 'pr'` says which one (#2629); when absent it is implied by an `openPr`/`openIssue` in the same outcome, else by the producer's PR-only / issue-only triggers. |
 | `openPr` | — | Open a pull request (absorbs `github.producesPr`). |
 | `openIssue` | — | Open an issue (absorbs `github.producesIssue`). |
 | `none` | — | Terminal outcome — no outbound signal. Renders as a dead-end port *without* triggering the `dead-end-emitter` lint. |

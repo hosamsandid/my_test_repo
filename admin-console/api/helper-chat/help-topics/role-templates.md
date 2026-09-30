@@ -107,7 +107,10 @@ it does not affect chatting with the agent:
 
 - **persistent** (the default when unset) — a triggered run resumes the agent's last
   conversation, so it still has that context in front of it.
-- **per-invocation** — every triggered run starts fresh, with no `--resume`.
+- **per-invocation** — every triggered run starts fresh, with no `--resume`. An
+  auto-scaled instance of a pooled role is the exception: its triggered runs and
+  its chat share one session for the instance's lifetime; only loop iterations
+  start fresh.
 
 It is effectively a two-state switch. Anything that is not exactly
 `per-invocation` — including `persistent` and leaving it unset — is stored as the

@@ -7,6 +7,7 @@ import {
   scopeStatusTone,
   buildCredentialSubmit,
   isCredentialDraftDirty,
+  selectScopes,
 } from '../pages/plugin-credentials-view.js';
 
 // Per-team Credentials section for an installed plugin that declares
@@ -16,6 +17,11 @@ import {
 // blank means "leave unchanged". Applies immediately (no restart): the
 // orchestrator re-pushes the per-scope map to the broker on save. Every
 // render/shape decision comes from the pure plugin-credentials-view.js.
+//
+// Two surfaces share this one component:
+//   - the Plugins registry page (default): every team scope the viewer can see.
+//   - the Team-Settings service-account section (#2608): `onlyScopeId` pins it
+//     to the one team being edited, so a Team Admin sees just their own account.
 
 const TONE = {
   ok: 'var(--eb-success-fg, #0a7)',
@@ -136,8 +142,8 @@ function ScopeFields({ pluginId, credentials, scope, onSaved }) {
   );
 }
 
-export default function PluginCredentials({ row }) {
-  const [open, setOpen] = React.useState(false);
+export default function PluginCredentials({ row, onlyScopeId = null, label = null, defaultOpen = false }) {
+  const [open, setOpen] = React.useState(!!defaultOpen);
   const [data, setData] = React.useState(null);
   const [loading, setLoading] = React.useState(false);
   const [err, setErr] = React.useState('');
@@ -154,7 +160,7 @@ export default function PluginCredentials({ row }) {
 
   React.useEffect(() => { if (open && !data && !loading) load(); }, [open, data, loading, load]);
 
-  const scopes = (data && Array.isArray(data.scopes)) ? data.scopes : [];
+  const scopes = selectScopes(data && data.scopes, onlyScopeId);
   const credentials = (data && Array.isArray(data.credentials)) ? data.credentials : [];
 
   return (
@@ -178,7 +184,9 @@ export default function PluginCredentials({ row }) {
         aria-expanded={open}
       >
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        {open ? 'Hide credentials' : `Set the ${row.credentialKeys.join(' / ')} per team`}
+        {open
+          ? 'Hide credentials'
+          : (label || `Set the ${row.credentialKeys.join(' / ')} per team`)}
       </button>
 
       {open && (
@@ -187,7 +195,9 @@ export default function PluginCredentials({ row }) {
           {err && <div role="alert" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-danger-fg, #a00)' }}>{err}</div>}
           {!loading && !err && scopes.length === 0 && (
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-              This plugin is not granted to any team you can see. Assign it to a team first.
+              {onlyScopeId
+                ? 'Grant this plugin to the team above first, then its service account can be set here.'
+                : 'This plugin is not granted to any team you can see. Assign it to a team first.'}
             </div>
           )}
           {scopes.map((scope) => (

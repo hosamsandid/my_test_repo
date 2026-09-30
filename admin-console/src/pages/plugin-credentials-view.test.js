@@ -8,6 +8,7 @@ import {
   scopeStatusTone,
   buildCredentialSubmit,
   isCredentialDraftDirty,
+  selectScopes,
 } from './plugin-credentials-view.js';
 
 const CREDS = [
@@ -90,4 +91,16 @@ test('isCredentialDraftDirty', () => {
   assert.equal(isCredentialDraftDirty({}, desc), false);
   assert.equal(isCredentialDraftDirty({ email: '  ' }, desc), false);
   assert.equal(isCredentialDraftDirty({ email: 'a@b.c' }, desc), true);
+});
+
+test('selectScopes: null keeps all, an id pins to that one scope', () => {
+  const scopes = [
+    { scopeId: 'team-a', teamName: 'A' },
+    { scopeId: 'team-b', teamName: 'B' },
+  ];
+  assert.equal(selectScopes(scopes, null).length, 2);
+  assert.equal(selectScopes(scopes, undefined).length, 2);
+  assert.deepEqual(selectScopes(scopes, 'team-b'), [{ scopeId: 'team-b', teamName: 'B' }]);
+  assert.deepEqual(selectScopes(scopes, 'team-z'), []);
+  assert.deepEqual(selectScopes(null, 'team-a'), []);
 });

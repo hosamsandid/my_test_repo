@@ -7,6 +7,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import PasswordField from '../components/PasswordField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
 import GithubTokenHint from '../components/GithubTokenHint';
 import IconButton from '../components/IconButton';
@@ -228,22 +229,27 @@ function CreateForm({ onSave, onCancel, saving, error, teams, isSysAdmin, adminT
       />
 
       <div>
-        <div style={{
+        <label htmlFor="github-token-value" style={{
+          display: 'block',
           fontSize: 'var(--eb-text-sm)',
           fontWeight: 'var(--eb-font-medium)',
           color: 'var(--eb-text-secondary)',
           marginBottom: 'var(--eb-space-1)',
         }}>
           GitHub token <span style={{ color: 'var(--eb-status-error)' }}>*</span>
-        </div>
-        <textarea
+        </label>
+        {/* Masked by default with a reveal toggle — the secret is not shown
+            in clear text while it is pasted (#2654). */}
+        <PasswordField
+          id="github-token-value"
           value={token}
           onChange={e => setToken(e.target.value)}
-          rows={3}
           placeholder="github_pat_… or ghp_…"
+          autoComplete="off"
+          spellCheck={false}
+          buttonTitle="Show or hide the token"
           style={{
             ...inputStyle,
-            resize: 'vertical',
             fontFamily: 'var(--eb-font-mono)',
             fontSize: 'var(--eb-text-xs)',
           }}
@@ -594,13 +600,16 @@ export default function GithubTokens() {
             <GithubTokenHint />
             <label style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
               New token value
-              <textarea
+              <PasswordField
                 value={rotateToken}
                 onChange={e => setRotateToken(e.target.value)}
                 placeholder="github_pat_… or ghp_…"
-                rows={3}
                 autoFocus
-                style={{ width: '100%', marginTop: 'var(--eb-space-2)', padding: 'var(--eb-space-2)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', resize: 'vertical', boxSizing: 'border-box' }}
+                autoComplete="off"
+                spellCheck={false}
+                buttonTitle="Show or hide the token"
+                wrapperStyle={{ marginTop: 'var(--eb-space-2)' }}
+                style={{ padding: 'var(--eb-space-2)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)' }}
               />
             </label>
             {formError && (

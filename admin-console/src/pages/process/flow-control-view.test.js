@@ -23,6 +23,10 @@ import {
   writeAutoRefresh,
   configFormRows,
   configFromForm,
+  REMOVE_CONFIRM_TEXT,
+  removeDialogTitle,
+  removedView,
+  withoutRows,
 } from './flow-control-view.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -32,7 +36,7 @@ const NOW = Date.parse('2026-09-29T12:00:00Z');
 const ago = (mins) => new Date(NOW - mins * 60_000).toISOString();
 
 const STAGES = [
-  { id: 'ready', label: 'Ready', roles: [] },
+  { id: 'draft', label: 'Draft', roles: [] },
   { id: 't-dev', label: 'Developer', roles: ['t-dev'] },
   { id: 't-rev', label: 'Code Reviewer', roles: ['t-rev'] },
   { id: 'done', label: 'Done', roles: [] },
@@ -102,12 +106,65 @@ test('rowView: a PR-only row has no issue ref; a done row marks every step past'
 
 test('rowView: the step list is exactly the team\'s own stages — no fixed vocabulary', () => {
   const kitchen = [
-    { id: 'ready', label: 'Ready' }, { id: 'k-chef', label: 'Chef' },
+    { id: 'draft', label: 'Draft' }, { id: 'k-chef', label: 'Chef' },
     { id: 'k-taster', label: 'Taster' }, { id: 'done', label: 'Done' },
   ];
   const v = rowView(row({ stageId: 'k-chef', stageIndex: undefined }), kitchen, { now: NOW });
-  assert.deepEqual(v.steps.map((s) => s.label), ['Ready', 'Chef', 'Taster', 'Done']);
+  assert.deepEqual(v.steps.map((s) => s.label), ['Draft', 'Chef', 'Taster', 'Done']);
   assert.equal(v.stageLabel, 'Chef');
+});
+
+// ── #2637: Draft and "Remove from board" ─────────────────────────────────────
+
+test('rowView: an unreleased item reads Draft · awaiting release — never "released" (AC1, AC2)', () => {
+  const v = rowView(row({ stageId: 'draft', stageIndex: 0, status: 'draft', removable: true }), STAGES, { now: NOW });
+  assert.equal(v.stageLabel, 'Draft');
+  assert.equal(v.statusText, 'awaiting release');
+  assert.deepEqual(v.steps.map((s) => [s.label, s.state]).slice(0, 2), [['Draft', 'current'], ['Developer', 'future']]);
+  assert.equal(v.removable, true);
+  for (const status of ['draft', 'ready', 'working', 'queued', 'idle', 'done']) {
+    assert.doesNotMatch(rowView(row({ status }), STAGES).statusText, /released/);
+  }
+});
+
+test('rowView: a released item is up next at its role and offers no removal (AC4, AC5)', () => {
+  const v = rowView(row({ stageId: 't-dev', stageIndex: 1, status: 'queued', removable: false }), STAGES, { now: NOW });
+  assert.equal(v.stageLabel, 'Developer');
+  assert.equal(v.statusText, 'up next');
+  assert.equal(v.removable, false);
+  assert.equal(rowView(row(), STAGES).removable, false); // absent → not offered
+});
+
+test('remove confirmation says only the board entry goes and the ticket stays unchanged (AC6)', () => {
+  assert.match(REMOVE_CONFIRM_TEXT, /only the board entry is removed/i);
+  assert.match(REMOVE_CONFIRM_TEXT, /GitHub ticket stays unchanged/);
+  assert.equal(removeDialogTitle('#2563'), 'Remove #2563 from the board?');
+  assert.equal(removeDialogTitle(''), 'Remove this item from the board?');
+  const topic = fs.readFileSync(HELP_TOPIC, 'utf8');
+  assert.match(topic, /only the board entry is\s+removed — the GitHub ticket stays unchanged/);
+});
+
+test('withoutRows: a removed row leaves the board (and Needs you) at once, before the next snapshot (AC6)', () => {
+  const data = { rows: [row({ id: 'a' }), row({ id: 'b' })], needsHuman: [{ id: 'a' }, { id: 'c' }], stages: STAGES };
+  const next = withoutRows(data, ['a']);
+  assert.deepEqual(next.rows.map((r) => r.id), ['b']);
+  assert.deepEqual(next.needsHuman.map((n) => n.id), ['c']);
+  assert.equal(next.stages, STAGES);
+  assert.equal(withoutRows(null, ['a']), null);
+});
+
+test('boardView: removed items are counted and listed for Restore (AC9)', () => {
+  const v = boardView({
+    repos: ['o/r'], stages: STAGES, rows: [row()],
+    removed: [
+      { id: 'o/r#2563', removalId: 'o/r#2563', title: 'Concept', url: 'u', issue: { repo: 'o/r', number: 2563 }, prs: [], removedAt: ago(90) },
+      { id: 'o/r#91', title: 'PR only', issue: null, prs: [{ repo: 'o/r', number: 91 }], removedAt: ago(5) },
+    ],
+  }, NOW);
+  assert.equal(v.removedLabel, 'Removed (2)');
+  assert.deepEqual(v.removed.map((r) => [r.ref, r.removalId, r.removedAgo]), [['#2563', 'o/r#2563', '1h 30m'], ['PR #91', 'o/r#91', '5m']]);
+  assert.deepEqual(boardView({}, NOW).removed, []);
+  assert.equal(removedView({ id: 'x', removedAt: ago(1) }, { now: NOW }).title, '(untitled)');
 });
 
 // ── area ① (AC7, AC13) ─────────────────────────────────────────────────────

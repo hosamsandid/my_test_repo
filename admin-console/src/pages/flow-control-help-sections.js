@@ -21,6 +21,8 @@ export const FLOW_CONTROL_HELP_SECTIONS = {
   states: 'the-stages',
   // 6 — the optional per-team column configuration and done retention
   columns: 'changing-the-columns',
+  // 7 — "Remove from board", when a removed item comes back, and Restore
+  remove: 'removing-items-from-the-board',
 };
 
 export default FLOW_CONTROL_HELP_SECTIONS;

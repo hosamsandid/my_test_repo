@@ -50,3 +50,24 @@ test("the flow-board route is maintenance-gated and leaves /tickets in place", (
   assert.match(SRC.slice(i, i + 1500), /readMaintenanceState\(\)/);
   assert.match(SRC, /\/internal\\\/teams\\\/\(\[\^\/\]\+\)\\\/tickets/);
 });
+
+test("board removals (#2637) are stored per team and pruned only for repos the sweep reached", () => {
+  assert.match(body("function flowBoardRemovedPath("), /controlOrPoolPath\(teamId, "flow-board-removed\.json"\)/);
+  const compute = body("async function computeTeamFlowBoard(");
+  assert.match(compute, /removed, now,/);
+  assert.match(compute, /removalsToPrune\.filter\(\(id\) => reachedRepos\.has\(/);
+  assert.match(compute, /saveFlowBoardRemoved\(teamId, current\)/);
+});
+
+test("the flow-board-removed route checks removability on the board and never writes to GitHub", () => {
+  const i = SRC.indexOf("const flowBoardRemovedMatch");
+  assert.ok(i > 0);
+  const route = SRC.slice(i, SRC.indexOf("// GET /internal/teams/:teamId/pool-control", i));
+  assert.match(route, /if \(!row\.removable\) return sendJson\(res, 409/);
+  // The store is read after the board, whose computation may have pruned it.
+  const remove = route.slice(route.indexOf("parsed.action === 'remove'"));
+  assert.ok(remove.indexOf("await getTeamFlowBoard(teamId)") >= 0);
+  assert.ok(remove.indexOf("await getTeamFlowBoard(teamId)") < remove.indexOf("removed = loadFlowBoardRemoved(teamId)"));
+  assert.match(route, /_flowBoardCache\.delete\(teamId\)/);
+  assert.doesNotMatch(route, /api\.github\.com|_flowGithub|gh-as-agent/);
+});

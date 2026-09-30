@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { upsertChannel, removeChannelFrom, chLabelKey } from './channel-ops.js';
+import { upsertChannel, removeChannelFrom, chLabelKey, hasChannel } from './channel-ops.js';
 
 // #828 channel keying relaxation: (artifact, from) → (artifact, from, label) so a
 // single producer can feed one consumer through differently-labelled channels
@@ -132,4 +132,19 @@ test('#2578: upsertChannel drops a legacy transport key instead of persisting it
   const out = upsertChannel([{ artifact: 'pr', from: 'rev', label: 'go', transport: 'internal' }],
     { artifact: 'pr', from: 'rev', label: 'go', transport: 'internal', autoClaim: false });
   assert.deepEqual(out, [{ artifact: 'pr', from: 'rev', label: 'go', autoClaim: false }]);
+});
+
+// #2665: the create dialog marks a re-drawn channel as existing.
+test('hasChannel matches the full (artifact, from, label) key', () => {
+  const list = [
+    { artifact: 'pr', from: 'dev' },
+    { artifact: 'pr', from: 'rev', label: 'ready-to-merge' },
+  ];
+  assert.equal(hasChannel(list, { artifact: 'pr', from: 'dev', label: '' }), true);
+  assert.equal(hasChannel(list, { artifact: 'pr', from: 'dev', label: '  ' }), true);
+  assert.equal(hasChannel(list, { artifact: 'pr', from: 'dev', label: 'approved' }), false);
+  assert.equal(hasChannel(list, { artifact: 'issue', from: 'dev', label: '' }), false);
+  assert.equal(hasChannel(list, { artifact: 'pr', from: 'rev', label: ' ready-to-merge ' }), true);
+  assert.equal(hasChannel(list, { artifact: 'pr', from: 'other', label: '' }), false);
+  assert.equal(hasChannel(undefined, { artifact: 'pr', from: 'dev', label: '' }), false);
 });

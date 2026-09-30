@@ -36,6 +36,16 @@ export function upsertChannel(list, { artifact, from, label, gate, wakePrompt, a
   return out;
 }
 
+// Whether `list` already holds the channel keyed (artifact, from, label) — the
+// create dialog marks it as existing instead of offering to create it again
+// (#2665); saving would only upsert it in place.
+export function hasChannel(list, { artifact, from, label }) {
+  const art = artifact === 'issue' ? 'issue' : 'pr';
+  const lbl = chLabelKey(label);
+  return (Array.isArray(list) ? list : []).some(c =>
+    c && c.artifact === art && c.from === from && chLabelKey(c.label) === lbl);
+}
+
 // Remove a channel from a list. When a `label` is supplied (present in the spec,
 // including the empty string), the match is the full (artifact, from, label) key
 // so switch fan-in siblings are removed individually; a legacy caller that omits

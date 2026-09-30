@@ -164,7 +164,7 @@ const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit, p
 // on the agent construct, never on the environment — and (de)activation is the
 // same additive live file sync, no respawn (#1547).
 const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantFor, normalizeGrantList, uninstalledRevokeGrant } = require("./plugin-grants");
-const { planWorkspaceSync, withStoredCliNames, PLUGINS_DIR, planCliRefresh } = require("./plugin-sync");
+const { planWorkspaceSync, withStoredCliNames, withStoredCommandNamespaces, uninstalledCommandRevokes, PLUGINS_DIR, planCliRefresh } = require("./plugin-sync");
 const { resolveAgentStateDir } = require("./agent-state-dir");
 const mcpSeed = require("./mcp-seed");
 const { resolveScopeId, scopeIdFromGrantScope } = require("./plugin-scope");
@@ -12755,9 +12755,14 @@ class Orchestrator {
       try { return JSON.parse(fs.readFileSync(path.join(dir, PLUGINS_DIR, `${pluginId}.json`), "utf8")); }
       catch { return null; }
     };
+    // Its command namespace is read the same way, before the plan removes the
+    // config file (#2657).
+    const storedPrevGrant = withStoredCommandNamespaces(
+      withStoredCliNames(prevGrant, manifests, readStoredConfig), manifests, readStoredConfig,
+    );
     const plan = planWorkspaceSync({
       agentCfg: cfg,
-      prevGrant: withStoredCliNames(prevGrant, manifests, readStoredConfig),
+      prevGrant: storedPrevGrant,
       nextGrant,
       manifests,
       resolveScopeId,
@@ -12893,6 +12898,12 @@ class Orchestrator {
           if (nsRel) commandReseedPaths.push(nsRel);
           commandReseedPaths.push(...projectPluginScaffold(id, pDir, pm, { remove: true }));
         }
+      }
+      // A revoked plugin that is no longer installed is not in `manifests`;
+      // remove its commands under the namespace its seeded config recorded.
+      for (const { namespace } of uninstalledCommandRevokes(storedPrevGrant, nextGrant, manifests)) {
+        const nsRel = projectSkillCommands(id, namespace, null, seededCmds, { remove: true });
+        if (nsRel) commandReseedPaths.push(nsRel);
       }
       writeSeededCommands(id, seededCmds);
     } catch (err) {

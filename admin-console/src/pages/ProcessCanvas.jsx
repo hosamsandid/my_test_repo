@@ -1205,6 +1205,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           toName={nodeName(outcomeConnect.to)}
           artifact={outcomeConnect.outcome.artifact}
           lockArtifact
+          existingChannels={(displayGraph?.nodes || []).find(n => n.id === outcomeConnect.to)?.channels}
           ops={ops}
           humans={displayGraph?.humans || []}
           humanOps={isDraft ? draftOps : liveHumanOps}

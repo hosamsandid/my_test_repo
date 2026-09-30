@@ -35,7 +35,9 @@ test('defaultListenerPrompt substitutes placeholders for missing label/repo', ()
     label: '', verb: 'removed from', targetNoun: 'a pull request',
     repo: '', fromLabel: 'A', toLabel: 'B',
   });
-  assert.match(p, /^`<label>` was removed from a pull request in `<repo>` by A\./);
+  assert.match(p, /^`<label>` was removed from a pull request by A\./);
+  // #2665: nothing ever substitutes a `<repo>` stand-in — the clause is omitted.
+  assert.doesNotMatch(p, /<repo>|\bin `/);
   assert.match(p, /<Describe what B should do\.>/);
 });
 

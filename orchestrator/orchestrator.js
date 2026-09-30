@@ -111,6 +111,7 @@ const { resolveCloneTarget } = require("./clone-target");
 const { assessConversionEligibility, planTeamConversion, planTeamOfOneCreation } = require("./team-conversion");
 const teamOfOneMigration = require("./team-of-one-migration");
 const pushAttribution = require("./push-attribution");
+const knowledgeBranchExclusion = require("./knowledge-branch-exclusion");
 const { nextAvailableAgentId, suggestFreeAgentId } = require("./agent-id-resolution");
 const { syncAgentRepoPlan, summarizeRepoResults, repoDivergence } = require("./repo-sync");
 // Agent-scoped repositories (#2067): a repository attached to ONE agent,
@@ -7363,6 +7364,27 @@ function resolveTeamKbRepo(teamId) {
     if (repoRef && repoRef.url) return { repoRef, env };
   }
   return null;
+}
+
+// Where every team's KB is pushed (#2602): one `{ url, branch }` per (team,
+// environment) with a git-backed KB it syncs, across the whole platform — the
+// GitHub poller never wakes a push trigger on a push to one of those branches,
+// whichever team's trigger it is. Read fresh on every poll tick.
+function listKnowledgeLocations() {
+  const out = [];
+  const seen = new Set();
+  for (const id of listAgentIds()) {
+    let cfg = null;
+    try { cfg = loadAgentConfig(id); } catch { cfg = null; }
+    if (!cfg || !cfg.environmentId) continue;
+    const teamId = agentKnowledgeTeamId(cfg);
+    const key = `${teamId}\u0000${cfg.environmentId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const loc = knowledgeBranchExclusion.knowledgeLocationOf(teamKnowledgeEnv(teamId, loadEnvironment(cfg.environmentId)));
+    if (loc) out.push(loc);
+  }
+  return out;
 }
 
 // The environment id a team shares (from any of its agents' configs). A team is
@@ -20767,6 +20789,8 @@ async function main() {
     labelMarkers: labelDedupMarkers, // #1858 internal fast-path dedup (shared with the label-applied endpoint)
     // #2571: who pushed a (repo, ref, head) — recorded by gh-as-agent push/pr.
     lookupPushProducer: (q) => pushAttribution.defaultStore().lookup(q),
+    // #2602: every team's KB branch — pushes to it never wake a push trigger.
+    listKnowledgeLocations,
   });
   githubPollerRef = ghPoller; // #2525: the manual re-fire re-arms through it; #2537: repo status
   ghPoller.start();

@@ -35,6 +35,7 @@ const wakeArmory = require('./wake-armory');
 const { canonicalEventKey, listensTo } = require('./event-key-aliases');
 const pushAttribution = require('./push-attribution');
 const { parseBranchFilter, pushBranch, branchFilterMatches } = require('./branch-filter');
+const { knowledgeBranchesByRepo, isKnowledgeBranchPush } = require('./knowledge-branch-exclusion');
 
 // Poll cadence. Fixed 30s in production; overridable via
 // AEE_GITHUB_POLL_INTERVAL_MS (#711) so the E2E stack can tighten it — the
@@ -566,7 +567,7 @@ function requestWithDeadline(makeRequest, { deadlineMs = REQUEST_DEADLINE_MS } =
 }
 
 class GitHubPoller {
-  constructor({ loadEnvironment, listEnvironmentIds, enqueuePending, triggersPath, onMergedPr, labelMarkers, lookupPushProducer } = {}) {
+  constructor({ loadEnvironment, listEnvironmentIds, enqueuePending, triggersPath, onMergedPr, labelMarkers, lookupPushProducer, listKnowledgeLocations } = {}) {
     this.loadEnvironment = loadEnvironment;
     this.listEnvironmentIds = listEnvironmentIds;
     // #2571: who pushed a (repo, ref, head)? The orchestrator records every
@@ -575,6 +576,10 @@ class GitHubPoller {
     // named agents. Absent in unit tests → every push is "producer unknown",
     // which only matters to triggers that set a filter.
     this.lookupPushProducer = typeof lookupPushProducer === 'function' ? lookupPushProducer : () => null;
+    // #2602: where every team's knowledge base is pushed (`[{ url, branch }]`,
+    // see knowledge-branch-exclusion.js). A push to one of those branches never
+    // wakes a push trigger. Absent in unit tests → no KB branches → no exclusion.
+    this.listKnowledgeLocations = typeof listKnowledgeLocations === 'function' ? listKnowledgeLocations : () => [];
     // #1858: shared dedup-marker store for the internal label fast-path. When a
     // human-applied label was already delivered internally (via the Admin
     // Console → /internal/github-label-applied), the later Events-API delivery
@@ -733,7 +738,15 @@ class GitHubPoller {
         agents.push({ id: agentId, config, triggers, triggersMtime });
       }
     }
-    return { environments, agents, allowNonGithubHost: usingNonDefaultApiBase() };
+    // #2602: re-read every tick, so a KB branch renamed by configuration is
+    // evaluated against the set configured when the event is fanned out.
+    let knowledgeLocations = [];
+    try {
+      knowledgeLocations = this.listKnowledgeLocations() || [];
+    } catch (err) {
+      console.error(`[GH-Poller] cannot list knowledge-base branches: ${err.message}`);
+    }
+    return { environments, agents, knowledgeLocations, allowNonGithubHost: usingNonDefaultApiBase() };
   }
 
   // #2537: the per-repository status the GitHub Event Log shows — built from the
@@ -758,7 +771,7 @@ class GitHubPoller {
     };
   }
 
-  async _pollRepo(repoFullName, { tokenId, envId, subscribers }) {
+  async _pollRepo(repoFullName, { tokenId, envId, subscribers, knowledgeBranches }) {
     const repoState = this.state[repoFullName] || {};
 
     // Honor a previously set backoff: skip silently until skipUntil passes.
@@ -892,7 +905,7 @@ class GitHubPoller {
       // GitHub returns newest-first; process oldest-first so triggers fire
       // in causal order. Events without a timestamp sort last (stable).
       fresh.sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
-      await this._fanOutBatch(repoFullName, fresh, subscribers, token, repoState);
+      await this._fanOutBatch(repoFullName, fresh, subscribers, token, repoState, knowledgeBranches);
       await this._handleMergedPrs(repoFullName, fresh);
     }
 
@@ -916,7 +929,7 @@ class GitHubPoller {
     }
   }
 
-  async _fanOutBatch(repoFullName, ghEvents, subscribers, token, repoStateArg) {
+  async _fanOutBatch(repoFullName, ghEvents, subscribers, token, repoStateArg, knowledgeBranches = []) {
     // Phase 1 — per-event delivery gates (history horizon, label filter).
     // Everything that survives becomes a "deliverable" tagged with its
     // subscriber + conversation, to be grouped in phase 2. Events arrive
@@ -926,7 +939,9 @@ class GitHubPoller {
     // a producer filter (`pushedBy`, #2571): otherwise a trigger fires on any
     // matching event regardless of who caused it (human, another agent, or the
     // subscriber itself). The only backstop against a self-triggering loop is
-    // the frequency-based Layer-3 throttle + burst digest in phase 2.
+    // the frequency-based Layer-3 throttle + burst digest in phase 2. The one
+    // built-in exception is a push to a knowledge-base branch (#2602), which
+    // never wakes a push trigger (`knowledgeBranches`, the repo's KB branches).
     //
     // `eventLogEntries` (#469) accumulates one entry per event for the
     // event-transparency log, keyed by event id — populated here with the
@@ -958,6 +973,9 @@ class GitHubPoller {
       eventLogEntries.set(ghEvent.id, logEntry);
       if (!key) continue;
       const convKey = conversationKey(ghEvent);
+      // #2602: a push to any team's knowledge-base branch on this repo (incl. a
+      // #2529 synthetic PR-open push whose head is that branch).
+      const knowledgePush = key === 'push' && isKnowledgeBranchPush(ghEvent, knowledgeBranches);
 
       // #2529: first push-class event for a (branch, head sha) wins; a later one
       // — the real PushEvent after the PR-open synthetic, or a PR (re)open whose
@@ -1028,6 +1046,21 @@ class GitHubPoller {
 
         const outcome = { agentId: sub.agentId, triggerId: sub.triggerId, status: 'pending', reason: null, digest: false };
         logEntry.outcomes.push(outcome);
+
+        // Knowledge-base branch (#2602): a KB sync push never wakes a push
+        // trigger — built in, not configurable, regardless of the trigger's
+        // `branchFilter` (even one listing the KB branch or `**`) or `pushedBy`.
+        // First gate, so a KB push never reaches the wake dedup / burst /
+        // throttle layers and never feeds an "Event burst clamped" digest.
+        if (knowledgePush) {
+          console.log(
+            `[GH-Poller] knowledge-branch: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
+            `(ref='${ghEvent.payload?.ref ?? '?'}' is a knowledge-base branch)`,
+          );
+          outcome.status = 'dropped';
+          outcome.reason = 'knowledge-branch';
+          continue;
+        }
 
         // History horizon (#320-A/B): skip events older than the subscriber's
         // horizon, widened by GRACE_MS to absorb late/out-of-order delivery.
@@ -1799,6 +1832,8 @@ function pollerSubscribes(t) {
 //                  supplies its token.
 //   agents       — [{ id, config, triggers, triggersMtime }]; config null = stub
 //                  agent (allowed through), triggers null = none/unreadable.
+//   knowledgeLocations — [{ url, branch }], one per team KB (#2602); each
+//                  bucket carries its repo's KB branches as `knowledgeBranches`.
 //
 // Agent-scoped repositories (`config.agentRepositories`, #2067) are token
 // sources too (#2528): they carry no credential of their own by design, so —
@@ -1807,9 +1842,9 @@ function pollerSubscribes(t) {
 // first, so a repo that is also in an environment keeps that environment's
 // token (no change for env repos); among agents, the first by id wins.
 //
-// Returns Map<repoFullName, { tokenId, envId, subscribers }>. A repo is in the
+// Returns Map<repoFullName, { tokenId, envId, subscribers, knowledgeBranches }>. A repo is in the
 // plan only when it has a token AND at least one subscriber.
-function computePollPlan({ environments = [], agents = [], allowNonGithubHost = false } = {}, { onInvalidTokenId } = {}) {
+function computePollPlan({ environments = [], agents = [], knowledgeLocations = [], allowNonGithubHost = false } = {}, { onInvalidTokenId } = {}) {
   const repoToToken = new Map();
   const envById = new Map();
   for (const env of environments) {
@@ -1837,6 +1872,11 @@ function computePollPlan({ environments = [], agents = [], allowNonGithubHost = 
     }
   }
 
+  // #2602: every team's KB branches per repository — the push-trigger exclusion.
+  const kbBranches = knowledgeBranchesByRepo(
+    knowledgeLocations, (url) => parseRepoFullName(url, { allowNonGithubHost }),
+  );
+
   const plan = new Map();
   for (const agent of agents) {
     // Skip disabled agents — do not enqueue events for them. The agent's
@@ -1854,7 +1894,10 @@ function computePollPlan({ environments = [], agents = [], allowNonGithubHost = 
       const branchFilter = parseBranchFilter(t.branchFilter);
       let bucket = plan.get(t.repo);
       if (!bucket) {
-        bucket = { tokenId: source.tokenId, envId: source.envId, subscribers: [] };
+        bucket = {
+          tokenId: source.tokenId, envId: source.envId, subscribers: [],
+          knowledgeBranches: kbBranches.get(t.repo) || [],
+        };
         plan.set(t.repo, bucket);
       }
       bucket.subscribers.push({

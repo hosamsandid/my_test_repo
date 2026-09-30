@@ -417,11 +417,10 @@ editable form; nothing about it becomes editable that was not editable before.
 
 ### Sessions — watching a run
 
-The **Sessions** tab is the monitoring surface: the runs this agent has done and
-the one it is doing now. Its badge counts the currently active sessions. Pick a
-run to see its structured **session log** — every step the agent took — together
-with what that run cost and how much context it used. A live run streams in as it
-happens and can be stopped from here; a finished one can be reopened any time.
+The **Sessions** tab lists this agent's runs, past and current; its badge counts
+active ones. Pick a run to see its **session log** — every step the agent took —
+with its cost and context use. A live run streams in and can be stopped here. A
+message's **Show in session log** icon jumps to its run.
 
 ### The session log and the TODO panel
 

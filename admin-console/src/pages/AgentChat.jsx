@@ -24,6 +24,7 @@ import { useTeamMemberships } from '../hooks/useTeamMemberships.js';
 import { resolveTeamConfigTab } from './agent-lifecycle/team-config-tabs-view.js';
 import PageHelpButton from '../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat/agent-chat-help-sections.js';
+import { buildSessionJumpRequest } from './agent-chat/session-jump.js';
 
 // Page-action header buttons (#1956). Copied from the convention the other
 // #1847/#1912-migrated pages share (`Briefings.jsx`): accent for the page's
@@ -506,6 +507,18 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   // Cold-nav safe (AC7): the effect waits for the async agent list. SessionsPanel
   // owns the active-vs-finished match + the graceful "not found" notice (AC6).
   const [sessionSelectRequest, setSessionSelectRequest] = useState(null);
+
+  // "Show in session log" on a chat message (#2603): the same Sessions-tab
+  // selection as `?session=` below, plus `reveal` so the log scrolls to the
+  // run and flashes it. Id-taking and stable, so the memoized Message rows
+  // don't re-render (#1676).
+  const handleShowInSession = useCallback((ref) => {
+    const request = buildSessionJumpRequest(ref, Date.now());
+    if (!request) return;
+    setLogOpen(true);
+    setRailTabRequest({ tab: 'sessions', ts: request.ts });
+    setSessionSelectRequest(request);
+  }, []);
   const consumedSessionRef = useRef(null);
   const requestedSession = searchParams.get('session');
   useEffect(() => {
@@ -970,6 +983,7 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
                 onOpenKnowledge={handleOpenKnowledge}
                 resumeRequest={resumeRequest}
                 msgTargetRequest={msgTargetRequest}
+                onShowInSession={handleShowInSession}
                 insertRefRequest={composerRefRequest}
                 removedFromRoster={agentRemoved}
               />

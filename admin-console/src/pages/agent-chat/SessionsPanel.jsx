@@ -10,6 +10,7 @@ import SessionLogPanel from './SessionLogPanel';
 import { canResumeSession, resumeNeedsConfirm } from './resume-session';
 import { resolveHistoricalId, historyFetchLimit } from './session-default';
 import { findActiveSessionMatch, findFinishedSessionMatch } from '../github-event-session';
+import { sessionNotFoundText } from './session-jump.js';
 import { useSessionsActive } from './SessionsActiveContext';
 import { removeSession } from './sessions-active';
 import ConfirmDialog from '../../components/ConfirmDialog';
@@ -43,6 +44,13 @@ import ConfirmDialog from '../../components/ConfirmDialog';
  * but only from that auto-default — a session the user *picked* from the
  * dropdown is left alone (the toolbar's Live button is the way back). The pure
  * rules live in `session-default.js`.
+ *
+ * "Show in session log" (#2603): a chat message's button sends the same
+ * `selectRequest` as the #642 deep-link, plus `reveal` (and, for an agent
+ * reply, an `eventId` that is first resolved to its run's correlationId via
+ * `GET .../session/:roomId/locate`). Once the session is selected, the embedded
+ * log scrolls to that run's first row and flashes its rows; a run that isn't in
+ * the loaded log shows the "not found" notice instead.
  *
  * Cost/context: the chat toolbar's cost + context-window indicators derive from
  * the *viewed* session (active sub-tab or selected historical session),
@@ -166,7 +174,10 @@ export default function SessionsPanel({
 
   // Non-blocking notice shown when a deep-link (#642) couldn't locate the
   // requested session (outside the history window, log pruned, no DM room, …).
-  const [notFound, setNotFound] = useState(null); // { correlationId } | null
+  const [notFound, setNotFound] = useState(null); // { correlationId, source? } | null
+  // The run the embedded log should scroll to and flash (#2603) —
+  // `{ correlationId, ts }`, handed to SessionLogPanel as `revealRequest`.
+  const [revealRequest, setRevealRequest] = useState(null);
   const [confirmResume, setConfirmResume] = useState(false); // resume would replace an active session
 
   // The active-sessions list itself is polled once for all consumers by
@@ -234,6 +245,7 @@ export default function SessionsPanel({
     setHistory([]);
     setHistoryOpen(false);
     setNotFound(null);
+    setRevealRequest(null);
   }, [agentId, roomId]);
 
   // Deep-link preselection (#642): a delivered GitHub-event chip asks us to open
@@ -243,11 +255,33 @@ export default function SessionsPanel({
   // We fetch fresh here rather than trust the polled state so a cold navigation
   // (tab just became visible) doesn't race the first poll.
   useEffect(() => {
-    if (!selectRequest || !selectRequest.correlationId || !agentId) return undefined;
-    const target = selectRequest.correlationId;
+    if (!selectRequest || !agentId) return undefined;
+    if (!selectRequest.correlationId && !selectRequest.eventId) return undefined;
+    const source = selectRequest.source;
     let cancelled = false;
     (async () => {
       setNotFound(null);
+      setRevealRequest(null);
+
+      // 0) An agent reply (#2603) names its run only through the runner's
+      //    `message.posted` row — resolve it server-side first.
+      let target = selectRequest.correlationId;
+      if (!target) {
+        if (!roomId) { setNotFound({ correlationId: null, source }); return; }
+        try {
+          const data = await apiCall(
+            'GET',
+            `/api/agents/${encodeURIComponent(agentId)}/session/${encodeURIComponent(roomId)}`
+              + `/locate?eventId=${encodeURIComponent(selectRequest.eventId)}`,
+          );
+          target = typeof data?.correlationId === 'string' ? data.correlationId : null;
+        } catch { target = null; }
+        if (cancelled) return;
+        if (!target) { setNotFound({ correlationId: null, source }); return; }
+      }
+      const reveal = () => {
+        if (selectRequest.reveal) setRevealRequest({ correlationId: target, ts: selectRequest.ts });
+      };
 
       // 1) Active sessions — a still-running session is selected as a sub-tab.
       let activeList = [];
@@ -262,11 +296,12 @@ export default function SessionsPanel({
         setHistoricalId(null);
         setHistoryPinned(false);
         setSelectedId(activeMatch.id);
+        reveal();
         return;
       }
 
       // 2) Finished sessions — needs a room to query the per-room history.
-      if (!roomId) { setNotFound({ correlationId: target }); return; }
+      if (!roomId) { setNotFound({ correlationId: target, source }); return; }
       let hist = [];
       try {
         const data = await apiCall(
@@ -276,7 +311,7 @@ export default function SessionsPanel({
         );
         hist = Array.isArray(data?.sessions) ? data.sessions : [];
       } catch {
-        if (!cancelled) setNotFound({ correlationId: target });
+        if (!cancelled) setNotFound({ correlationId: target, source });
         return;
       }
       if (cancelled) return;
@@ -287,9 +322,10 @@ export default function SessionsPanel({
         // An explicit preselection outranks the #910 auto-default.
         setHistoryPinned(true);
         setHistoricalId(histMatch.id);
+        reveal();
         return;
       }
-      setNotFound({ correlationId: target });
+      setNotFound({ correlationId: target, source });
     })();
     return () => { cancelled = true; };
   }, [selectRequest, agentId, roomId]);
@@ -354,6 +390,14 @@ export default function SessionsPanel({
       setStoppingId(null);
     }
   }, [agentId, stoppingId, setSessions, refresh]);
+
+  // The log finished loading without a row of the requested run (#2603 AC6):
+  // say so rather than leave the user on a session that doesn't show it.
+  const handleRevealMissing = useCallback(() => {
+    if (!revealRequest) return;
+    setNotFound({ correlationId: revealRequest.correlationId, source: 'message' });
+    setRevealRequest(null);
+  }, [revealRequest]);
 
   const selectActive = useCallback((id) => {
     setHistoricalId(null);
@@ -431,9 +475,7 @@ export default function SessionsPanel({
           flexShrink: 0,
         }}>
           <span style={{ flex: 1 }}>
-            Couldn't locate the session this event triggered — it may be older
-            than the retained history, its log may have been pruned, or the agent
-            has no chat room yet.
+            {sessionNotFoundText(notFound.source)}
           </span>
           <button
             type="button"
@@ -639,6 +681,8 @@ export default function SessionsPanel({
                 todoCloseSignal={todoCloseSignal}
                 hoveredCorrelationId={hoveredCorrelationId}
                 onHoverCorrelation={onHoverCorrelation}
+                revealRequest={revealRequest}
+                onRevealMissing={handleRevealMissing}
               />
             </div>
           </>
@@ -710,6 +754,8 @@ export default function SessionsPanel({
                 todoCloseSignal={todoCloseSignal}
                 hoveredCorrelationId={hoveredCorrelationId}
                 onHoverCorrelation={onHoverCorrelation}
+                revealRequest={revealRequest}
+                onRevealMissing={handleRevealMissing}
               />
             </div>
           </>

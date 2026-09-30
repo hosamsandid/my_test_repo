@@ -1184,6 +1184,19 @@ def _append_event(room_id: str, event: dict) -> None:
         print(f"[Runner] session-log append failed: {exc}", file=sys.stderr)
 
 
+def _log_run_reply(room_id: str, correlation_id: str | None, event_id: str | None) -> None:
+    """Record the `message.posted` row that ties a reply to its run (#2603), so
+    Agent Chat's "Show in session log" resolves the agent-error / abort replies
+    too, not only the answer. No-op without an event id (send failed)."""
+    if not (isinstance(event_id, str) and event_id and correlation_id):
+        return
+    _append_event(room_id, {
+        "type": "message.posted",
+        "correlationId": correlation_id,
+        "eventId": event_id,
+    })
+
+
 def _normalize_usage_tokens(usage: dict) -> dict:
     """Shape a Claude Code stream-json `usage` object (assistant-message or
     result-event, same field names either way) into the token-count dict used
@@ -6726,7 +6739,8 @@ class TriggerScheduler:
         return None
 
     async def _post_trigger_notice(self, trigger: dict, ctx: dict | None,
-                                   room_id: str) -> None:
+                                   room_id: str,
+                                   correlation_id: str | None = None) -> None:
         """Send the m.notice envelope that issue #158 republishes.
 
         Keys are fixed:
@@ -6734,6 +6748,10 @@ class TriggerScheduler:
           io.aee.trigger.triggerId   (string)
           io.aee.trigger.triggerType (string)
           io.aee.trigger.event       (string|None — None for non-github triggers)
+
+        Additive (#2603): io.aee.trigger.correlationId (string, only when
+        known) — the run's session-log correlationId, so Agent Chat's "Show in
+        session log" button can open the run the notice announces.
         """
         ttype = trigger.get("type", "")
         tid = trigger.get("id", "")
@@ -6821,6 +6839,8 @@ class TriggerScheduler:
                 "event": gh.get("event") or None,
             },
         }
+        if isinstance(correlation_id, str) and correlation_id:
+            content["io.aee.trigger"]["correlationId"] = correlation_id
         # AC3: carry the HTML so the abbreviated `[#N](url)` link renders in the
         # Admin Console and other Matrix clients; the plain `body` (`#N (url)`)
         # stays the fallback for clients that ignore formatting. AC7: the
@@ -6970,7 +6990,8 @@ class TriggerScheduler:
     async def _post_trigger_failure_notice(self, trigger: dict, room_id: str,
                                            err: Exception,
                                            permanent: bool = False,
-                                           restored_label: str | None = None
+                                           restored_label: str | None = None,
+                                           correlation_id: str | None = None
                                            ) -> None:
         """Post one plain DM notice when a triggered run is given up. Best-effort,
         no Claude call — the triggering event is consumed and will not re-fire,
@@ -6982,7 +7003,11 @@ class TriggerScheduler:
         attempts. When the run had claimed the item and the claim was rolled
         back (#957), `restored_label` names the wake label that is back on it:
         the poller re-fires the chain by itself, so the notice must not ask for
-        a manual re-issue that would double-run the work."""
+        a manual re-issue that would double-run the work.
+
+        `correlation_id` (#2603) is carried as
+        `io.aee.triggerFailure.correlationId` so Agent Chat's "Show in session
+        log" button can open the failed run."""
         if not (isinstance(room_id, str) and _MATRIX_ROOM_ID_RE.match(room_id)):
             return
         tid = trigger.get("id", "?")
@@ -7016,6 +7041,8 @@ class TriggerScheduler:
         }
         if restored_label:
             failure_block["claimRolledBack"] = restored_label
+        if isinstance(correlation_id, str) and correlation_id:
+            failure_block["correlationId"] = correlation_id
         content = {
             "msgtype": "m.notice",
             "body": body,
@@ -7268,7 +7295,7 @@ class TriggerScheduler:
         _bump_active(+1, session)
         try:
             try:
-                await self._post_trigger_notice(trigger, ctx, room_id)
+                await self._post_trigger_notice(trigger, ctx, room_id, correlation_id)
             except Exception as exc:
                 print(
                     f"[Runner:{self._agent_id}] Could not post trigger notice for "
@@ -7367,7 +7394,8 @@ class TriggerScheduler:
                         try:
                             await self._post_trigger_failure_notice(
                                 trigger, room_id, err, permanent=permanent,
-                                restored_label=restored_label)
+                                restored_label=restored_label,
+                                correlation_id=correlation_id)
                         except Exception as exc:
                             print(
                                 f"[Runner:{self._agent_id}] Could not post "
@@ -7951,7 +7979,8 @@ async def run_dm_listener() -> None:
             if getattr(err, "user_aborted", False):
                 print(f"[Runner:{agent_id}] Session stopped by user", file=sys.stderr)
                 try:
-                    await send_formatted(room_id, "_(Execution aborted.)_")
+                    abort_event_id = await send_formatted(room_id, "_(Execution aborted.)_")
+                    _log_run_reply(room_id, correlation_id, abort_event_id)
                 except Exception as post_exc:
                     print(f"[Runner:{agent_id}] Could not post abort notice: {post_exc}",
                           file=sys.stderr)
@@ -7963,10 +7992,11 @@ async def run_dm_listener() -> None:
                 })
                 print(f"[Runner:{agent_id}] Error: {detail}", file=sys.stderr)
                 try:
-                    await send_formatted(
+                    err_event_id = await send_formatted(
                         room_id,
                         f"⚠️ **Agent error**\n\n```\n{detail[:800]}\n```",
                     )
+                    _log_run_reply(room_id, correlation_id, err_event_id)
                 except Exception:
                     pass
         except Exception as err:
@@ -7977,10 +8007,11 @@ async def run_dm_listener() -> None:
             })
             print(f"[Runner:{agent_id}] Error: {detail}", file=sys.stderr)
             try:
-                await send_formatted(
+                err_event_id = await send_formatted(
                     room_id,
                     f"⚠️ **Agent error**\n\n```\n{detail[:800]}\n```",
                 )
+                _log_run_reply(room_id, correlation_id, err_event_id)
             except Exception:
                 pass
         finally:

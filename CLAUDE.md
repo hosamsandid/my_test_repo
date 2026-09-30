@@ -540,7 +540,11 @@ uncovered). Key pieces:
   questions (raised headlessly via the `aee-ask` CLI → per-turn sentinel file,
   #2523 — the only mechanism since #1719 removed the MCP path); inline image
   thumbnails; hover-revealed "Copy link" builds the `?msg=` deep-link above
-  (#2310, plain text bubbles only).
+  (#2310, plain text bubbles only); next to it "Show in session log" (#2603,
+  pure `session-jump.js`) opens the Sessions tab on the message's run and
+  scrolls to + flashes its rows — an agent reply's run is resolved server-side
+  from the runner's `message.posted` row (`GET …/session/:roomId/locate`), a
+  trigger notice uses its `io.aee.trigger.correlationId`.
 - `MessageInput` — composer, send-keybinding preset, per-agent drafts,
   slash-command palette, unified Send/Stop.
 - `RightRail` — tabs (Sessions, session log, Workspace, Triggers, Outcomes,

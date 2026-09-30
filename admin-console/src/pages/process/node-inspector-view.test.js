@@ -161,3 +161,28 @@ test('Delete agent opens a confirmation and surfaces a failed delete', () => {
   assert.match(inspector, /catch \(e\) \{\s*setDeleteError\(e\?\.message \|\| String\(e\)\);/);
   assert.match(inspector, /roleDeleteImpact\(node\.id, roles\)/);
 });
+
+// Review B1: pin the consuming side too — the guarded if-conditions, the
+// dialogs' open/onConfirm, confirmLeave's branches, and the delete dialog's
+// list and error renders — so each AC cannot regress one line at a time.
+test('the leave guard opens the dialog only when something is unsaved', () => {
+  assert.match(inspector, /if \(parts\.length\) setPendingLeave\(\{ action: 'close', parts \}\);\s*else onClose\?\.\(\);/);
+  assert.match(inspector, /if \(parts\.length\) setPendingLeave\(\{ action: 'tab', toTab: next, parts \}\);\s*else setTab\(next\);/);
+});
+
+test('the Discard dialog is wired to the pending leave and confirmLeave', () => {
+  assert.match(inspector, /open=\{!!pendingLeave\}\s*title="Discard unsaved changes\?"/);
+  assert.match(inspector, /confirmLabel="Discard"\s*onConfirm=\{confirmLeave\}\s*onCancel=\{\(\) => setPendingLeave\(null\)\}/);
+});
+
+test('confirmLeave clears the outcomes flag on a tab switch and closes otherwise', () => {
+  assert.match(inspector, /if \(leave\.action === 'tab'\) \{\s*setOutcomesDirty\(false\);\s*setTab\(leave\.toTab\);\s*\} else \{\s*onClose\?\.\(\);\s*\}/);
+});
+
+test('the Delete agent dialog opens on the impact, lists it and reports errors', () => {
+  assert.match(inspector, /const deleteImpact = !isLive && confirmDelete \? roleDeleteImpact\(node\.id, roles\) : null;/);
+  assert.match(inspector, /open=\{!!deleteImpact\}\s*title="Delete agent\?"/);
+  assert.match(inspector, /confirmLabel="Delete agent"[\s\S]{0,80}onConfirm=\{deleteAgent\}/);
+  assert.match(inspector, /\{rows\.map\(r => <li key=\{r\}>\{r\}<\/li>\)\}/);
+  assert.match(inspector, /\{deleteError && <p [^>]*>Delete failed: \{deleteError\}<\/p>\}/);
+});

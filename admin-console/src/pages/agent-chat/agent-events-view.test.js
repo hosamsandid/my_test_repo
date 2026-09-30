@@ -129,3 +129,10 @@ test('#2570: a branch-filter drop names the pushed branch (or tag) in plain lang
   assert.match(dropReasonText(drop('branch-filter', {})), /^This branch is not/);
   assert.equal(canRefire(drop('branch-filter'), { canManage: true }), false);
 });
+
+test('#2602 AC4: a knowledge-branch drop names the KB branch and is never re-firable', () => {
+  assert.equal(dropReasonText(drop('knowledge-branch', { ref: 'refs/heads/agent-knowledge' })),
+    "Branch 'agent-knowledge' is a knowledge-base branch — pushes to it never wake push triggers.");
+  assert.doesNotMatch(dropReasonText(drop('knowledge-branch', {})), /branch filter/);
+  assert.equal(canRefire(drop('knowledge-branch'), { canManage: true }), false);
+});

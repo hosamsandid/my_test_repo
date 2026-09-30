@@ -86,6 +86,13 @@ test('#2571: the legend explains the producer-filter drop', () => {
   assert.match(outcomeTooltip({ status: 'dropped', reason: 'producer-filter' }), /pushed by/);
 });
 
+test('#2602 AC4: the legend explains the knowledge-branch drop as built in', () => {
+  assert.equal(outcomeLegendKey({ status: 'dropped', reason: 'knowledge-branch' }), 'knowledge-branch');
+  const t = outcomeTooltip({ status: 'dropped', reason: 'knowledge-branch' });
+  assert.match(t, /knowledge-base branch/);
+  assert.match(t, /can't be changed/);
+});
+
 // #2596: a pool pause/drain hold explains the role control, not the WIP lane.
 test('outcomeTooltip: a pool hold points at the role, a WIP hold is unchanged', () => {
   assert.match(outcomeTooltip({ status: 'held', reason: 'pool-paused' }), /auto-scaled role.*paused, draining or off/);

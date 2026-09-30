@@ -142,6 +142,7 @@ legend — this is the longer version.
 | **dropped (horizon)** | The event is older than that subscriber's subscription window (its activation time plus a short grace). | Expected right after wiring or reactivating a trigger. A new agent deliberately does not react to history that predates it. |
 | **dropped (label-filter)** | The event carried a label this trigger does not subscribe to. | No — that is label routing working. |
 | **dropped (branch-filter)** | A push went to a branch (or a tag) that this trigger's **Branches** filter does not list. | No — that is branch routing working. Widen the filter if the branch should wake the agent. |
+| **dropped (knowledge-branch)** | Push to a knowledge-base branch (`agent-knowledge`); never wakes push triggers. | No; built in. |
 | **dropped (internal-dedup)** | The wake was already delivered on the internal fast path; this is GitHub telling us about the same label a second time. | No. |
 | **dropped (wake-already-armed)** | Already woken for this label on this item; a repeat does not wake it again until the label is removed and re-added. | Usually no. Re-fire a lost hand-off from the agent's Events tab. |
 | **nobody's listening** | No trigger subscribed to this event **type** at all. | Maybe. If something should have reacted, the wiring is missing — add or fix the `github-event` trigger on the target agent. |
@@ -149,8 +150,7 @@ legend — this is the longer version.
 A **dropped (branch-filter)** row comes from a *Push* trigger with a
 **Branches** filter (e.g. `main, feature/*`): `*` matches within one path
 segment, `**` also across `/`, names match exactly, and tag pushes never match.
-Empty means every branch. Widen the trigger's Branches field in Agent Chat →
-Triggers if the push should have woken the agent.
+Empty means every branch.
 
 A `delivered` or `digested` outcome may carry the **wake label** in brackets: the
 label that actually satisfied the subscriber's filter. No bracket means the

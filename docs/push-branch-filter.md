@@ -49,6 +49,21 @@ A push fires the trigger if its branch matches **any** entry.
   "Branch 'agent-knowledge' is not in this trigger's branch filter".
 - The trigger card reads e.g. *Push · branches: main, feature/\**.
 
+## Knowledge-base branches (built in)
+
+A push to a knowledge-base branch never wakes a push trigger, whatever the
+filter says — even an explicit `agent-knowledge`, `*` or `**` — and with or
+without **Pushed by**. The set is every team's KB branch on that repository
+(`agent-knowledge` by default, or the configured `knowledgeStore.repoRef.branch`),
+where the KB repository is the team repository or the separate KB repository;
+a team with the knowledge base switched off contributes nothing. It is resolved
+at every poll, runs before the throttle and burst digest (so KB syncs never
+cause an "Event burst clamped" digest), covers the synthesized PR-open push,
+and leaves tags of the same name alone. The Event Log shows such a push as
+dropped (`knowledge-branch`); the trigger form states the rule under
+**Branches**. It cannot be turned off (#2602,
+`orchestrator/knowledge-branch-exclusion.js`).
+
 ## Validation
 
 The console rejects (and the agent runtime flags as a one-time advisory on a

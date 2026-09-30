@@ -32,6 +32,9 @@ export const OUTCOME_TONES = {
 // #2571: the readable reason of a producer-filter drop — who pushed (or that
 // nobody the platform knows did: a human, a raw `git push`, a knowledge-base
 // sync, a branch deletion).
+// #2602: the readable reason of a knowledge-branch drop.
+export const KNOWLEDGE_BRANCH_TEXT = 'knowledge-base branch — never wakes push triggers';
+
 export function producerFilterText(producer) {
   return typeof producer === 'string' && producer
     ? `pushed by \`${producer}\`, not in producer filter`
@@ -63,6 +66,8 @@ export function outcomeLabel(outcome, { refired = false } = {}) {
     return `held (WIP${wip})${wakeSuffix} → ${target}`;
   }
   if (o.reason === 'producer-filter') return `dropped (${producerFilterText(o.producer)}) → ${target}`;
+  // #2602: built in and not configurable, so it reads as a rule, not a filter.
+  if (o.reason === 'knowledge-branch') return `dropped (${KNOWLEDGE_BRANCH_TEXT}) → ${target}`;
   return `dropped (${o.reason || 'unknown'})${wakeSuffix} → ${target}`;
 }
 

@@ -274,8 +274,8 @@ rows. It expands/collapses and remembers your choice the same way a team group
 does, and stays empty (no sub-list at all) while the role has nothing live. Each
 instance row is an ordinary agent: its status dot follows the same activity poll,
 and clicking it opens its own chat/session log exactly like any other member —
-they are just as ephemeral as the role that spawned them, so a row can disappear
-once its instance is torn down.
+a row disappears once its instance is torn down. Its triggered runs and your chat
+share one session.
 
 **Adding an agent** is done from the page header, not the list. **New Agent**
 (top right) hands over to the create launcher, where *Configure an agent

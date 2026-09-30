@@ -326,6 +326,8 @@ else queues FIFO.
   `[PASS]` suppresses output.
 - **Session policy**: `per-invocation` → triggered runs start fresh (no
   `--resume`), don't move the session pointer; absent = `persistent` (legacy).
+  A pool instance (`poolInstance: true`) instead resumes its DM pointer from
+  every non-loop trigger and chat turn — one session per instance (#2595).
 - Concepts: `docs/triggers.md`, `docs/loop-triggers-concept.md`,
   `docs/direct-agent-handoff-concept.md`,
   `docs/process-template-format.md`.

@@ -223,7 +223,8 @@ function buildSessionHistory(events, activeCorrelationIds = [], opts = {}) {
  * history, (b) not be one of the currently-running sessions (Decision A / AC7 —
  * an active run already owns the room), and (c) be a **DM** session (Open
  * Question A → DM only; triggered per-invocation runs never persist a pointer,
- * so they carry no resumable id). Returns the matching session descriptor when
+ * so they carry no resumable id — except a pool instance's, which continue its
+ * one DM session (#2595) and so are merged into it by session-ID). Returns the matching session descriptor when
  * all hold, else `null` — the caller maps `null` to a clear "not resumable"
  * error and MUST NOT start a fresh empty session in its place (AC6).
  *

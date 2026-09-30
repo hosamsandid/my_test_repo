@@ -350,6 +350,19 @@ function isArchiveExpired({ archivedAt, retainLogsMs }, now = Date.now()) {
   return (now - ts) >= retainLogsMs;
 }
 
+/**
+ * #2595 AC10: a pool instance keeps ONE resumable session pointer
+ * (`sessions/<roomId>.current.json`) for its whole lifetime. The teardown
+ * archive keeps the transcript (`<roomId>.jsonl` + rotations) but must not
+ * carry the pointer along — it only ever drives `--resume` inside the live
+ * instance and would be orphaned state in `pool-archive/`. Used as the
+ * `fs.cpSync` filter, so it is called for directories too: keep everything
+ * that is not a pointer file.
+ */
+function isArchivableSessionPath(p) {
+  return !(typeof p === 'string' && p.endsWith('.current.json'));
+}
+
 module.exports = {
   POOL_WORKSPACES,
   POOL_CONTROL_STATES,
@@ -368,4 +381,5 @@ module.exports = {
   isInstanceTimedOut,
   isInstanceIdle,
   isArchiveExpired,
+  isArchivableSessionPath,
 };

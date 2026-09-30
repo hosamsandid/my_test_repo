@@ -5574,7 +5574,9 @@ async function gracefulPoolTeardown(id, cfg) {
       const archiveRoot = path.join(HILL_CLIMB_TEAMS_DIR, seg, "pool-archive", id);
       const archiveDir = path.join(archiveRoot, "sessions");
       fs.mkdirSync(path.dirname(archiveDir), { recursive: true });
-      fs.cpSync(sessionsDir, archiveDir, { recursive: true });
+      // The transcript is archived, the resumable session pointer is not
+      // (#2595 AC10) — it dies with the instance.
+      fs.cpSync(sessionsDir, archiveDir, { recursive: true, filter: agentPool.isArchivableSessionPath });
       fs.writeFileSync(
         path.join(archiveRoot, "archived-at.json"),
         JSON.stringify({ archivedAt: new Date().toISOString() }),

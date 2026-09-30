@@ -146,8 +146,8 @@ repository from launching a flood of sessions.
 ### Session policy
 Whether a triggered run continues the previous conversation or starts fresh.
 `persistent` (default) resumes; `per-invocation` starts a clean session each time and
-asks the agent to write down what it learned first. Chats with a human always keep
-continuity, regardless of this setting.
+asks the agent to write down what it learned first. Chats always keep continuity;
+a pool instance keeps one session for its triggers and chat (#2595).
 
 ### Label
 A GitHub label used as a coordination signal. An agent **emits** a label to announce it

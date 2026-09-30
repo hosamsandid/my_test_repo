@@ -205,7 +205,9 @@ from "a human decided" to "the supervisor decided").
    from the resolved base (clean main / PR head / input copy); throwaway Matrix
    account (D7); config `pool-instance: true`, `enabled:true`, per-invocation.
 4. **Run:** the instance executes *R*'s prompt/LoopScript, opens its PR / writes
-   its artifact.
+   its artifact. Every trigger run and chat turn of the instance continues ONE
+   Claude session (its DM room's session pointer, #2595) — only loop iterations
+   start fresh; the pointer is not archived at teardown.
 5. **Reap the container** when the run ends (nothing to keep running).
 6. **Release the slot (D4)** when the reconcile tick sees *I* done.
 7. **Graceful teardown (D8):** commit/push partial work + archive the log, then

@@ -346,7 +346,7 @@ test('a rename that does NOT re-key still reaches the open canvas', () => {
 });
 
 test('the rename cannot be forked by key-repeat, and the field really gets focus', () => {
-  assert.match(briefings, /if \(!d \|\| !name \|\| renameBusy\) return;/);
+  assert.match(briefings, /if \(!d \|\| !canSubmitRename\(name\) \|\| renameBusy\) return;/);
   // `autoFocus` and a child effect both lose to ConfirmDialog's own focus
   // effect, so the caret would not be in the field and Enter would activate
   // the confirm button with the value unchanged.

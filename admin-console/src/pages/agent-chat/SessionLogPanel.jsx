@@ -10,6 +10,7 @@ import { sumContextTokens, resolveContextTokensForResult } from './context-windo
 import { mergeThinkingTokens } from './system-event.js';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
 import { annotateTaskRows } from './task-todo.js';
+import { firstRowKeyForCorrelation, revealStatus, jumpHighlightCss, JUMP_HIGHLIGHT_MS } from './session-jump.js';
 import {
   HOVER_CORRELATION_COACHMARK,
   hasSeenCoachmark,
@@ -70,10 +71,17 @@ import {
  *     ChatPanel's `onTodoBoundary`) so the pinned To-Do panel from the
  *     *previous* session is dismissed even though no new task-list change has
  *     arrived yet (#273). Default 0 = "never fired" so mount doesn't dismiss.
+ *   revealRequest              — `{ correlationId, ts }` from "Show in session
+ *     log" (#2603): once loaded, scroll to that run's first row, flash all of
+ *     its rows and move focus there. Pauses stick-to-bottom so a live run's
+ *     new rows don't yank the view away.
+ *   onRevealMissing()          — the load finished without a row of the
+ *     requested run; the parent shows its "not found" notice.
  */
 export default function SessionLogPanel({
   agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate,
   todoCloseSignal = 0, embedded = false, scopeCorrelationId = null, staticOnly = false,
+  revealRequest = null, onRevealMissing,
 }) {
   const [events, setEvents]       = useState([]);
   const [cursor, setCursor]       = useState(0);
@@ -113,6 +121,11 @@ export default function SessionLogPanel({
   // Backfill bumps a generation counter so a slow response from the previous
   // (agent, room) can't clobber the current state.
   const reqIdRef = useRef(0);
+  // Which (agent, room, scope) the last *finished* backfill was for. A reveal
+  // (#2603) only judges found/missing against a settled load — right after a
+  // mount `loading` is still false before the backfill effect has run.
+  const loadKey = `${agentId}|${roomId}|${scopeCids ? scopeCids.join(',') : ''}`;
+  const [loadedKey, setLoadedKey] = useState(null);
 
   /* ─── 1. Backfill on agent/room change ──────────────────────────────── */
   const loadBackfill = useCallback(() => {
@@ -149,7 +162,10 @@ export default function SessionLogPanel({
         setError(`Log load failed: ${e.message}`);
       })
       .finally(() => {
-        if (reqId === reqIdRef.current) setLoading(false);
+        if (reqId === reqIdRef.current) {
+          setLoading(false);
+          setLoadedKey(`${agentId}|${roomId}|${scopeCids ? scopeCids.join(',') : ''}`);
+        }
       });
   }, [agentId, roomId, scopeCids]);
 
@@ -253,6 +269,50 @@ export default function SessionLogPanel({
     [scopedEvents],
   );
   const renderable = annotated.rows;
+
+  /* ─── 4b. "Show in session log" reveal (#2603) ─────────────────────────
+   * A request is settled once: scroll to the run's first row (VirtualList
+   * #2310 seek), then flash every row of the run via CSS and focus the target
+   * row. A load without a row of the run reports back instead (AC6). */
+  const [revealKey, setRevealKey]       = useState(null);
+  const [highlightCid, setHighlightCid] = useState(null);
+  const revealRef = useRef(null); // the request being settled, null when done
+  useEffect(() => {
+    revealRef.current = revealRequest && revealRequest.correlationId ? revealRequest : null;
+    setRevealKey(null);
+    setHighlightCid(null);
+    if (revealRef.current) setAtBottom(false);
+  }, [revealRequest]);
+  useEffect(() => {
+    const req = revealRef.current;
+    if (!req) return;
+    const status = revealStatus({ loading: loading || loadedKey !== loadKey, rows: renderable, correlationId: req.correlationId, keyOf: logKeyOf });
+    if (status === 'pending') return;
+    revealRef.current = null;
+    if (status === 'found') {
+      setRevealKey(firstRowKeyForCorrelation(renderable, req.correlationId, logKeyOf));
+    } else if (onRevealMissing) {
+      onRevealMissing();
+    }
+  }, [loading, loadedKey, loadKey, renderable, onRevealMissing]);
+  const handleScrolledToReveal = useCallback(() => {
+    const req = revealRequest;
+    setRevealKey(null);
+    if (!req) return;
+    setHighlightCid(req.correlationId);
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    const row = Array.from(scroller.querySelectorAll('[data-cid]'))
+      .find(el => el.getAttribute('data-cid') === req.correlationId);
+    const target = row || scroller;
+    if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+    target.focus({ preventScroll: true });
+  }, [revealRequest]);
+  useEffect(() => {
+    if (!highlightCid) return undefined;
+    const t = setTimeout(() => setHighlightCid(null), JUMP_HIGHLIGHT_MS);
+    return () => clearTimeout(t);
+  }, [highlightCid]);
 
   /* ─── 5. Session cost aggregation ──────────────────────────────────── */
   const costTotals = useMemo(() => {
@@ -543,7 +603,9 @@ export default function SessionLogPanel({
         <VirtualList
           items={renderable}
           scrollerRef={scrollerRef}
-          keyOf={(ev, i) => ev._key ?? `e${i}`}
+          keyOf={logKeyOf}
+          scrollToKey={revealKey}
+          onScrolledToKey={handleScrolledToReveal}
           estimateHeight={44}
           overscan={10}
           renderItem={(ev) => {
@@ -587,12 +649,18 @@ export default function SessionLogPanel({
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         ${hoverBaseCss('log')}
         ${hoverDimCss('log', hoveredCorrelationId)}
+        ${jumpHighlightCss('log', highlightCid)}
       `}</style>
     </div>
   );
 }
 
 /* ─── Helpers ─────────────────────────────────────────────────────────── */
+
+/** Stable row key for the VirtualList and the #2603 reveal seek. */
+function logKeyOf(ev, i) {
+  return ev._key ?? `e${i}`;
+}
 
 /**
  * Walk the event list once and pair each `tool_use` with its matching

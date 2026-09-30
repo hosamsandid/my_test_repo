@@ -102,11 +102,17 @@ const MSG_NOT_FOUND_NOTICE_MS = 4000;
  *        `MAX_MSG_BACKFILL_ATTEMPTS`), scrolls it into view via VirtualList's
  *        `scrollToKey`, then briefly highlights it. Falls back to the normal
  *        default position with a transient notice if the id can't be found.
+ * @param {?(ref:object)=>void} [onShowInSession] "Show in session log" (#2603):
+ *        stable callback passed straight to each Message; receives the
+ *        message's `sessionJumpRef`.
  */
 export default function ChatPanel({
   agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost, contextFill,
   onWorkspaceChanged, onTodoBoundary, onOpenKnowledge, resumeRequest,
   insertRefRequest, msgTargetRequest,
+  // #2603: stable callback behind each message's "Show in session log" button;
+  // AgentChat opens the Sessions tab and hands the request to SessionsPanel.
+  onShowInSession = null,
   // #2311 D2: true once the live roster poll has confirmed this agent is no
   // longer in `/api/matrix/agents` while its chat is still open. `agent` is
   // then the LAST known snapshot (frozen by the caller), not live data — the
@@ -1309,6 +1315,7 @@ export default function ChatPanel({
           questionAnswer={qState}
           viewer={viewer}
           authorDirectory={authorDirectory}
+          onShowInSession={onShowInSession}
         />
       </div>
     );

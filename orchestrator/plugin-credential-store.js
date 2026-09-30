@@ -137,7 +137,10 @@ class PluginCredentialStore {
   _personalPath(pluginId, userId) {
     assertIds(pluginId);
     if (!USER_ID_RE.test(String(userId || ''))) throw new Error(`invalid userId: ${String(userId)}`);
-    return path.join(this.dir, pluginId, PERSONAL_DIR, `${userId}.json`);
+    // `path.basename` on the already-validated ids is a no-op, but it is the
+    // call CodeQL treats as the js/path-injection sanitizer at the join site
+    // (the regex checks above sit behind a throwing helper it does not follow).
+    return path.join(this.dir, path.basename(String(pluginId)), PERSONAL_DIR, `${path.basename(String(userId))}.json`);
   }
 
   _path(pluginId, scopeId) {

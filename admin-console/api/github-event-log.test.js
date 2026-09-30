@@ -203,3 +203,46 @@ test('projectAgentRows (#2570): a push row carries its ref so a branch-filter dr
   assert.equal(row.ref, 'refs/heads/agent-knowledge');
   assert.equal(row.reason, 'branch-filter');
 });
+
+// ── #2596: naming/linking the pool instance a pooled delivery ran on ──────
+test('projectPoolInstance names an existing instance by its display name', () => {
+  const configs = {
+    'team-developer': { displayName: 'Developer' },
+    'team-developer-i2562': { displayName: 'Developer · #2562' },
+  };
+  const r = eventLog.projectPoolInstance(
+    { agentId: 'team-developer', status: 'delivered', instanceId: 'team-developer-i2562' },
+    (id) => configs[id] || null,
+  );
+  assert.equal(r.instanceName, 'Developer · #2562');
+  assert.equal(r.instanceExists, true);
+  assert.equal(r.instanceItem, '2562');
+  assert.equal(r.poolRoleName, 'Developer');
+});
+
+test('projectPoolInstance marks a reaped instance and still names it after its ticket', () => {
+  const r = eventLog.projectPoolInstance(
+    { agentId: 'team-developer', status: 'delivered', instanceId: 'team-developer-i2562' },
+    (id) => (id === 'team-developer' ? { displayName: 'Developer' } : null),
+  );
+  assert.equal(r.instanceExists, false);
+  assert.equal(r.instanceName, 'Developer · #2562');
+  assert.equal(r.poolRoleName, 'Developer');
+});
+
+test('projectPoolInstance falls back to the ids when no config is readable', () => {
+  const r = eventLog.projectPoolInstance(
+    { agentId: 'team-developer', status: 'delivered', instanceId: 'team-developer-i7' },
+    () => null,
+  );
+  assert.equal(r.instanceName, 'team-developer-i7');
+  assert.equal(r.poolRoleName, 'team-developer');
+  assert.equal(r.instanceExists, false);
+});
+
+test('projectPoolInstance leaves non-pooled and pre-#2596 outcomes untouched', () => {
+  const o = { agentId: 'dev', status: 'delivered', agentName: 'dev' };
+  let calls = 0;
+  assert.equal(eventLog.projectPoolInstance(o, () => { calls++; return null; }), o);
+  assert.equal(calls, 0, 'no config read for a row without an instance');
+});

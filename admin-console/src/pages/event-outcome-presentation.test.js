@@ -114,8 +114,11 @@ test('AC2/AC3: outcomes stack one per line with spacing', () => {
 });
 
 test('AC5: a delivered session outcome stays a clickable, link-styled button with a hover state', () => {
-  assert.match(outcomeBlock, /isSessionOutcome\(outcome\) && correlationId && onOpenSession/);
-  assert.match(outcomeBlock, /<button\s+type="button"\s+onClick=\{\(\) => onOpenSession\(outcome\.agentId, correlationId\)\}/);
+  // #2596: the link target is the agent sessionLinkTarget resolves (the pool
+  // instance for a pooled delivery, the recorded agent otherwise).
+  assert.match(outcomeBlock, /const target = sessionLinkTarget\(outcome\);/);
+  assert.match(outcomeBlock, /target && target\.kind === 'agent' && correlationId && onOpenSession/);
+  assert.match(outcomeBlock, /<button\s+type="button"\s+onClick=\{\(\) => onOpenSession\(target\.agentId, correlationId\)\}/);
   assert.match(outcomeBlock, /textDecoration: 'underline'/);
   assert.match(outcomeBlock, /onMouseEnter=\{\(\) => setHover\(true\)\}/);
   assert.match(outcomeBlock, /hover \? 'var\(--eb-accent-hover\)' : 'var\(--eb-accent-primary\)'/);
@@ -142,4 +145,24 @@ test('#2571 AC8: a producer-filter drop reads who pushed, or that the producer i
     'dropped (pushed by `t1-review`, not in producer filter) → t1-dev');
   assert.equal(outcomeLabel({ status: 'dropped', reason: 'producer-filter', producer: null, agentId: 't1-dev' }),
     'dropped (producer unknown) → t1-dev');
+});
+
+// #2596: a pooled delivery names the per-ticket instance that ran it.
+test('a pooled delivery names the instance, falling back to its id (AC3)', () => {
+  assert.equal(
+    outcomeLabel({ status: 'delivered', wakeLabel: 'ready', agentId: 'team-developer', instanceId: 'team-developer-i2562', instanceName: 'Developer · #2562' }),
+    'delivered (ready) → Developer · #2562',
+  );
+  assert.equal(
+    outcomeLabel({ status: 'delivered', agentId: 'team-developer', instanceId: 'team-developer-i2562' }),
+    'delivered → team-developer-i2562',
+  );
+  // Non-pooled / pre-#2596 rows read exactly as before (AC7).
+  assert.equal(outcomeLabel({ status: 'delivered', wakeLabel: 'ready', agentId: 'dev', agentName: 'dev' }), 'delivered (ready) → dev');
+});
+
+test('a pool pause/drain hold reads as held by the role, not by WIP (AC6)', () => {
+  assert.equal(outcomeLabel({ status: 'held', reason: 'pool-paused', agentId: 'r' }), 'held (role paused) → r');
+  assert.equal(outcomeLabel({ status: 'held', reason: 'pool-draining', wakeLabel: 'ready', agentId: 'r' }), 'held (role draining) (ready) → r');
+  assert.equal(outcomeTone({ status: 'held', reason: 'pool-off' }), 'held');
 });

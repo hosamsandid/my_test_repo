@@ -85,3 +85,9 @@ test('#2571: the legend explains the producer-filter drop', () => {
   assert.equal(outcomeLegendKey({ status: 'dropped', reason: 'producer-filter' }), 'producer-filter');
   assert.match(outcomeTooltip({ status: 'dropped', reason: 'producer-filter' }), /pushed by/);
 });
+
+// #2596: a pool pause/drain hold explains the role control, not the WIP lane.
+test('outcomeTooltip: a pool hold points at the role, a WIP hold is unchanged', () => {
+  assert.match(outcomeTooltip({ status: 'held', reason: 'pool-paused' }), /auto-scaled role.*paused, draining or off/);
+  assert.match(outcomeTooltip({ status: 'held', reason: 'wip' }), /Work-in-Progress limit/);
+});

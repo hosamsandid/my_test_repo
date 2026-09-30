@@ -7,7 +7,7 @@ import PageHelpButton from '../components/PageHelpButton';
 import WhenCell from '../components/WhenCell';
 import RowContextMenu from '../components/RowContextMenu';
 import ConfirmDialog from '../components/ConfirmDialog';
-import { buildTriggerCorrelationId, isSessionOutcome } from './github-event-session';
+import { buildTriggerCorrelationId, sessionLinkTarget, reapedInstanceNotice } from './github-event-session';
 import {
   kindLabel, kindTooltip, entryDetail, entryHoverDetail, labelChip, totalPending, totalHeld,
   pendingRowMenu, reassignPickerState, reassignTargetLabel, pendingReassignError, pendingReassignSuccess,
@@ -68,23 +68,71 @@ function OutcomeMarker({ marker, color }) {
   return <span aria-hidden="true" style={{ ...outcomeMarkerStyle, color }}>{marker}</span>;
 }
 
-function OutcomeLine({ outcome, eventId, onOpenSession, refireNote = null }) {
+function OutcomeLine({ outcome, eventId, onOpenSession, onOpenChat, refireNote = null }) {
   const [hover, setHover] = useState(false);
+  const [showReaped, setShowReaped] = useState(false);
   const { label, marker, markerColor, textColor } = outcomePresentation(outcome, { refired: !!refireNote });
 
   // Only a `delivered` outcome that carries a triggerId maps to a real Claude
   // session, so only those become an activatable control (AC1/AC2). Everything
-  // else stays plain, non-interactive text.
+  // else stays plain, non-interactive text. A pooled delivery (#2596) links the
+  // per-ticket instance that ran it, or — once that instance is reaped — says
+  // so instead of silently opening the pooled role's chat.
   const explain = refireNote ? `${refireNote} ${outcomeTooltip(outcome)}` : outcomeTooltip(outcome);
   const correlationId = buildTriggerCorrelationId(outcome.triggerId, eventId);
-  if (isSessionOutcome(outcome) && correlationId && onOpenSession) {
+  const target = sessionLinkTarget(outcome);
+  if (target && target.kind === 'reaped' && correlationId) {
+    const notice = reapedInstanceNotice(target);
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+        <button
+          type="button"
+          onClick={() => setShowReaped(v => !v)}
+          aria-expanded={showReaped}
+          title={`${explain}\n\n${notice}`}
+          style={{
+            ...outcomeLineStyle,
+            background: 'none',
+            border: 'none',
+            padding: 0,
+            margin: 0,
+            textAlign: 'left',
+            fontFamily: 'inherit',
+            cursor: 'pointer',
+            color: textColor,
+          }}
+        >
+          <OutcomeMarker marker={marker} color={markerColor} />
+          <span style={{ ...outcomeTextStyle, textDecoration: 'underline dotted', textUnderlineOffset: 2 }}>{label} (instance removed)</span>
+        </button>
+        {showReaped && (
+          <div role="status" style={{ ...outcomeTextStyle, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', paddingLeft: 14 }}>
+            {notice}
+            {target.poolRoleId && onOpenChat && (
+              <>
+                {' '}
+                <button
+                  type="button"
+                  onClick={() => onOpenChat(target.poolRoleId)}
+                  style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', cursor: 'pointer', color: 'var(--eb-accent-primary)', textDecoration: 'underline' }}
+                >
+                  Open the pooled role's chat ({target.poolRoleName})
+                </button>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (target && target.kind === 'agent' && correlationId && onOpenSession) {
     return (
       <button
         type="button"
-        onClick={() => onOpenSession(outcome.agentId, correlationId)}
+        onClick={() => onOpenSession(target.agentId, correlationId)}
         onMouseEnter={() => setHover(true)}
         onMouseLeave={() => setHover(false)}
-        aria-label={`Open session for ${outcome.agentName || outcome.agentId}`}
+        aria-label={`Open session for ${outcome.instanceId ? (outcome.instanceName || outcome.instanceId) : (outcome.agentName || outcome.agentId)}`}
         title={`${explain}\n\nClick to open the session this event triggered.`}
         style={{
           ...outcomeLineStyle,
@@ -311,6 +359,12 @@ function ProcessedEventsView() {
     if (!agentId || !correlationId) return;
     navigate(`/chats/${encodeURIComponent(agentId)}?session=${encodeURIComponent(correlationId)}`);
   }, [navigate]);
+  // The pooled role's own chat, offered when the instance that ran an event
+  // has been reaped (#2596 AC5) — no session preselected, it did not run there.
+  const openChat = useCallback((agentId) => {
+    if (!agentId) return;
+    navigate(`/chats/${encodeURIComponent(agentId)}`);
+  }, [navigate]);
 
   const since = useMemo(() => {
     const preset = RANGE_PRESETS.find(r => r.key === rangeKey) || RANGE_PRESETS[0];
@@ -397,7 +451,7 @@ function ProcessedEventsView() {
       return (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, minWidth: 0 }}>
           {list.map((o, i) => (
-            <OutcomeLine key={i} outcome={o} eventId={row.eventId} onOpenSession={openSession} refireNote={refireNote(row)} />
+            <OutcomeLine key={i} outcome={o} eventId={row.eventId} onOpenSession={openSession} onOpenChat={openChat} refireNote={refireNote(row)} />
           ))}
         </div>
       );

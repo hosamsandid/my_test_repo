@@ -58,6 +58,12 @@ export const OUTCOME_LEGEND = [
     whatToDo: "Normal branch routing — the trigger only wakes on pushes to its configured branches. Widen the trigger's Branches field if this branch should wake the agent.",
   },
   {
+    key: 'knowledge-branch',
+    term: 'dropped (knowledge-base branch)',
+    meaning: "A push to a knowledge-base branch (e.g. agent-knowledge) — the platform's own knowledge sync. Pushes to any team's knowledge-base branch on the repository never wake push triggers.",
+    whatToDo: "Nothing to do — this is built in and can't be changed, not even with the trigger's Branches field.",
+  },
+  {
     key: 'wake-already-armed',
     term: 'dropped (wake-already-armed)',
     meaning: 'The agent was already woken for this label on this item; a repeat of the same label is ignored until the label is removed and re-applied.',

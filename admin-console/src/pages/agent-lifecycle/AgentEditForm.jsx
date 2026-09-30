@@ -104,8 +104,10 @@ export function PluginGrantSection({ agent, parentTeam, alwaysVisible = false })
 
   const installed = (data && data.installed) || [];
   // Grants left behind by an uninstall (#2651): the picker lists installed
-  // plugins only, so these get their own rows with a Revoke.
-  const orphans = React.useMemo(() => uninstalledGrantRows(grant, installed), [grant, installed]);
+  // plugins only, so these get their own rows with a Revoke. Only once the
+  // installed list is known — null while loading or after a failed fetch.
+  const knownInstalled = data && Array.isArray(data.installed) ? data.installed : null;
+  const orphans = React.useMemo(() => uninstalledGrantRows(grant, knownInstalled), [grant, knownInstalled]);
 
   // The quota ceiling for "per agent" granularity is only honest if it counts
   // the members that would actually carry the grant, so a team's members are

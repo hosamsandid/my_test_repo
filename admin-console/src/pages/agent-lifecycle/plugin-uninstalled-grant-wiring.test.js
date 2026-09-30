@@ -26,7 +26,13 @@ test('the section slice is found', () => {
 });
 
 test('orphaned grants are computed from the optimistic grant and the installed list', () => {
-  assert.match(SECTION, /const orphans = React\.useMemo\(\(\) => uninstalledGrantRows\(grant, installed\), \[grant, installed\]\);/);
+  assert.match(SECTION, /const orphans = React\.useMemo\(\(\) => uninstalledGrantRows\(grant, knownInstalled\), \[grant, knownInstalled\]\);/);
+});
+
+test('the installed list is unknown (null) until /api/plugins has loaded, so no grant looks orphaned', () => {
+  // A `|| []` fallback here would label every working grant "Plugin not
+  // installed" and offer Revoke while loading or after a failed fetch.
+  assert.match(SECTION, /const knownInstalled = data && Array\.isArray\(data\.installed\) \? data\.installed : null;/);
 });
 
 test('each orphan row shows its id and status', () => {

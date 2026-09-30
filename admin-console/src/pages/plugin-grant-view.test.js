@@ -192,3 +192,14 @@ test('no grant, or every grant installed, yields no rows', () => {
   assert.deepEqual(uninstalledGrantRows(['p'], installed), []);
   assert.deepEqual(uninstalledGrantRows(null, null), []);
 });
+
+test('an unknown installed list (still loading, or the fetch failed) yields no rows', () => {
+  // Otherwise every working grant would be offered for Revoke as "not installed".
+  assert.deepEqual(uninstalledGrantRows(['p', 'q'], null), []);
+  assert.deepEqual(uninstalledGrantRows(['p'], undefined), []);
+  assert.deepEqual(uninstalledGrantRows(['p'], {}), []);
+});
+
+test('a known but empty installed list still reports every grant', () => {
+  assert.deepEqual(uninstalledGrantRows(['p'], []).map((r) => r.id), ['p']);
+});

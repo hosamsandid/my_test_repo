@@ -153,12 +153,15 @@ export function pluginGrantRow(manifest, grant, { memberCount = 1, stackRuntime 
 // manifest. `installed` is the /api/plugins `installed` list ({ id, ok, manifest }).
 export const UNINSTALLED_GRANT_STATUS = 'Plugin not installed';
 export const UNINSTALLED_GRANT_HINT =
-  'The plugin was uninstalled while this grant was active. Its broker is gone, so the '
-  + 'command cannot work; revoking removes the command and the capability note from the '
+  'The plugin is not installed (or its manifest is invalid), but this grant is still '
+  + 'active. Its broker is gone, so the command cannot work; revoking removes the command and the capability note from the '
   + 'agent. Re-installing the plugin would restore the grant instead.';
 
 export function uninstalledGrantRows(grant, installed) {
-  const live = new Set((Array.isArray(installed) ? installed : [])
+  // An unknown installed list (still loading, or the fetch failed) must not
+  // make every grant look orphaned: that would offer Revoke on working grants.
+  if (!Array.isArray(installed)) return [];
+  const live = new Set(installed
     .filter((p) => p && p.ok && p.manifest)
     .map((p) => p.id));
   return normalizeGrantEntries(grant)

@@ -19,6 +19,7 @@ something.
 | `heuristics.md` | generic probes applied in **every** area (validation, errors, roles, a11y, …) |
 | `areas/NN-*.md` | one charter per UI area: scope, preconditions, persona matrix, specific probes, known risk spots, cleanup |
 | `workflows/*.md` | cross-area end-to-end journeys (e.g. Jira from install to chat) |
+| `loop-prompt.md` | reusable prompt + queue format to run the plan as a `loop` trigger, one charter per iteration |
 
 Suggested order = the `NN` prefix (roughly by risk). Every area is self-contained,
 so any subset can be run in any order.

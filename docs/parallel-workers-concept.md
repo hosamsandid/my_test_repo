@@ -1028,7 +1028,9 @@ up until the user manually reloaded. #2311 makes that sentence true.
   scroll position — with an inline notice banner
   (`agent-removed-notice.js` / `ChatPanel`'s `removedFromRoster` prop) instead
   of the disabled-agent banner. A route that never named a real agent at all
-  (a bad deep link) still bounces to `/chats` exactly as before.
+  (a bad deep link) still bounces to `/chats` — since #2619 with an
+  *Agent "<id>" not found* empty state (`agent-not-found.js`) instead of the
+  generic "pick an agent" card.
 - **Scope**: Agent Chat rail only (D4) — the pure `roster-diff.js` module has
   no Agent Chat import and could back another live list later, but nothing
   else was wired to it. The refresh mechanism is roster-generic and always on;

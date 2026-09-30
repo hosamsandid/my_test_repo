@@ -103,6 +103,7 @@ const { CHAT_AUTHOR_FIELD, chatAuthorStamp } = require('./chat-author');
 const { createHumanMatrixStore } = require('./human-matrix-store');
 const { parseAssistSelection, resolveAssistSelection } = require('./assist-target');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
+const { locateCorrelationId } = require('./session-locate');
 const { buildProcessGraph } = require('./process-graph');
 const {
   validateHostMountPath,
@@ -19873,6 +19874,38 @@ app.get('/api/agents/:agentId/sessions/history', apiLimiter, (req, res) => {
   }
   if (!events.length) return res.json({ sessions: [], total: 0, truncated: false });
   res.json(buildSessionHistory(events, activeCorrelationIds, { limit, offset }));
+});
+
+// Which run produced a chat message (#2603, Agent Chat "Show in session log").
+// `eventId` is the message's Matrix event id; answers the correlationId of its
+// run from the runner's own `message.posted` row (or the user message's own
+// rows), spanning rotated archives like the history route above. 404 when the
+// log holds no row for it, so the console shows its "not found" notice instead
+// of guessing a session.
+app.get('/api/agents/:agentId/session/:roomId/locate', apiLimiter, (req, res) => {
+  const { agentId, roomId } = req.params;
+  if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const eventId = typeof req.query.eventId === 'string' ? req.query.eventId : '';
+  if (!eventId || eventId.length > 512) return res.status(400).json({ error: 'invalid eventId' });
+
+  const filepath = controlOrAgentPath(agentId, 'sessions', roomId + '.jsonl'); // pushed copy preferred (#185)
+  const events = readSessionArchiveEvents(agentId, roomId, parseJsonlLine);
+  if (fs.existsSync(filepath)) {
+    let raw;
+    try {
+      raw = fs.readFileSync(filepath, 'utf8');
+    } catch (err) {
+      return res.status(500).json({ error: 'read failed: ' + err.message });
+    }
+    for (const line of raw.split('\n')) {
+      if (line.trim()) events.push(parseJsonlLine(line));
+    }
+  }
+  const correlationId = locateCorrelationId(events, eventId);
+  if (!correlationId) return res.status(404).json({ error: 'not found' });
+  res.json({ correlationId });
 });
 
 /* ─── Workspace browser (read-only) ────────────────────────────────── */

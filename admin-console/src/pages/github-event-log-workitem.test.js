@@ -59,6 +59,7 @@ test('AC7: work-item number and title are filterable/sortable via flat row keys'
 // per-column `wrap` flag so long content wraps within its column instead of
 // pushing the table past the page width. Short columns (Time, Repository, Type,
 // Actor) stay single-line, and no other DataTable page is touched (AC9).
+// #2614 made Event a fourth wrap column; its guard is in the #2614 block below.
 test('#1898: the three wide columns opt into per-column wrap', () => {
   assert.match(src, /label: 'Work item', wrap: true/);
   assert.match(src, /label: 'Title', wrap: true/);

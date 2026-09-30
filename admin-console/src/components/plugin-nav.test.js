@@ -9,6 +9,7 @@ import {
   pluginTitle,
   pluginsNeedingScopes,
   buildPluginNav,
+  pluginTitleMap,
 } from './plugin-nav.js';
 
 const uiPlugin = (id, extra = {}) => ({
@@ -105,4 +106,14 @@ test('notifyPluginsChanged is inert without a window', () => {
   } finally {
     global.window = prev;
   }
+});
+
+test('pluginTitleMap names every installed UI plugin, regardless of scope (#2650)', () => {
+  const installed = [
+    uiPlugin('a', { title: 'Alpha' }),
+    uiPlugin('b'),
+    { id: 'c', ok: true, manifest: { name: 'C' } }, // no UI
+  ];
+  assert.deepEqual(pluginTitleMap(installed), { a: 'Alpha', b: 'b name' });
+  assert.deepEqual(pluginTitleMap(undefined), {});
 });

@@ -113,6 +113,8 @@ own row.
 
 Each row shows its **current stage**, whether an agent is **working** on it or
 it is **up next**, and the **time in that stage** — not the item's total age.
+For a finished item it shows the **time since completion** (hover it for the
+exact date and time).
 
 **Draft** holds items a team agent created or took part in that no person has
 released yet and no agent is working on or queued for — for example a concept

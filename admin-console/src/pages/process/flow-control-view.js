@@ -14,6 +14,8 @@
 //     held[], removed[], config, canManage, generatedAt, stale, warning,
 //     maintenance }
 
+import { absoluteWhen } from '../../components/format-when.js';
+
 // ---------------------------------------------------------------------------
 // Durations
 // ---------------------------------------------------------------------------
@@ -79,8 +81,18 @@ const STATUS_TEXT = {
   done: 'done',
 };
 
+// Hover text for a done row's "In stage" value: the absolute completion time
+// in the viewer's local time zone (#2643). '' when the row is not done or has
+// no usable timestamp, so the cell then carries no tooltip either.
+export function doneTitle(row) {
+  if (!row || !row.done) return '';
+  const when = absoluteWhen(row.since);
+  return when ? `Finished ${when}` : '';
+}
+
 // One board row: title, links, the progress steps and the current stage with
-// its time in stage. `stages` is the board's own stage list, so the step count
+// its time in stage. For a done row `since` is the completion time, so "in
+// stage" reads "in Done since" (#2643). `stages` is the board's own stage list, so the step count
 // is exactly the team's hand-off chain.
 export function rowView(row, stages, { now = Date.now(), singleRepo = true } = {}) {
   const list = Array.isArray(stages) ? stages : [];
@@ -104,6 +116,7 @@ export function rowView(row, stages, { now = Date.now(), singleRepo = true } = {
     statusText: STATUS_TEXT[row.status] || '',
     agentId: row.agentId || null,
     inStage: since(row.since, now),
+    inStageTitle: doneTitle(row),
     done: !!row.done,
     blocked: !!row.needsHuman,
     removable: !!row.removable,

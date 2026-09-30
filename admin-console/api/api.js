@@ -117,6 +117,7 @@ const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { applyPushedBy } = require('./push-producer-filter');
 const { normalizeBranchFilter } = require('./branch-filter');
+const { newTriggerIdError, annotateTriggerList, stripTriggerAnnotations, resolveTriggerIndex } = require('./trigger-validate');
 const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { rederiveTeamDataFlow } = require('./derived-data-flow');
@@ -6253,7 +6254,9 @@ app.get('/api/agents/:id/triggers', (req, res) => {
   const agentDir = safeAgentPath(id, '');
   if (!agentDir) return res.status(404).json({ error: 'Agent not found' });
   const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []); // canonical copy (#185)
-  res.json(Array.isArray(triggers) ? triggers : []);
+  // Legacy entries the write guard would now reject (invalid cron, shared id)
+  // are flagged — `invalid` + `position` — never rewritten (#2626).
+  res.json(annotateTriggerList(Array.isArray(triggers) ? triggers : []));
 });
 
 // Read-only proxy to the orchestrator's allowlisted script content. Used by
@@ -6315,7 +6318,11 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   if (denyUnlessCanManageAgent(req, res, agentDir)) return;
   const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
   const triggers = Array.isArray(cur) ? cur : [];
-  const newTrigger = { id: `t${Date.now()}`, ...req.body };
+  const newTrigger = stripTriggerAnnotations({ id: `t${Date.now()}`, ...req.body });
+  // Trigger ids (#2626): URL-safe shape (400), unique per agent (409) — a
+  // shared id makes DELETE/PUT ambiguous and the agent runs only one of them.
+  const ide = newTriggerIdError(triggers, newTrigger.id);
+  if (ide) return res.status(ide.status).json({ error: ide.error });
   // Raw-layer guard (#1006, concept §4.8): one event per github-event trigger
   // + claim shape — enforced server-side so no surface (engine dialog, panel,
   // direct API) can persist a non-conformant listener unchallenged again.
@@ -6374,10 +6381,14 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   if (denyUnlessCanManageAgent(req, res, agentDir)) return;
   const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
   const triggers = Array.isArray(cur) ? cur : [];
-  const idx = triggers.findIndex(t => t.id === triggerId);
-  if (idx === -1) return res.status(404).json({ error: 'Trigger not found' });
+  // `?position=` addresses one row of a legacy duplicated id (#2626); without
+  // it the FIRST entry with the id is edited. The id itself is immutable here
+  // (body `id` is ignored), so an edit can never rename onto another trigger.
+  const at = resolveTriggerIndex(triggers, triggerId, req.query.position);
+  if (at.error) return res.status(at.status).json({ error: at.error });
+  const idx = at.index;
   const prev = triggers[idx];
-  const merged = { ...prev, ...req.body, id: triggerId };
+  const merged = stripTriggerAnnotations({ ...prev, ...req.body, id: triggerId });
   // Trigger-level `emits` was removed (#783): the agent/role level is canonical.
   // Ignore any supplied `emits` and drop a legacy field so an edit never
   // re-persists it (a persisted-but-ignored value can't create a phantom edge).
@@ -6427,13 +6438,16 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
 // hill-climb applier (#1225) run the exact same write + reconcile. Returns the
 // removed trigger object (or null if it wasn't present) so a caller can retain
 // it (the applier keeps the deleted trigger JSON as its undo payload). Throws on
-// a write failure.
-async function deleteAgentTrigger(id, triggerId) {
+// a write failure. Removes exactly ONE entry (#2626): the one at `position`
+// when given, else the first with the id — a legacy duplicated id is never
+// wiped wholesale.
+async function deleteAgentTrigger(id, triggerId, position) {
   const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
   const triggers = Array.isArray(cur) ? cur : [];
-  const removed = triggers.find(t => t && t.id === triggerId) || null;
-  const filtered = triggers.filter(t => t.id !== triggerId);
-  await putTriggers(id, filtered);
+  const at = resolveTriggerIndex(triggers, triggerId, position);
+  if (at.error) return null;
+  const [removed] = triggers.splice(at.index, 1);
+  await putTriggers(id, triggers);
   // Consumer write (#1007) — a trigger write changes who consumes its siblings'
   // labels, so re-render the team's Outcomes blocks.
   await reconcileTeamOutcomesForAgent(id);
@@ -6476,7 +6490,14 @@ app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) =
   // team-admin management rights, not visibility.
   if (denyUnlessCanManageAgent(req, res, agentDir)) return;
   try {
-    await deleteAgentTrigger(id, triggerId);
+    // `?position=` deletes exactly that row of a legacy duplicated id (#2626)
+    // and must point at it; without it an unknown id stays an idempotent 204.
+    const { position } = req.query;
+    if (position !== undefined) {
+      const at = resolveTriggerIndex(readJsonFile(controlOrAgentPath(id, 'triggers.json'), []), triggerId, position);
+      if (at.error) return res.status(at.status).json({ error: at.error });
+    }
+    await deleteAgentTrigger(id, triggerId, position);
   } catch (err) {
     return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
   }

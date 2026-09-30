@@ -7,6 +7,7 @@ const path = require('node:path');
 
 const {
   PLUGIN_ID_RE,
+  REGISTRY_DIR_NAME_RE,
   invalidPluginIdMessage,
   isValidPluginId,
   isRemovableRegistryDirName,
@@ -51,4 +52,31 @@ test('api.js uses the shared rules: readPluginDir message and a DELETE that can 
 
 test('PLUGIN_ID_RE is unchanged', () => {
   assert.equal(PLUGIN_ID_RE.source, '^[a-z0-9][a-z0-9-]{0,62}$');
+});
+
+test('the console view gates Remove on the same dir-name rule DELETE uses', () => {
+  const view = fs.readFileSync(path.join(__dirname, '..', 'src', 'pages', 'plugin-registry-view.js'), 'utf8');
+  const m = view.match(/export const REMOVABLE_DIR_NAME_RE = \/(.+)\/;/);
+  assert.ok(m, 'REMOVABLE_DIR_NAME_RE literal not found');
+  assert.equal(m[1], REGISTRY_DIR_NAME_RE.source);
+});
+
+test('GET /api/plugins reports the stack runtime from AEE_CONTAINER_RUNTIME (#2649 B1)', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'api.js'), 'utf8');
+  const start = src.indexOf("app.get('/api/plugins', ");
+  assert.ok(start >= 0);
+  const get = src.slice(start, src.indexOf('\n});', start));
+  assert.match(get, /stackRuntime: normalizeToolchainRuntime\(process\.env\.AEE_CONTAINER_RUNTIME\),/);
+  assert.match(src, /normalizeRuntime: normalizeToolchainRuntime,[\s\S]*?\} = require\('\.\/toolchain-registry'\);/);
+  // …and the values it can report are exactly the ones a manifest's `platforms` uses.
+  const { normalizeRuntime } = require('./toolchain-registry');
+  assert.equal(normalizeRuntime('kubernetes'), 'kubernetes');
+  assert.equal(normalizeRuntime('K8S'), 'kubernetes');
+  assert.equal(normalizeRuntime(undefined), 'podman');
+  assert.equal(normalizeRuntime('podman'), 'podman');
+});
+
+test('the k8s overlay tells the console it runs on kubernetes', () => {
+  const yaml = fs.readFileSync(path.join(__dirname, '..', '..', 'deploy', 'k8s', 'base', 'app', '50-admin-console.yaml'), 'utf8');
+  assert.match(yaml, /- name: AEE_CONTAINER_RUNTIME\s+value: kubernetes/);
 });

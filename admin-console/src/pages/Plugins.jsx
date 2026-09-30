@@ -8,7 +8,7 @@ import PluginTeamAssign from '../components/PluginTeamAssign';
 import PluginCredentials from '../components/PluginCredentials';
 import { useHelpSubject } from '../context/HelperChatContext';
 import { OVERLAY_PLUGIN_INSTALL, OVERLAY_PLUGIN_UNINSTALL } from '../context/page-help-view.js';
-import { pluginRegistryRow, needsBrokerPoll, uninstallDialog, BROKER_POLL_MS } from './plugin-registry-view.js';
+import { pluginRegistryRow, needsBrokerPoll, settledStartIds, uninstallDialog, BROKER_POLL_MS } from './plugin-registry-view.js';
 import { PLUGINS_HELP_SECTIONS } from './plugins-help-sections.js';
 import { notifyPluginsChanged } from '../components/plugin-nav';
 import { grantableTeams } from './plugin-team-assign-view.js';
@@ -307,9 +307,9 @@ export default function Plugins() {
   const [startingSince, setStartingSince] = useState({});
   const [now, setNow] = useState(() => Date.now());
 
-  // The stack runtime the plugin's `platforms` is checked against. The console
-  // is served by the same compose stack the orchestrator runs in, so podman is
-  // the honest default; a hosted deployment sets it explicitly.
+  // The stack runtime the plugin's `platforms` is checked against. GET
+  // /api/plugins reports it from AEE_CONTAINER_RUNTIME (#2649); podman is only
+  // the fallback while the first response is loading.
   const stackRuntime = (data && data.stackRuntime) || 'podman';
   const canManage = !!(data && data.canManage);
 
@@ -329,6 +329,17 @@ export default function Plugins() {
     const t = setInterval(() => { setNow(Date.now()); refetch(); }, BROKER_POLL_MS);
     return () => clearInterval(t);
   }, [polling, refetch]);
+  // Once a broker is up its install timestamp has done its job. Keeping it
+  // would make a later crash read "did not start" instead of "not running".
+  useEffect(() => {
+    const settled = settledStartIds(installed, startingSince);
+    if (settled.length === 0) return;
+    setStartingSince((prev) => {
+      const next = { ...prev };
+      for (const id of settled) delete next[id];
+      return next;
+    });
+  }, [installed, startingSince]);
   const available = useMemo(
     () => ((data && data.available) || []).map((e) => pluginRegistryRow(e, { canManage, stackRuntime })),
     [data, canManage, stackRuntime],

@@ -10,6 +10,8 @@ import {
   sidecarStatus,
   pluginRegistryRow,
   isInvalidInstalled,
+  settledStartIds,
+  REMOVABLE_DIR_NAME_RE,
   needsBrokerPoll,
   BROKER_START_WINDOW_MS,
   uninstallDialog,
@@ -252,6 +254,32 @@ test('an invalid installed entry can be removed by a System Admin only', () => {
   const viewer = installAction(entry, { canManage: false, stackRuntime: 'podman' });
   assert.equal(viewer.disabled, true);
   assert.match(viewer.hint, /System Admin/);
+});
+
+test('a broken entry whose name DELETE would refuse offers no working Remove (S1)', () => {
+  for (const id of ['jira copy', 'jira+old', 'a'.repeat(129)]) {
+    const a = installAction({ id, ok: false, installed: true, errors: ['e'], manifest: null }, { canManage: true });
+    assert.equal(a.action, 'none', id);
+    assert.equal(a.disabled, true, id);
+    assert.match(a.hint, /plugins volume/, id);
+  }
+  // The longest accepted name and a dotted backup still get Remove.
+  for (const id of ['a'.repeat(128), 'jira.bak-20260930', 'Jira_Old']) {
+    assert.equal(REMOVABLE_DIR_NAME_RE.test(id), true, id);
+    const a = installAction({ id, ok: false, installed: true, errors: ['e'], manifest: null }, { canManage: true });
+    assert.equal(a.action, 'uninstall', id);
+    assert.equal(a.disabled, false, id);
+  }
+});
+
+test('settledStartIds drops only ids whose broker is now running (S3)', () => {
+  const mk = (id, state) => ({ id, status: { state } });
+  const rows = [mk('a', 'running'), mk('b', 'starting'), mk('c', 'running'), mk('d', 'failed')];
+  assert.deepEqual(settledStartIds(rows, { a: 1, b: 2, d: 3 }), ['a']);
+  assert.deepEqual(settledStartIds(rows, {}), []);
+  assert.deepEqual(settledStartIds(null, null), []);
+  // a: 0 is a real timestamp, not "absent"
+  assert.deepEqual(settledStartIds([mk('a', 'running')], { a: 0 }), ['a']);
 });
 
 test('the remove confirm for a broken entry does not talk about a broker', () => {

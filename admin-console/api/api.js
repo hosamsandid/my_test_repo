@@ -10136,6 +10136,11 @@ app.get('/api/plugins', apiLimiter, async (req, res) => {
       imageBuild: null,
     })),
     canManage: !!getScope(req).all,
+    // The runtime a plugin's `platforms` is checked against (#2649) — the same
+    // AEE_CONTAINER_RUNTIME signal the orchestrator spawns on; the k8s overlay
+    // sets it on the console too. Without it the page assumed podman, so a
+    // podman-only plugin on Kubernetes read "starting" instead of its mismatch.
+    stackRuntime: normalizeToolchainRuntime(process.env.AEE_CONTAINER_RUNTIME),
   });
 });
 

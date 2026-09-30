@@ -104,6 +104,11 @@ export function isInvalidInstalled(entry) {
   return !!(entry && entry.installed && entry.ok === false);
 }
 
+// Mirror of REGISTRY_DIR_NAME_RE in api/plugin-registry-ids.js (a parity test
+// there keeps them equal): the directory names DELETE /api/plugins/:id accepts.
+// A broken entry outside it (`jira copy`, `jira+old`) cannot be removed here.
+export const REMOVABLE_DIR_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
 // What the install button should do and say for one registry entry.
 //   entry : { id, ok, errors, manifest, installed, sidecarRunning }
 //   { canManage, stackRuntime }
@@ -112,6 +117,14 @@ export function installAction(entry, { canManage = false, stackRuntime = null } 
   // A broken INSTALLED entry can only be removed. It goes through the same
   // uninstall route, which accepts such a directory name (#2649).
   if (isInvalidInstalled(entry)) {
+    if (!REMOVABLE_DIR_NAME_RE.test(String(entry.id || ''))) {
+      return {
+        action: 'none',
+        disabled: true,
+        label: 'Remove',
+        hint: 'This directory name cannot be removed from the console. Delete it on the plugins volume.',
+      };
+    }
     return canManage
       ? { action: 'uninstall', disabled: false, label: 'Remove', hint: '' }
       : { action: 'uninstall', disabled: true, label: 'Remove', hint: 'Only a System Admin can install or remove plugins.' };
@@ -210,6 +223,14 @@ export function uninstallDialog(row) {
 // Should the page keep re-reading /api/plugins? Only while a broker is starting.
 export function needsBrokerPoll(rows) {
   return (rows || []).some((r) => r && r.status && r.status.state === 'starting');
+}
+
+// Ids whose install timestamp can be dropped because the broker is running now.
+export function settledStartIds(rows, startingSince) {
+  const since = startingSince || {};
+  return (rows || [])
+    .filter((r) => r && since[r.id] != null && r.status && r.status.state === 'running')
+    .map((r) => r.id);
 }
 
 // ─── build identity (#2646) ─────────────────────────────────────────────────

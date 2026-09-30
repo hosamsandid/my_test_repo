@@ -37,3 +37,18 @@ test('the remove confirm uses the view-module wording', () => {
   assert.match(src, /const \{ body \} = uninstallDialog\(row\);/);
   assert.match(src, /\{body \|\| 'The broker stops\./);
 });
+
+test('uninstall forgets the start timestamp (S2)', () => {
+  const start = src.indexOf('async function doUninstall(row)');
+  const body = src.slice(start, src.indexOf('\n  }\n', start));
+  assert.match(body, /setStartingSince\(\(prev\) => \{\s*const next = \{ \.\.\.prev \};\s*delete next\[row\.id\];\s*return next;\s*\}\);/);
+});
+
+test('a start timestamp is dropped once its broker runs (S3)', () => {
+  assert.match(src, /const settled = settledStartIds\(installed, startingSince\);\s*if \(settled\.length === 0\) return;\s*setStartingSince\(\(prev\) => \{\s*const next = \{ \.\.\.prev \};\s*for \(const id of settled\) delete next\[id\];/);
+  assert.match(src, /\}, \[installed, startingSince\]\);/);
+});
+
+test('the stack runtime comes from the API response', () => {
+  assert.match(src, /const stackRuntime = \(data && data\.stackRuntime\) \|\| 'podman';/);
+});

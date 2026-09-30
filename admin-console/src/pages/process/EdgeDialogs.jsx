@@ -10,7 +10,7 @@ import { TriggerForm } from '../agent-chat/TriggersPanel';
 import { defaultListenerPrompt, handoffVerb, handoffTargetNoun } from './handoff-prompt';
 import { isGateLabel, isBrakeLabel } from './label-flags';
 import { defaultGateKind } from './human-gate-ops';
-import { labelEdgeHasListener } from './outcome-routing';
+import { labelEdgeHasListener, setLabelTarget, labelTargetKind } from './outcome-routing';
 // Every multi-write hand-off goes through the wiring engine (#1002) — dialogs
 // collect input and render state; they never sequence ops calls themselves.
 import {
@@ -102,7 +102,7 @@ const LABEL_ACTIONS = [
   { value: 'unlabeled', label: 'removed' },
 ];
 
-export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = liveOps, onBack, onClose, onDone, initialLabel = '', emitSource = true }) {
+export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = liveOps, onBack, onClose, onDone, initialLabel = '', initialTarget = 'issues', emitSource = true }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -111,7 +111,9 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
   // port drag (#828): the source already declares the emit via its outcome, so
   // `emitSource` is false there and only the listener on the target is created.
   const [label, setLabel] = useState(initialLabel || '');
-  const [target, setTarget] = useState('issues');       // issues | pull_request
+  // `initialTarget` (#2629): where the producer's outcome puts the label — a PR
+  // label arrives as pull_request.labeled, never issues.labeled.
+  const [target, setTarget] = useState(initialTarget === 'pull_request' ? 'pull_request' : 'issues'); // issues | pull_request
   const [action, setAction] = useState('labeled');       // labeled | unlabeled
   const [repo, setRepo] = useState('');
   const [prompt, setPrompt] = useState('');
@@ -276,7 +278,8 @@ export function CreateEdgeDialog({
   const back = allowed.length > 1 ? () => { setType(null); setPrefill(null); } : undefined;
 
   if (type === 'label') {
-    return <CreateHandoffDialog {...common} labels={labels} onBack={back} initialLabel={prefill?.label || ''} />;
+    return <CreateHandoffDialog {...common} labels={labels} onBack={back} initialLabel={prefill?.label || ''}
+      initialTarget={prefill?.target || 'issues'} />;
   }
   if (type === 'wake') {
     return <CreateWakeHandoffDialog {...common} onBack={back} initialNote={prefill?.note || ''} />;
@@ -306,7 +309,7 @@ export function CreateEdgeDialog({
       if (setLabel && allowed.includes('label')) {
         return { id: `oc:${o.id}`, title: `${A} sets \`${setLabel.label}\``,
           desc: `Outcome “${o.title || o.id}” — ${B} wakes on this label.`,
-          open: () => { setPrefill({ label: setLabel.label }); setType('label'); } };
+          open: () => { setPrefill({ label: setLabel.label, target: labelTargetKind(setLabelTarget(o, setLabel, fromNode.triggers)) }); setType('label'); } };
       }
       if (opensPr && allowed.includes('github-pr')) {
         return { id: `oc:${o.id}`, title: `${A} opens a pull request`,

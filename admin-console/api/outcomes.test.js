@@ -12,7 +12,7 @@ const assert = require('node:assert/strict');
 const {
   validateOutcomes, normalizeOutcomes, isAuthoredOutcomes, liftOutcomes,
   outcomeEmitPairs, outcomeSetLabels, outcomesToGithub, substituteOutcomes,
-  slugifyOutcome,
+  slugifyOutcome, setLabelTarget, triggerObjectKind, labelTargetEvent,
 } = require('./outcomes');
 const {
   buildProcessTemplate, validateProcessTemplate, templateToCustomRoles,
@@ -572,4 +572,50 @@ test('#2030: the bundle validator names the producer, so not-self fires on a bun
   const v = validateProcessTemplate(bundle);
   assert.equal(v.ok, false);
   assert.match(v.error, /role developer: option h: wakeAgent may not target its own role/);
+});
+
+// ─── setLabel target: Issue vs PR (#2629) ────────────────────────────────────
+
+test('#2629: validateOutcomes accepts target issue/pr on setLabel and rejects anything else', () => {
+  const port = target => ({ mode: 'anyOf', options: [{ id: 'x', actions: [{ type: 'setLabel', label: 'l', target }] }] });
+  assert.equal(validateOutcomes(port('pr')).ok, true);
+  assert.equal(validateOutcomes(port('issue')).ok, true);
+  assert.equal(validateOutcomes(port(undefined)).ok, true);
+  const bad = validateOutcomes(port('pull_request'));
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /target must be 'issue' or 'pr'/);
+});
+
+test('#2629: normalizeOutcomes and substituteOutcomes keep a setLabel target (and drop junk)', () => {
+  const port = { mode: 'anyOf', options: [
+    { id: 'a', actions: [{ type: 'setLabel', label: '{{p}}-x', target: 'pr' }] },
+    { id: 'b', actions: [{ type: 'setLabel', label: 'y', target: 'nope' }] },
+  ] };
+  const n = normalizeOutcomes(port);
+  assert.deepEqual(n.options[0].actions, [{ type: 'setLabel', label: '{{p}}-x', target: 'pr' }]);
+  assert.deepEqual(n.options[1].actions, [{ type: 'setLabel', label: 'y' }]);
+  const s = substituteOutcomes(port, v => v.replace('{{p}}', 'team'));
+  assert.deepEqual(s.options[0].actions, [{ type: 'setLabel', label: 'team-x', target: 'pr' }]);
+});
+
+test('#2629: setLabelTarget — explicit, then the outcome\'s artifact, then the producer\'s triggers', () => {
+  const prTriggers = [{ type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'go' }];
+  const issueTriggers = [{ type: 'github-event', events: ['issues.labeled'], labelFilter: 'go' }];
+  const lbl = { type: 'setLabel', label: 'x' };
+  assert.equal(setLabelTarget({ actions: [lbl] }, { ...lbl, target: 'issue' }, prTriggers), 'issue');
+  assert.equal(setLabelTarget({ actions: [{ type: 'openPr' }, lbl] }, lbl, issueTriggers), 'pr');
+  assert.equal(setLabelTarget({ actions: [{ type: 'openIssue' }, lbl] }, lbl, prTriggers), 'issue');
+  assert.equal(setLabelTarget({ actions: [lbl] }, lbl, prTriggers), 'pr');
+  assert.equal(setLabelTarget({ actions: [lbl] }, lbl, issueTriggers), 'issue');
+  assert.equal(setLabelTarget({ actions: [lbl] }, lbl, [...prTriggers, ...issueTriggers]), null);
+  assert.equal(setLabelTarget({ actions: [lbl] }, lbl, []), null);
+});
+
+test('#2629: triggerObjectKind ignores kind-ambiguous events; labelTargetEvent maps the target', () => {
+  assert.equal(triggerObjectKind([{ type: 'github-event', events: ['pull_request_review.submitted'] }]), 'pr');
+  assert.equal(triggerObjectKind([{ type: 'github-event', events: ['issue_comment.created', 'push'] }]), null);
+  assert.equal(triggerObjectKind([{ type: 'cron', cron: '* * * * *' }]), null);
+  assert.equal(labelTargetEvent('pr'), 'pull_request.labeled');
+  assert.equal(labelTargetEvent('issue'), 'issues.labeled');
+  assert.equal(labelTargetEvent(null), null);
 });

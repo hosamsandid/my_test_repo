@@ -99,7 +99,7 @@ A new declarative port on the agent/role — a sibling of `channels`, `dataFlow`
 
 | `type` | Fields | Semantics |
 |---|---|---|
-| `setLabel` | `label` | Apply this GitHub label (to the issue/PR the run concerns). |
+| `setLabel` | `label`, `target?` | Apply this GitHub label (to the issue/PR the run concerns). Optional `target: 'issue' \| 'pr'` says which one (#2629); when absent it is implied by an `openPr`/`openIssue` in the same outcome, else by the producer's PR-only / issue-only triggers. |
 | `openPr` | — | Open a pull request (absorbs `github.producesPr`). |
 | `openIssue` | — | Open an issue (absorbs `github.producesIssue`). |
 | `none` | — | Terminal outcome — no outbound signal. Renders as a dead-end port *without* triggering the `dead-end-emitter` lint. |
@@ -256,6 +256,7 @@ projection** — same pattern as the `github-io` block (#380):
 | `outcome-without-consumer` | warning | An outcome's signal has no listener anywhere in the flow (successor of `dead-end-emitter` for outcome edges; `none` actions are exempt). |
 | `switch-with-one-option` | info | `exactlyOne` with fewer than two options — not a branch. |
 | `same-label-multiple-outcomes` | warning | Under `exactlyOne`, two options set the same label — the consumers cannot distinguish the branches. |
+| `label-target-mismatch` | warning | A `setLabel` lands on a PR (or an issue) — explicit `target: 'pr'\|'issue'`, else implied by an `openPr`/`openIssue` in the same outcome or by the producer's PR-only / issue-only triggers — but a consumer on that label only listens on the other `*.labeled` event, so it never wakes (#2629). |
 | `human-label-as-outcome` | error | An outcome action sets a `human:*` / brake label (extends today's `gate-violation`). |
 
 Existing lints keep working: `orphan-listener` unchanged; `dead-end-emitter` computes over the

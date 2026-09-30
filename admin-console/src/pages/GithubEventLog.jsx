@@ -38,6 +38,29 @@ const controlStyle = {
   fontFamily: 'inherit',
 };
 
+/* ── Column width budget (#2614, regression of #1898) ──────────────────
+   The table uses auto layout, so a single-line (nowrap) column claims its
+   full text width, while a wrap column (overflow-wrap: anywhere) may shrink
+   to about one character. Once the nowrap columns alone filled the
+   container, Title and Outcomes collapsed to about 60 px and the table
+   overflowed again at 1280–1440 px. So every column has a bounded share:
+   the single-line Repository and Actor are capped (ellipsis + full value on
+   hover), Event wraps, and Title, Event and Outcomes get a floor so they
+   stay readable. The floors plus caps fit the ~990 px content width at
+   1280 px with room to spare; wider screens hand the rest to Title/Event. */
+const COL_FLOOR = { title: '8rem', event: '6rem', outcomes: '7rem' };
+const COL_CAP = { repo: '8rem', actor: '7rem' };
+// A capped single-line cell: truncates with an ellipsis at `max`, so its
+// column's min-content is the cap rather than the full text.
+const cappedCellStyle = max => ({
+  display: 'inline-block',
+  maxWidth: max,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+  verticalAlign: 'bottom',
+});
+
 /* ── Outcome line (#2524) ──────────────────────────────────────────────
    Each outcome is a plain text line — no pill border/background, since a
    rounded pill cannot contain the multi-line text a long outcome wraps into.
@@ -262,7 +285,9 @@ function TitleCell({ title, hover, hint }) {
   // it whole. For every other row `hover` equals `title` and this is the same
   // single-argument hover it has always been.
   const full = hover || title;
-  return <span title={hint ? `${hint}: ${full}` : full}>{title}</span>;
+  // #2614: the floor keeps the column wide enough to wrap at word boundaries
+  // instead of one word (or part of one) per line.
+  return <span title={hint ? `${hint}: ${full}` : full} style={{ display: 'block', minWidth: COL_FLOOR.title }}>{title}</span>;
 }
 
 /* ── Repository cell (#1827, restored to prominence in #1833) — the short repo
@@ -276,11 +301,18 @@ function RepoCell({ repo }) {
   return (
     <span
       title={repo}
-      style={{ color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)' }}
+      style={{ ...cappedCellStyle(COL_CAP.repo), color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)' }}
     >
       {short}
     </span>
   );
+}
+
+/* ── Actor cell (#2614) — the GitHub login, capped like Repository so a long
+   login cannot widen the table; the full login is on hover. */
+function ActorCell({ actor }) {
+  if (!actor) return '—';
+  return <span title={actor} style={cappedCellStyle(COL_CAP.actor)}>{actor}</span>;
 }
 
 /* ── Git ref → short branch/tag name (#1833 AC1.3) — `refs/heads/main` → `main`,
@@ -422,7 +454,10 @@ function ProcessedEventsView() {
     // DataTable pages stay single-line + ellipsis (AC9).
     { key: 'workItemNumber', label: 'Work item', wrap: true, render: (_v, row) => <WorkItemCell workItem={row.workItem} repo={row.repo} /> },
     { key: 'workItemTitle', label: 'Title', wrap: true, render: (v, row) => <TitleCell title={handoffNoteDisplay(row) || v} hover={v} hint={handoffTitleHint(row)} /> },
-    { key: 'event', label: 'Event', render: (v, row) => {
+    // Event wraps too (#2614): a long label suffix, e.g.
+    // "(ready-for-documentation-update:completed)", on one line made this the
+    // widest column and starved Title. The floor keeps it from being squeezed.
+    { key: 'event', label: 'Event', wrap: true, render: (v, row) => {
       // Plain-language event name (single source of truth: the shared eventLabel
       // map used by the trigger editor) so this log reads for someone who
       // doesn't know the GitHub Events API vocabulary. The raw technical event
@@ -437,20 +472,21 @@ function ProcessedEventsView() {
       // rather than show a potentially-wrong collapsed label.
       if (row.noMatchingTrigger && row.label) suffix = ` (${row.label})`;
       else if (row.ref) suffix = ` · ${shortRef(row.ref)}`;
-      return <span>{friendly || '—'}{suffix}</span>;
+      return <span style={{ display: 'block', minWidth: COL_FLOOR.event }}>{friendly || '—'}{suffix}</span>;
     },
       // #2442: the raw event key ("pull_request.opened") is no longer shown — only
       // the friendly name ("PR opened"). Search the friendly name, keeping the raw
       // key matchable too so an operator who knows the API vocabulary still finds it.
       filterValue: eventFilterText },
-    { key: 'actor', label: 'Actor', render: v => v || '—' },
+    { key: 'actor', label: 'Actor', render: v => <ActorCell actor={v} /> },
     { key: 'outcomes', label: 'Outcomes', sortable: false, wrap: true, render: (v, row) => {
-      if (row.noMatchingTrigger) return <NoMatchLine />;
       const list = Array.isArray(v) ? v : [];
-      // One outcome per line (#2524), spaced so each reads on its own.
+      // One outcome per line (#2524), spaced so each reads on its own. The
+      // floor (#2614) keeps an outcome wrapping at word boundaries rather than
+      // clipped to a few letters per line.
       return (
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, minWidth: 0 }}>
-          {list.map((o, i) => (
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, minWidth: COL_FLOOR.outcomes }}>
+          {row.noMatchingTrigger ? <NoMatchLine /> : list.map((o, i) => (
             <OutcomeLine key={i} outcome={o} eventId={row.eventId} onOpenSession={openSession} onOpenChat={openChat} refireNote={refireNote(row)} />
           ))}
         </div>

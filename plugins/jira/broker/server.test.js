@@ -15,6 +15,10 @@ process.env.JIRA_AUDIT_DIR = path.join(STATE, 'audit');
 
 const { mint } = require('../../../broker-sdk');
 const broker = require('./server');
+// #2562: every CLI call first asks the orchestrator whose credential it may
+// use. The existing route tests run as an AUTONOMOUS call (service account);
+// the per-person paths are covered by the dedicated tests at the end.
+broker._setGrantResolver(async () => ({ ok: true, mode: 'service', interactive: false, agentId: 'team-1-dev' }));
 const { signViewerHeaders } = require('./viewer-headers');
 
 const TOKEN = mint('jira', 'team-1', 'test-secret');
@@ -225,10 +229,10 @@ test('cli reads: /projects, /list, /show need the per-scope credential and call 
     const noJql = await call(srv, 'GET', '/cli/search?jql=', { token: TOKEN });
     assert.equal(noJql.status, 400);
 
-    // a scope with no credential → 400 no-credential (not a 500)
+    // a scope with no service account → 400 no-service-account (not a 500)
     const nocred = await call(srv, 'GET', '/cli/projects', { token: OTHER });
     assert.equal(nocred.status, 400);
-    assert.equal(nocred.body.code, 'no-credential');
+    assert.equal(nocred.body.code, 'no-service-account');
   } finally {
     global.fetch = origFetch;
     broker.scopeCredentials.delete('team-1');
@@ -261,10 +265,10 @@ test('cli reads: /statuses returns a project\'s workflow statuses grouped by iss
     const noProject = await call(srv, 'GET', '/cli/statuses', { token: TOKEN });
     assert.equal(noProject.status, 400);
 
-    // a scope with no credential → 400 no-credential
+    // a scope with no service account → 400 no-service-account
     const nocred = await call(srv, 'GET', '/cli/statuses?project=KAN', { token: OTHER });
     assert.equal(nocred.status, 400);
-    assert.equal(nocred.body.code, 'no-credential');
+    assert.equal(nocred.body.code, 'no-service-account');
   } finally {
     global.fetch = origFetch;
     broker.scopeCredentials.delete('team-1');
@@ -333,10 +337,10 @@ test('cli reads: /attachment fetches one attachment by id, cred-gated, 404 for a
     assert.equal(missing.status, 404);
     assert.match(missing.body.error, /not on issue KAN-6/);
 
-    // a scope with no credential → 400 no-credential
+    // a scope with no service account → 400 no-service-account
     const nocred = await call(srv, 'GET', '/cli/attachment?issue=KAN-6&id=10312', { token: OTHER });
     assert.equal(nocred.status, 400);
-    assert.equal(nocred.body.code, 'no-credential');
+    assert.equal(nocred.body.code, 'no-service-account');
 
     // a missing id arg → 400
     assert.equal((await call(srv, 'GET', '/cli/attachment?issue=KAN-6', { token: TOKEN })).status, 400);
@@ -378,10 +382,10 @@ test('cli writes: /attachment/add uploads one file per call server-side, cred-ga
     assert.equal((await call(srv, 'POST', '/cli/attachment/add', { token: TOKEN, body: { issue: 'KAN-6', contentBase64 } })).status, 400);
     assert.equal((await call(srv, 'POST', '/cli/attachment/add', { token: TOKEN, body: { issue: 'KAN-6', filename: 'a.txt' } })).status, 400);
 
-    // no credential → 400 no-credential
+    // no service account → 400 no-service-account
     const nocred = await call(srv, 'POST', '/cli/attachment/add', { token: OTHER, body: { issue: 'KAN-6', filename: 'a.txt', contentBase64 } });
     assert.equal(nocred.status, 400);
-    assert.equal(nocred.body.code, 'no-credential');
+    assert.equal(nocred.body.code, 'no-service-account');
 
     // a GET on the upload path → 404 (upload is POST only)
     assert.equal((await call(srv, 'GET', '/cli/attachment/add', { token: TOKEN })).status, 404);
@@ -416,7 +420,7 @@ test('cli writes: comment + transition are role-gated (pass for team scope), cre
     // a scope with no credential → 400, not a 500
     const nocred = await call(srv, 'POST', '/cli/comment', { token: OTHER, body: { issue: 'X-1', body: 'y' } });
     assert.equal(nocred.status, 400);
-    assert.equal(nocred.body.code, 'no-credential');
+    assert.equal(nocred.body.code, 'no-service-account');
 
     // a GET on a write path → 404 (writes are POST only)
     assert.equal((await call(srv, 'GET', '/cli/comment', { token: TOKEN })).status, 404);
@@ -454,7 +458,7 @@ test('cli writes: /update replaces the description through the client, role- and
 
     const nocred = await call(srv, 'POST', '/cli/update', { token: OTHER, body: { issue: 'X-1', description: 'y' } });
     assert.equal(nocred.status, 400);
-    assert.equal(nocred.body.code, 'no-credential');
+    assert.equal(nocred.body.code, 'no-service-account');
   } finally {
     global.fetch = origFetch;
     broker.scopeCredentials.delete('team-1');
@@ -498,10 +502,10 @@ test('cli writes: /set-field sets an allow-listed custom field, refuses one that
     assert.equal((await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', value: 'x' } })).status, 400);
     assert.equal((await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', field: 'Team' } })).status, 400);
 
-    // a scope with no credential → 400 no-credential
+    // a scope with no service account → 400 no-service-account
     const nocred = await call(srv, 'POST', '/cli/set-field', { token: OTHER, body: { issue: 'X-1', field: 'Team', value: '1' } });
     assert.equal(nocred.status, 400);
-    assert.equal(nocred.body.code, 'no-credential');
+    assert.equal(nocred.body.code, 'no-service-account');
 
     // a GET on the write path → 404 (set-field is POST only)
     assert.equal((await call(srv, 'GET', '/cli/set-field', { token: TOKEN })).status, 404);
@@ -633,10 +637,10 @@ test('cli writes: /create-epic creates an epic + child stories, allow-list-gatin
     assert.equal((await call(srv, 'POST', '/cli/create-epic', { token: TOKEN, body: { epic: { summary: 'E' } } })).status, 400);
     assert.equal((await call(srv, 'POST', '/cli/create-epic', { token: TOKEN, body: { project: 'KAN' } })).status, 400);
 
-    // no credential → 400 no-credential
+    // no service account → 400 no-service-account
     const nocred = await call(srv, 'POST', '/cli/create-epic', { token: OTHER, body: { project: 'X', epic: { summary: 'E' } } });
     assert.equal(nocred.status, 400);
-    assert.equal(nocred.body.code, 'no-credential');
+    assert.equal(nocred.body.code, 'no-service-account');
 
     // GET on the create path → 404 (POST only)
     assert.equal((await call(srv, 'GET', '/cli/create-epic', { token: TOKEN })).status, 404);
@@ -958,10 +962,10 @@ test('cli sprint: /sprint/list reads a board sprints; /sprint/create + /sprint/b
     assert.equal((await call(srv, 'GET', '/cli/sprint/list', { token: TOKEN })).status, 400);
     assert.equal((await call(srv, 'POST', '/cli/sprint/create', { token: TOKEN, body: { name: 'x' } })).status, 400);
 
-    // a scope with no credential → 400 no-credential (both read and write)
-    assert.equal((await call(srv, 'GET', '/cli/sprint/list?board=B', { token: OTHER })).body.code, 'no-credential');
+    // a scope with no service account → 400 no-service-account (both read and write)
+    assert.equal((await call(srv, 'GET', '/cli/sprint/list?board=B', { token: OTHER })).body.code, 'no-service-account');
     const nocred = await call(srv, 'POST', '/cli/sprint/bulk-create', { token: OTHER, body: { board: 'B', nameTemplate: 'S{n}', until: '2026-01-01' } });
-    assert.equal(nocred.body.code, 'no-credential');
+    assert.equal(nocred.body.code, 'no-service-account');
 
     // a GET on a write path → 404 (POST only)
     assert.equal((await call(srv, 'GET', '/cli/sprint/create', { token: TOKEN })).status, 404);
@@ -1022,7 +1026,7 @@ test('cli sprint: /sprint/close, /sprint/start and /sprint/advance transition sp
     assert.equal((await call(srv, 'GET', '/cli/sprint/advance', { token: TOKEN })).status, 404);
 
     // no-credential scope
-    assert.equal((await call(srv, 'POST', '/cli/sprint/start', { token: OTHER, body: { board: 'B' } })).body.code, 'no-credential');
+    assert.equal((await call(srv, 'POST', '/cli/sprint/start', { token: OTHER, body: { board: 'B' } })).body.code, 'no-service-account');
   } finally {
     global.fetch = origFetch;
     broker.scopeCredentials.delete('team-1');
@@ -1066,6 +1070,208 @@ test('cli sprint: /sprint/advance reports a partial roll-over distinctly (#2491)
   } finally {
     global.fetch = origFetch;
     broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+// ── per-person Jira credentials (#2562) ─────────────────────────────────────
+
+const SERVICE_GRANT = async () => ({ ok: true, mode: 'service', interactive: false, agentId: 'team-1-dev' });
+
+async function callAs(srv, method, urlPath, { token, body, caller } = {}) {
+  const { port } = srv.address();
+  const res = await fetch(`http://127.0.0.1:${port}${urlPath}`, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(caller ? { 'X-AEE-Agent-Token': caller } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return { status: res.status, body: await res.json().catch(() => ({})) };
+}
+
+function basic(email, token) {
+  return `Basic ${Buffer.from(`${email}:${token}`).toString('base64')}`;
+}
+
+function auditLines() {
+  const dir = path.join(STATE, 'audit');
+  return fs.readdirSync(dir).flatMap((f) => fs.readFileSync(path.join(dir, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)));
+}
+
+function stubJira(seen, { status = 200 } = {}) {
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    seen.push({ url: String(url), auth: opts && opts.headers && opts.headers.Authorization });
+    if (status !== 200) return { ok: false, status, text: async () => '' };
+    if (String(url).includes('/comment')) return { ok: true, status: 201, text: async () => JSON.stringify({ id: '1' }) };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [{ key: 'KAN', name: 'Kanban', id: '1' }] }) };
+  };
+  return () => { global.fetch = origFetch; };
+}
+
+test('a chat turn uses the SENDER\'s own Jira credential on the team\'s site, per call; the audit names them', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok', 'readable-custom-fields': 'Team' });
+  const grants = [];
+  broker._setGrantResolver(async (req) => {
+    grants.push(req);
+    const who = grants.length === 1 ? 'alice' : 'bob';
+    return { ok: true, mode: 'personal', interactive: true, agentId: 'team-1-dev', userId: who, values: { email: `${who}@b.c`, 'api-token': `${who}-tok` } };
+  });
+  const seen = [];
+  const restore = stubJira(seen);
+  const srv = await listen();
+  try {
+    // consecutive turns from different members each use their own token (AC8)
+    const r1 = await callAs(srv, 'GET', '/cli/projects', { token: TOKEN, caller: 'aeecall1.x.y' });
+    assert.equal(r1.status, 200);
+    const r2 = await callAs(srv, 'POST', '/cli/comment', { token: TOKEN, caller: 'aeecall1.x.y', body: { issue: 'KAN-1', body: 'hi' } });
+    assert.equal(r2.status, 200);
+    assert.equal(seen[0].auth, basic('alice@b.c', 'alice-tok'));
+    assert.ok(seen[0].url.includes('acme'));
+    assert.ok(seen.slice(1).every((c) => c.auth === basic('bob@b.c', 'bob-tok')), 'the write is authored by bob');
+    assert.ok(seen.every((c) => c.auth !== basic('svc@b.c', 'svc-tok')), 'never the service account');
+    // the CLI's caller token is what the broker forwards — nothing else
+    assert.deepEqual(grants.map((g) => g.callerToken), ['aeecall1.x.y', 'aeecall1.x.y']);
+    assert.deepEqual(grants.map((g) => g.scopeId), ['team-1', 'team-1']);
+    // audit: identity, agent, interactive (AC11); no secret in the line
+    const lines = auditLines().filter((l) => l.identity === 'alice' || l.identity === 'bob');
+    assert.ok(lines.some((l) => l.identity === 'alice' && l.subcommand === 'projects' && l.agentId === 'team-1-dev' && l.interactive === true));
+    assert.ok(lines.some((l) => l.identity === 'bob' && l.subcommand === 'comment' && l.interactive === true));
+    assert.equal(JSON.stringify(auditLines()).includes('-tok'), false);
+    // the personal token was never stored in the broker's pushed map
+    assert.equal(broker.scopeCredentials.get('team-1')['api-token'], 'svc-tok');
+  } finally {
+    restore();
+    broker._setGrantResolver(SERVICE_GRANT);
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('a refused grant blocks EVERY subcommand before Jira is touched (AC4/AC5)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
+  broker._setGrantResolver(async () => ({
+    ok: false, status: 424, code: 'personal-credential-required', agentId: 'team-1-dev',
+    message: 'You have no personal Jira credential yet. … Connections → Plugin Tokens (/plugin-tokens) … Nothing was sent to Jira.',
+  }));
+  const seen = [];
+  const restore = stubJira(seen);
+  const srv = await listen();
+  try {
+    const routes = [
+      ['GET', '/cli/whoami'], ['GET', '/cli/inbox'], ['GET', '/cli/inbox?consume=KAN-1:1'], ['GET', '/cli/projects'],
+      ['GET', '/cli/show?issue=KAN-1'], ['GET', '/cli/sprint/list?board=B'], ['GET', '/cli/attachment?issue=KAN-1&id=1'],
+      ['POST', '/cli/comment'], ['POST', '/cli/transition'], ['POST', '/cli/create-epic'], ['POST', '/cli/sprint/create'],
+      ['POST', '/cli/attachment/add'],
+    ];
+    for (const [method, url] of routes) {
+      const r = await callAs(srv, method, url, { token: TOKEN, body: method === 'POST' ? { issue: 'KAN-1', body: 'x' } : undefined });
+      assert.equal(r.status, 424, `${method} ${url}`);
+      assert.equal(r.body.code, 'personal-credential-required');
+      assert.match(r.body.error, /\/plugin-tokens/);
+    }
+    assert.equal(seen.length, 0, 'nothing was sent to Jira');
+    assert.ok(auditLines().some((l) => l.outcome === 'denied' && l.detail === 'personal-credential-required' && l.agentId === 'team-1-dev'));
+  } finally {
+    restore();
+    broker._setGrantResolver(SERVICE_GRANT);
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('personal 401 → "renew your token"; 403 passes through unchanged and is never retried as the service account', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
+  broker._setGrantResolver(async () => ({ ok: true, mode: 'personal', interactive: true, agentId: 'team-1-dev', userId: 'alice', values: { email: 'a@b.c', 'api-token': 'old' } }));
+  const srv = await listen();
+  try {
+    let seen = [];
+    let restore = stubJira(seen, { status: 401 });
+    let r = await callAs(srv, 'GET', '/cli/projects', { token: TOKEN });
+    restore();
+    assert.equal(r.status, 401);
+    assert.equal(r.body.code, 'personal-credential-rejected');
+    assert.match(r.body.error, /renew it/);
+
+    seen = [];
+    restore = stubJira(seen, { status: 403 });
+    r = await callAs(srv, 'POST', '/cli/comment', { token: TOKEN, body: { issue: 'KAN-1', body: 'x' } });
+    restore();
+    assert.equal(r.status, 403);
+    assert.ok(seen.length >= 1);
+    assert.ok(seen.every((c) => c.auth === basic('a@b.c', 'old')), 'no retry under the service account');
+  } finally {
+    broker._setGrantResolver(SERVICE_GRANT);
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('autonomous run: service account, audited as non-interactive; none configured → no-service-account (AC7)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
+  broker._setGrantResolver(async () => ({ ok: true, mode: 'service', interactive: false, agentId: 'team-1-cron' }));
+  const seen = [];
+  const restore = stubJira(seen);
+  const srv = await listen();
+  try {
+    const r = await callAs(srv, 'GET', '/cli/projects', { token: TOKEN });
+    assert.equal(r.status, 200);
+    assert.equal(seen[0].auth, basic('svc@b.c', 'svc-tok'));
+    assert.ok(auditLines().some((l) => l.agentId === 'team-1-cron' && l.identity === 'service-account' && l.interactive === false));
+    const who = await callAs(srv, 'GET', '/cli/whoami', { token: TOKEN });
+    assert.equal(who.body.identity, 'service-account');
+
+    const none = await callAs(srv, 'GET', '/cli/projects', { token: OTHER });
+    assert.equal(none.status, 400);
+    assert.equal(none.body.code, 'no-service-account');
+    assert.match(none.body.error, /service account/);
+  } finally {
+    restore();
+    broker._setGrantResolver(SERVICE_GRANT);
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('the default grant resolver asks the orchestrator with the reserved grant token + caller token and fails closed', async () => {
+  broker._setGrantResolver(null); // the real round-trip
+  const origFetch = global.fetch;
+  const asked = [];
+  let answer = { status: 200, body: { ok: true, mode: 'service', interactive: false, agentId: 'team-1-dev' } };
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    if (String(url).endsWith('/internal/plugin-credential-grant')) {
+      asked.push({ auth: opts.headers.Authorization, body: JSON.parse(opts.body) });
+      if (answer === 'throw') throw new Error('ECONNREFUSED');
+      return { ok: answer.status < 400, status: answer.status, json: async () => answer.body };
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+  const srv = await listen();
+  try {
+    let r = await callAs(srv, 'GET', '/cli/whoami', { token: TOKEN, caller: 'aeecall1.abc.def' });
+    assert.equal(r.status, 200);
+    // The reserved grant scope — never the team token the agent holds (review B1).
+    assert.equal(asked[0].auth, `Bearer ${mint('jira', '_grant-team-1', 'test-secret')}`);
+    assert.notEqual(asked[0].auth, `Bearer ${TOKEN}`);
+    assert.deepEqual(asked[0].body, { callerToken: 'aeecall1.abc.def' });
+
+    answer = { status: 403, body: { ok: false, code: 'untrusted-sender', message: 'Refused: not a member.' } };
+    r = await callAs(srv, 'GET', '/cli/whoami', { token: TOKEN });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.code, 'untrusted-sender');
+
+    answer = 'throw';
+    r = await callAs(srv, 'GET', '/cli/whoami', { token: TOKEN });
+    assert.equal(r.status, 503);
+    assert.equal(r.body.code, 'grant-unavailable');
+  } finally {
+    global.fetch = origFetch;
+    broker._setGrantResolver(SERVICE_GRANT);
     srv.close();
   }
 });

@@ -60,7 +60,14 @@ function listPluginIds(dir = REGISTRY_DIR) {
 // Read + validate one plugin's manifest.
 // Returns { id, ok, errors, manifest, dir } — never throws.
 function readPluginManifest(id, dir = REGISTRY_DIR) {
-  const pluginDir = path.join(dir, id);
+  // A registry id is a single directory name. Callers validate (listing via
+  // isPluginDirName, HTTP routes via PLUGIN_ID_RE), but re-check here with
+  // `path.basename` — the sanitizer CodeQL js/path-injection recognises at the
+  // join site — so a `../x` or `a/b` id never names a path outside the registry.
+  if (!isPluginDirName(id) || path.basename(id) !== id) {
+    return { id, ok: false, errors: ['invalid plugin id'], manifest: null, dir: null };
+  }
+  const pluginDir = path.join(dir, path.basename(id));
   const manifestPath = path.join(pluginDir, MANIFEST_FILE);
   let raw;
   try {

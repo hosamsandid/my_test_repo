@@ -131,3 +131,60 @@ test('invalid ids are refused (path traversal)', () => {
   assert.throws(() => s.read('../evil', 'team-1'));
   assert.throws(() => s.read('jira', '../../etc/passwd'));
 });
+
+// ── personal credentials (#2562) ────────────────────────────────────────────
+
+const JIRA_PERSONAL = [
+  { key: 'email', required: true, secret: false },
+  { key: 'api-token', required: true },
+];
+
+test('personal: write/read/meta per user, 0600 under _personal, separate from the team doc', () => {
+  const s = tmpStore();
+  s.write('jira', 'team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' }, JIRA_CREDS, { setBy: 'admin' });
+  let r = s.writePersonal('jira', 'alice', { email: 'alice@b.c', 'api-token': 'alice-tok' }, JIRA_PERSONAL);
+  assert.equal(r.ok, true);
+  assert.equal(r.meta.complete, true);
+  assert.equal(r.meta.setBy, 'alice');
+  assert.equal(JSON.stringify(r.meta).includes('alice-tok'), false); // metadata only
+
+  const file = s._personalPath('jira', 'alice');
+  assert.equal(path.basename(path.dirname(file)), '_personal');
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.dirname(file)).mode & 0o777, 0o700);
+
+  assert.deepEqual(s.readPersonal('jira', 'alice').values, { email: 'alice@b.c', 'api-token': 'alice-tok' });
+  assert.equal(s.readPersonal('jira', 'bob'), null);
+  // the team document is untouched and the team map never sees personal docs
+  assert.deepEqual(s.resolveScopeCredentialMap('jira', ['team-1'])['team-1'], { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
+
+  // rotate one field: merge keeps the other
+  s.writePersonal('jira', 'alice', { 'api-token': 'alice-tok-2' }, JIRA_PERSONAL);
+  assert.deepEqual(s.readPersonal('jira', 'alice').values, { email: 'alice@b.c', 'api-token': 'alice-tok-2' });
+  // unknown keys are dropped (a person cannot set the team site through here)
+  s.writePersonal('jira', 'alice', { 'site-url': 'evil' }, JIRA_PERSONAL);
+  assert.equal('site-url' in s.readPersonal('jira', 'alice').values, false);
+});
+
+test('personal: delete, offboarding sweep across plugins, uninstall reaps personal docs', () => {
+  const s = tmpStore();
+  s.writePersonal('jira', 'alice', { email: 'a', 'api-token': 'b' }, JIRA_PERSONAL);
+  s.writePersonal('other', 'alice', { email: 'a', 'api-token': 'b' }, JIRA_PERSONAL);
+  s.writePersonal('jira', 'bob', { email: 'a', 'api-token': 'b' }, JIRA_PERSONAL);
+  assert.deepEqual(s.deleteAllPersonalForUser('alice').sort(), ['jira', 'other']);
+  assert.equal(s.readPersonal('jira', 'alice'), null);
+  assert.notEqual(s.readPersonal('jira', 'bob'), null);
+  assert.equal(s.deletePersonal('jira', 'bob'), true);
+  assert.equal(s.deletePersonal('jira', 'bob'), false);
+
+  s.writePersonal('jira', 'carol', { email: 'a', 'api-token': 'b' }, JIRA_PERSONAL);
+  assert.equal(s.teardownPlugin('jira'), 1);
+  assert.equal(fs.existsSync(path.join(s.dir, 'jira')), false);
+});
+
+test('personal: invalid user ids are refused (path traversal)', () => {
+  const s = tmpStore();
+  assert.throws(() => s.readPersonal('jira', '../team-1'));
+  assert.throws(() => s.writePersonal('jira', '../../x', { email: 'a' }, JIRA_PERSONAL));
+  assert.deepEqual(s.deleteAllPersonalForUser('../x'), []);
+});

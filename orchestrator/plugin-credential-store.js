@@ -27,6 +27,15 @@
 //
 // Pure decisions (key validation, metadata shaping, preview) are separate from
 // the fs adapter so they unit-test in isolation.
+//
+// ── personal credentials (#2562) ────────────────────────────────────────────
+// A plugin may also declare `personalCredentials[]` — fields each HUMAN stores
+// for themselves (Jira: their Atlassian e-mail + API token). Those live beside
+// the team documents at `<pluginId>/_personal/<userId>.json` (0600; `_personal`
+// can never collide with a scope id, which must start alphanumeric). They are
+// owner-only: the routes key them by the caller's own user id, there is no
+// admin read path, and the one raw-value exit is `readPersonal`, used only by
+// the orchestrator's per-call credential grant to a broker.
 
 const fs = require('fs');
 const path = require('path');
@@ -37,6 +46,9 @@ const DEFAULT_DIR = process.env.PLUGIN_CREDENTIALS_DIR
 // pluginId: the registry slug (validator ID_RE). scopeId: a token subject.
 const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const SCOPE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+// userId: a platform user record id (teams-store). Same safe-filename alphabet.
+const USER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const PERSONAL_DIR = '_personal';
 
 function assertIds(pluginId, scopeId) {
   if (!PLUGIN_ID_RE.test(String(pluginId || ''))) throw new Error(`invalid pluginId: ${String(pluginId)}`);
@@ -122,6 +134,15 @@ class PluginCredentialStore {
     this.now = now;
   }
 
+  _personalPath(pluginId, userId) {
+    assertIds(pluginId);
+    if (!USER_ID_RE.test(String(userId || ''))) throw new Error(`invalid userId: ${String(userId)}`);
+    // `path.basename` on the already-validated ids is a no-op, but it is the
+    // call CodeQL treats as the js/path-injection sanitizer at the join site
+    // (the regex checks above sit behind a throwing helper it does not follow).
+    return path.join(this.dir, path.basename(String(pluginId)), PERSONAL_DIR, `${path.basename(String(userId))}.json`);
+  }
+
   _path(pluginId, scopeId) {
     assertIds(pluginId, scopeId);
     return path.join(this.dir, pluginId, `${scopeId}.json`);
@@ -203,6 +224,77 @@ class PluginCredentialStore {
     return out;
   }
 
+  // ── personal credentials (#2562) ──────────────────────────────────────────
+  // Raw stored personal document `{ values, setBy, setAt }` or null. INTERNAL —
+  // the only caller that may hand the values on is the per-call credential
+  // grant; every route returns `personalMeta()` instead.
+  readPersonal(pluginId, userId) {
+    let raw;
+    try {
+      raw = fs.readFileSync(this._personalPath(pluginId, userId), 'utf8');
+    } catch (err) {
+      if (err && err.code === 'ENOENT') return null;
+      throw err;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      return {
+        values: parsed && typeof parsed.values === 'object' && parsed.values ? parsed.values : {},
+        setBy: parsed && parsed.setBy ? String(parsed.setBy) : null,
+        setAt: parsed && parsed.setAt ? String(parsed.setAt) : null,
+      };
+    } catch {
+      return { values: {}, setBy: null, setAt: null };
+    }
+  }
+
+  personalMeta(pluginId, userId, manifestPersonalCredentials) {
+    return credentialMeta(this.readPersonal(pluginId, userId), manifestPersonalCredentials);
+  }
+
+  // Same merge/stamp/0600 semantics as `write`, on the caller's own document.
+  writePersonal(pluginId, userId, submitted, manifestPersonalCredentials) {
+    const file = this._personalPath(pluginId, userId);
+    const existing = this.readPersonal(pluginId, userId) || { values: {} };
+    const { ok, errors, set, clear } = shapeCredentialValues(manifestPersonalCredentials, submitted);
+    if (!ok) return { ok: false, errors, meta: credentialMeta(existing, manifestPersonalCredentials) };
+    const merged = { ...(existing.values || {}) };
+    for (const k of clear) delete merged[k];
+    Object.assign(merged, set);
+    const doc = { values: merged, setBy: String(userId), setAt: this.now() };
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const tmp = `${file}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(doc, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+    try { fs.chmodSync(file, 0o600); } catch { /* best effort */ }
+    return { ok: true, errors: [], meta: credentialMeta(doc, manifestPersonalCredentials) };
+  }
+
+  deletePersonal(pluginId, userId) {
+    try {
+      fs.unlinkSync(this._personalPath(pluginId, userId));
+      return true;
+    } catch (err) {
+      if (err && err.code === 'ENOENT') return false;
+      throw err;
+    }
+  }
+
+  // Offboarding: remove one human's personal document from EVERY plugin dir
+  // (installed or not — an uninstalled plugin's leftovers are theirs too).
+  // Returns the plugin ids a document was removed from.
+  deleteAllPersonalForUser(userId) {
+    if (!USER_ID_RE.test(String(userId || ''))) return [];
+    let plugins;
+    try { plugins = fs.readdirSync(this.dir); } catch { return []; }
+    const removed = [];
+    for (const pluginId of plugins) {
+      if (!PLUGIN_ID_RE.test(pluginId)) continue;
+      try { if (this.deletePersonal(pluginId, userId)) removed.push(pluginId); } catch { /* keep going */ }
+    }
+    return removed;
+  }
+
   // Reap every document for a plugin (uninstall) or one scope (grant revoke /
   // team delete). Best-effort, idempotent. Returns the count removed.
   teardownPlugin(pluginId) {
@@ -214,6 +306,15 @@ class PluginCredentialStore {
       if (!name.endsWith('.json')) continue;
       try { fs.unlinkSync(path.join(this.dir, pluginId, name)); n += 1; } catch { /* ignore */ }
     }
+    // Uninstall also reaps every person's credential for the plugin (#2562).
+    const personalDir = path.join(this.dir, pluginId, PERSONAL_DIR);
+    let personal = [];
+    try { personal = fs.readdirSync(personalDir); } catch { personal = []; }
+    for (const name of personal) {
+      if (!name.endsWith('.json')) continue;
+      try { fs.unlinkSync(path.join(personalDir, name)); n += 1; } catch { /* ignore */ }
+    }
+    try { fs.rmdirSync(personalDir); } catch { /* non-empty or gone */ }
     try { fs.rmdirSync(path.join(this.dir, pluginId)); } catch { /* non-empty or gone */ }
     return n;
   }
@@ -226,5 +327,7 @@ module.exports = {
   previewValue,
   PLUGIN_ID_RE,
   SCOPE_ID_RE,
+  USER_ID_RE,
+  PERSONAL_DIR,
   DEFAULT_DIR,
 };

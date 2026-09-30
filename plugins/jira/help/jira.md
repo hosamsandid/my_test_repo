@@ -71,13 +71,15 @@ inlines at most 20 of *its own* transitions; when it had more it carries
 
 The plugin seeds a small command-line tool into a granted agent's workspace.
 All Jira access stays server-side in the broker; the agent never sees the token.
+Chats run as the **sender** (own **Plugin Tokens** entry, else refused);
+watching and automated runs use the team's service account.
 
 | Command | |
 |---|---|
 | `aee-jira inbox` / `aee-jira inbox --consume <id>…` | the queued status changes of the whole team (peek); `--consume` drains exactly the ids named — use the ids from your own wake (`id`, or `events[].id` in a digest), never a teammate's |
 | `aee-jira list --project KAN [--status "Ready for Dev"]`, `aee-jira show KAN-6 [--fields "Team"]` | read issues (`show` also lists any attachments, the `parent`/epic key so you can traverse Story→Epic, and `availableTransitions` — the moves reachable from the issue's current status, so you can `transition --to` one without guessing). `--fields` additionally reads **custom fields** by their Jira name (e.g. `Team`) — an empty field comes back as `null`, so you can tell unset from set |
-| `aee-jira statuses --project KAN` | every workflow status the project supports, grouped by issue type — the full set the workflow allows, independent of any one issue's current state (for planning / checking what a workflow supports) |
-| `aee-jira search --jql "<JQL>" [--fields …] [--limit N]` | run any JQL the team's credential is allowed — for filters `list` can't express (a `created` range, an empty custom field, a summary match). Scoped to the team's bound site & projects; read-only, shaped like `list`. A `--fields` name that isn't a standard column is read as a custom field and rides alongside the row |
+| `aee-jira statuses --project KAN` | every workflow status the project supports, grouped by issue type — the full set the workflow allows, independent of any one issue's current state |
+| `aee-jira search --jql "<JQL>" [--fields …] [--limit N]` | run any JQL the credential allows — for filters `list` can't express (a `created` range, an empty custom field, a summary match). Scoped to the team's bound site & projects; read-only, shaped like `list`. A `--fields` name that isn't a standard column is read as a custom field and rides alongside the row |
 | `aee-jira attachment get KAN-6 <id> [--out PATH]` | fetch one attachment's content by id (from `show`) — text prints inline, binary is saved to a workspace path |
 | `aee-jira attachment add KAN-6 <path> [<path>…]` | upload one or more local files as new attachments — each path becomes a separate attachment (Jira never overwrites); paths are checked to exist before any upload, and the result reports per-file success/failure with each created id |
 | `aee-jira comment KAN-6 --body "…"` | add a comment |

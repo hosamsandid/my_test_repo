@@ -54,6 +54,7 @@ const TeamSetup           = lazy(() => import('./pages/TeamSetup'));
 const EnvironmentTemplates  = lazy(() => import('./pages/EnvironmentTemplates'));
 const SshKeys             = lazy(() => import('./pages/SshKeys'));
 const GithubTokens        = lazy(() => import('./pages/GithubTokens'));
+const PluginTokens        = lazy(() => import('./pages/PluginTokens'));
 const SkillsRegistry      = lazy(() => import('./pages/SkillsRegistry'));
 const RoleTemplates       = lazy(() => import('./pages/RoleTemplates'));
 const GithubEventLog      = lazy(() => import('./pages/GithubEventLog'));
@@ -142,6 +143,7 @@ export default function App() {
               (`visibleCredential` / `providerReadVisible`). */}
           <Route path="/ssh-keys"     element={<SshKeys />} />
           <Route path="/github-tokens" element={<GithubTokens />} />
+          <Route path="/plugin-tokens" element={<PluginTokens />} />
           {/* The former My Credentials page folded into SSH Keys (#2360); an old
               link or bookmark lands there. */}
           <Route path="/my-credentials" element={<Navigate to="/ssh-keys" replace />} />

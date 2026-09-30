@@ -55,6 +55,7 @@
 
 const crypto = require("crypto");
 const pluginScopeToken = require("./plugin-scope-token");
+const { scopeIdFromGrantScope } = require("./plugin-scope");
 
 const AUTH_MODES = ["observe", "warn", "enforce"];
 
@@ -293,6 +294,13 @@ const AGENT_ROUTES = [
   // Chat-attributed `gh` writes (#2559, the `gh` shim) — same reasoning.
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/github\/gh$/, scope: "own" },
 
+  // Plugin run identity (#2562): the runner's per-container run key and its
+  // run declarations. The handler additionally requires the agent's caller
+  // token for the same :id.
+  { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/run-key$/, scope: "own" },
+  { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/runs$/, scope: "own" },
+  { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/runs\/end$/, scope: "own" },
+
   // THE ONE CROSS-AGENT ROUTE. The loop verifier (#933) hands its verify request
   // to a SIBLING's queue, so `own` would break every loop with a `verify.agentId`
   // gate. Left as `peer` rather than silently narrowed; the route's own same-team
@@ -314,13 +322,18 @@ const AGENT_ROUTES = [
 // ── The plugin-facing allowlist ─────────────────────────────────────────────
 //
 // A broker sidecar holds a scope token for ONE (pluginId, scopeId) and may use
-// it for exactly one thing on this surface: waking the agents that plugin is
-// granted to in that scope. The route re-verifies the token itself to derive
+// it for waking the agents that plugin is granted to in that scope, and — with
+// its reserved grant token only — for asking whose credential an agent CLI call
+// may use (below). The route re-verifies the token itself to derive
 // {pluginId, scopeId} for the fan-out, so this gate is the first line and the
 // handler the second. Everything else — the credential push, the team roster,
 // wake-agent — is a control-plane concern and stays refused.
 const PLUGIN_SCOPE_ROUTES = [
   { method: "POST", pattern: /^\/internal\/plugin-event$/ },
+  // #2562: a broker asks which credential ONE agent CLI call may use. Only with
+  // its reserved `_grant-<scopeId>` token: the plain scope token is also held by
+  // every granted agent, and this route returns a person's secret.
+  { method: "POST", pattern: /^\/internal\/plugin-credential-grant$/, grantScope: true },
 ];
 
 // Strip the query string and decode each path segment, so an allowlist entry
@@ -450,8 +463,12 @@ function decideInternalAuth({ method, url, headers = {}, config }) {
     if (pathname === null) {
       return { ...base, allowed: false, denied: enforcing, status: 403, reason: "unparseable-path" };
     }
-    if (!pluginRouteRule(method, pathname)) {
+    const pluginRule = pluginRouteRule(method, pathname);
+    if (!pluginRule) {
       return { ...base, allowed: false, denied: enforcing, status: 403, reason: "route-not-plugin-facing" };
+    }
+    if (pluginRule.grantScope && !scopeIdFromGrantScope(caller.scopeId)) {
+      return { ...base, allowed: false, denied: enforcing, status: 403, reason: "grant-token-required" };
     }
     return { ...base, allowed: true, denied: false, status: 0, reason: "plugin-allowlist" };
   }

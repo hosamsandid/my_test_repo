@@ -10425,7 +10425,7 @@ function pluginUiProxy(req, res) {
 }
 
 app.all('/plugins/:id/ui', spaLimiter, auth.requireAuth, pluginUiProxy);
-app.all('/plugins/:id/ui/*', spaLimiter, auth.requireAuth, pluginUiProxy);
+app.all('/plugins/:id/ui/*path', spaLimiter, auth.requireAuth, pluginUiProxy);
 
 /* ─── Process drafts (Process Canvas v2, #344) ──────────────────────────
  * A draft is an editable process-template bundle that exists before any team
@@ -21539,7 +21539,7 @@ app.get('/api/agents/:agentId/session/:roomId/stream', (req, res) => {
 
 /* ─── SPA fallback ──────────────────────────────────────────────────── */
 
-app.get('*', spaLimiter, (req, res) => {
+app.get('*path', spaLimiter, (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Not found' });
   res.sendFile(path.join(STATIC_DIR, 'index.html'));
 });

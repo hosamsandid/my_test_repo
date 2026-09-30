@@ -136,17 +136,26 @@ build: plugin-images
 # Dockerfile vendors broker-sdk/ into the image (a build context cannot reach a
 # sibling directory). Image tags must match the `sidecar.image` in the
 # corresponding plugins/<id>/plugin.json.
+#
+# PLUGIN_BUILD_ARGS stamps every broker image with this checkout's git identity
+# (#2646) — the same GIT_COMMIT / GIT_DIRTY / GIT_COMMIT_TIME the console shows.
+# The running broker reports it on /healthz and the Plugins page shows it;
+# `podman image inspect --format '{{index .Labels "org.opencontainers.image.revision"}}' <image>`
+# reads it without starting anything.
+PLUGIN_BUILD_ARGS = --build-arg AEE_BUILD_COMMIT=$(GIT_COMMIT) \
+	--build-arg AEE_BUILD_DIRTY=$(GIT_DIRTY) \
+	--build-arg AEE_BUILD_COMMIT_TIME=$(GIT_COMMIT_TIME)
 plugin-images:
-	@echo "Building plugin broker images..."
-	podman build -t localhost/aee-plugin-podman-sandbox:latest -f plugins/podman-sandbox/broker/Dockerfile .
-	podman build -t localhost/aee-plugin-test-mgmt:latest -f plugins/test-mgmt/broker/Dockerfile .
-	podman build -t localhost/aee-plugin-netzplan:latest -f plugins/netzplan/broker/Dockerfile .
-	podman build -t localhost/aee-plugin-patterns-catalog:latest -f plugins/patterns-catalog/broker/Dockerfile .
-	podman build -t localhost/aee-plugin-github-issues:latest -f plugins/github-issues/broker/Dockerfile .
-	podman build -t localhost/aee-plugin-gke:latest -f plugins/gke/broker/Dockerfile .
-	podman build -t localhost/aee-plugin-jira:latest -f plugins/jira/broker/Dockerfile .
+	@echo "Building plugin broker images (commit $(GIT_COMMIT)$(if $(GIT_DIRTY),-dirty))..."
+	podman build $(PLUGIN_BUILD_ARGS) -t localhost/aee-plugin-podman-sandbox:latest -f plugins/podman-sandbox/broker/Dockerfile .
+	podman build $(PLUGIN_BUILD_ARGS) -t localhost/aee-plugin-test-mgmt:latest -f plugins/test-mgmt/broker/Dockerfile .
+	podman build $(PLUGIN_BUILD_ARGS) -t localhost/aee-plugin-netzplan:latest -f plugins/netzplan/broker/Dockerfile .
+	podman build $(PLUGIN_BUILD_ARGS) -t localhost/aee-plugin-patterns-catalog:latest -f plugins/patterns-catalog/broker/Dockerfile .
+	podman build $(PLUGIN_BUILD_ARGS) -t localhost/aee-plugin-github-issues:latest -f plugins/github-issues/broker/Dockerfile .
+	podman build $(PLUGIN_BUILD_ARGS) -t localhost/aee-plugin-gke:latest -f plugins/gke/broker/Dockerfile .
+	podman build $(PLUGIN_BUILD_ARGS) -t localhost/aee-plugin-jira:latest -f plugins/jira/broker/Dockerfile .
 	@echo "Done. Plugin broker images:"
-	@podman images --filter reference='localhost/aee-plugin-*' --format '  {{.Repository}}:{{.Tag}}'
+	@podman images --filter reference='localhost/aee-plugin-*' --format '  {{.Repository}}:{{.Tag}}  commit {{index .Labels "org.opencontainers.image.revision"}}'
 
 agent-image:
 	@n=0; max=3; \
@@ -304,16 +313,25 @@ seed-mcp-servers:
 # plugin.json + bin/. Seeded into the pool as /pool/plugins/<id>/ (→ the
 # operator registry at /workspace/plugins/<id>/), mirroring seed-mcp-servers.
 # Installing a plugin from the registry grants nothing to any agent.
+# Each seeded plugin gets a build-info.json stamped with this checkout's git
+# identity (#2646). Install copies the pool dir, so the registry copy keeps the
+# commit it was installed from, and the Plugins page can compare it with the
+# commit the running broker reports. Values are plain hash / ISO date / "dirty"
+# strings, so printf into JSON needs no escaping.
+SEED_PLUGINS_SCRIPT = rm -rf /pool/plugins && mkdir -p /pool/plugins && cp -r /src/. /pool/plugins/ && \
+	for d in /pool/plugins/*/; do [ -f "$$d/plugin.json" ] || continue; \
+	  printf '"'"'{"commit":"%s","dirty":"%s","commitTime":"%s"}\n'"'"' "$${AEE_BUILD_COMMIT:-unknown}" "$$AEE_BUILD_DIRTY" "$$AEE_BUILD_COMMIT_TIME" > "$$d/build-info.json"; done
 seed-plugins:
 	@if [ ! -d "$(CURDIR)/plugins" ]; then \
 	  echo "ERROR: $(CURDIR)/plugins not found in repo" >&2; \
 	  exit 1; \
 	fi
-	@echo "Seeding plugins into volume $(SKILL_POOL_VOLUME)..."
+	@echo "Seeding plugins into volume $(SKILL_POOL_VOLUME) (commit $(GIT_COMMIT)$(if $(GIT_DIRTY),-dirty))..."
 	podman run --rm --security-opt label=disable \
 	  -v $(SKILL_POOL_VOLUME):/pool \
 	  -v $(CURDIR)/plugins:/src:ro \
-	  alpine sh -c 'rm -rf /pool/plugins && mkdir -p /pool/plugins && cp -r /src/. /pool/plugins/'
+	  -e AEE_BUILD_COMMIT="$(GIT_COMMIT)" -e AEE_BUILD_DIRTY="$(GIT_DIRTY)" -e AEE_BUILD_COMMIT_TIME="$(GIT_COMMIT_TIME)" \
+	  alpine sh -c '$(SEED_PLUGINS_SCRIPT)'
 	@echo "Done. Pool plugins contents:"
 	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/plugins/
 

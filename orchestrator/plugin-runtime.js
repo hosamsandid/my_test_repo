@@ -192,6 +192,18 @@ async function listLiveSidecars() {
   return splitByRunning(await listSidecarContainers()).running;
 }
 
+// The libpod inspect body of a sidecar image in the local store, or null when
+// it is absent or the runtime cannot say (#2646 AC8: the image a recreated
+// sidecar would run). On Kubernetes the image lives in a node's cache, out of
+// reach from here — null, which the console shows as "unknown". The reference
+// is path-escaped the way podman's own client does; libpod unescapes it.
+async function inspectSidecarImage(image) {
+  if (IS_K8S || !PLUGIN_SIDECARS_SUPPORTED || typeof image !== 'string' || !image) return null;
+  const r = await libpodRequest('GET', `/images/${encodeURIComponent(image)}/json`);
+  if (r.status >= 300 || !r.body || typeof r.body !== 'object') return null;
+  return r.body;
+}
+
 async function ensureAuditVolume(pluginId) {
   const name = auditVolumeName(pluginId);
   const r = await libpodRequest('POST', '/volumes/create', { name });
@@ -536,6 +548,7 @@ module.exports = {
   listSidecarContainers,
   splitByRunning,
   listLiveSidecars,
+  inspectSidecarImage,
   startSidecar,
   stopSidecar,
   reconcilePluginSidecars,

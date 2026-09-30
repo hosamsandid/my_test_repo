@@ -18,7 +18,7 @@ askPrompts:
 
 ## What the Flow Control board shows
 
-One **Agent Team**, one board, three areas from top to bottom:
+One **Agent Team**, one board, these areas from top to bottom:
 
 1. **Working now** — every agent run in progress, and how busy each pooled
    role is.
@@ -26,12 +26,15 @@ One **Agent Team**, one board, three areas from top to bottom:
    hidden when nothing needs you.
 3. **In progress** — one row per work item, with the stage it is in and how
    long it has been there.
+4. **Recently completed** — closed issues and merged pull requests, in the
+   same table layout. This area is hidden when nothing finished recently.
 
 **Only work the team took part in appears.** An issue or pull request is on
 the board once a team agent was woken on it, created it or pushed to it — or,
 for an issue, once a person released it to the team (whichever comes first).
 The untouched backlog, Dependabot pull requests and other people's PRs are not
-shown. When there is nothing to show, the board says **Nothing in progress**.
+shown. When no work item is active, the **In progress** area says
+**Nothing in progress**.
 
 **Refreshing.** The board refreshes itself every 30 seconds while
 **Auto-refresh** is on (your choice is remembered for you on this browser).
@@ -47,8 +50,9 @@ result, so the board stays fast.
   and the board says that too.
 - **GitHub unreachable**: the board keeps the last state it knew, shows when
   that was, and warns you that it is not current.
-- A **finished** item stays in **Done** for 24 hours (a team can change that —
-  see *Changing the columns*), then drops off.
+- A **finished** item moves to **Recently completed** and stays there for 24
+  hours (a team can change that — see *Changing the columns*), then drops off.
+  The note under the heading shows the team's current setting.
 
 ## Who is working right now
 
@@ -112,13 +116,14 @@ it is **up next**, and the **time in that stage** — not the item's total age.
 Rows read like the pipeline, **top to bottom**: **Ready** first, then each
 stage in hand-off order. Within a stage the item that entered it most recently
 is on top, so an item that moves on appears at the top of the next stage's
-block. **Done** items sit at the bottom, the most recently finished first. An
-item that needs you keeps its place in this order.
+block. An item that needs you keeps its place in this order. Finished items
+are listed separately under **Recently completed**, the most recently finished
+first.
 
 ## Changing the columns
 
 Team Admins can open **Columns** to adjust the automatic stages for their
 team: **rename** a stage, **merge** it into another one (its items are then
 shown there), or **hide** it (its items appear in the stage before it). The
-same dialog sets how long finished items stay in **Done**. Without a saved
-configuration the stages are derived automatically.
+same dialog sets how long finished items stay in **Recently completed**.
+Without a saved configuration the stages are derived automatically.

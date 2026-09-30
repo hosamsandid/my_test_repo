@@ -640,7 +640,8 @@ or — for an issue — carries a label a team role consumes (released). An
 issue and the PRs its woken agent opened form one row, linked through the
 pr-created record's correlation id to the waking event — no `Closes #n`
 needed. Dependabot PRs never appear. Finished rows stay for
-`doneRetentionHours` (default 24).
+`doneRetentionHours` (default 24); the console lists them in a separate
+**Recently completed** section below **In progress**, never mixed in (#2607).
 
 **A3.4 — sessions know their work item.** The agent runtime now records a
 `workItem` (`{repo, kind, number}`) on each triggered session, so the

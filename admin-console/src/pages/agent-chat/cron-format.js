@@ -61,6 +61,53 @@ function cronItemError(item, f, nthList) {
   return null;
 }
 
+// Days in each month (February with 29 — a leap-year schedule does fire).
+const MONTH_DAYS = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+// The values a validated, non-`n#k` item selects; null for a lone `L` (the
+// last day exists in every month). `L` ending a range counts as 31.
+function cronItemValues(item, f) {
+  if (f.last && item.toUpperCase() === 'L') return null;
+  const [base, step] = item.split('/');
+  const bounds = base === '*' ? [String(f.min), String(f.max)] : base.split('-');
+  const nums = bounds.map((b, i) => (f.last && i === 1 && b.toUpperCase() === 'L' ? f.max : fieldValue(b, f)));
+  const lo = nums[0];
+  // `a/n` runs from a to the end of the field.
+  const hi = nums.length === 2 ? nums[1] : (step !== undefined ? f.max : lo);
+  const values = [];
+  for (let v = lo; v <= hi; v += step !== undefined ? Number(step) : 1) values.push(v);
+  return values;
+}
+
+// Error for a well-formed expression that can never fire (#2661) — croniter
+// accepts these, but its get_next never finds a run, so the agent silently
+// never schedules them. Mirrors the server check in api/trigger-validate.js.
+function cronNeverFiresError(parts) {
+  const [, , dom, month, dow] = parts;
+  const domValues = new Set();
+  let domLast = false;
+  for (const item of dom.split(',')) {
+    const vals = cronItemValues(item, CRON_FIELDS[2]);
+    if (vals === null) domLast = true;
+    else vals.forEach(v => domValues.add(v));
+  }
+  // `n#k` with a restricted day of month: whether it ever fires depends on the
+  // pair (`15 * 1#3` does, `15 * 1#2` never does), so it is refused outright.
+  if (dow.includes('#') && (domLast || domValues.size < 31)) {
+    return `Weekday "${dow}" (n#k) cannot be combined with a restricted day of month — set day of month to *, otherwise the schedule never fires.`;
+  }
+  // A day of month no selected month has. Only when weekday is `*`: with both
+  // restricted, cron fires on EITHER match.
+  if (dom !== '*' && dow === '*' && !domLast && month !== '*') {
+    const firstDay = Math.min(...domValues);
+    const months = month.split(',').flatMap(item => cronItemValues(item, CRON_FIELDS[3]));
+    if (!months.some(m => firstDay <= MONTH_DAYS[m - 1])) {
+      return `Day ${firstDay} never occurs in the selected month(s), so this schedule never fires.`;
+    }
+  }
+  return null;
+}
+
 // Error message for a cron expression, or null when it is valid.
 export function cronExpressionError(cron) {
   const expr = String(cron ?? '').trim();
@@ -80,7 +127,7 @@ export function cronExpressionError(cron) {
       if (err) return err.charAt(0).toUpperCase() + err.slice(1) + '.';
     }
   }
-  return null;
+  return cronNeverFiresError(parts);
 }
 
 const isInt = v => /^\d+$/.test(String(v ?? '').trim());

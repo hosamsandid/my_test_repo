@@ -1328,10 +1328,15 @@ class GitHubPoller {
         // a held dispatch was delivered (which then dead-ends on "no session").
         if (decision && decision.held) {
           it.outcome.status = 'held';
-          it.outcome.reason = 'wip';
+          // 'wip' (the flow's lane) unless a pooled role's pause/drain held it
+          // ('pool-paused' etc., #2596).
+          it.outcome.reason = decision.reason || 'wip';
           if (decision.wipLimit != null) it.outcome.wipLimit = decision.wipLimit;
         } else {
           it.outcome.status = 'delivered';
+          // #2596: a pooled role's dispatch ran on its per-ticket instance —
+          // record it so the log links that instance, not the role template.
+          if (decision && decision.instanceId) it.outcome.instanceId = decision.instanceId;
         }
       }
     }
@@ -1372,7 +1377,7 @@ class GitHubPoller {
           ghEvent: ghEventForLog,
           repoFullName,
           key: entry.key,
-          outcomes: entry.outcomes.map(({ agentId, triggerId, status, reason, digest, wakeLabel, wipLimit, producer }) => {
+          outcomes: entry.outcomes.map(({ agentId, triggerId, status, reason, digest, wakeLabel, wipLimit, producer, instanceId }) => {
             const o = { agentId, triggerId, status, reason, digest };
             if (wakeLabel !== undefined) o.wakeLabel = wakeLabel;
             // Held-by-WIP outcomes carry the flow's limit so the log row can read
@@ -1380,6 +1385,8 @@ class GitHubPoller {
             if (wipLimit !== undefined) o.wipLimit = wipLimit;
             // A producer-filter drop names who pushed (null = unknown), #2571.
             if (producer !== undefined) o.producer = producer;
+            // The pool instance a pooled role's delivery ran on (#2596).
+            if (instanceId !== undefined) o.instanceId = instanceId;
             return o;
           }),
         }),

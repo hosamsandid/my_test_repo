@@ -308,3 +308,34 @@ test('readEntries (#2525) returns every recorded entry across day files, skippin
   fs.writeFileSync(path.join(TMP, 'unrelated.txt'), 'x');
   assert.deepEqual(eventLog.readEntries().map((e) => e.eventId), ['a', 'b']);
 });
+
+// ── #2596: pooled routing verdict folded into a delivered outcome ─────────
+test('applyPoolDecision stamps the pool instance a delivered outcome ran on', () => {
+  const o = { agentId: 'team-developer', triggerId: 't1', status: 'delivered', reason: null, digest: false };
+  assert.deepEqual(
+    eventLog.applyPoolDecision(o, { held: false, instanceId: 'team-developer-i2562' }),
+    { ...o, instanceId: 'team-developer-i2562' },
+  );
+});
+
+test('applyPoolDecision leaves a non-pooled delivery exactly as it was (AC7)', () => {
+  const o = { agentId: 'dev', triggerId: 't1', status: 'delivered', reason: null, digest: false };
+  assert.equal(eventLog.applyPoolDecision(o, { held: false }), o);
+  assert.equal(eventLog.applyPoolDecision(o, {}), o);
+  assert.equal(eventLog.applyPoolDecision(o, undefined), o);
+  // A WIP hold on the label fast path keeps today's row (out of #2596's scope).
+  assert.equal(eventLog.applyPoolDecision(o, { held: true, reason: 'wip', wipLimit: 2 }), o);
+});
+
+test("applyPoolDecision records a pool pause/drain hold as held, never a link to the role (AC6)", () => {
+  const o = { agentId: 'team-developer', triggerId: 't1', status: 'delivered', reason: null, digest: false };
+  const r = eventLog.applyPoolDecision(o, { held: true, reason: 'pool-paused' });
+  assert.equal(r.status, 'held');
+  assert.equal(r.reason, 'pool-paused');
+  assert.equal(r.instanceId, undefined);
+});
+
+test('applyPoolDecision never touches a non-delivered outcome', () => {
+  const o = { agentId: 'a', status: 'dropped', reason: 'throttle' };
+  assert.equal(eventLog.applyPoolDecision(o, { instanceId: 'a-i1' }), o);
+});

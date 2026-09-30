@@ -87,7 +87,7 @@ test('_enqueue creates the decision, passes it down and returns it to the fan-ou
 test('the fan-out records the true status and never overwrites the digest path', () => {
   const body = slice(POLLER, 'if (decision && decision.held) {', '\n    }\n', 600);
   assert.match(body, /it\.outcome\.status = 'held';/);
-  assert.match(body, /it\.outcome\.reason = 'wip';/);
+  assert.match(body, /it\.outcome\.reason = decision\.reason \|\| 'wip';/);
   assert.match(body, /if \(decision\.wipLimit != null\) it\.outcome\.wipLimit = decision\.wipLimit;/);
   assert.match(body, /\} else \{\n\s+it\.outcome\.status = 'delivered';/, 'not-held must still record delivered');
   // The digest path stamps its own 'delivered' a few dozen lines up and must not

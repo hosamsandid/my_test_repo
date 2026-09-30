@@ -256,6 +256,7 @@ projection** — same pattern as the `github-io` block (#380):
 | `outcome-without-consumer` | warning | An outcome's signal has no listener anywhere in the flow (successor of `dead-end-emitter` for outcome edges; `none` actions are exempt). |
 | `switch-with-one-option` | info | `exactlyOne` with fewer than two options — not a branch. |
 | `same-label-multiple-outcomes` | warning | Under `exactlyOne`, two options set the same label — the consumers cannot distinguish the branches. |
+| `label-target-mismatch` | warning | A `setLabel` lands on a PR (or an issue) — explicit `target: 'pr'\|'issue'`, else implied by an `openPr`/`openIssue` in the same outcome or by the producer's PR-only / issue-only triggers — but a consumer on that label only listens on the other `*.labeled` event, so it never wakes (#2629). |
 | `human-label-as-outcome` | error | An outcome action sets a `human:*` / brake label (extends today's `gate-violation`). |
 
 Existing lints keep working: `orphan-listener` unchanged; `dead-end-emitter` computes over the

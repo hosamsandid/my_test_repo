@@ -676,6 +676,27 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
             send_formatted=None, blueprint_id=None,
         ), client
 
+    # -- #2603: the run's correlationId rides on the notice ----------------------
+
+    async def test_correlation_id_added_when_known(self):
+        """#2603: the notice names its run so the chat can open its session log."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t1", "type": "cron", "description": "Nightly"}
+        await scheduler._post_trigger_notice(trigger, None, "!room:local", "trigger:t1:1700000000000")
+        meta = client.room_send.call_args.kwargs["content"]["io.aee.trigger"]
+        self.assertEqual(meta["correlationId"], "trigger:t1:1700000000000")
+        # The #158 keys are untouched.
+        self.assertEqual(meta["triggerId"], "t1")
+        self.assertEqual(meta["triggerType"], "cron")
+        self.assertIsNone(meta["event"])
+
+    async def test_correlation_id_omitted_when_unknown(self):
+        """#2603: without a correlationId the envelope keeps its original keys."""
+        scheduler, client = self._scheduler()
+        await scheduler._post_trigger_notice({"id": "t1", "type": "cron"}, None, "!room:local")
+        meta = client.room_send.call_args.kwargs["content"]["io.aee.trigger"]
+        self.assertEqual(set(meta), {"triggerId", "triggerType", "event"})
+
     # -- AC1: friendly event name -----------------------------------------------
 
     async def test_friendly_event_name_replaces_raw_key(self):

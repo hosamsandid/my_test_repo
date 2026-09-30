@@ -6726,7 +6726,8 @@ class TriggerScheduler:
         return None
 
     async def _post_trigger_notice(self, trigger: dict, ctx: dict | None,
-                                   room_id: str) -> None:
+                                   room_id: str,
+                                   correlation_id: str | None = None) -> None:
         """Send the m.notice envelope that issue #158 republishes.
 
         Keys are fixed:
@@ -6734,6 +6735,10 @@ class TriggerScheduler:
           io.aee.trigger.triggerId   (string)
           io.aee.trigger.triggerType (string)
           io.aee.trigger.event       (string|None — None for non-github triggers)
+
+        Additive (#2603): io.aee.trigger.correlationId (string, only when
+        known) — the run's session-log correlationId, so Agent Chat's "Show in
+        session log" button can open the run the notice announces.
         """
         ttype = trigger.get("type", "")
         tid = trigger.get("id", "")
@@ -6821,6 +6826,8 @@ class TriggerScheduler:
                 "event": gh.get("event") or None,
             },
         }
+        if isinstance(correlation_id, str) and correlation_id:
+            content["io.aee.trigger"]["correlationId"] = correlation_id
         # AC3: carry the HTML so the abbreviated `[#N](url)` link renders in the
         # Admin Console and other Matrix clients; the plain `body` (`#N (url)`)
         # stays the fallback for clients that ignore formatting. AC7: the
@@ -7268,7 +7275,7 @@ class TriggerScheduler:
         _bump_active(+1, session)
         try:
             try:
-                await self._post_trigger_notice(trigger, ctx, room_id)
+                await self._post_trigger_notice(trigger, ctx, room_id, correlation_id)
             except Exception as exc:
                 print(
                     f"[Runner:{self._agent_id}] Could not post trigger notice for "

@@ -84,3 +84,12 @@ export function buildCredentialSubmit(draft, descriptors) {
 export function isCredentialDraftDirty(draft, descriptors) {
   return Object.keys(buildCredentialSubmit(draft, descriptors).values).length > 0;
 }
+
+// The Plugins page shows every team scope the viewer can see; the Team-Settings
+// service-account surface (#2608) pins the section to ONE team (its team-agent
+// id == the team-granularity scopeId). `onlyScopeId` null/absent keeps all.
+export function selectScopes(scopes, onlyScopeId) {
+  const list = Array.isArray(scopes) ? scopes : [];
+  if (!onlyScopeId) return list;
+  return list.filter((s) => s && s.scopeId === onlyScopeId);
+}

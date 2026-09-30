@@ -140,3 +140,30 @@ test('onceScheduleLabel shows an absolute instant in the viewer zone and a naive
   assert.equal(onceScheduleLabel('', opts), '—');
   assert.equal(onceScheduleLabel(undefined, opts), '—');
 });
+
+// Review S4: an overdue once trigger (held back by Maintenance Mode) keeps a
+// past nextFireAt — say so rather than "Next: today 09:00" after 09:00.
+test('triggerTiming marks a next run in the past as overdue', () => {
+  const status = { triggers: { o: { nextFireAt: new Date(SUMMER.getTime() - 60000).toISOString() } } };
+  const got = triggerTiming({ id: 'o', type: 'once' }, status, { now: SUMMER, viewerZone: 'UTC' });
+  assert.match(got.next, /^today \d\d:\d\d \(overdue\)$/);
+  const future = { triggers: { o: { nextFireAt: new Date(SUMMER.getTime() + 60000).toISOString() } } };
+  assert.doesNotMatch(triggerTiming({ id: 'o', type: 'once' }, future, { now: SUMMER, viewerZone: 'UTC' }).next, /overdue/);
+});
+
+// Review S1: a run cut off by a restart/cancellation is reported as such.
+test('resultLabel: interrupted runs read as an error', () => {
+  assert.deepEqual(resultLabel('interrupted'), { text: 'interrupted', tone: 'error' });
+});
+
+// Review S3: TriggersPanel.jsx is JSX (#651) — a source guard pins that the
+// status of a previously viewed agent is cleared on switch and a late
+// response for another agent id is dropped (trigger ids repeat across agents).
+test('TriggersPanel drops trigger status that belongs to another agent', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const src = fs.readFileSync(path.join(import.meta.dirname, 'TriggersPanel.jsx'), 'utf8');
+  assert.match(src, /statusAgentRef\.current = agentId;\s*setTriggerStatus\(null\);\s*\}, \[agentId\]\);/);
+  assert.match(src, /\.then\(\(body\) => \{\s*if \(statusAgentRef\.current === id\) setTriggerStatus\(/);
+  assert.match(src, /\.catch\(\(\) => \{ if \(statusAgentRef\.current === id\) setTriggerStatus\(null\); \}\)/);
+});

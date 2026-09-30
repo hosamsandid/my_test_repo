@@ -12,6 +12,8 @@ or directly:
     python3 agent-image/scripts/test_agent_entrypoint.py
 """
 import asyncio
+import inspect
+import types
 import importlib.util
 import json
 import os
@@ -1957,6 +1959,75 @@ class TriggerScheduleStatus(unittest.IsolatedAsyncioTestCase):
         with patch.object(scheduler, "_execute_inner", AsyncMock(side_effect=RuntimeError("x"))):
             await scheduler._execute_guarded({"id": "c1"}, None, None)
         self.assertEqual(scheduler._exec_results["c1"], "error")
+
+    async def test_execute_guarded_records_still_running_and_backstop_skips(self):
+        # Review S2: both early returns record "skipped", not the default "ok".
+        scheduler = self._scheduler()
+        scheduler._running.add("c1")
+        await scheduler._execute_guarded({"id": "c1"}, None, None)
+        self.assertEqual(scheduler._exec_results["c1"], "skipped")
+        scheduler = self._scheduler()
+        denied = types.SimpleNamespace(allowed=False, warn=False, reason="rate",
+                                       active=1, window_count=1)
+        with patch.object(scheduler._backstop, "try_acquire", return_value=denied), \
+             patch.object(scheduler, "_execute_inner", AsyncMock()) as inner:
+            await scheduler._execute_guarded({"id": "c1"}, None, None)
+        inner.assert_not_called()
+        self.assertEqual(scheduler._exec_results["c1"], "skipped")
+
+    async def test_failing_precheck_is_recorded_as_skipped(self):
+        # Review S2: drives the real _execute_inner, whose preCheck gate
+        # returns "skipped" before Claude is called.
+        scheduler = self._scheduler()
+        with patch.object(entrypoint, "_run_pre_check", return_value=(1, "")):
+            await scheduler._execute_guarded(
+                {"id": "c1", "preCheckScript": "exit 1"}, None, None)
+        self.assertEqual(scheduler._exec_results["c1"], "skipped")
+
+    async def test_cron_runner_records_error_when_execute_raises(self):
+        scheduler = self._scheduler()
+
+        async def boom(_t):
+            raise RuntimeError("x")
+        await self._run_cron_once(scheduler, boom)
+        self.assertEqual(scheduler._trigger_status["c1"]["lastResult"], "error")
+
+    async def test_cancelled_run_is_recorded_as_interrupted(self):
+        # Review S1: a runner cancelled mid-run must not leave "running".
+        scheduler = self._scheduler()
+        started = asyncio.Event()
+
+        async def hang(_t):
+            started.set()
+            await asyncio.Event().wait()
+        with patch.object(scheduler, "_execute", AsyncMock(side_effect=hang)), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            orig_sleep = asyncio.sleep
+            with patch.object(entrypoint.asyncio, "sleep", AsyncMock(return_value=None)):
+                task = asyncio.create_task(
+                    scheduler._cron_runner({"id": "c1", "type": "cron"}, "* * * * *"))
+                await started.wait()
+            self.assertEqual(scheduler._trigger_status["c1"]["lastResult"], "running")
+            task.cancel()
+            await orig_sleep(0)
+            await orig_sleep(0)
+        self.assertTrue(task.done())
+        self.assertEqual(scheduler._trigger_status["c1"]["lastResult"], "interrupted")
+
+    def test_running_status_left_by_a_restart_becomes_interrupted(self):
+        # Review S1: start() rewrites a stale "running" from before a restart.
+        scheduler = self._scheduler()
+        scheduler._trigger_status = {
+            "c1": {"lastFiredAt": "2026-09-30T07:00:00Z", "lastResult": "running"},
+            "c2": {"lastResult": "ok"},
+        }
+        scheduler._mark_interrupted_runs()
+        self.assertEqual(scheduler._trigger_status["c1"],
+                         {"lastFiredAt": "2026-09-30T07:00:00Z", "lastResult": "interrupted"})
+        self.assertEqual(scheduler._trigger_status["c2"], {"lastResult": "ok"})
+        # …and start() applies it right after loading the status file.
+        src = inspect.getsource(entrypoint.TriggerScheduler.start)
+        self.assertRegex(src, r"_load_trigger_status\(\)\n\s+self\._mark_interrupted_runs\(\)")
 
     def test_status_file_round_trips_with_the_time_zone(self):
         pc = unittest.mock.MagicMock()

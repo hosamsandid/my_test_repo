@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router';
 import { RefreshCw, Clock, CalendarClock, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch, Repeat, Puzzle } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
@@ -1900,6 +1900,14 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
   // #2628: the agent scheduler's per-trigger next/last run + scheduling
   // errors. Live agents only; a failed read just shows no status line.
   const [triggerStatus, setTriggerStatus] = useState(null);
+  // Trigger ids repeat across agents (template ids), so a status fetched for
+  // the previous agent must never be shown on this one: clear it on switch and
+  // drop late responses for another id. Not cleared per poll (no flicker).
+  const statusAgentRef = useRef(agentId);
+  useEffect(() => {
+    statusAgentRef.current = agentId;
+    setTriggerStatus(null);
+  }, [agentId]);
 
   const fetchTriggers = useCallback(async (id) => {
     if (!id) { setTriggers([]); return; }
@@ -1911,8 +1919,10 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
       setTriggers(list);
       if (ops.mode !== 'draft' && list.some((t) => t && (t.type === 'cron' || t.type === 'once'))) {
         apiCall('GET', `/api/agents/${encodeURIComponent(id)}/trigger-status`)
-          .then((body) => setTriggerStatus(body && typeof body === 'object' ? body : null))
-          .catch(() => setTriggerStatus(null));
+          .then((body) => {
+            if (statusAgentRef.current === id) setTriggerStatus(body && typeof body === 'object' ? body : null);
+          })
+          .catch(() => { if (statusAgentRef.current === id) setTriggerStatus(null); });
       }
       if (ops.mode !== 'draft' && list.some((t) => t && t.type === 'github-event')) {
         apiCall('GET', '/api/github-events/repo-status')

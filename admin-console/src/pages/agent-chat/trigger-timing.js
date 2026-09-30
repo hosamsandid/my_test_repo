@@ -141,6 +141,7 @@ export const RESULT_LABELS = Object.freeze({
   skipped: { text: 'skipped', tone: 'muted' },
   'skipped-maintenance': { text: 'skipped (maintenance)', tone: 'muted' },
   running: { text: 'running…', tone: 'muted' },
+  interrupted: { text: 'interrupted', tone: 'error' },
 });
 
 /** Label for a `lastResult` value; unknown values pass through unchanged. */
@@ -155,7 +156,8 @@ export function resultLabel(result) {
  *
  * Returns { invalid, next, last, lastResult } where
  *   invalid    — the scheduler's reason it cannot schedule the trigger, or null
- *   next       — "today 18:26" etc. (viewer-local), null when none is armed
+ *   next       — "today 18:26" etc. (viewer-local), "… (overdue)" once past,
+ *                null when none is armed
  *   last       — viewer-local label of the last fire, null if it never fired
  *   lastResult — resultLabel() of the last fire, or null
  */
@@ -165,9 +167,12 @@ export function triggerTiming(trigger, status, { now = new Date(), viewerZone = 
   const enabled = trigger.enabled !== false;
   const invalid = enabled && typeof entry.invalid === 'string' && entry.invalid ? entry.invalid : null;
   const opts = { now, timeZone: viewerZone };
+  let next = enabled && !invalid ? formatRunTime(entry.nextFireAt, opts) : null;
+  // A once trigger held back (e.g. by Maintenance Mode) keeps a past fire time.
+  if (next && new Date(entry.nextFireAt) < now) next += ' (overdue)';
   return {
     invalid,
-    next: enabled && !invalid ? formatRunTime(entry.nextFireAt, opts) : null,
+    next,
     last: formatRunTime(entry.lastFiredAt, opts),
     lastResult: entry.lastFiredAt ? resultLabel(entry.lastResult) : null,
   };

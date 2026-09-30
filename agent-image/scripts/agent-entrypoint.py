@@ -4210,7 +4210,8 @@ def _save_triggers(triggers: list[dict]) -> None:
 # isolated agent's volume). Shape:
 #   {"timeZone": "Europe/Berlin", "updatedAt": "<iso>",
 #    "triggers": {<id>: {"nextFireAt"?, "lastFiredAt"?, "lastResult"?, "invalid"?}}}
-# `lastResult` is one of running / ok / error / skipped / skipped-maintenance.
+# `lastResult` is one of running / ok / error / skipped / skipped-maintenance /
+# interrupted (a run cut off by a restart or cancellation).
 _TRIGGER_STATUS_FILENAME = "trigger-status.json"
 
 
@@ -4970,6 +4971,7 @@ class TriggerScheduler:
         await self._reconcile_in_flight()
         self._capture_stale_launched_loops()
         self._trigger_status = _load_trigger_status()
+        self._mark_interrupted_runs()
         await self._sync()
         self._sync_task = asyncio.create_task(self._sync_loop())
         self._pending_task = asyncio.create_task(self._pending_loop())
@@ -5585,7 +5587,18 @@ class TriggerScheduler:
                     result = "error"
                 self._set_trigger_status(tid, lastResult=result)
         except asyncio.CancelledError:
+            # Cancelled mid-run (disable / reschedule): don't leave "running".
+            if (self._trigger_status.get(tid) or {}).get("lastResult") == "running":
+                self._set_trigger_status(tid, lastResult="interrupted")
             return
+
+    def _mark_interrupted_runs(self) -> None:
+        """A run still recorded as "running" at start-up was cut off by a
+        restart; record it as "interrupted" instead of "running" until the
+        next fire (#2628 review S1)."""
+        for tid, entry in list(self._trigger_status.items()):
+            if isinstance(entry, dict) and entry.get("lastResult") == "running":
+                self._set_trigger_status(tid, lastResult="interrupted")
 
     @staticmethod
     def _latest_trigger(tasks: dict[str, dict], tid: str, fallback: dict) -> dict:
@@ -7081,12 +7094,13 @@ class TriggerScheduler:
         serialization gate is held (by ``_execute`` for a non-loop caller, or by
         the loop runner's ``acquire_loop`` for a loop iteration)."""
         tid = trigger.get("id", "?")
+        # Outcome read back by the cron runner for the trigger list (#2628) —
+        # set before the still-running check so that skip is recorded too.
+        self._exec_results[tid] = "skipped"
         if tid in self._running:
             print(f"[Runner:{self._agent_id}] Trigger {tid} still running — skipping",
                   file=sys.stderr)
             return
-        # Outcome read back by the cron runner for the trigger list (#2628).
-        self._exec_results[tid] = "skipped"
         # Blast-radius backstop (#611): drop the spawn if this agent is already
         # at its concurrency ceiling or over its spawn-rate for the window, so a
         # self-triggering loop can't grow unbounded. Surfaced once per episode

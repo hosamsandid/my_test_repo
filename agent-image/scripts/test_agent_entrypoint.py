@@ -1797,6 +1797,165 @@ class MaintenanceModeGating(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(maintenance_calls), 2)
 
 
+class TriggerEditTakesEffect(unittest.IsolatedAsyncioTestCase):
+    """#2627: editing a trigger without changing its schedule (prompt,
+    description, roomId, …) must reach the next run — the running cron task is
+    kept, but it fires with the trigger as of the latest sync."""
+
+    EXPR = "*/1 * * * *"
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir",
+                               return_value=Path(self._tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        scheduler = entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+        self.addAsyncCleanup(scheduler.stop)
+        return scheduler
+
+    def _cron(self, prompt, **extra):
+        return {"id": "c1", "type": "cron", "enabled": True,
+                "cron": self.EXPR, "prompt": prompt, **extra}
+
+    async def _run_with_gated_sleep(self, scheduler, steps):
+        """Run `steps` (async callables) while every cron sleep blocks on a
+        gate; the gate opens after the last step so the runner fires once."""
+        real_sleep = asyncio.sleep
+        gate = asyncio.Event()
+
+        async def fake_sleep(delay, *args, **kwargs):
+            if delay == 0:
+                return await real_sleep(0)
+            await gate.wait()
+
+        async def fake_execute(_trigger, *args, **kwargs):
+            scheduler._shutdown_event.set()
+
+        execute_mock = AsyncMock(side_effect=fake_execute)
+        with patch.object(scheduler, "_execute", execute_mock), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             patch.object(entrypoint.asyncio, "sleep", fake_sleep):
+            for step in steps:
+                await step()
+                await real_sleep(0)
+            gate.set()
+            for _ in range(5):
+                await real_sleep(0)
+        return execute_mock
+
+    async def test_prompt_only_edit_reaches_next_run(self):
+        scheduler = self._scheduler()
+        tasks = []
+
+        async def sync_with(trigger):
+            with patch.object(entrypoint, "_load_triggers", return_value=[trigger]):
+                await scheduler._sync()
+            tasks.append(scheduler._cron_tasks["c1"]["task"])
+
+        execute_mock = await self._run_with_gated_sleep(scheduler, [
+            lambda: sync_with(self._cron("cron ok v1")),
+            lambda: sync_with(self._cron("cron ok VERSION-2", description="new")),
+        ])
+        # Same schedule → the running task is kept, not rescheduled…
+        self.assertIs(tasks[0], tasks[1])
+        # …and its next fire uses the edited prompt and description.
+        execute_mock.assert_called_once()
+        fired = execute_mock.call_args.args[0]
+        self.assertEqual(fired["prompt"], "cron ok VERSION-2")
+        self.assertEqual(fired["description"], "new")
+
+    async def test_disable_after_edit_still_stops_next_run(self):
+        scheduler = self._scheduler()
+
+        async def sync_with(triggers):
+            with patch.object(entrypoint, "_load_triggers", return_value=triggers):
+                await scheduler._sync()
+
+        task_holder = {}
+
+        async def first():
+            await sync_with([self._cron("v1")])
+            task_holder["task"] = scheduler._cron_tasks["c1"]["task"]
+
+        execute_mock = await self._run_with_gated_sleep(scheduler, [
+            first,
+            lambda: sync_with([self._cron("v2")]),
+            lambda: sync_with([self._cron("v2", enabled=False)]),
+        ])
+        execute_mock.assert_not_called()
+        self.assertNotIn("c1", scheduler._cron_tasks)
+        # The runner swallows its CancelledError, so it ends done, not cancelled.
+        self.assertTrue(task_holder["task"].done())
+
+    async def test_delete_after_edit_still_stops_next_run(self):
+        scheduler = self._scheduler()
+
+        async def sync_with(triggers):
+            with patch.object(entrypoint, "_load_triggers", return_value=triggers):
+                await scheduler._sync()
+
+        execute_mock = await self._run_with_gated_sleep(scheduler, [
+            lambda: sync_with([self._cron("v1")]),
+            lambda: sync_with([self._cron("v2")]),
+            lambda: sync_with([]),
+        ])
+        execute_mock.assert_not_called()
+        self.assertNotIn("c1", scheduler._cron_tasks)
+
+    async def test_duplicate_ids_do_not_cancel_each_other(self):
+        scheduler = self._scheduler()
+        first = self._cron("first")
+        second = {**self._cron("second"), "cron": "0 * * * *"}
+        with patch.object(entrypoint, "_load_triggers", return_value=[first, second]), \
+             patch.object(scheduler, "_cron_runner", AsyncMock()) as runner_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._sync()
+            task = scheduler._cron_tasks["c1"]["task"]
+            await scheduler._sync()
+            await asyncio.sleep(0)
+        # The first trigger wins and stays scheduled across syncs; the
+        # duplicate is warned about once, not scheduled.
+        runner_mock.assert_called_once()
+        self.assertIs(scheduler._cron_tasks["c1"]["task"], task)
+        self.assertEqual(scheduler._cron_tasks["c1"]["expr"], self.EXPR)
+        self.assertEqual(scheduler._cron_tasks["c1"]["trigger"]["prompt"], "first")
+        self.assertEqual(scheduler._duplicate_notified, {"c1"})
+
+    async def test_running_loop_picks_up_the_edited_trigger(self):
+        scheduler = self._scheduler()
+        v1 = {"id": "lp", "type": "loop", "enabled": True,
+              "maxIterations": 5, "prompt": "v1"}
+        v2 = {**v1, "prompt": "v2"}
+        blocker = asyncio.Event()
+
+        async def fake_runner(_trigger):
+            await blocker.wait()
+
+        with patch.object(scheduler, "_loop_runner", fake_runner), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            with patch.object(entrypoint, "_load_triggers", return_value=[v1]):
+                await scheduler._sync()
+            task = scheduler._loop_tasks["lp"]["task"]
+            with patch.object(entrypoint, "_load_triggers", return_value=[v2]):
+                await scheduler._sync()
+            self.assertIs(scheduler._loop_tasks["lp"]["task"], task)
+            latest = scheduler._latest_trigger(scheduler._loop_tasks, "lp", v1)
+            self.assertEqual(latest["prompt"], "v2")
+            blocker.set()
+            await task
+
+    def test_latest_trigger_falls_back_to_the_runner_copy(self):
+        own = {"id": "c1", "prompt": "own"}
+        self.assertIs(entrypoint.TriggerScheduler._latest_trigger({}, "c1", own), own)
+
+
 class LoopTriggerValidation(unittest.TestCase):
     """#932: a `loop` trigger must declare a positive-integer `maxIterations`
     (no unbounded loop may be authored); optional `until`/`minGapSeconds` are

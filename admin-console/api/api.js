@@ -578,17 +578,21 @@ app.get('/api/github-events', (req, res) => {
     until: req.query.until,
     limit: Number(req.query.limit) || undefined,
   });
-  const nameCache = new Map();
-  const agentName = (agentId) => {
-    if (!nameCache.has(agentId)) {
-      const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
-      nameCache.set(agentId, cfg?.name || agentId);
+  const configCache = new Map();
+  const readConfig = (agentId) => {
+    if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) return null;
+    if (!configCache.has(agentId)) {
+      configCache.set(agentId, readJsonFile(path.join(AGENTS_DIR, path.basename(agentId), 'config.json'), null));
     }
-    return nameCache.get(agentId);
+    return configCache.get(agentId);
   };
+  const agentName = (agentId) => readConfig(agentId)?.name || agentId;
   res.json(entries.map((e) => ({
     ...e,
-    outcomes: (e.outcomes || []).map((o) => ({ ...o, agentName: agentName(o.agentId) })),
+    // #2596: a pooled delivery also names/links the instance that ran it.
+    outcomes: (e.outcomes || []).map((o) => githubEventLog.projectPoolInstance(
+      { ...o, agentName: agentName(o.agentId) }, readConfig,
+    )),
   })));
 });
 

@@ -18,7 +18,7 @@ export const OUTCOME_LEGEND = [
   {
     key: 'delivered',
     term: 'delivered → <agent>',
-    meaning: 'The event matched a trigger and woke that agent — a session ran.',
+    meaning: 'The event matched a trigger and woke that agent — a session ran. For an auto-scaled role it names the per-ticket instance that ran it (e.g. "Developer · #2562").',
     whatToDo: 'Nothing to do. Click a delivered chip to open the session it started.',
   },
   {
@@ -118,6 +118,9 @@ export function outcomeTooltip(outcome) {
   if (key === 'drop-unknown') {
     const reason = (outcome && outcome.reason) || 'unknown';
     return `Dropped by a protection layer (${reason}). Not one of the standard reasons — check the orchestrator logs if unexpected.`;
+  }
+  if (key === 'held' && typeof outcome.reason === 'string' && outcome.reason.startsWith('pool-')) {
+    return "The event matched a trigger of an auto-scaled role, but the role is paused, draining or off, so no instance took the work yet. Nothing is lost — it is delivered once the role resumes (Flow Control).";
   }
   const entry = LEGEND_BY_KEY[key];
   return `${entry.meaning} ${entry.whatToDo}`;

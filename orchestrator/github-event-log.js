@@ -64,6 +64,26 @@ function buildEventEntry({ ghEvent, repoFullName, key, outcomes }) {
   };
 }
 
+// #2596: fold a pooled role's routing verdict (the `decision` out-parameter
+// `enqueuePending` fills) into a delivered outcome, for the producers that
+// record `delivered` up front (label fast-path, manual re-fire):
+// - routed to a pool instance → stamp its `instanceId`, so the Event Log links
+//   the instance that ran it rather than the role template;
+// - held (the flow's WIP lane, or a pooled role's pause/drain/off control) →
+//   `held` with that reason (`'wip'` by default, plus `wipLimit`), mirroring the
+//   poller's fan-out, so no link points at a session that never ran.
+// A dispatch that ran with no `instanceId` (non-pooled) is returned unchanged.
+function applyPoolDecision(outcome, decision) {
+  if (!outcome || outcome.status !== 'delivered' || !decision) return outcome;
+  if (decision.held) {
+    const held = { ...outcome, status: 'held', reason: decision.reason || 'wip' };
+    if (decision.wipLimit != null) held.wipLimit = decision.wipLimit;
+    return held;
+  }
+  if (typeof decision.instanceId !== 'string' || !decision.instanceId) return outcome;
+  return { ...outcome, instanceId: decision.instanceId };
+}
+
 // Append one entry as a JSONL line to the current day's file. Never throws.
 function record(entry) {
   try {
@@ -129,6 +149,7 @@ module.exports = {
   EVENT_LOG_DIR,
   RETENTION_DAYS,
   buildEventEntry,
+  applyPoolDecision,
   extractWorkItem,
   record,
   readEntries,

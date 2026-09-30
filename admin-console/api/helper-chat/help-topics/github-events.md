@@ -156,6 +156,10 @@ A `delivered` or `digested` outcome may carry the **wake label** in brackets: th
 label that actually satisfied the subscriber's filter. No bracket means the
 listener takes any label.
 
+For a pooled role, `delivered` names and opens the ticket's instance
+(*Developer · #2562*); once it is removed, the click says so. **held (role
+paused)**: fires when the role resumes.
+
 *One caveat about digests as currently recorded:* the fold itself is real and
 lossless, but a folded event is written to the log as **`delivered`** with a
 separate digest marker rather than as a `digest` status — so today a digested

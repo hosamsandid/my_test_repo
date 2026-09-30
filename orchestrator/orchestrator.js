@@ -1906,13 +1906,17 @@ async function wakeGithubLabelListeners({ repo, number, kind, label, actor, sour
     eventId: `intlbl:${crypto.randomBytes(6).toString('hex')}`,
     now,
   });
+  // #2596: per-listener enqueue verdict, read back for the log outcome below.
+  const decisions = new Map();
   for (const l of listeners) {
     // Enqueue first (immediate wake), then arm the dedup marker so the
     // poller's later delivery of the same label is dropped.
+    const decision = {};
     enqueuePending(l.agentId, {
       ...labelFastPath.buildPendingEntry(l.triggerId, key, ghEvent),
       source,
-    });
+    }, { decision });
+    decisions.set(l, decision);
     labelDedupMarkers.add({
       agentId: l.agentId, triggerId: l.triggerId,
       repo, kind, number, label, appliedAt: now,
@@ -1927,10 +1931,10 @@ async function wakeGithubLabelListeners({ repo, number, kind, label, actor, sour
   githubEventLog.record({
     ...githubEventLog.buildEventEntry({
       ghEvent, repoFullName: repo, key,
-      outcomes: listeners.map((l) => ({
+      outcomes: listeners.map((l) => githubEventLog.applyPoolDecision({
         agentId: l.agentId, triggerId: l.triggerId,
         status: 'delivered', reason: null, digest: false, wakeLabel: label,
-      })),
+      }, decisions.get(l))),
     }),
     source,
   });
@@ -2038,9 +2042,10 @@ async function refireGithubEvent({ agentId, eventId, triggerId, actor }) {
       now,
     });
     const logFields = githubRefire.buildRefireLogFields({ entry, outcome, actor });
+    const decision = {};
     const ok = enqueuePending(agentId, githubRefire.buildRefirePendingEntry({
       triggerId, key, ghEvent, wakeLabel, refireOf: logFields.refireOf,
-    }));
+    }), { decision });
     if (!ok) {
       return { status: 500, body: { ok: false, code: "enqueue-failed", error: "Could not queue the wake for the agent." } };
     }
@@ -2053,7 +2058,8 @@ async function refireGithubEvent({ agentId, eventId, triggerId, actor }) {
     const logEntry = {
       ...githubEventLog.buildEventEntry({
         ghEvent, repoFullName: entry.repo, key,
-        outcomes: [{ agentId, triggerId, status: "delivered", reason: null, digest: false, wakeLabel }],
+        outcomes: [githubEventLog.applyPoolDecision(
+          { agentId, triggerId, status: "delivered", reason: null, digest: false, wakeLabel }, decision)],
       }),
       ...logFields,
     };
@@ -10734,7 +10740,8 @@ function enqueuePending(agentId, entry, { admissionChecked = false, decision = n
     }
   }
   // Agent instance pools (#2246): route onto the item-keyed instance.
-  const pooled = routePooledDispatch(agentId, entry); // #2281: held already durable
+  // #2596: `decision` also learns the pool instance it lands on (or the hold).
+  const pooled = routePooledDispatch(agentId, entry, decision); // #2281: held already durable
   if (pooled) {
     if (pooled.held) return true;
     if (pooled.spawning) return true;
@@ -11293,7 +11300,13 @@ async function spawnPoolInstance(teamId, templateCfg, instanceId, itemKey, { rep
 // unchanged) or `{ targetId, spawning }` — `spawning: true` means the caller
 // should treat the dispatch as durably admitted (it will land the moment the
 // async spawn above finishes) rather than write it anywhere itself.
-function routePooledDispatch(agentId, entry) {
+//
+// `out` (#2596) is `enqueuePending`'s optional `decision` out-parameter: it
+// learns the instance the dispatch lands on (`instanceId` — deterministic per
+// work item, so known even while spawning) or, for a pause/drain/off hold,
+// `held` with reason `pool-<state>`, so the GitHub Event Log links the
+// instance that ran the event instead of the role template.
+function routePooledDispatch(agentId, entry, out = null) {
   let cfg = null;
   try {
     cfg = loadAgentConfig(agentId);
@@ -11329,6 +11342,9 @@ function routePooledDispatch(agentId, entry) {
     // An ordinary `max-instances` refusal is unaffected — that ticket is
     // still governed by the team's admission lane/reconcile tick, which is
     // what already promotes it once a slot frees.
+    if (out && agentPool.POOL_CONTROL_STATES.includes(decision.reason)) {
+      Object.assign(out, { held: true, reason: `pool-${decision.reason}` }); // #2596
+    }
     if (agentPool.POOL_CONTROL_STATES.includes(decision.reason)) {
       const held = agentPool.normalizePausedHold(loadPausedHold(teamId));
       held[roleId] = [...(held[roleId] || []), { agentId, entry, heldAt: new Date().toISOString() }];
@@ -11342,6 +11358,7 @@ function routePooledDispatch(agentId, entry) {
     console.warn(`[AgentPool] ${agentId}: refused to spawn ${decision.instanceId} (${decision.reason})`);
     return null;
   }
+  if (out) out.instanceId = decision.instanceId;
   if (decision.action === 'reuse') {
     return { targetId: decision.instanceId, spawning: false };
   }

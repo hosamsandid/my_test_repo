@@ -41,3 +41,33 @@ export function findFinishedSessionMatch(history, correlationId) {
     s => s && Array.isArray(s.correlationIds) && s.correlationIds.includes(correlationId),
   ) || null;
 }
+
+// Where the delivered chip of one outcome should take the user (#2596). A
+// pooled role's delivery ran on its per-ticket instance (`instanceId`), so the
+// session lives in the instance's chat, not the role's:
+// - `{ kind: 'agent', agentId }` — open this agent's chat (the instance while it
+//   still exists; the recorded agent for every non-pooled or pre-#2596 row);
+// - `{ kind: 'reaped', instanceName, poolRoleId, poolRoleName }` — the instance
+//   was removed, so there is no chat to open; the caller says so and offers
+//   the pooled role's chat, labelled as such, instead of silently opening it.
+// `instanceExists` is filled in by GET /api/github-events; a row without it is
+// treated as existing, so a missing flag never hides a working link.
+// Null when the outcome is not linkable at all (see isSessionOutcome).
+export function sessionLinkTarget(outcome) {
+  if (!isSessionOutcome(outcome)) return null;
+  const instanceId = typeof outcome.instanceId === 'string' && outcome.instanceId ? outcome.instanceId : null;
+  if (!instanceId) return outcome.agentId ? { kind: 'agent', agentId: outcome.agentId } : null;
+  if (outcome.instanceExists !== false) return { kind: 'agent', agentId: instanceId };
+  return {
+    kind: 'reaped',
+    instanceName: outcome.instanceName || instanceId,
+    poolRoleId: outcome.agentId || null,
+    poolRoleName: outcome.poolRoleName || outcome.agentId || null,
+  };
+}
+
+// The notice shown instead of a link when the instance is gone (#2596 AC5).
+export function reapedInstanceNotice(target) {
+  if (!target || target.kind !== 'reaped') return null;
+  return `${target.instanceName} no longer exists — pool instances are removed after their ticket is done, so this session can no longer be opened.`;
+}

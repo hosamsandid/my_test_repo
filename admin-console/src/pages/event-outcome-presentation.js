@@ -38,16 +38,27 @@ export function producerFilterText(producer) {
     : 'producer unknown';
 }
 
+// #2596: a pooled role's per-ticket instance cannot take the work while the
+// role itself is paused / draining / off; the orchestrator holds the dispatch
+// with reason `pool-<state>`.
+const POOL_HOLD_TEXT = { 'pool-paused': 'role paused', 'pool-draining': 'role draining', 'pool-off': 'role off' };
+
 export function outcomeLabel(outcome, { refired = false } = {}) {
   const o = outcome && typeof outcome === 'object' ? outcome : {};
   const wakeSuffix = typeof o.wakeLabel === 'string' ? ` (${o.wakeLabel})` : '';
   const target = o.agentName || o.agentId;
-  if (o.status === 'delivered') return `delivered${refired ? ' · fired again' : ''}${wakeSuffix} → ${target}`;
+  if (o.status === 'delivered') {
+    // #2596: a pooled delivery names the per-ticket instance that ran it
+    // ("Developer · #2562"), falling back to its id while no name is known.
+    const ran = typeof o.instanceId === 'string' && o.instanceId ? (o.instanceName || o.instanceId) : target;
+    return `delivered${refired ? ' · fired again' : ''}${wakeSuffix} → ${ran}`;
+  }
   if (o.status === 'digest') return `digested${wakeSuffix} → ${target}`;
   // `held (WIP n)` — the limit that is holding it, so the operator can act on
   // the row without opening another view. A missing wipLimit degrades to a bare
   // `held (WIP)` rather than printing "undefined".
   if (o.status === 'held') {
+    if (POOL_HOLD_TEXT[o.reason]) return `held (${POOL_HOLD_TEXT[o.reason]})${wakeSuffix} → ${target}`;
     const wip = o.wipLimit != null ? ` ${o.wipLimit}` : '';
     return `held (WIP${wip})${wakeSuffix} → ${target}`;
   }

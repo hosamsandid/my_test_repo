@@ -761,6 +761,57 @@ test("_fanOutBatch: a dispatch the WIP lane HOLDS is recorded 'held', not 'deliv
   }
 });
 
+// ── #2596: a pooled role's delivery records the instance that ran it ──────
+async function fanOutOneReady(fillDecision) {
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    poller._enqueuePending = (agentId, entry, decision) => { if (decision) fillDecision(decision); };
+    const ghEvent = {
+      id: "pool-1",
+      actor: { login: "human" },
+      created_at: new Date().toISOString(),
+      type: "IssuesEvent",
+      repo: { name: "org/repo" },
+      payload: {
+        action: "labeled",
+        label: { name: "ready" },
+        issue: { number: 2562, title: "T", html_url: "https://github.com/org/repo/issues/2562" },
+      },
+    };
+    const subscribers = [{
+      agentId: "team-developer", triggerId: "trigger-ready",
+      events: new Set(["issues.labeled"]), labelFilter: "ready", horizon: null,
+    }];
+    await poller._fanOutBatch("org/repo", [ghEvent], subscribers, "tok");
+    return recorded[0].outcomes[0];
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+}
+
+test("_fanOutBatch: a pooled delivery records the pool instance id alongside the role (#2596)", async () => {
+  const o = await fanOutOneReady((d) => { d.held = false; d.instanceId = "team-developer-i2562"; });
+  assert.equal(o.status, "delivered");
+  assert.equal(o.agentId, "team-developer", "the pooled role stays the recorded subscriber");
+  assert.equal(o.instanceId, "team-developer-i2562");
+});
+
+test("_fanOutBatch: a non-pooled delivery carries no instanceId key at all (#2596 AC7)", async () => {
+  const o = await fanOutOneReady((d) => { d.held = false; });
+  assert.equal(o.status, "delivered");
+  assert.equal("instanceId" in o, false);
+});
+
+test("_fanOutBatch: a pool pause/drain hold is recorded held with its own reason (#2596 AC6)", async () => {
+  const o = await fanOutOneReady((d) => { d.held = true; d.reason = "pool-draining"; });
+  assert.equal(o.status, "held");
+  assert.equal(o.reason, "pool-draining");
+  assert.equal("instanceId" in o, false, "a held dispatch never links an instance");
+});
+
 // ── #2151: the pending entry itself carries the stamp, not just the event-log
 // outcome — this is what the trigger-fired notice and the Pending queue read.
 test("_fanOutBatch: the pending entry is stamped with the matched wakeLabel, not the collapsed payload.label.name (#2151)", async () => {

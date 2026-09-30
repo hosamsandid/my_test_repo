@@ -218,6 +218,7 @@ export default function FlowControl() {
                 <WorkingNow view={view} busy={busy} onSetState={setRoleState} onForceDispatch={forceDispatch} />
                 {view.needsYou && <NeedsYou items={view.needsYou} />}
                 <InProgress view={view} />
+                {view.doneRows.length > 0 && <RecentlyCompleted rows={view.doneRows} hint={view.retentionHint} />}
               </>
             )}
           </>
@@ -426,23 +427,45 @@ function InProgress({ view }) {
       {view.empty ? (
         <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>{view.emptyText}</p>
       ) : (
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-sm)' }}>
-            <thead>
-              <tr style={{ textAlign: 'left', ...mutedStyle }}>
-                <th style={cellStyle}>Work item</th>
-                <th style={cellStyle}>Progress</th>
-                <th style={cellStyle}>Stage</th>
-                <th style={cellStyle}>In stage</th>
-              </tr>
-            </thead>
-            <tbody>
-              {view.rows.map((r) => <BoardRow key={r.id} row={r} />)}
-            </tbody>
-          </table>
-        </div>
+        <BoardTable rows={view.activeRows} />
       )}
     </section>
+  );
+}
+
+/* ── recently completed (#2607) ────────────────────────────────────── */
+
+// Closed issues and merged PRs, kept for the team's retention window. Only
+// mounted when there is something to show.
+function RecentlyCompleted({ rows, hint }) {
+  return (
+    <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+      <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.states} helpLabel="Where the stages come from">
+        Recently completed ({rows.length})
+      </AreaHeading>
+      <p style={{ margin: 0, ...mutedStyle }}>{hint}</p>
+      <BoardTable rows={rows} />
+    </section>
+  );
+}
+
+function BoardTable({ rows }) {
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-sm)' }}>
+        <thead>
+          <tr style={{ textAlign: 'left', ...mutedStyle }}>
+            <th style={cellStyle}>Work item</th>
+            <th style={cellStyle}>Progress</th>
+            <th style={cellStyle}>Stage</th>
+            <th style={cellStyle}>In stage</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => <BoardRow key={r.id} row={r} />)}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

@@ -15,6 +15,7 @@ import {
   needsYouView,
   boardView,
   EMPTY_TEXT,
+  retentionHint,
   POOL_ACTION_TOOLTIPS,
   AUTO_REFRESH_MS,
   autoRefreshKey,
@@ -192,7 +193,7 @@ test('boardView: stale snapshot keeps its rows and surfaces the warning', () => 
     stages: STAGES, rows: [row()], needsHuman: [{ id: 'o/r#7', reason: 'checks failing', since: ago(5), issue: { repo: 'o/r', number: 7 } }],
     repos: ['o/r'], generatedAt: ago(10), stale: true, warning: 'GitHub is unreachable — showing the last known state from X.',
   }, NOW);
-  assert.equal(v.rows.length, 1);
+  assert.equal(v.activeRows.length, 1);
   assert.equal(v.stale, true);
   assert.match(v.warning, /unreachable/);
   assert.equal(v.needsYou.length, 1);
@@ -200,7 +201,7 @@ test('boardView: stale snapshot keeps its rows and surfaces the warning', () => 
 
 test('boardView: qualifies refs only on a multi-repo board; flags a team without a repository', () => {
   const multi = boardView({ stages: STAGES, rows: [row()], repos: ['o/r', 'o/s'], generatedAt: ago(0) }, NOW);
-  assert.equal(multi.rows[0].ref, 'o/r#7');
+  assert.equal(multi.activeRows[0].ref, 'o/r#7');
   const none = boardView({ stages: STAGES, rows: [], repos: [], generatedAt: ago(0) }, NOW);
   assert.equal(none.noRepos, true);
   const maint = boardView({ maintenance: true, repos: [], generatedAt: ago(0) }, NOW);
@@ -213,6 +214,50 @@ test('boardView: none of the removed surfaces are produced (AC10)', () => {
   for (const gone of ['summary', 'epics', 'rollups', 'backlog', 'openPrs', 'lanes']) {
     assert.ok(!(gone in v), `"${gone}" must not come back`);
   }
+});
+
+// ── #2607: "Recently completed" is its own section ─────────────────────────
+
+const boardOf = (rows, extra = {}) => boardView({ stages: STAGES, rows, repos: ['o/r'], generatedAt: ago(0), ...extra }, NOW);
+
+test('boardView: an all-active board has no done rows and is not empty (#2607)', () => {
+  const v = boardOf([row({ id: 'a' }), row({ id: 'b' })]);
+  assert.deepEqual(v.activeRows.map((r) => r.id), ['a', 'b']);
+  assert.deepEqual(v.doneRows, []);
+  assert.equal(v.empty, false);
+});
+
+test('boardView: an all-done board leaves "In progress" empty (#2607)', () => {
+  const v = boardOf([row({ id: 'a', done: true, status: 'done' }), row({ id: 'b', done: true, status: 'done' })]);
+  assert.deepEqual(v.activeRows, []);
+  assert.deepEqual(v.doneRows.map((r) => r.id), ['a', 'b']);
+  assert.equal(v.empty, true);
+  assert.equal(v.emptyText, 'Nothing in progress');
+});
+
+test('boardView: a mixed board puts each row in exactly one section, order kept (#2607)', () => {
+  const v = boardOf([row({ id: 'a' }), row({ id: 'b', done: true }), row({ id: 'c' }), row({ id: 'd', done: true })]);
+  assert.deepEqual(v.activeRows.map((r) => r.id), ['a', 'c']);
+  assert.deepEqual(v.doneRows.map((r) => r.id), ['b', 'd']);
+  assert.ok(v.activeRows.every((r) => !r.done));
+  assert.ok(v.doneRows.every((r) => r.done));
+  assert.ok(!('rows' in v), 'no mixed row list');
+});
+
+test('boardView: a stale snapshot still sorts rows by their done flag (#2607)', () => {
+  const v = boardOf([row({ id: 'a' }), row({ id: 'b', done: true })], { stale: true });
+  assert.deepEqual(v.activeRows.map((r) => r.id), ['a']);
+  assert.deepEqual(v.doneRows.map((r) => r.id), ['b']);
+});
+
+test('retentionHint: states the retention window, with a fallback (#2607)', () => {
+  assert.equal(retentionHint(24), 'Kept for 24 h · configurable in columns settings');
+  assert.equal(retentionHint(1.5), 'Kept for 1.5 h · configurable in columns settings');
+  for (const none of [0, null, undefined, 'x', -3]) {
+    assert.equal(retentionHint(none), 'Kept for a limited time · configurable in columns settings');
+  }
+  assert.equal(boardOf([], { config: { doneRetentionHours: 48 } }).retentionHint, 'Kept for 48 h · configurable in columns settings');
+  assert.equal(boardOf([], { doneRetentionHours: 12 }).retentionHint, 'Kept for 12 h · configurable in columns settings');
 });
 
 // ── AC12: auto-refresh, remembered per user ────────────────────────────────

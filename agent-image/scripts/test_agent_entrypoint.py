@@ -668,6 +668,38 @@ class GithubEventDetail(unittest.TestCase):
         self.assertIsNone(github_event_detail("issues.labeled", {"issue": "not-a-dict"}))
 
 
+class LogRunReply(unittest.TestCase):
+    """#2603: error / abort replies leave a `message.posted` row so Agent Chat's
+    "Show in session log" resolves them to their run instead of "not found"."""
+
+    def test_appends_message_posted_row(self):
+        with patch.object(entrypoint, "_append_event") as append_mock:
+            entrypoint._log_run_reply("!room:local", "$u1", "$err1")
+        append_mock.assert_called_once_with("!room:local", {
+            "type": "message.posted", "correlationId": "$u1", "eventId": "$err1",
+        })
+
+    def test_noop_without_event_id_or_run(self):
+        with patch.object(entrypoint, "_append_event") as append_mock:
+            entrypoint._log_run_reply("!room:local", "$u1", "")
+            entrypoint._log_run_reply("!room:local", "$u1", None)
+            entrypoint._log_run_reply("!room:local", None, "$err1")
+        append_mock.assert_not_called()
+
+    def test_dm_error_and_abort_replies_are_logged(self):
+        src = _MODULE_PATH.read_text(encoding="utf-8")
+        import re
+        sends = re.findall(
+            r"(\w+) = await send_formatted\(\s*room_id,\s*"
+            r"(?:\"_\(Execution aborted\.\)_\"|f\"⚠️ \*\*Agent error\*\*)"
+            r"[\s\S]{0,120}?\)\n\s*_log_run_reply\(room_id, correlation_id, (\w+)\)",
+            src)
+        # One abort reply + the two Agent-error replies of the DM handler.
+        self.assertEqual(len(sends), 3, sends)
+        for assigned, logged in sends:
+            self.assertEqual(assigned, logged)
+
+
 class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
     def _scheduler(self):
         client = AsyncMock()
@@ -3753,6 +3785,7 @@ class TriggerClaudeFailureRetry(unittest.IsolatedAsyncioTestCase):
 
     def _run(self, scheduler, call_mock, trigger=None):
         trigger = trigger or {"id": "t1", "type": "github-event"}
+        self._notice_mock = AsyncMock()
         patches = [
             patch.object(entrypoint, "_load_dm_room_id",
                          return_value="!room:local"),
@@ -3771,7 +3804,7 @@ class TriggerClaudeFailureRetry(unittest.IsolatedAsyncioTestCase):
             patch.object(entrypoint, "_write_last_response_at"),
             patch.object(entrypoint, "TRIGGER_RETRY_DELAY_SEC", 0),
             patch.object(entrypoint, "_call_claude_once", call_mock),
-            patch.object(scheduler, "_post_trigger_notice", AsyncMock()),
+            patch.object(scheduler, "_post_trigger_notice", self._notice_mock),
         ]
         async def go():
             for p in patches:
@@ -3805,6 +3838,12 @@ class TriggerClaudeFailureRetry(unittest.IsolatedAsyncioTestCase):
         content = scheduler._client.room_send.await_args.kwargs["content"]
         self.assertIn("io.aee.triggerFailure", content)
         self.assertEqual(content["io.aee.triggerFailure"]["triggerId"], "t1")
+        # #2603: the failure notice names its run for "Show in session log".
+        self.assertTrue(
+            content["io.aee.triggerFailure"]["correlationId"].startswith("trigger:t1:"))
+        # S1 (#2603): the start notice got the same run's correlationId.
+        notice_cid = self._notice_mock.await_args.args[3]
+        self.assertEqual(notice_cid, content["io.aee.triggerFailure"]["correlationId"])
 
     async def test_user_abort_is_not_retried_and_stays_silent(self):
         scheduler = self._scheduler()

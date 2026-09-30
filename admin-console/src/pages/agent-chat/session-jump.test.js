@@ -57,6 +57,34 @@ test('sessionJumpRef: no button without a correlationId or log rows (AC2)', () =
   assert.equal(sessionJumpRef(null, AGENT), null);
 });
 
+test('sessionJumpRef: an agent m.notice without a correlationId gets no button (no message.posted row)', () => {
+  const backstop = {
+    event_id: '$b1', sender: AGENT, msgtype: 'm.notice', body: '⚠️ **Trigger backstop active** — …',
+    'io.aee.backstop': { reason: 'rate', active: 3, windowCount: 12, maxConcurrent: 3, maxPerWindow: 10 },
+  };
+  assert.equal(sessionJumpRef(backstop, AGENT), null);
+  const legacyFailure = {
+    event_id: '$f0', sender: AGENT, msgtype: 'm.notice', body: '⚠️ **Triggered run failed** — …',
+    'io.aee.triggerFailure': { triggerId: 't1', triggerType: 'github-event' },
+  };
+  assert.equal(sessionJumpRef(legacyFailure, AGENT), null);
+  // A plain notice, even without any io.aee key, is never resolved by event id.
+  assert.equal(sessionJumpRef({ event_id: '$p', sender: AGENT, msgtype: 'm.notice', body: 'x' }, AGENT), null);
+});
+
+test('sessionJumpRef: a trigger-failure notice carrying its correlationId names that run', () => {
+  const msg = {
+    event_id: '$f1', sender: AGENT, msgtype: 'm.notice', 'io.aee.trigger': null,
+    'io.aee.triggerFailure': { triggerId: 't1', triggerType: 'cron', correlationId: 'trigger:t1:1700000000' },
+  };
+  assert.deepEqual(sessionJumpRef(msg, AGENT), { correlationId: 'trigger:t1:1700000000' });
+});
+
+test('sessionJumpRef: agent error / abort replies are m.text and resolve by event id', () => {
+  const err = { event_id: '$e1', sender: AGENT, msgtype: 'm.text', body: '⚠️ **Agent error**\n\n```\nboom\n```' };
+  assert.deepEqual(sessionJumpRef(err, AGENT), { eventId: '$e1' });
+});
+
 test('buildSessionJumpRequest: the #642 selectRequest shape plus reveal/source', () => {
   assert.deepEqual(buildSessionJumpRequest({ correlationId: '$u1' }, 42), {
     correlationId: '$u1', eventId: null, reveal: true, source: 'message', ts: 42,
@@ -117,5 +145,8 @@ test('jumpHighlightCss: lifts the run out of a hover dim (visible without hoveri
 
 test('sessionNotFoundText: message jumps get their own wording', () => {
   assert.match(sessionNotFoundText('message'), /this message/);
+  // Run-less status posts (e.g. "Trigger possibly lost") keep the button and
+  // land here, so the text must not claim the log was pruned as the only cause.
+  assert.match(sessionNotFoundText('message'), /status post that doesn't belong to a run/);
   assert.match(sessionNotFoundText(undefined), /this event triggered/);
 });

@@ -20,25 +20,28 @@ export const JUMP_HIGHLIGHT_MS = 1700;
  * message gets no "Show in session log" button (AC1/AC2).
  *
  * - `{ correlationId }` when the message names its run itself: a user message
- *   (its own event id is the run's correlationId) or a trigger notice that
- *   carries `io.aee.trigger.correlationId`.
- * - `{ eventId }` for an agent reply: the run is looked up server-side from the
- *   runner's `message.posted` row, because the client can't tell which run a
- *   reply belongs to when a user message arrived while a triggered run was
- *   going.
+ *   (its own event id is the run's correlationId), a trigger notice that
+ *   carries `io.aee.trigger.correlationId`, or a triggered-run failure notice
+ *   that carries `io.aee.triggerFailure.correlationId`.
+ * - `{ eventId }` for an agent `m.text` reply (answer, agent error, abort): the
+ *   run is looked up server-side from the runner's `message.posted` row,
+ *   because the client can't tell which run a reply belongs to when a user
+ *   message arrived while a triggered run was going.
  *
  * No button for unconfirmed messages (optimistic / thinking — no stable event
- * id yet), transcript separators, loop-record cards, and trigger notices
- * posted before the notice carried its correlationId.
+ * id yet), transcript separators, loop-record cards, and any `m.notice` that
+ * doesn't name its run: the runner's status notices (backstop, trigger notices
+ * from before the correlationId was carried, …) have no `message.posted` row,
+ * so a lookup would only end in the not-found notice.
  */
 export function sessionJumpRef(message, agentUserId) {
   if (!message || typeof message !== 'object') return null;
   const eventId = typeof message.event_id === 'string' ? message.event_id : '';
   if (!eventId || message.isOptimistic || message.type) return null;
   if (message['io.aee.loop-record']) return null;
-  const trigger = message['io.aee.trigger'];
-  if (message.msgtype === 'm.notice' && trigger) {
-    const cid = trigger && typeof trigger.correlationId === 'string' ? trigger.correlationId : '';
+  if (message.msgtype === 'm.notice') {
+    const meta = message['io.aee.trigger'] || message['io.aee.triggerFailure'];
+    const cid = meta && typeof meta.correlationId === 'string' ? meta.correlationId : '';
     return cid ? { correlationId: cid } : null;
   }
   if (agentUserId && message.sender === agentUserId) return { eventId };
@@ -109,8 +112,9 @@ export function jumpHighlightCss(scope, correlationId) {
 /** Text of the Sessions tab's non-blocking "not found" notice, per source. */
 export function sessionNotFoundText(source) {
   if (source === 'message') {
-    return "Couldn't find this message in the session logs — it may be older "
-      + 'than the retained history, or its log was pruned or reset.';
+    return "Couldn't find this message in the session logs — it may be a status "
+      + "post that doesn't belong to a run, be older than the retained history, "
+      + 'or its log was pruned or reset.';
   }
   return "Couldn't locate the session this event triggered — it may be older "
     + 'than the retained history, its log may have been pruned, or the agent '

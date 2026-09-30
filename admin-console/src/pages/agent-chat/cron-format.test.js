@@ -69,14 +69,15 @@ test('cronExpressionError rejects malformed and out-of-range expressions', () =>
 test('cronExpressionError matches croniter on L and n#k', () => {
   for (const cron of [
     '0 9 L * *', '0 9 1,L * *', '0 9 l * *', '0 9 * * 1#2', '0 9 * * MON#2', '0 9 * * 7#1',
-    '0 9 * * 1#5', '0 9 * * 1#2,3#1',
+    '0 9 * * 1#5', '0 9 * * 1#2,3#1', '0 9 1-L * *', '0 9 15-l * *', '0 9 1-L/2 * *', '0 9 1-L,3 * *',
   ]) {
     assert.equal(cronExpressionError(cron), null, cron);
   }
   for (const cron of [
     '0 L * * *', '0 9 L-1 * *', '0 9 LW * *', '0 9 L/2 * *', '0 9 * * L', '0 9 * * 5L',
     '0 9 * * 1#0', '0 9 * * 1#6', '0 9 * * 8#1', '0 9 * * 3,1#2', '0 9 * * 1-2#1',
-    '0 9 * * 1#2/2', '0 9 * * 1#2#3',
+    '0 9 * * 1#2/2', '0 9 * * 1#2#3', '0 1#2 * * *', '0 9 1#2 * *', '0 9 L-L * *', '0 9 L-5 * *',
+    '0 9 32-L * *', '0 9 0-L * *', '0 9 1-L/0 * *', '0 * * * 1-L',
   ]) {
     assert.ok(cronExpressionError(cron), `expected an error for ${JSON.stringify(cron)}`);
   }

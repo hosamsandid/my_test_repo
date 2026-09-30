@@ -32,7 +32,7 @@ function fieldValue(tok, f) {
 }
 
 // One comma-separated item: `*`, `n`, `a-b`, each optionally `/step` (step ≥ 1).
-// Like croniter, day of month also takes `L` (last day) and weekday takes
+// Like croniter, day of month also takes `L` (last day, alone or ending a range) and weekday takes
 // `n#k` (k-th such weekday, k 1–5) — the latter only when every item of the
 // list uses it (croniter rejects `3,1#2`).
 function cronItemError(item, f, nthList) {
@@ -53,7 +53,8 @@ function cronItemError(item, f, nthList) {
   if (base === '*') return null;
   const bounds = base.split('-');
   if (bounds.length > 2) return `invalid ${f.label} "${item}"`;
-  const nums = bounds.map(b => fieldValue(b, f));
+  // Day of month may also end a range in `L` (`15-L`), as croniter allows.
+  const nums = bounds.map((b, i) => (f.last && i === 1 && b.toUpperCase() === 'L' ? f.max : fieldValue(b, f)));
   if (nums.some(Number.isNaN)) return `invalid ${f.label} "${item}"`;
   if (nums.some(n => n < f.min || n > f.max)) return `${f.label} must be between ${f.min} and ${f.max}`;
   if (nums.length === 2 && nums[0] > nums[1]) return `${f.label} range "${base}" runs backwards`;

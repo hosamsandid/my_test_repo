@@ -31,6 +31,9 @@ import {
   knowledgeBranchNote, knowledgeBranchesForRepo,
 } from './branch-filter.js';
 import { DOW_LABELS, parseCronState, buildCron, describeCron } from './cron-format.js';
+import {
+  TRIGGER_TIME_ZONE, browserTimeZone, schedulerTimeZone, cronZoneNote, onceScheduleLabel, triggerTiming,
+} from './trigger-timing.js';
 import { triggerRepoOptions, environmentRepoOptions, triggerRepoWarning } from './trigger-repo-status.js';
 import {
   STOP_CONDITIONS,
@@ -70,12 +73,14 @@ function isDataFlowTrigger(t) {
 // the card summary and the Flow canvas readout share one source of truth (#778).
 
 /* ── Toggle switch ──────────────────────────────────────────────────── */
-function ToggleSwitch({ checked, onChange }) {
+function ToggleSwitch({ checked, onChange, label }) {
   return (
     <button
+      type="button"
       onClick={() => onChange(!checked)}
       role="switch"
       aria-checked={checked}
+      aria-label={label}
       style={{
         width: 28, height: 16,
         borderRadius: 'var(--eb-radius-full)',
@@ -173,6 +178,9 @@ function CronBuilder({ value, onChange }) {
   const description = describeCron(s);
   const cronStr = buildCron(s);
   const customEmpty = s.mode === 'custom' && !s.raw.trim();
+  // #2628: the agent evaluates the expression in the scheduler's zone, not the
+  // browser's — say so, and give the viewer's local time when they differ.
+  const zoneNote = cronZoneNote(cronStr, { schedulerZone: TRIGGER_TIME_ZONE });
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
@@ -245,6 +253,10 @@ function CronBuilder({ value, onChange }) {
         </div>
       )}
 
+      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+        Times are in {zoneNote}.
+      </div>
+
       {/* Summary */}
       {s.mode !== 'custom' && cronStr && (
         <div style={{
@@ -255,7 +267,7 @@ function CronBuilder({ value, onChange }) {
         }}>
           <Clock size={11} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
           <span style={{ color: 'var(--eb-accent-primary)', fontWeight: 'var(--eb-font-medium)', flex: 1 }}>
-            {description}
+            {description} ({zoneNote})
           </span>
           <code style={{ color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>
             {cronStr}
@@ -281,7 +293,7 @@ function DateTimePicker({ value, onChange }) {
   return (
     <div>
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
-        Date &amp; Time
+        Date &amp; Time <span style={{ fontWeight: 'normal' }}>(your time, {browserTimeZone()})</span>
       </div>
       <input
         type="datetime-local"
@@ -306,7 +318,7 @@ function DateTimePicker({ value, onChange }) {
 // former EmitsSection/EmitsEditor and their emit-suggestions/emits endpoints are
 // gone; the trigger row no longer renders an emits chip or edit button.
 
-function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onToggled, repoWarning = null, nameOf = undefined }) {
+function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onToggled, repoWarning = null, nameOf = undefined, status = null }) {
   const [toggling, setToggling] = useState(false);
   const [scriptPanelName, setScriptPanelName] = useState(null);
   const preCheckScriptName = scriptNameFromPath(trigger.preCheckScript);
@@ -339,8 +351,14 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
   } else if (trigger.cron) {
     schedule = describeCron(parseCronState(trigger.cron)) || trigger.cron;
   } else {
-    schedule = trigger.at || '—';
+    schedule = onceScheduleLabel(trigger.at, { schedulerZone: schedulerTimeZone(status) });
   }
+  // #2628: zone, next/last run and "cannot be scheduled" for cron/once rows.
+  const timing = triggerTiming(trigger, status);
+  const zoneNote = trigger.type === 'cron' && trigger.cron
+    ? cronZoneNote(trigger.cron, { schedulerZone: schedulerTimeZone(status) })
+    : null;
+  const toneColor = { success: 'var(--eb-status-success)', error: 'var(--eb-status-error)', muted: 'var(--eb-text-muted)' };
 
   async function handleToggle(val) {
     setToggling(true);
@@ -385,7 +403,7 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
                 : 'Enable this trigger — it will start firing again'}
               style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)', flexShrink: 0 }}
             >
-              <ToggleSwitch checked={trigger.enabled !== false} onChange={handleToggle} />
+              <ToggleSwitch checked={trigger.enabled !== false} onChange={handleToggle} label={`Enable trigger ${trigger.description || trigger.id || ''}`.trim()} />
               <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', width: 18 }}>
                 {trigger.enabled !== false ? 'On' : 'Off'}
               </span>
@@ -403,6 +421,38 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
           <Trash2 size={11} />
         </button>
       </div>
+
+      {timing?.invalid && (
+        <div role="status" style={{
+          display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+          padding: 'var(--eb-space-1) var(--eb-space-2)',
+          background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-sm)',
+          fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', lineHeight: 1.4,
+        }}>
+          <AlertCircle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span style={{ overflowWrap: 'anywhere' }}>
+            The agent cannot schedule this trigger — it never fires: {timing.invalid}
+          </span>
+        </div>
+      )}
+
+      {(zoneNote || timing?.next || timing?.last) && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', flexWrap: 'wrap',
+          fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
+        }}>
+          {zoneNote && <span>{zoneNote}</span>}
+          {timing?.next && <span>{zoneNote ? '· ' : ''}Next: {timing.next}</span>}
+          {timing?.last && (
+            <span>
+              {zoneNote || timing.next ? '· ' : ''}Last: {timing.last}
+              {timing.lastResult && (
+                <span style={{ color: toneColor[timing.lastResult.tone] }}> {timing.lastResult.text}</span>
+              )}
+            </span>
+          )}
+        </div>
+      )}
 
       {ghSummary && (
         <div style={{
@@ -1755,8 +1805,8 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
       {!lockedMode && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
-          <ToggleSwitch checked={form.enabled} onChange={v => set('enabled', v)} />
-          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+          <ToggleSwitch checked={form.enabled} onChange={v => set('enabled', v)} label="Enable trigger" />
+          <span aria-hidden="true" style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
             Enabled
           </span>
         </div>
@@ -1847,6 +1897,9 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
   // #2571: display names for the producer filter on push-trigger cards
   // ("wakes on push from Specifier …"). Live agents only; ids on failure.
   const [agentNames, setAgentNames] = useState(null);
+  // #2628: the agent scheduler's per-trigger next/last run + scheduling
+  // errors. Live agents only; a failed read just shows no status line.
+  const [triggerStatus, setTriggerStatus] = useState(null);
 
   const fetchTriggers = useCallback(async (id) => {
     if (!id) { setTriggers([]); return; }
@@ -1856,6 +1909,11 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
       const data = await ops.listTriggers(id);
       const list = Array.isArray(data) ? data : [];
       setTriggers(list);
+      if (ops.mode !== 'draft' && list.some((t) => t && (t.type === 'cron' || t.type === 'once'))) {
+        apiCall('GET', `/api/agents/${encodeURIComponent(id)}/trigger-status`)
+          .then((body) => setTriggerStatus(body && typeof body === 'object' ? body : null))
+          .catch(() => setTriggerStatus(null));
+      }
       if (ops.mode !== 'draft' && list.some((t) => t && t.type === 'github-event')) {
         apiCall('GET', '/api/github-events/repo-status')
           .then((body) => setRepoStatusRows(Array.isArray(body?.repos) ? body.repos : null))
@@ -2037,6 +2095,7 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
             onToggled={afterRowMutation}
             repoWarning={isDraft ? null : triggerRepoWarning(t, repoStatusRows, { agentId })}
             nameOf={agentNames ? (id) => agentNames.get(id) : undefined}
+            status={isDraft ? null : triggerStatus}
           />
         ))}
       </div>

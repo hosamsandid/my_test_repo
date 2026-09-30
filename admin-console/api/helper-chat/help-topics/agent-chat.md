@@ -519,11 +519,12 @@ same question, "what wakes this agent", and every one of them delivers a
 | **Plugin event** | a granted plugin's broker reports something (a Jira status change, say). Two filters narrow it — see *Which event vs. Only when* below. |
 | **Loop (re-run until done)** | you start it. It is not a subscription (see below). |
 
-### Cron and once fire on the container clock
+### Cron and once: time zone and status
 
-Both are evaluated against the clock inside the container, not your laptop's. On
-a Podman VM that clock can drift; a forward correction fires every `once` whose
-time it passes and every `cron` whose time it crosses.
+Cron runs in **Europe/Berlin** (your time is shown if it differs); a once time
+is your local time. Rows show next/last run, or a red warning if the agent
+cannot schedule the trigger. The container clock can drift on a Podman VM; a
+forward correction fires whatever it skips.
 
 ### A GitHub event fires regardless of who caused it
 

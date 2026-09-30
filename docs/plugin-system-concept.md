@@ -483,6 +483,33 @@ plugin upgrade = image update + CLI re-sync (live). Breaking CLI changes are
 the plugin author's problem to version (`aee-<x> --version`); the platform
 only guarantees contract-level stability (`pluginVersion`).
 
+**Amendment (#2646) — build identity instead of a version field.** No reference
+plugin sets `version`, and every broker image is tagged `:latest`, so the
+identity a plugin actually carries is the git commit it was built from, in the
+console's own version format (short hash + `-dirty`, commit timestamp):
+
+- **Broker image** — `make plugin-images` passes `AEE_BUILD_COMMIT` /
+  `AEE_BUILD_DIRTY` / `AEE_BUILD_COMMIT_TIME` as build args; each broker
+  Dockerfile bakes them into the environment and OCI labels
+  (`org.opencontainers.image.revision`, `aee.build.*`). The Broker SDK's health
+  route reports them as `build` (`broker-sdk/build-info.js`).
+- **Installed files** — `make seed-plugins` writes `build-info.json` into each
+  pool plugin; install copies it into the registry.
+- **Surface** — the orchestrator probes every live sidecar's `/healthz`
+  (`orchestrator/plugin-build-info.js`) and returns `brokerBuild` from
+  `GET /internal/plugins`, plus `imageBuild` — the OCI labels of
+  `manifest.sidecar.image` in the local store (libpod image inspect; `null` on
+  Kubernetes, whose node cache is out of reach). `GET /api/plugins` adds
+  `sourceBuild` (registry for installed, pool for available). The Plugins page
+  shows all three (`plugin-registry-view.js` `buildIdentity`) with two hints:
+  running broker ≠ image (the image was rebuilt under a live sidecar — the
+  registry files do not move on a rebuild, so only this comparison catches it)
+  and running broker ≠ installed files. Unknown identities are shown as
+  "unknown", never blank.
+
+Refreshing the pool, "update available" offers and recreating sidecars on an
+image change stay out of this amendment (#2639).
+
 ## 5. Failure modes and edge cases
 
 | Scenario | Behaviour |

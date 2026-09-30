@@ -61,15 +61,18 @@ function claimFor(event, label, autoClaim) {
 // Upsert a setLabel outcome on the producer — the structured successor to flat
 // `emits`. Keyed on the label (option id = label, matching every existing
 // creation path), so re-wiring the same label is a no-op.
-async function ensureLabelOutcome(ops, roleId, label) {
+// `target` (#2629) records where the label lands — 'pr' | 'issue' — so the
+// hand-off's PR-vs-issue choice is authored on the emit, not only on the listener.
+async function ensureLabelOutcome(ops, roleId, label, target) {
   if (!ops.getRoleOutcomes || !ops.setRoleOutcomes) return;
   const cur = (await ops.getRoleOutcomes(roleId)) || { mode: 'anyOf', options: [] };
   const has = (cur.options || []).some(o =>
     (o.actions || []).some(a => a && a.type === 'setLabel' && a.label === label));
   if (has) return;
+  const action = { type: 'setLabel', label, ...(target ? { target } : {}) };
   await ops.setRoleOutcomes(roleId, {
     ...cur,
-    options: [...(cur.options || []), { id: label, title: label, actions: [{ type: 'setLabel', label }] }],
+    options: [...(cur.options || []), { id: label, title: label, actions: [action] }],
   });
 }
 
@@ -99,9 +102,12 @@ async function ensureArtifactOutcome(ops, roleId, artifact) {
  * the outcome (outcome-port drags already declare the emit, #828). Idempotent:
  * an existing matching listener/outcome is reused, never duplicated.
  */
-export async function wireLabelHandoff({ ops }, { from, to, label, target = 'issues', action = 'labeled', prompt, labels, emitSource = true, autoClaim, repo, fromName, toName }) {
+export async function wireLabelHandoff({ ops }, { from, to, label, target: explicitTarget, action = 'labeled', prompt, labels, emitSource = true, autoClaim, repo, fromName, toName }) {
   const l = String(label || '').trim();
   if (!l) throw new Error('label is required');
+  // No target given → the historical `issues` default for the listener, but the
+  // emit records none (#2629): a default is a guess, not an authored choice.
+  const target = explicitTarget || 'issues';
   const event = `${target}.${action}`;
   const humanLabel = isGateLabel(labels, l) || isBrakeLabel(labels, l);
 
@@ -124,7 +130,10 @@ export async function wireLabelHandoff({ ops }, { from, to, label, target = 'iss
       }),
     });
   }
-  if (!humanLabel && emitSource) await ensureLabelOutcome(ops, from, l);
+  if (!humanLabel && emitSource) {
+    await ensureLabelOutcome(ops, from, l,
+      explicitTarget === 'pull_request' ? 'pr' : explicitTarget === 'issues' ? 'issue' : undefined);
+  }
 }
 
 /**

@@ -26,6 +26,8 @@ const LINT_INFO = {
   'duplicate-listener': { title: 'Redundant inputs', fix: 'Remove the duplicate trigger so the agent wakes once per event.' },
   'raw-trigger-nonconformant': { title: 'Trigger bends the wiring rules', fix: 'Edit the trigger to match the wiring rules — it still runs meanwhile.' },
   'unclaimed-listener': { title: 'Listener without a claim', fix: 'Add a claim so a stalled run stays distinguishable from a wake that never arrived.' },
+  // Issue vs PR label hand-off (#2629).
+  'label-target-mismatch': { title: 'Label lands on the wrong kind of item', fix: "Make the consumer's input listen on the event for where the label lands (PR labeled vs issue labeled), or set the outcome's “on:” to match." },
   // Direct hand-off (#2032, docs/direct-agent-handoff-concept.md §12 P3).
   'wake-target-unresolved': { title: 'Hand-off names no reachable agent', fix: 'Point the hand-off at another agent on this team — a person has no queue, and an agent cannot hand off to itself.' },
   'wake-target-disabled': { title: 'Hand-off target cannot receive it', fix: "Re-enable the target's hand-off input, or the wake is queued and then dropped." },

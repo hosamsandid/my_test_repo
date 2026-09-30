@@ -62,10 +62,11 @@ test('§8.3 rule 2: a label hand-off onto the reworker template reuses its prese
   assert.equal(listeners[0].prompt, presetPrompt, 'the preset prompt is left untouched');
   assert.deepEqual(listeners[0].claim, { remove: 'revisions-required', add: 'revisions-required:wip' },
     'the migrated preset claim (#1008) survives the wire');
-  // The producer side is still written: reviewer gains the setLabel outcome.
+  // The producer side is still written: reviewer gains the setLabel outcome,
+  // recording that the label lands on the PR (#2629).
   const reviewer = bundle.roles[0];
   assert.deepEqual(reviewer.outcomes.options.map(o => o.actions).flat(),
-    [{ type: 'setLabel', label: 'revisions-required' }]);
+    [{ type: 'setLabel', label: 'revisions-required', target: 'pr' }]);
 });
 
 test('developer + review gate: one listener, idempotent re-run, preset outcome reused', async () => {

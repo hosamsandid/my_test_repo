@@ -12,7 +12,7 @@
 //     options: [
 //       { id, title?, when?, notify?,
 //         actions: [ { type: "setLabel"|"openPr"|"openIssue"|"wakeAgent"|"none",
-//                      label?, to?, note? } ] }
+//                      label?, target?, to?, note? } ] }
 //     ]
 //   }
 //
@@ -29,6 +29,57 @@
 
 const OUTCOME_MODES = new Set(['exactlyOne', 'anyOf']);
 const ACTION_TYPES = new Set(['setLabel', 'openPr', 'openIssue', 'wakeAgent', 'none']);
+
+// ─── where a `setLabel` lands: Issue vs Pull Request (#2629) ─────────────────
+//
+// GitHub reports a label on a PR as `pull_request.labeled` and a label on an
+// issue as `issues.labeled` — never both, and the poller has no alias between
+// them. A consumer listening on the wrong one never wakes. So a `setLabel`
+// action may carry an explicit `target: 'issue' | 'pr'`; when absent, the
+// target is IMPLIED, in this order:
+//   1. the same option opens a PR / an issue (`openPr` / `openIssue`) — the
+//      label goes on the artifact that outcome produces;
+//   2. the producer is only ever woken by one kind of GitHub object (all its
+//      github-event triggers are `pull_request*` or all are `issues.*`) — it
+//      can only be labelling the object it was woken on;
+//   otherwise null (genuinely unknown).
+const LABEL_TARGETS = new Set(['issue', 'pr']);
+
+// The one GitHub object kind a producer's github-event triggers react to, or
+// null when it listens on both, neither, or only kind-ambiguous events
+// (`issue_comment` fires for PR comments too, `push` has no object).
+function triggerObjectKind(triggers) {
+  const kinds = new Set();
+  for (const t of (Array.isArray(triggers) ? triggers : [])) {
+    if (!t || t.type !== 'github-event' || !Array.isArray(t.events)) continue;
+    for (const e of t.events) {
+      const obj = String(e || '').split('.')[0];
+      if (obj === 'issues') kinds.add('issue');
+      else if (obj.startsWith('pull_request')) kinds.add('pr');
+    }
+  }
+  return kinds.size === 1 ? [...kinds][0] : null;
+}
+
+/**
+ * The object a `setLabel` action applies its label to — 'issue' | 'pr' | null.
+ * @param {object} option - the outcome option carrying the action
+ * @param {object} action - the setLabel action
+ * @param {Array} [producerTriggers] - the producer's triggers (rule 2 above)
+ */
+function setLabelTarget(option, action, producerTriggers) {
+  if (action && LABEL_TARGETS.has(action.target)) return action.target;
+  for (const a of (option && Array.isArray(option.actions) ? option.actions : [])) {
+    if (a && a.type === 'openPr') return 'pr';
+    if (a && a.type === 'openIssue') return 'issue';
+  }
+  return triggerObjectKind(producerTriggers);
+}
+
+// The `.labeled` event GitHub emits for a label on that target.
+function labelTargetEvent(target) {
+  return target === 'pr' ? 'pull_request.labeled' : target === 'issue' ? 'issues.labeled' : null;
+}
 
 // ─── the `wakeAgent` action (#2030, direct-agent-handoff concept §4.1) ───────
 //
@@ -193,6 +244,9 @@ function validateOutcomes(outcomes, sources) {
         if (forbiddenOutcomeLabel(a.label.trim(), sources)) {
           return { ok: false, error: `option ${id}: outcome may not set human-gate label \`${a.label.trim()}\`` };
         }
+        if (a.target !== undefined && !LABEL_TARGETS.has(a.target)) {
+          return { ok: false, error: `option ${id}: setLabel target must be 'issue' or 'pr'` };
+        }
       }
       if (a.type === 'wakeAgent') {
         const err = validateWakeAction(a, id, sources);
@@ -268,6 +322,7 @@ function normalizeOutcomes(outcomes) {
         type: a.type,
         ...(a.type === 'setLabel' && typeof a.label === 'string' && a.label.trim()
           ? { label: a.label.trim() } : {}),
+        ...(a.type === 'setLabel' && LABEL_TARGETS.has(a.target) ? { target: a.target } : {}),
         // wakeAgent (#2030): `to` + the capped `note` must survive every
         // persist, or the edge is lost with no error anywhere.
         ...(a.type === 'wakeAgent' && typeof a.to === 'string' && a.to.trim()
@@ -367,6 +422,7 @@ function substituteOutcomes(outcomes, subst) {
       actions: (Array.isArray(o.actions) ? o.actions : []).map(a => ({
         type: a.type,
         ...(a.type === 'setLabel' && typeof a.label === 'string' ? { label: f(a.label) } : {}),
+        ...(a.type === 'setLabel' && LABEL_TARGETS.has(a.target) ? { target: a.target } : {}),
         // wakeAgent (#2030): `to` is a role id — carried through UNsubstituted,
         // because the role-id → member-id remap is buildMemberFromTemplate's
         // job, not a `{{var}}` expansion. `note` is template-bearing free text
@@ -423,4 +479,6 @@ module.exports = {
   // wakeAgent (#2030)
   WAKE_NOTE_MAX, WAKE_NOTE_TRUNCATION_MARK, clampWakeNote,
   validateWakeAction, outcomeWakePairs,
+  // setLabel target (#2629)
+  LABEL_TARGETS, setLabelTarget, triggerObjectKind, labelTargetEvent,
 };

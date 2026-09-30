@@ -4917,8 +4917,12 @@ class TriggerScheduler:
         # always self-consistent.
         self._gate = workspace_gate if workspace_gate is not None else WorkspaceGate()
 
-        self._cron_tasks: dict[str, dict] = {}  # triggerId -> {"task": Task, "expr": str}
-        self._loop_tasks: dict[str, dict] = {}  # loop triggerId -> {"task": Task} (#932)
+        # triggerId -> {"task": Task, "expr": str, "trigger": dict}. `trigger` is
+        # refreshed on every sync, so a runner fires with the latest edit (#2627).
+        self._cron_tasks: dict[str, dict] = {}
+        self._loop_tasks: dict[str, dict] = {}  # loop triggerId -> {"task": Task, "trigger": dict} (#932)
+        # Trigger ids already warned about as duplicates (#2627) — one warning each.
+        self._duplicate_notified: set[str] = set()
         # Raw-layer guard (#1006): trigger ids already flagged as deviating
         # from the wiring rules — each gets ONE advisory DM, never a repeat.
         self._nonconformant_notified: set[str] = set()
@@ -5324,6 +5328,7 @@ class TriggerScheduler:
         # cron/once ids the scheduler is handling this tick — their status
         # entries keep nextFireAt/invalid; every other entry drops them (#2628).
         status_ids: set[str] = set()
+        seen_ids: set[str] = set()
         # Checked once per tick (not per overdue once-trigger) — a single
         # HTTP round-trip to the orchestrator covers the whole batch.
         maintenance_active = await self._maintenance_active()
@@ -5336,6 +5341,17 @@ class TriggerScheduler:
             tid = trigger.get("id")
             if not isinstance(tid, str) or not tid:
                 continue
+            # Duplicate ids (#2627): the task maps are keyed by id, so two
+            # triggers sharing one would cancel and reschedule each other on
+            # every sync. The first one wins; the rest are skipped with a
+            # single warning.
+            if tid in seen_ids:
+                if tid not in self._duplicate_notified:
+                    self._duplicate_notified.add(tid)
+                    print(f"[Runner:{self._agent_id}] duplicate trigger id {tid} "
+                          f"— only the first one is scheduled", file=sys.stderr)
+                continue
+            seen_ids.add(tid)
 
             # Raw-layer guard (#1006, §4.8): a self-managed edit that deviates
             # from the wiring rules is flagged ONCE (stderr + advisory DM) and
@@ -5359,6 +5375,10 @@ class TriggerScheduler:
                 active_ids.add(tid)
                 existing = self._cron_tasks.get(tid)
                 if existing and existing.get("expr") == expr and not existing["task"].done():
+                    # Same schedule: keep the running task, but hand it the
+                    # latest trigger so its next fire uses the edited prompt,
+                    # description, roomId, … (#2627).
+                    existing["trigger"] = dict(trigger)
                     continue
                 if existing:
                     existing["task"].cancel()
@@ -5372,11 +5392,13 @@ class TriggerScheduler:
                         nextFireAt=None)
                     continue
                 self._set_trigger_status(tid, invalid=None)
-                # Snapshot the trigger dict so later edits to triggers.json
-                # don't mutate the running task's view.
+                # Copy the trigger dict so later edits to triggers.json don't
+                # mutate the running task's view; each sync replaces the
+                # entry's copy and the runner reads it at fire time (#2627).
                 snapshot = dict(trigger)
                 task = asyncio.create_task(self._cron_runner(snapshot, expr))
-                self._cron_tasks[tid] = {"task": task, "expr": expr}
+                self._cron_tasks[tid] = {"task": task, "expr": expr,
+                                         "trigger": snapshot}
                 print(f"[Runner:{self._agent_id}] Trigger scheduled: {tid} ({expr})",
                       file=sys.stderr)
 
@@ -5475,12 +5497,15 @@ class TriggerScheduler:
                     continue
                 existing = self._loop_tasks.get(tid)
                 if existing and not existing["task"].done():
+                    # Next iteration runs with the edited trigger (#2627); the
+                    # stop contract and verifier stay as resolved at loop start.
+                    existing["trigger"] = dict(trigger)
                     continue
-                # Snapshot so later edits to triggers.json don't mutate the
-                # running task's view (same as the cron path).
+                # Copy so later edits to triggers.json don't mutate the running
+                # task's view (same as the cron path).
                 snapshot = dict(trigger)
                 task = asyncio.create_task(self._loop_runner(snapshot))
-                self._loop_tasks[tid] = {"task": task}
+                self._loop_tasks[tid] = {"task": task, "trigger": snapshot}
                 print(f"[Runner:{self._agent_id}] Loop scheduled: {tid} "
                       f"(maxIterations={trigger.get('maxIterations')})",
                       file=sys.stderr)
@@ -5552,7 +5577,7 @@ class TriggerScheduler:
                     tid, lastFiredAt=_iso_utc(datetime.now(tz=_TRIGGER_TZ)),
                     lastResult="running", nextFireAt=None)
                 try:
-                    await self._execute(trigger)
+                    await self._execute(self._latest_trigger(self._cron_tasks, tid, trigger))
                     result = self._exec_results.pop(tid, "ok")
                 except Exception as exc:
                     print(f"[Runner:{self._agent_id}] cron _execute({tid}) error: {exc}",
@@ -5561,6 +5586,20 @@ class TriggerScheduler:
                 self._set_trigger_status(tid, lastResult=result)
         except asyncio.CancelledError:
             return
+
+    @staticmethod
+    def _latest_trigger(tasks: dict[str, dict], tid: str, fallback: dict) -> dict:
+        """The trigger as of the last sync (#2627), else the runner's own copy.
+
+        A runner is started with a copy of its trigger, but `_sync` keeps the
+        task alive across edits that leave the schedule unchanged and only
+        swaps the entry's `trigger`. Reading it here, right before a run, is
+        what makes a prompt-only edit take effect on the next fire. Removal and
+        disabling need no check here: `_sync` cancels the task instead.
+        """
+        entry = tasks.get(tid)
+        latest = entry.get("trigger") if isinstance(entry, dict) else None
+        return dict(latest) if isinstance(latest, dict) else fallback
 
     async def _loop_runner(self, trigger: dict) -> None:
         """Run a `loop` trigger (#932): a continuation primitive.
@@ -5650,8 +5689,9 @@ class TriggerScheduler:
                 try:
                     # `_gate_held=True`: the gate is already held for the whole
                     # loop (above), so the iteration must not re-acquire it.
-                    await self._execute(trigger, ctx, loop_sink=sink,
-                                        _gate_held=True)
+                    await self._execute(
+                        self._latest_trigger(self._loop_tasks, tid, trigger),
+                        ctx, loop_sink=sink, _gate_held=True)
                 except Exception as exc:
                     print(f"[Runner:{self._agent_id}] loop _execute({tid}) error: {exc}",
                           file=sys.stderr)

@@ -46,7 +46,7 @@ A push fires the trigger if its branch matches **any** entry.
   matching pushes.
 - A non-matching push is logged in the GitHub Event Log as dropped
   (`branch-filter`); the Agent Chat **Events** tab names the branch, e.g.
-  "Branch 'agent-knowledge' is not in this trigger's branch filter".
+  "Branch 'docs/typo' is not in this trigger's branch filter".
 - The trigger card reads e.g. *Push · branches: main, feature/\**.
 
 ## Knowledge-base branches (built in)

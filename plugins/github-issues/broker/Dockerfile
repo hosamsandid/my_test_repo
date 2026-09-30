@@ -19,4 +19,21 @@ COPY broker-sdk/ /opt/broker-sdk/
 
 ENV AEE_PLUGIN_PORT=4008
 EXPOSE 4008
+
+# Build identity (#2646): the git commit this image was built from, passed in
+# by `make plugin-images`. Baked into the ENVIRONMENT so the running broker
+# reports it on /healthz (broker-sdk/build-info.js) — the only way to tell what
+# a live sidecar really runs while every image is tagged `:latest` — and into
+# OCI labels so `podman image inspect` shows it without starting anything.
+# Declared last so a new commit only rebuilds these metadata layers.
+ARG AEE_BUILD_COMMIT=unknown
+ARG AEE_BUILD_DIRTY=
+ARG AEE_BUILD_COMMIT_TIME=
+ENV AEE_BUILD_COMMIT="${AEE_BUILD_COMMIT}" \
+    AEE_BUILD_DIRTY="${AEE_BUILD_DIRTY}" \
+    AEE_BUILD_COMMIT_TIME="${AEE_BUILD_COMMIT_TIME}"
+LABEL org.opencontainers.image.revision="${AEE_BUILD_COMMIT}" \
+      aee.build.dirty="${AEE_BUILD_DIRTY}" \
+      aee.build.commit-time="${AEE_BUILD_COMMIT_TIME}"
+
 CMD ["node", "server.js"]

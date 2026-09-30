@@ -50,6 +50,25 @@ building the broker image, seeding the registry, installing, then granting:
    chained from `make up` — a broker sidecar holds real privilege, so building
    it is an explicit action.
 
+   Each image is stamped with the checkout's **build identity** (#2646) — the
+   short commit hash (`-dirty` for uncommitted changes) and the commit
+   timestamp, the same `GIT_COMMIT` / `GIT_DIRTY` / `GIT_COMMIT_TIME` the console
+   shows. They are baked in as `AEE_BUILD_COMMIT` / `AEE_BUILD_DIRTY` /
+   `AEE_BUILD_COMMIT_TIME` (every broker Dockerfile ends with that `ARG`/`ENV`
+   block, defaulting to `unknown`) and as OCI labels, readable without starting
+   anything:
+
+   ```bash
+   podman image inspect localhost/aee-plugin-jira:latest \
+     --format '{{index .Labels "org.opencontainers.image.revision"}} {{index .Labels "aee.build.commit-time"}}'
+   ```
+
+   A running broker reports the same values on `GET /healthz` as
+   `build: { commit, dirty, commitTime }` (Broker SDK `healthEndpoint`); the
+   orchestrator asks every live sidecar, so the Plugins page shows what the
+   container really runs, not what `:latest` points at now. Another build path
+   must pass the three `--build-arg`s, or the image reports `unknown`.
+
 2. **Seed the registry** so operators can see the plugin:
 
    ```bash
@@ -58,6 +77,10 @@ building the broker image, seeding the registry, installing, then granting:
 
    Copies `plugins/<id>/` into the pool volume → the operator registry at
    `/workspace/plugins/<id>/`.
+   Every seeded plugin gets a `build-info.json` (`{ commit, dirty, commitTime }`)
+   with the same identity; installing copies it into the registry, so the
+   **Installed files** line on the Plugins page names the commit the manifest
+   and CLI came from.
 
 3. **Install** (System Admin) from the **Plugins** page (`/plugins`) or
    `POST /api/plugins/:id/install`. Install copies the plugin into the operator
@@ -65,6 +88,12 @@ building the broker image, seeding the registry, installing, then granting:
    capabilities are shown in plain language for review first, because a sidecar
    can hold real privilege (e.g. `podman-sandbox` mounts the host Podman
    socket). **Install still grants nothing to any agent.**
+
+   Each card shows the **Installed files** and **Running broker** build
+   identities. **"Running broker differs from installed plugin"** means the
+   live sidecar was started from another commit than the installed files — a
+   rebuilt `:latest` image does not replace a running sidecar; it keeps the old
+   image until the sidecar container is recreated.
 
 4. **Grant** the plugin to a team or agent (Team Admin) — from the Agents edit
    form's plugin picker, or `POST /api/agents/:id/plugins/activate`. Only then

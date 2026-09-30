@@ -11,7 +11,12 @@
 // install — an unreviewed "podman-socket" is the whole security model quietly
 // handing out the host container runtime.
 //
-// No imports: unit-tested with node --test, bundled by Vite (#651 convention).
+// Unit-tested with node --test, bundled by Vite (#651 convention). The only
+// imports are the console's own pure formatters, so a plugin's build identity
+// reads exactly like Agent Studio's version display (#2646).
+
+import { formatVersionLabel, formatCommitTimestamp } from '../components/version-info.js';
+import { absoluteWhen } from '../components/format-when.js';
 
 export const HOST_MOUNT_PREFIX = 'host-mount:';
 
@@ -138,6 +143,89 @@ export function sidecarStatus(entry) {
   return { state: 'stopped', label: 'Broker not running', tone: 'warn' };
 }
 
+// ─── build identity (#2646) ─────────────────────────────────────────────────
+//
+// Two identities per plugin, because they can differ: the INSTALLED FILES
+// (manifest + CLI, `sourceBuild` from the seeded build-info.json) and the
+// RUNNING BROKER (`brokerBuild`, what the live sidecar reports on /healthz).
+// Every "we don't know" case is spelled out — never an empty or guessed value.
+
+export const BROKER_MISMATCH_HINT = 'Running broker differs from installed plugin';
+export const BROKER_MISMATCH_DETAIL =
+  'The broker container was started from a different commit than the installed plugin files. It keeps running that image until its sidecar container is recreated — rebuilding the image alone does not replace it.';
+export const UNKNOWN_BUILD = 'unknown';
+
+// One `{ commit, dirty, commitTime }` → `{ known, hash, time, text }`, formatted
+// with the console's own version-info.js (hash with the -dirty suffix, time as
+// "2026-08-13 17:52 +0200").
+export function describeBuild(build) {
+  const b = build && typeof build === 'object' ? build : null;
+  const hash = b ? formatVersionLabel(b.commit, b.dirty) : UNKNOWN_BUILD;
+  if (hash === UNKNOWN_BUILD) return { known: false, hash, time: UNKNOWN_BUILD, text: UNKNOWN_BUILD };
+  const time = formatCommitTimestamp(b.commitTime);
+  return { known: true, hash, time, text: `${hash} · ${time === UNKNOWN_BUILD ? 'time unknown' : time}` };
+}
+
+// A reference broker image is `[localhost/]aee-plugin-<id>:<tag>` and built by
+// `make plugin-images`; anything else (dummy-echo's busybox) is a third-party
+// image that carries no Agent Studio build.
+export function isAgentStudioImage(image) {
+  if (typeof image !== 'string' || !image) return false;
+  const name = image.split('/').pop().split(/[:@]/)[0];
+  return name.startsWith('aee-plugin-');
+}
+
+// The fetch-at-install upstream version of a command-only plugin (#1798):
+// "github/spec-kit@v0.0.90, fetched 9/30/2026, 9:08:25 PM".
+export function fetchedVersionText(installedVersion) {
+  const iv = installedVersion;
+  if (!iv || typeof iv !== 'object' || !iv.repo) return '';
+  const where = iv.ref ? `${iv.repo}@${iv.ref}` : iv.repo;
+  const when = absoluteWhen(iv.fetchedAt);
+  return when ? `${where}, fetched ${when}` : where;
+}
+
+// The running broker's identity line, or null for a plugin without a broker
+// (command-only, or not installed).
+export function brokerBuildLine(entry) {
+  const manifest = entry && entry.manifest;
+  if (!entry || !entry.installed || !manifest || !manifest.sidecar) return null;
+  if (entry.sidecarRunning === true) {
+    const d = describeBuild(entry.brokerBuild);
+    if (d.known) return { state: 'known', ...d };
+    if (!isAgentStudioImage(manifest.sidecar.image)) {
+      return { state: 'external', known: false, hash: UNKNOWN_BUILD, time: UNKNOWN_BUILD, text: 'unknown (external image)' };
+    }
+    // Running, but no usable build reported: an image built before #2646 or
+    // without git metadata.
+    return { state: 'unknown', known: false, hash: UNKNOWN_BUILD, time: UNKNOWN_BUILD, text: 'unknown (image reports no build)' };
+  }
+  if (entry.sidecarRunning === false) {
+    return { state: 'not-running', known: false, hash: UNKNOWN_BUILD, time: UNKNOWN_BUILD, text: 'unknown (broker not running)' };
+  }
+  return { state: 'unknown', known: false, hash: UNKNOWN_BUILD, time: UNKNOWN_BUILD, text: 'unknown (broker status unknown)' };
+}
+
+// Everything the card's build block renders.
+export function buildIdentity(entry) {
+  const installed = !!(entry && entry.installed);
+  const files = describeBuild(entry && entry.sourceBuild);
+  const broker = brokerBuildLine(entry);
+  // Compare the formatted labels, so "abc1234" vs "abc1234-dirty" counts as a
+  // difference too — a dirty build can hold anything.
+  const mismatch = !!(broker && broker.known && files.known && broker.hash !== files.hash);
+  return {
+    // "Installed files" for an installed plugin; "Source" for a pool entry.
+    filesLabel: installed ? 'Installed files' : 'Source',
+    files,
+    broker,
+    mismatch,
+    mismatchHint: mismatch ? BROKER_MISMATCH_HINT : '',
+    mismatchDetail: mismatch ? BROKER_MISMATCH_DETAIL : '',
+    fetched: installed ? fetchedVersionText(entry.installedVersion) : '',
+  };
+}
+
 // Fold one registry entry into everything the row renders.
 export function pluginRegistryRow(entry, { canManage = false, stackRuntime = null } = {}) {
   const manifest = entry && entry.manifest;
@@ -169,6 +257,7 @@ export function pluginRegistryRow(entry, { canManage = false, stackRuntime = nul
     errors: (entry && entry.errors) || [],
     installed: !!(entry && entry.installed),
     status: sidecarStatus(entry),
+    build: buildIdentity(entry),
     action: installAction(entry, { canManage, stackRuntime }),
     // #1599: a UI-bearing plugin that opted into global visibility. Surfaced so
     // an operator understands why an installed plugin appears for all users

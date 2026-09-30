@@ -170,6 +170,7 @@ const mcpSeed = require("./mcp-seed");
 const { resolveScopeId, scopeIdFromGrantScope } = require("./plugin-scope");
 const pluginRegistry = require("./plugin-registry");
 const pluginRuntime = require("./plugin-runtime");
+const { probeRunningBrokerBuilds } = require("./plugin-build-info");
 const { resolveScopeGithubCredentials, buildTeamFlowLabels } = require("./plugin-github-creds");
 // Generic per-scope plugin credential store + wiring (Jira plan §5). Makes the
 // manifest's `credentials[]` real: a Team Admin sets values in the console,
@@ -20354,6 +20355,9 @@ async function main() {
           let live = [];
           try { live = await pluginRuntime.listLiveSidecars(); } catch { /* runtime down: report none */ }
           const running = new Set(live.map((c) => (c.Labels || {})['aee.plugin.id']).filter(Boolean));
+          // #2646: the build each LIVE broker reports on /healthz — what the
+          // container really runs, not what `:latest` points at now.
+          const brokerBuilds = await probeRunningBrokerBuilds(entries, running, pluginRuntime.brokerBaseUrl);
           return sendJson(res, 200, {
             plugins: entries.map((e) => ({
               id: e.id,
@@ -20361,6 +20365,7 @@ async function main() {
               errors: e.errors,
               manifest: e.manifest,
               sidecarRunning: running.has(e.id),
+              brokerBuild: brokerBuilds[e.id] ?? null,
             })),
           });
         } catch (err) {

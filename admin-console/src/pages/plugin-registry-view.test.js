@@ -160,3 +160,143 @@ test('pluginRegistryRow degrades safely on a broken entry', () => {
   assert.equal(row.action.disabled, true);
   assert.match(row.quota, /uncapped/i);
 });
+
+// ─── build identity (#2646) ─────────────────────────────────────────────────
+
+import {
+  describeBuild,
+  isAgentStudioImage,
+  fetchedVersionText,
+  brokerBuildLine,
+  buildIdentity,
+  BROKER_MISMATCH_HINT,
+} from './plugin-registry-view.js';
+import { absoluteWhen } from '../components/format-when.js';
+import fs from 'node:fs';
+
+const NEW = { commit: 'bbbbbbb', dirty: '', commitTime: '2026-09-30T21:08:25+02:00' };
+const OLD = { commit: 'aaaaaaa', dirty: '', commitTime: '2026-09-29T08:05:00Z' };
+const brokerManifest = (image = 'localhost/aee-plugin-jira:latest') => manifest({ id: 'jira', sidecar: { image, capabilities: ['egress'], internalPort: 4009 } });
+
+// AC4 / AC7: same formatter as the console's own version display.
+test('describeBuild: hash (with -dirty) and commit timestamp in version-info.js format', () => {
+  assert.deepStrictEqual(describeBuild(NEW), { known: true, hash: 'bbbbbbb', time: '2026-09-30 21:08 +0200', text: 'bbbbbbb · 2026-09-30 21:08 +0200' });
+  assert.strictEqual(describeBuild({ ...NEW, dirty: 'dirty' }).hash, 'bbbbbbb-dirty');
+  assert.strictEqual(describeBuild(OLD).time, '2026-09-29 08:05 +0000');
+  assert.strictEqual(describeBuild({ commit: 'bbbbbbb', dirty: '', commitTime: '' }).text, 'bbbbbbb · time unknown');
+});
+
+// AC6: never empty — unknown is said out loud.
+test('describeBuild: missing / unknown build → "unknown"', () => {
+  for (const b of [null, undefined, {}, { commit: 'unknown', dirty: 'dirty', commitTime: '2026-09-30T21:08:25+02:00' }, { commit: '' }]) {
+    assert.deepStrictEqual(describeBuild(b), { known: false, hash: 'unknown', time: 'unknown', text: 'unknown' });
+  }
+});
+
+test('isAgentStudioImage: reference broker images vs third-party images', () => {
+  assert.strictEqual(isAgentStudioImage('localhost/aee-plugin-jira:latest'), true);
+  assert.strictEqual(isAgentStudioImage('aee-plugin-jira'), true);
+  assert.strictEqual(isAgentStudioImage('europe-west3-docker.pkg.dev/p/r/aee-plugin-jira@sha256:abc'), true);
+  assert.strictEqual(isAgentStudioImage('docker.io/library/busybox:latest'), false);
+  assert.strictEqual(isAgentStudioImage(''), false);
+  assert.strictEqual(isAgentStudioImage(undefined), false);
+});
+
+test('fetchedVersionText: repo@ref plus the local fetch time', () => {
+  const iv = { repo: 'github/spec-kit', ref: 'v0.0.90', fetchedAt: '2026-09-30T19:08:25.000Z', fileCount: 9 };
+  assert.strictEqual(fetchedVersionText(iv), `github/spec-kit@v0.0.90, fetched ${absoluteWhen(iv.fetchedAt)}`);
+  assert.strictEqual(fetchedVersionText({ repo: 'github/spec-kit', ref: 'main', fetchedAt: 'garbage' }), 'github/spec-kit@main');
+  assert.strictEqual(fetchedVersionText(null), '');
+  assert.strictEqual(fetchedVersionText({ ref: 'main' }), '');
+});
+
+test('brokerBuildLine: running broker reports its build', () => {
+  const line = brokerBuildLine({ installed: true, manifest: brokerManifest(), sidecarRunning: true, brokerBuild: OLD });
+  assert.strictEqual(line.state, 'known');
+  assert.strictEqual(line.text, 'aaaaaaa · 2026-09-29 08:05 +0000');
+});
+
+// AC6 + edge cases: every "don't know" case is named, never blank.
+test('brokerBuildLine: unknown cases are explicit', () => {
+  const entry = (extra) => ({ installed: true, manifest: brokerManifest(), ...extra });
+  assert.strictEqual(brokerBuildLine(entry({ sidecarRunning: true, brokerBuild: null })).text, 'unknown (image reports no build)');
+  assert.strictEqual(brokerBuildLine(entry({ sidecarRunning: true, brokerBuild: { commit: 'unknown' } })).text, 'unknown (image reports no build)');
+  assert.strictEqual(brokerBuildLine(entry({ sidecarRunning: false })).text, 'unknown (broker not running)');
+  assert.strictEqual(brokerBuildLine(entry({ sidecarRunning: null })).text, 'unknown (broker status unknown)');
+  // dummy-echo runs busybox: an external image, not an error.
+  const ext = brokerBuildLine({ installed: true, manifest: brokerManifest('busybox:latest'), sidecarRunning: true, brokerBuild: null });
+  assert.strictEqual(ext.state, 'external');
+  assert.strictEqual(ext.text, 'unknown (external image)');
+});
+
+test('brokerBuildLine: no line for command-only, not-installed or invalid plugins', () => {
+  assert.strictEqual(brokerBuildLine({ installed: true, manifest: manifest({ id: 'spec-kit', sidecar: undefined }), sidecarRunning: null }), null);
+  assert.strictEqual(brokerBuildLine({ installed: false, manifest: brokerManifest(), sidecarRunning: false }), null);
+  assert.strictEqual(brokerBuildLine({ installed: true, manifest: null, sidecarRunning: null }), null);
+  assert.strictEqual(brokerBuildLine(null), null);
+});
+
+// AC5 / AC8: the old sidecar keeps running after the plugin files moved on.
+test('buildIdentity: running broker on another commit → mismatch hint', () => {
+  const b = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: NEW, brokerBuild: OLD });
+  assert.strictEqual(b.filesLabel, 'Installed files');
+  assert.strictEqual(b.files.text, 'bbbbbbb · 2026-09-30 21:08 +0200');
+  assert.strictEqual(b.broker.text, 'aaaaaaa · 2026-09-29 08:05 +0000');
+  assert.strictEqual(b.mismatch, true);
+  assert.strictEqual(b.mismatchHint, BROKER_MISMATCH_HINT);
+  assert.ok(b.mismatchDetail.length > 0);
+});
+
+test('buildIdentity: same commit → no hint; dirty vs clean counts as different', () => {
+  const same = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: NEW, brokerBuild: { ...NEW } });
+  assert.strictEqual(same.mismatch, false);
+  assert.strictEqual(same.mismatchHint, '');
+  assert.strictEqual(same.mismatchDetail, '');
+  const dirty = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: NEW, brokerBuild: { ...NEW, dirty: 'dirty' } });
+  assert.strictEqual(dirty.mismatch, true);
+});
+
+// An unknown side is not evidence of a difference: say "unknown", no hint.
+test('buildIdentity: no mismatch hint when either side is unknown', () => {
+  const noFiles = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: null, brokerBuild: OLD });
+  assert.strictEqual(noFiles.files.text, 'unknown');
+  assert.strictEqual(noFiles.mismatch, false);
+  const noBroker = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: false, sourceBuild: NEW, brokerBuild: null });
+  assert.strictEqual(noBroker.mismatch, false);
+});
+
+test('buildIdentity: available plugin shows its pool source only', () => {
+  const b = buildIdentity({ installed: false, manifest: brokerManifest(), sidecarRunning: false, sourceBuild: NEW, installedVersion: { repo: 'x/y', ref: 'main' } });
+  assert.strictEqual(b.filesLabel, 'Source');
+  assert.strictEqual(b.files.text, 'bbbbbbb · 2026-09-30 21:08 +0200');
+  assert.strictEqual(b.broker, null);
+  assert.strictEqual(b.fetched, '');
+});
+
+test('buildIdentity: command-only fetch plugin shows its upstream version', () => {
+  const b = buildIdentity({
+    installed: true, manifest: manifest({ id: 'spec-kit', sidecar: undefined }), sidecarRunning: null,
+    sourceBuild: NEW, installedVersion: { repo: 'github/spec-kit', ref: 'v0.0.90', fetchedAt: '2026-09-30T19:08:25.000Z' },
+  });
+  assert.strictEqual(b.broker, null);
+  assert.strictEqual(b.mismatch, false);
+  assert.ok(b.fetched.startsWith('github/spec-kit@v0.0.90, fetched '));
+});
+
+test('pluginRegistryRow: carries the build identity', () => {
+  const row = pluginRegistryRow({ id: 'jira', ok: true, errors: [], installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: NEW, brokerBuild: OLD });
+  assert.strictEqual(row.build.mismatch, true);
+  assert.strictEqual(row.build.files.hash, 'bbbbbbb');
+});
+
+// #651 source guard: the card renders every build field the view computes.
+test('Plugins.jsx renders the build identity block', () => {
+  const src = fs.readFileSync(new URL('./Plugins.jsx', import.meta.url), 'utf8');
+  assert.match(src, /<BuildIdentity build=\{row\.build\} \/>/);
+  assert.match(src, /\{build\.filesLabel\}: <code style=\{mono\}>\{build\.files\.text\}<\/code>/);
+  assert.match(src, /\{build\.broker && \(\s*<span>Running broker: <code style=\{mono\}>\{build\.broker\.text\}<\/code><\/span>/);
+  assert.match(src, /\{build\.fetched && <span>Fetched from: <code style=\{mono\}>\{build\.fetched\}<\/code><\/span>\}/);
+  assert.match(src, /\{build\.mismatch && \(/);
+  assert.match(src, /title=\{build\.mismatchDetail\}/);
+  assert.match(src, /\{build\.mismatchHint\}\s*<\/span>/);
+});

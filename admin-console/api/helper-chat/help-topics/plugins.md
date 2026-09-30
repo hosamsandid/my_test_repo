@@ -39,8 +39,9 @@ accident. Nothing an agent can reach was not first granted to it.
 
 The page lists plugins in two sections. **Installed** are the ones whose broker
 this stack runs; **Available** are the ones sitting in the pool, ready to be
-installed but doing nothing yet. Each card states the plugin's id and version,
-its broker status, the name of the CLI command its agents would get (if it has
+installed but doing nothing yet. Each card states the plugin's id, the build
+it comes from (see *Which build is installed and running* below), its broker
+status, the name of the CLI command its agents would get (if it has
 one), the scope granularities it offers, its per-scope quota, and the privileges
 its broker would receive.
 
@@ -177,6 +178,38 @@ the "broker unreachable" exit code rather than a hang.
 Uninstalling also removes the plugin's card from the Installed section, and with
 it the team-assignment control on that card, so the page stops offering a grant
 it could not act on.
+
+### Which build is installed and running
+
+Every card shows the **build identity** of the plugin: the short **commit hash**
+of the Agent Studio source it was built from and that commit's **date and time**,
+in the same format as Agent Studio's own version (About page and sidebar footer).
+A build made from a working tree with uncommitted changes carries a `-dirty`
+suffix, just like the console's own version.
+
+An installed plugin can show two identities, because they can differ:
+
+- **Installed files** — the manifest and command-line tool in the registry, i.e.
+  the plugin source as it was when it was installed (`make seed-plugins` stamps
+  the pool with the commit; installing copies that stamp along). An available
+  plugin shows the same line as **Source**.
+- **Running broker** — the build the live broker container reports about
+  itself. This is what is really running, even if a newer image has been built
+  since. Command-only plugins have no broker and show no such line. A plugin
+  fetched from GitHub at install time (such as spec-kit) also shows **Fetched
+  from** — the upstream repository, ref and fetch time.
+
+When the running broker's commit differs from the installed files' commit, the
+card shows **"Running broker differs from installed plugin"**. The broker
+container keeps running the image it was started from; building a new image
+alone does not replace it. The hint disappears once the sidecar container is
+recreated from the matching build.
+
+Whatever cannot be determined is labelled **unknown** instead of left blank:
+a plugin seeded or an image built before build identities existed, a stack built
+without git metadata, a broker that is not running, or a third-party image (such
+as the `dummy-echo` smoke test's busybox), which says *unknown (external
+image)*. None of these affect how the plugin works.
 
 ## Plugins with their own UI
 

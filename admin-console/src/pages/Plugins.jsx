@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Puzzle, ShieldAlert, Download, Trash2, RefreshCw, BookOpen } from 'lucide-react';
+import { Puzzle, ShieldAlert, Download, Trash2, RefreshCw, BookOpen, AlertTriangle } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import ConfirmDialog from '../components/ConfirmDialog';
 import IconButton from '../components/IconButton';
@@ -143,6 +143,32 @@ function UninstallDialogBody() {
   );
 }
 
+// Build identity (#2646): which commit the installed files and the running
+// broker came from, in the console's own version format. Every value and hint
+// comes from plugin-registry-view.js buildIdentity().
+function BuildIdentity({ build }) {
+  const mono = { fontFamily: 'var(--eb-font-mono)' };
+  return (
+    <div style={{ display: 'flex', gap: 'var(--eb-space-4)', flexWrap: 'wrap', marginTop: 'var(--eb-space-1)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+      <span>{build.filesLabel}: <code style={mono}>{build.files.text}</code></span>
+      {build.broker && (
+        <span>Running broker: <code style={mono}>{build.broker.text}</code></span>
+      )}
+      {build.fetched && <span>Fetched from: <code style={mono}>{build.fetched}</code></span>}
+      {build.mismatch && (
+        <span
+          role="status"
+          title={build.mismatchDetail}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: STATUS_TONE.warn, fontWeight: 600 }}
+        >
+          <AlertTriangle size={12} aria-hidden="true" />
+          {build.mismatchHint}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function PluginCard({ row, onInstall, onUninstall, busy, teams, stackRuntime, onAssignChanged }) {
   return (
     <div style={{
@@ -186,6 +212,8 @@ function PluginCard({ row, onInstall, onUninstall, busy, teams, stackRuntime, on
             <span>Scopes: {row.scopes.join(', ')}</span>
             <span>{row.quota}</span>
           </div>
+
+          <BuildIdentity build={row.build} />
 
           {!row.ok && (
             <div style={{ marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-danger-fg, #a00)' }}>

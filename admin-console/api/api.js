@@ -174,6 +174,7 @@ const { admitsToChatList } = require('./matrix-agent-list');
 const { parseMemberMaterialize } = require('./member-materialize');
 const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentBaseId } = require('./quickstart-llm');
 const { validatePluginManifest } = require('./plugin-manifest');
+const { readPluginBuildInfo } = require('./plugin-build-info');
 // Agent toolchain registry (#1940) — the pure validator/resolver, byte-identical
 // to orchestrator/toolchain-registry.js. The console owns the WRITE side (a
 // System Admin registering an image reference); the orchestrator reads the same
@@ -10093,21 +10094,47 @@ app.get('/api/plugins', apiLimiter, async (req, res) => {
   // Which sidecars are actually up — an installed plugin whose broker is not
   // running is a real state an operator needs to see, not an error.
   let running = {};
+  // #2646: the build each live broker reports — probed by the orchestrator,
+  // which owns sidecar truth on both runtimes.
+  const brokerBuilds = {};
+  // …and the build of the image a recreated sidecar would run (AC8).
+  const imageBuilds = {};
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/plugins`);
     if (resp.ok) {
       const body = await resp.json();
-      for (const p of body.plugins || []) running[p.id] = !!p.sidecarRunning;
+      for (const p of body.plugins || []) {
+        running[p.id] = !!p.sidecarRunning;
+        brokerBuilds[p.id] = p.brokerBuild || null;
+        imageBuilds[p.id] = p.imageBuild || null;
+      }
     }
   } catch { /* orchestrator unreachable — report unknown rather than false */ }
 
+  // sourceBuild (#2646): the commit the plugin's files were seeded from — the
+  // registry copy for an installed plugin, the pool copy for an available one.
   res.json({
     installed: installed.map((p) => {
       const iv = readInstalledVersion(REGISTRY_PLUGINS_DIR, p.id);
-      return { ...p, installed: true, sidecarRunning: running[p.id] ?? null, ...(iv ? { installedVersion: iv } : {}) };
+      return {
+        ...p,
+        installed: true,
+        sidecarRunning: running[p.id] ?? null,
+        sourceBuild: readPluginBuildInfo(REGISTRY_PLUGINS_DIR, p.id),
+        brokerBuild: brokerBuilds[p.id] ?? null,
+        imageBuild: imageBuilds[p.id] ?? null,
+        ...(iv ? { installedVersion: iv } : {}),
+      };
     }),
-    available: available.map((p) => ({ ...p, installed: false, sidecarRunning: false })),
+    available: available.map((p) => ({
+      ...p,
+      installed: false,
+      sidecarRunning: false,
+      sourceBuild: readPluginBuildInfo(POOL_PLUGINS_DIR, p.id),
+      brokerBuild: null,
+      imageBuild: null,
+    })),
     canManage: !!getScope(req).all,
   });
 });

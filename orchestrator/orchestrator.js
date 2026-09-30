@@ -170,6 +170,7 @@ const mcpSeed = require("./mcp-seed");
 const { resolveScopeId, scopeIdFromGrantScope } = require("./plugin-scope");
 const pluginRegistry = require("./plugin-registry");
 const pluginRuntime = require("./plugin-runtime");
+const { probeRunningBrokerBuilds, inspectSidecarImageBuilds } = require("./plugin-build-info");
 const { resolveScopeGithubCredentials, buildTeamFlowLabels } = require("./plugin-github-creds");
 // Generic per-scope plugin credential store + wiring (Jira plan §5). Makes the
 // manifest's `credentials[]` real: a Team Admin sets values in the console,
@@ -20354,6 +20355,14 @@ async function main() {
           let live = [];
           try { live = await pluginRuntime.listLiveSidecars(); } catch { /* runtime down: report none */ }
           const running = new Set(live.map((c) => (c.Labels || {})['aee.plugin.id']).filter(Boolean));
+          // #2646: the build each LIVE broker reports on /healthz — what the
+          // container really runs, not what `:latest` points at now — and the
+          // build of the image a recreated sidecar would run (its labels). The
+          // two differ after a rebuild until the sidecar is recreated (AC8).
+          const [brokerBuilds, imageBuilds] = await Promise.all([
+            probeRunningBrokerBuilds(entries, running, pluginRuntime.brokerBaseUrl),
+            inspectSidecarImageBuilds(entries, pluginRuntime.inspectSidecarImage),
+          ]);
           return sendJson(res, 200, {
             plugins: entries.map((e) => ({
               id: e.id,
@@ -20361,6 +20370,8 @@ async function main() {
               errors: e.errors,
               manifest: e.manifest,
               sidecarRunning: running.has(e.id),
+              brokerBuild: brokerBuilds[e.id] ?? null,
+              imageBuild: imageBuilds[e.id] ?? null,
             })),
           });
         } catch (err) {

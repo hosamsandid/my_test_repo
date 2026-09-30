@@ -5213,7 +5213,6 @@ class TriggerScheduler:
         triggers = _load_triggers()
         active_ids: set[str] = set()
         active_loop_ids: set[str] = set()
-        seen_ids: set[str] = set()
         # Checked once per tick (not per overdue once-trigger) — a single
         # HTTP round-trip to the orchestrator covers the whole batch.
         maintenance_active = await self._maintenance_active()

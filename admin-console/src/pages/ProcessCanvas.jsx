@@ -17,7 +17,7 @@ import { anomalyCountByNode } from './process/flow-anomalies-view';
 import { lintView } from './process/lint-view';
 import HumanNodeInspector from './process/HumanNodeInspector';
 import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog, CreateChannelDialog, AgentToPersonDialog } from './process/EdgeDialogs';
-import { outcomeDropDialog, edgeOpensProducerOutcome } from './process/outcome-routing';
+import { outcomeDropDialog, edgeOpensProducerOutcome, nodeLabelTarget, labelTargetKind } from './process/outcome-routing';
 import MaterializeDialog from './process/MaterializeDialog';
 import SidePanel from '../components/SidePanel';
 import { roleIcon } from '../components/role-icons';
@@ -513,6 +513,11 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // `role … not found` on a human.
   const outcomeToNode = outcomeConnect
     ? (displayGraph?.nodes || []).find(n => n.id === outcomeConnect.to) || null
+    : null;
+  // #2629: an outcome-port drag pre-selects where the label lands (PR vs issue)
+  // from the producer's outcome, so the listener is typed on the right event.
+  const outcomeFromNode = outcomeConnect
+    ? (displayGraph?.nodes || []).find(n => n.id === outcomeConnect.from) || null
     : null;
   const outcomeDialog = outcomeConnect
     ? outcomeDropDialog(outcomeConnect.outcome, outcomeToNode)
@@ -1215,6 +1220,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           labels={displayGraph?.labels || []}
           ops={ops}
           initialLabel={outcomeConnect.outcome?.label || ''}
+          initialTarget={labelTargetKind(nodeLabelTarget(outcomeFromNode, outcomeConnect.outcome?.label))}
           emitSource={false}
           onClose={() => setOutcomeConnect(null)}
           onDone={() => { setOutcomeConnect(null); afterEdit(); }}

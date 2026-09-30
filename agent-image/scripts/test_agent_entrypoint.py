@@ -6385,5 +6385,207 @@ class DmConsolidationWiring(unittest.TestCase):
         self.assertIn("consolidation_task.cancel()", body)
 
 
+
+class PoolInstanceSessionPolicy(unittest.TestCase):
+    """#2595: which runs share a pool instance's one lifetime session."""
+
+    def test_pool_instance_trigger_and_chat_share_the_session(self):
+        cfg = {"sessionPolicy": "per-invocation", "poolInstance": True}
+        self.assertTrue(entrypoint._pool_instance_session(cfg))
+        self.assertTrue(entrypoint._pool_instance_session(
+            cfg, {"id": "t1", "type": "github-event"}))
+        self.assertTrue(entrypoint._pool_instance_session(
+            cfg, {"id": "t1", "type": "cron"}))
+
+    def test_loop_iterations_stay_fresh_even_on_a_pool_instance(self):
+        cfg = {"sessionPolicy": "per-invocation", "poolInstance": True}
+        self.assertFalse(entrypoint._pool_instance_session(
+            cfg, {"id": "l1", "type": "loop"}))
+
+    def test_non_pooled_agents_are_unaffected(self):
+        for cfg in ({}, {"sessionPolicy": "per-invocation"},
+                    {"sessionPolicy": "persistent"},
+                    {"poolInstance": "true"}, None):
+            self.assertFalse(entrypoint._pool_instance_session(
+                cfg, {"id": "t1", "type": "github-event"}))
+
+
+class PoolInstanceSessionContinuity(unittest.IsolatedAsyncioTestCase):
+    """#2595: a pool instance's triggered runs create, resume and move the DM
+    room's session pointer (AC1/2/4), still carry the learn hint and harvest
+    (AC9), and a stale pointer falls back to a fresh session with a visible
+    notice. Non-pooled agents keep today's behaviour (AC8), and a loop on a
+    pool instance stays fresh."""
+
+    DM_ROOM = "!dm:local"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workdir = Path(self._tmp.name)
+        self.calls = []  # (prompt, room_id, resume_id)
+        self.next_sessions = ["sess-1", "sess-2", "sess-3"]
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _fake_once(self, fail_resume=False):
+        def once(prompt, room_id, correlation_id, resume_id, blueprint_id,
+                 timeout_sec, run_context=None):
+            self.calls.append((prompt, room_id, resume_id))
+            if resume_id and fail_resume:
+                raise subprocess.CalledProcessError(
+                    1, "claude", stderr="No conversation found with session ID")
+            return "done", (resume_id or self.next_sessions.pop(0))
+        return once
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(return_value="$evt"), blueprint_id=None,
+        )
+
+    async def _fire(self, scheduler, cfg, trigger, once, harvest=None):
+        harvest = harvest or unittest.mock.Mock(side_effect=lambda text, cid: text)
+        patches = [
+            patch.object(entrypoint, "_agent_workdir", return_value=self.workdir),
+            patch.object(entrypoint, "_get_push_client", return_value=None),
+            patch.object(entrypoint, "_load_dm_room_id", return_value=self.DM_ROOM),
+            patch.object(entrypoint, "_load_dm_agent_config", return_value=cfg),
+            patch.object(entrypoint, "_base_run_context",
+                         side_effect=lambda: {"agentId": "agent-1"}),
+            patch.object(entrypoint, "_new_session", return_value={"id": "s1"}),
+            patch.object(entrypoint, "_bump_active"),
+            patch.object(entrypoint, "_append_event"),
+            patch.object(entrypoint, "_knowledge_autonomy_level", return_value=1),
+            patch.object(entrypoint, "_harvest_shared_lessons", harvest),
+            patch.object(entrypoint, "_rebuild_knowledge_digest"),
+            patch.object(entrypoint, "_rebuild_scoped_knowledge"),
+            patch.object(entrypoint, "_write_last_response_at"),
+            patch.object(entrypoint, "_call_claude_once", once),
+            patch.object(scheduler, "_post_trigger_notice", AsyncMock()),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            await scheduler._execute_inner(trigger, None)
+        finally:
+            for p in patches:
+                p.stop()
+        return harvest
+
+    def _pointer(self, room_id=None):
+        f = self.workdir / "sessions" / f"{room_id or self.DM_ROOM}.current.json"
+        return json.loads(f.read_text())["sessionId"] if f.exists() else None
+
+    POOL = {"sessionPolicy": "per-invocation", "poolInstance": True}
+    TRIGGER = {"id": "t1", "type": "github-event", "prompt": "Rework."}
+
+    async def test_first_trigger_creates_and_second_resumes_the_session(self):
+        scheduler = self._scheduler()
+        once = self._fake_once()
+        await self._fire(scheduler, self.POOL, self.TRIGGER, once)
+        self.assertIsNone(self.calls[0][2])          # AC1: fresh first run …
+        self.assertEqual(self._pointer(), "sess-1")  # … recorded as current
+        await self._fire(scheduler, self.POOL, self.TRIGGER, once)
+        self.assertEqual(self.calls[1][2], "sess-1")  # AC2: resumed
+        self.assertEqual(self._pointer(), "sess-1")
+
+    async def test_trigger_after_a_chat_turn_resumes_the_chat_session(self):
+        # AC4: the chat turn wrote the DM pointer; the trigger continues it.
+        entrypoint_workdir = patch.object(entrypoint, "_agent_workdir",
+                                          return_value=self.workdir)
+        with entrypoint_workdir, patch.object(entrypoint, "_get_push_client",
+                                              return_value=None):
+            entrypoint._write_session_pointer(self.DM_ROOM, "chat-sess")
+        await self._fire(self._scheduler(), self.POOL, self.TRIGGER,
+                         self._fake_once())
+        self.assertEqual(self.calls[0][2], "chat-sess")
+
+    async def test_trigger_posting_to_another_room_still_uses_the_dm_session(self):
+        trigger = dict(self.TRIGGER, roomId="!team:local")
+        await self._fire(self._scheduler(), self.POOL, trigger, self._fake_once())
+        self.assertEqual(self.calls[0][1], "!team:local")  # logs/posts there
+        self.assertEqual(self._pointer(), "sess-1")        # DM pointer moved
+        self.assertIsNone(self._pointer("!team:local"))
+
+    async def test_learn_hint_and_harvest_still_run_on_every_resumed_run(self):
+        scheduler = self._scheduler()
+        once = self._fake_once()
+        await self._fire(scheduler, self.POOL, self.TRIGGER, once)
+        harvest = await self._fire(scheduler, self.POOL, self.TRIGGER, once)
+        self.assertIn("```knowledge", self.calls[1][0])  # AC9
+        harvest.assert_called_once()
+
+    async def test_stale_pointer_falls_back_fresh_with_a_visible_notice(self):
+        with patch.object(entrypoint, "_agent_workdir", return_value=self.workdir), \
+                patch.object(entrypoint, "_get_push_client", return_value=None):
+            entrypoint._write_session_pointer(self.DM_ROOM, "gone")
+        scheduler = self._scheduler()
+        await self._fire(scheduler, self.POOL, self.TRIGGER,
+                         self._fake_once(fail_resume=True))
+        self.assertEqual([c[2] for c in self.calls], ["gone", None])
+        self.assertEqual(self._pointer(), "sess-1")
+        posted = [c.args[1] for c in scheduler._send_formatted.await_args_list]
+        self.assertIn(entrypoint.POOL_SESSION_RESTARTED_NOTICE, posted)
+
+    async def test_loop_on_a_pool_instance_stays_fresh_and_leaves_the_pointer(self):
+        with patch.object(entrypoint, "_agent_workdir", return_value=self.workdir), \
+                patch.object(entrypoint, "_get_push_client", return_value=None):
+            entrypoint._write_session_pointer(self.DM_ROOM, "chat-sess")
+        await self._fire(self._scheduler(), self.POOL,
+                         {"id": "l1", "type": "loop", "prompt": "x"},
+                         self._fake_once())
+        self.assertIsNone(self.calls[0][2])
+        self.assertEqual(self._pointer(), "chat-sess")
+
+    async def test_non_pooled_per_invocation_never_touches_the_pointer(self):
+        # AC8 regression: a regular per-invocation agent starts fresh and
+        # neither reads nor moves the DM pointer.
+        with patch.object(entrypoint, "_agent_workdir", return_value=self.workdir), \
+                patch.object(entrypoint, "_get_push_client", return_value=None):
+            entrypoint._write_session_pointer(self.DM_ROOM, "chat-sess")
+        await self._fire(self._scheduler(), {"sessionPolicy": "per-invocation"},
+                         self.TRIGGER, self._fake_once())
+        self.assertIsNone(self.calls[0][2])
+        self.assertEqual(self._pointer(), "chat-sess")
+
+    async def test_persistent_agent_still_resumes_its_trigger_room_pointer(self):
+        # AC8 regression: persistent keeps resuming the trigger room's pointer.
+        with patch.object(entrypoint, "_agent_workdir", return_value=self.workdir), \
+                patch.object(entrypoint, "_get_push_client", return_value=None):
+            entrypoint._write_session_pointer(self.DM_ROOM, "chat-sess")
+        await self._fire(self._scheduler(), {}, self.TRIGGER, self._fake_once())
+        self.assertEqual(self.calls[0][2], "chat-sess")
+
+
+class PoolInstanceDmSessionWiring(unittest.TestCase):
+    """#2595 AC3: a chat turn on a pool instance resumes the instance's one
+    session through the DM pointer and says so when it could not. `on_message`
+    is a nested listener with no harness, so — like DmKnowledgeHarvestWiring —
+    the wiring is read off the module source."""
+
+    SRC = _MODULE_PATH.read_text(encoding="utf-8")
+
+    def _dm_body(self):
+        start = self.SRC.index("async def on_message")
+        end = self.SRC.index("async def ", start + 1)
+        return self.SRC[start:end]
+
+    def test_chat_turn_passes_the_dm_pointer_room_for_a_pool_instance(self):
+        body = self._dm_body()
+        self.assertIn(
+            "dm_instance_session = _pool_instance_session(_load_dm_agent_config())",
+            body)
+        self.assertIn(
+            "(_load_dm_room_id() or room_id) if dm_instance_session else None,",
+            body)
+
+    def test_chat_turn_surfaces_a_restarted_session(self):
+        body = self._dm_body()
+        self.assertIn('dm_instance_session and dm_run_context.get("_resumeFellBack")',
+                      body)
+        self.assertIn("POOL_SESSION_RESTARTED_NOTICE", body)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -338,6 +338,34 @@ RESUME_UNAVAILABLE_NOTICE = (
 )
 
 
+# Shown in the room when a pool instance's one lifetime session (#2595) could
+# not be resumed (snapshot gone, e.g. lost with the container) and the run had
+# to start a fresh one — the break must be visible, never silent.
+POOL_SESSION_RESTARTED_NOTICE = (
+    "_(My previous session for this work item could not be resumed — the saved "
+    "conversation snapshot is no longer available. I continued in a new "
+    "session, so I don't remember earlier runs beyond what is on disk.)_"
+)
+
+
+def _pool_instance_session(cfg: dict | None, trigger: dict | None = None) -> bool:
+    """True when this run belongs to a pool instance's single lifetime session
+    (#2595).
+
+    A pool instance (`poolInstance: true`) exists for exactly one work item and
+    is reaped when it is done, so every trigger run and every chat turn resume
+    ONE Claude session through the DM room's session pointer — instead of the
+    fresh, pointer-less session `per-invocation` gives a triggered run. Loop
+    iterations are the exception: they rely on a fresh context per iteration
+    by design. Non-pooled agents are unaffected (False).
+    """
+    if not isinstance(cfg, dict) or cfg.get("poolInstance") is not True:
+        return False
+    if isinstance(trigger, dict) and trigger.get("type") == "loop":
+        return False
+    return True
+
+
 def _session_pointer_file(room_id: str) -> Path:
     return _agent_workdir() / "sessions" / f"{room_id}.current.json"
 
@@ -3750,15 +3778,23 @@ def _call_claude_once_inner(prompt: str, room_id: str, correlation_id: str,
 
 def _call_claude(prompt: str, room_id: str, correlation_id: str,
                  blueprint_id: str | None, timeout_sec: int = CLAUDE_TIMEOUT_SEC,
-                 run_context: dict | None = None) -> str:
-    """Drive _call_claude_once with --resume retry-on-stale-session logic."""
+                 run_context: dict | None = None,
+                 pointer_room_id: str | None = None) -> str:
+    """Drive _call_claude_once with --resume retry-on-stale-session logic.
+
+    `pointer_room_id` names the room whose session pointer is read and moved
+    (default: `room_id`, where the run logs and posts). A pool instance
+    (#2595) passes its DM room so a trigger posting elsewhere still continues
+    the instance's one session. When a stale pointer forces a fresh session,
+    `run_context["_resumeFellBack"]` is set so the caller can say so."""
+    pointer_room = pointer_room_id or room_id
     # Pyramid level 1 guarantee: the digest CLAUDE.md @-imports is current for
     # this run (per-invocation agents see the team state on every run).
     _rebuild_knowledge_digest()
     # Level 1.5 (#917): task-scoped knowledge for THIS prompt — the one place
     # in the whole system where the task text and the KB meet.
     _rebuild_scoped_knowledge(prompt)
-    resume_id, resume_requested = _read_session_pointer_full(room_id)
+    resume_id, resume_requested = _read_session_pointer_full(pointer_room)
     if resume_id:
         try:
             text, observed = _call_claude_once(
@@ -3766,14 +3802,14 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
                 run_context,
             )
             if observed:
-                _write_session_pointer(room_id, observed)
+                _write_session_pointer(pointer_room, observed)
             return text
         except subprocess.CalledProcessError as err:
             if getattr(err, "user_aborted", False):
                 raise
             blob = (str(err.stderr or "") + " " + str(err)).lower()
             if "session" in blob or "resume" in blob or "not found" in blob:
-                _clear_session_pointer(room_id)
+                _clear_session_pointer(pointer_room)
                 # An explicit resume (#574) must NOT silently fall back to a
                 # fresh empty session (AC6) — the user chose *this* snapshot, so
                 # tell them it's gone and let them decide, rather than answering
@@ -3789,12 +3825,14 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
                     f"[Runner] --resume {resume_id} failed; retrying without resume",
                     file=sys.stderr,
                 )
+                if run_context is not None:
+                    run_context["_resumeFellBack"] = True
                 text, observed = _call_claude_once(
                     prompt, room_id, correlation_id, None, blueprint_id, timeout_sec,
                     run_context,
                 )
                 if observed:
-                    _write_session_pointer(room_id, observed)
+                    _write_session_pointer(pointer_room, observed)
                 return text
             raise
 
@@ -3803,7 +3841,7 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
         run_context,
     )
     if observed:
-        _write_session_pointer(room_id, observed)
+        _write_session_pointer(pointer_room, observed)
     return text
 
 
@@ -7051,6 +7089,10 @@ class TriggerScheduler:
         cfg = _load_dm_agent_config()
         session_policy = cfg.get("sessionPolicy")
         is_per_invocation = session_policy == "per-invocation"
+        # A pool instance (#2595) is still per-invocation for everything else
+        # (learn hint, harvest, autonomy) but resumes its one lifetime session
+        # instead of starting fresh — shared with its chat via the DM pointer.
+        instance_session = _pool_instance_session(cfg, trigger)
 
         # Build the prompt — order mirrors agent-runner.js:874-914.
         task_body = trigger.get("prompt", "")
@@ -7237,7 +7279,9 @@ class TriggerScheduler:
             # Per-invocation runs MUST NOT read or write the per-room session
             # pointer — otherwise the DM's resume id gets stolen. Bypass the
             # _call_claude wrapper for that case and call _call_claude_once
-            # directly with resume_id=None.
+            # directly with resume_id=None. A pool instance is the exception
+            # (#2595): its DM pointer IS the instance's one session, so its
+            # triggers resume and move it exactly like its chat turns do.
             #
             # The claude invocation gets one retry on transient failure: the
             # triggering event is already consumed at this point, so giving up
@@ -7248,7 +7292,14 @@ class TriggerScheduler:
             while True:
                 attempt += 1
                 try:
-                    if is_per_invocation:
+                    if instance_session:
+                        result = await asyncio.to_thread(
+                            _call_claude,
+                            prompt, room_id, correlation_id, self._blueprint_id,
+                            timeout_sec, run_context,
+                            _load_dm_room_id() or room_id,
+                        )
+                    elif is_per_invocation:
                         result, _observed = await asyncio.to_thread(
                             _call_claude_once,
                             prompt, room_id, correlation_id, None,
@@ -7457,6 +7508,20 @@ class TriggerScheduler:
                 })
             except Exception:
                 pass
+
+        # A pool instance whose one session could not be resumed (#2595) says
+        # so in the room — even when the run itself then reports `[PASS]`.
+        if instance_session and run_context.get("_resumeFellBack"):
+            try:
+                _append_event(room_id, {
+                    "type": "system_event",
+                    "subtype": "pool-session-restarted",
+                    "correlationId": correlation_id,
+                })
+                await self._send_formatted(room_id, POOL_SESSION_RESTARTED_NOTICE)
+            except Exception as exc:
+                print(f"[Runner:{self._agent_id}] Could not post session-restart "
+                      f"notice for {tid}: {exc}", file=sys.stderr)
 
         # Deterministic KB harvest (issue #602): record the structured
         # ```knowledge block the run emitted, then drop it from the reply. Only
@@ -7779,6 +7844,9 @@ async def run_dm_listener() -> None:
             # Only the event is named; the orchestrator reads its sender from
             # the homeserver, so nothing here can choose whose credential runs.
             dm_run_context["chatEvent"] = {"roomId": room_id, "eventId": getattr(event, "event_id", None)}
+            # A pool instance (#2595) continues its one lifetime session — the
+            # same DM pointer its triggered runs resume and move.
+            dm_instance_session = _pool_instance_session(_load_dm_agent_config())
             try:
                 # claude invocation is blocking — run it off the event loop so
                 # matrix-nio can keep syncing (otherwise no follow-on messages
@@ -7786,6 +7854,7 @@ async def run_dm_listener() -> None:
                 result = await asyncio.to_thread(
                     _call_claude, send_body, room_id, correlation_id, blueprint_id,
                     CLAUDE_TIMEOUT_SEC, dm_run_context,
+                    (_load_dm_room_id() or room_id) if dm_instance_session else None,
                 )
             finally:
                 _bump_active(-1, session)
@@ -7836,6 +7905,16 @@ async def run_dm_listener() -> None:
                     "_(The agent produced no output. This usually means the model id is "
                     "misconfigured or the run was interrupted — check the agent container logs.)_"
                 )
+
+            # A pool instance whose one session could not be resumed (#2595)
+            # says so rather than answering as if it remembered.
+            if dm_instance_session and dm_run_context.get("_resumeFellBack"):
+                _append_event(room_id, {
+                    "type": "system_event",
+                    "subtype": "pool-session-restarted",
+                    "correlationId": correlation_id,
+                })
+                reply = f"{POOL_SESSION_RESTARTED_NOTICE}\n\n{reply}"
 
             # If the run paused on an AskUserQuestion, carry the structured
             # options to the console so it can render clickable quick-reply

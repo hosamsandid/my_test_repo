@@ -392,3 +392,33 @@ test('reworkRefFromPayload: an unsafe-looking head.ref is refused, not merely pa
     null,
   );
 });
+
+// ─── isArchivableSessionPath (#2595 AC10) ────────────────────────────────────
+
+test('isArchivableSessionPath: the transcript and its rotations are archived', () => {
+  assert.equal(pool.isArchivableSessionPath('/s/sessions'), true);
+  assert.equal(pool.isArchivableSessionPath('/s/sessions/!room:local.jsonl'), true);
+  assert.equal(pool.isArchivableSessionPath('/s/sessions/!room:local.1.jsonl'), true);
+});
+
+test('isArchivableSessionPath: the resumable session pointer is never archived', () => {
+  assert.equal(pool.isArchivableSessionPath('/s/sessions/!room:local.current.json'), false);
+});
+
+test('isArchivableSessionPath: the filter really drops the pointer from an fs.cpSync copy', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pool-archive-'));
+  try {
+    const src = path.join(root, 'sessions');
+    fs.mkdirSync(src);
+    fs.writeFileSync(path.join(src, '!r.jsonl'), '{}\n');
+    fs.writeFileSync(path.join(src, '!r.current.json'), '{"sessionId":"s1"}');
+    const dst = path.join(root, 'archive', 'sessions');
+    fs.cpSync(src, dst, { recursive: true, filter: pool.isArchivableSessionPath });
+    assert.deepEqual(fs.readdirSync(dst).sort(), ['!r.jsonl']);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

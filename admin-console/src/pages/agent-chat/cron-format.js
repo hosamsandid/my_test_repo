@@ -15,10 +15,10 @@ export const DOW_LABELS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday
 const CRON_FIELDS = [
   { label: 'minute',       min: 0, max: 59 },
   { label: 'hour',         min: 0, max: 23 },
-  { label: 'day of month', min: 1, max: 31 },
+  { label: 'day of month', min: 1, max: 31, last: true },
   { label: 'month',        min: 1, max: 12,
     names: ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'], nameBase: 1 },
-  { label: 'weekday',      min: 0, max: 7,
+  { label: 'weekday',      min: 0, max: 7, nth: true,
     names: ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'], nameBase: 0 },
 ];
 
@@ -32,7 +32,19 @@ function fieldValue(tok, f) {
 }
 
 // One comma-separated item: `*`, `n`, `a-b`, each optionally `/step` (step ≥ 1).
-function cronItemError(item, f) {
+// Like croniter, day of month also takes `L` (last day) and weekday takes
+// `n#k` (k-th such weekday, k 1–5) — the latter only when every item of the
+// list uses it (croniter rejects `3,1#2`).
+function cronItemError(item, f, nthList) {
+  if (f.last && item.toUpperCase() === 'L') return null;
+  if (nthList) {
+    const [day, k, extra] = item.split('#');
+    if (extra !== undefined || !/^\d+$/.test(k ?? '')) return `invalid ${f.label} "${item}"`;
+    const n = fieldValue(day, f);
+    if (Number.isNaN(n) || n < f.min || n > f.max) return `${f.label} must be between ${f.min} and ${f.max}`;
+    if (Number(k) < 1 || Number(k) > 5) return `${f.label} "${item}": the occurrence after # must be 1 to 5`;
+    return null;
+  }
   const [base, step, extra] = item.split('/');
   if (extra !== undefined || base === '') return `invalid ${f.label} "${item}"`;
   if (step !== undefined && (!/^\d+$/.test(step) || Number(step) < 1)) {
@@ -60,8 +72,10 @@ export function cronExpressionError(cron) {
     return `A cron expression has 5 fields (minute hour day month weekday) — found ${parts.length}.`;
   }
   for (let i = 0; i < 5; i++) {
-    for (const item of parts[i].split(',')) {
-      const err = cronItemError(item, CRON_FIELDS[i]);
+    const items = parts[i].split(',');
+    const nthList = CRON_FIELDS[i].nth && items.every(it => it.includes('#'));
+    for (const item of items) {
+      const err = cronItemError(item, CRON_FIELDS[i], nthList);
       if (err) return err.charAt(0).toUpperCase() + err.slice(1) + '.';
     }
   }

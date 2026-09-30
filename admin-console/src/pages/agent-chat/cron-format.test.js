@@ -64,6 +64,24 @@ test('cronExpressionError rejects malformed and out-of-range expressions', () =>
   assert.match(cronExpressionError('*/0 * * * *'), /step/);
 });
 
+// Review S1: croniter also schedules `L` (last day of month) and `n#k`
+// (k-th weekday) — an existing trigger using them must stay saveable.
+test('cronExpressionError matches croniter on L and n#k', () => {
+  for (const cron of [
+    '0 9 L * *', '0 9 1,L * *', '0 9 l * *', '0 9 * * 1#2', '0 9 * * MON#2', '0 9 * * 7#1',
+    '0 9 * * 1#5', '0 9 * * 1#2,3#1',
+  ]) {
+    assert.equal(cronExpressionError(cron), null, cron);
+  }
+  for (const cron of [
+    '0 L * * *', '0 9 L-1 * *', '0 9 LW * *', '0 9 L/2 * *', '0 9 * * L', '0 9 * * 5L',
+    '0 9 * * 1#0', '0 9 * * 1#6', '0 9 * * 8#1', '0 9 * * 3,1#2', '0 9 * * 1-2#1',
+    '0 9 * * 1#2/2', '0 9 * * 1#2#3',
+  ]) {
+    assert.ok(cronExpressionError(cron), `expected an error for ${JSON.stringify(cron)}`);
+  }
+});
+
 test('validateCronState flags empty / out-of-range preset fields per input', () => {
   const base = parseCronState('0 9 * * *');
   const bad = (patch) => validateCronState({ ...base, ...patch });

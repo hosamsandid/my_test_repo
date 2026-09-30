@@ -3,7 +3,8 @@
 // Source-reading drift guard for revoking a grant whose plugin is uninstalled
 // (#2651, #651 convention). The decisions are pure and covered in
 // plugin-grants.test.js (uninstalledRevokeGrant) and plugin-sync.test.js
-// (withStoredCliNames); `orchestrator.js` boots listeners on require, so this
+// (withStoredCliNames, withStoredCommandNamespaces, uninstalledCommandRevokes);
+// `orchestrator.js` boots listeners on require, so this
 // file checks that the seams still CALL them.
 
 const { test } = require('node:test');
@@ -40,7 +41,13 @@ test('the agent route passes the direction and the agent\'s effective grant', ()
 test('the workspace sync names an uninstalled plugin\'s CLI from its seeded config', () => {
   const body = slice(SRC, 'async _syncPluginIntoWorkspace(id, cfg, prevGrant, nextGrant) {', 'const written = [];', 1600);
   assert.match(body, /path\.join\(dir, PLUGINS_DIR, `\$\{pluginId\}\.json`\)/);
-  assert.match(body, /prevGrant: withStoredCliNames\(prevGrant, manifests, readStoredConfig\),/);
+  assert.match(body, /const storedPrevGrant = withStoredCommandNamespaces\(\s*withStoredCliNames\(prevGrant, manifests, readStoredConfig\), manifests, readStoredConfig,\s*\);/);
+  assert.match(body, /prevGrant: storedPrevGrant,/);
   // The legacy-dir migration must run before the stored config is read.
   assert.ok(body.indexOf('resolveAgentStateDir(dir);') < body.indexOf('const plan = planWorkspaceSync({'));
+});
+
+test('the command sync unprojects an uninstalled plugin\'s commands under its stored namespace (#2657)', () => {
+  const body = slice(SRC, 'const seededCmds = readSeededCommands(id);', 'writeSeededCommands(id, seededCmds);', 3000);
+  assert.match(body, /for \(const \{ namespace \} of uninstalledCommandRevokes\(storedPrevGrant, nextGrant, manifests\)\) \{\s*const nsRel = projectSkillCommands\(id, namespace, null, seededCmds, \{ remove: true \}\);\s*if \(nsRel\) commandReseedPaths\.push\(nsRel\);\s*\}/);
 });

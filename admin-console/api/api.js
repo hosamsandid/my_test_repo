@@ -193,6 +193,7 @@ const { resolveSpecKitCommand, hasUnresolvedPlaceholders } = require('./speckit-
 const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
 const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole, viewerTeamRoles } = require('./plugin-ui-viewer');
 const pluginCredView = require('./plugin-credential-view');
+const { PLUGIN_ID_RE, invalidPluginIdMessage, isRemovableRegistryDirName } = require('./plugin-registry-ids');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -9947,13 +9948,13 @@ app.get('/api/process-templates/:id', (req, res) => {
  * NOTHING to any agent — that is the separate grant step (§4.4). */
 const POOL_PLUGINS_DIR = path.join(POOL_DIR, 'plugins');
 const REGISTRY_PLUGINS_DIR = path.join(WORKSPACE, 'plugins');
-const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+// PLUGIN_ID_RE and the removable-directory rule live in plugin-registry-ids.js (#2649).
 
 // Read + validate one plugin.json under a base dir. Never throws; an invalid
 // plugin is reported WITH its errors rather than hidden, so an operator can see
 // why something they dropped in isn't installable.
 function readPluginDir(baseDir, id) {
-  if (!PLUGIN_ID_RE.test(id)) return { id, ok: false, errors: ['invalid plugin id'], manifest: null };
+  if (!PLUGIN_ID_RE.test(id)) return { id, ok: false, errors: [invalidPluginIdMessage(id)], manifest: null };
   const file = path.join(baseDir, id, 'plugin.json');
   // Containment: id is regex-bounded above (no dots, no slashes), so the join
   // cannot escape — re-checked here because this path is attacker-adjacent.
@@ -10148,6 +10149,11 @@ app.get('/api/plugins', apiLimiter, async (req, res) => {
       imageBuild: null,
     })),
     canManage: !!getScope(req).all,
+    // The runtime a plugin's `platforms` is checked against (#2649) — the same
+    // AEE_CONTAINER_RUNTIME signal the orchestrator spawns on; the k8s overlay
+    // sets it on the console too. Without it the page assumed podman, so a
+    // podman-only plugin on Kubernetes read "starting" instead of its mismatch.
+    stackRuntime: normalizeToolchainRuntime(process.env.AEE_CONTAINER_RUNTIME),
   });
 });
 
@@ -10198,7 +10204,10 @@ app.post('/api/plugins/:id/install', heavyLimiter, async (req, res) => {
 app.delete('/api/plugins/:id', heavyLimiter, async (req, res) => {
   if (!getScope(req).all) return res.status(403).json({ error: 'System Admin required' });
   const id = req.params.id;
-  if (!PLUGIN_ID_RE.test(id)) return res.status(400).json({ error: 'invalid plugin id' });
+  // A broken registry entry whose directory name is not a valid id (e.g. an
+  // operator's `jira.bak-…` copy) is still listed on the Plugins page, so it
+  // must be removable from there too (#2649) — see plugin-registry-ids.js.
+  if (!isRemovableRegistryDirName(id)) return res.status(400).json({ error: invalidPluginIdMessage(id) });
   const dest = path.join(REGISTRY_PLUGINS_DIR, id);
   if (!path.resolve(dest).startsWith(path.resolve(REGISTRY_PLUGINS_DIR) + path.sep)) {
     return res.status(400).json({ error: 'invalid plugin id' });
@@ -10214,13 +10223,16 @@ app.delete('/api/plugins/:id', heavyLimiter, async (req, res) => {
   // reinstall does not silently resurrect a team's old vendor token.
   // PLUGIN_ID_RE already excludes every path separator; the resolve-guard
   // mirrors the one on `dest` above (defense in depth, CodeQL js/path-injection).
-  try {
-    const credRoot = path.resolve(REGISTRY_PLUGINS_DIR, '_credentials');
-    const credDest = path.resolve(credRoot, id);
-    if (credDest.startsWith(credRoot + path.sep)) {
-      fs.rmSync(credDest, { recursive: true, force: true });
-    }
-  } catch { /* best effort */ }
+  // Only a valid id can own credentials, so a removed broken entry reaps none.
+  if (PLUGIN_ID_RE.test(id)) {
+    try {
+      const credRoot = path.resolve(REGISTRY_PLUGINS_DIR, '_credentials');
+      const credDest = path.resolve(credRoot, id);
+      if (credDest.startsWith(credRoot + path.sep)) {
+        fs.rmSync(credDest, { recursive: true, force: true });
+      }
+    } catch { /* best effort */ }
+  }
   // Existing grants are deliberately LEFT ALONE: uninstalling is an operator
   // action on the registry, not a mass revoke. The orchestrator's reconcile
   // stops the orphaned sidecar, and a grant with no installed manifest seeds

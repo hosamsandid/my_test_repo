@@ -84,17 +84,59 @@ export function formatDuration(seconds) {
   return `${s}s`;
 }
 
+// A just-installed broker is given this long to come up before the card stops
+// saying "Starting…" and says it did not start (#2649). Generous on purpose: an
+// image pull on a fresh Kubernetes node takes well over the ~10 s it usually
+// needs, and a false "did not start" is worse than a slow one.
+export const BROKER_START_WINDOW_MS = 120_000;
+// How often the page re-reads /api/plugins while any broker is starting.
+export const BROKER_POLL_MS = 3_000;
+
+function platformMismatch(manifest, stackRuntime) {
+  const platforms = (manifest && manifest.platforms) || ['any'];
+  return !platforms.includes('any') && !!stackRuntime && !platforms.includes(stackRuntime);
+}
+
+// An installed registry entry without a usable manifest — a directory in
+// /workspace/plugins that is not a plugin (a backup copy, a bad id, a broken
+// plugin.json). It must not look like an installed plugin (#2649).
+export function isInvalidInstalled(entry) {
+  return !!(entry && entry.installed && entry.ok === false);
+}
+
+// Mirror of REGISTRY_DIR_NAME_RE in api/plugin-registry-ids.js (a parity test
+// there keeps them equal): the directory names DELETE /api/plugins/:id accepts.
+// A broken entry outside it (`jira copy`, `jira+old`) cannot be removed here.
+export const REMOVABLE_DIR_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
 // What the install button should do and say for one registry entry.
 //   entry : { id, ok, errors, manifest, installed, sidecarRunning }
 //   { canManage, stackRuntime }
 export function installAction(entry, { canManage = false, stackRuntime = null } = {}) {
   if (!entry) return { action: 'none', disabled: true, label: '', hint: '' };
+  // A broken INSTALLED entry can only be removed. It goes through the same
+  // uninstall route, which accepts such a directory name (#2649).
+  if (isInvalidInstalled(entry)) {
+    if (!REMOVABLE_DIR_NAME_RE.test(String(entry.id || ''))) {
+      return {
+        action: 'none',
+        disabled: true,
+        label: 'Remove',
+        hint: 'This directory name cannot be removed from the console. Delete it on the plugins volume.',
+      };
+    }
+    return canManage
+      ? { action: 'uninstall', disabled: false, label: 'Remove', hint: '' }
+      : { action: 'uninstall', disabled: true, label: 'Remove', hint: 'Only a System Admin can install or remove plugins.' };
+  }
   if (!entry.ok) {
+    // The errors themselves are already listed on the card; repeating the first
+    // one here printed it twice (#2649).
     return {
       action: 'none',
       disabled: true,
       label: 'Cannot install',
-      hint: (entry.errors && entry.errors[0]) || 'The manifest is invalid.',
+      hint: (entry.errors && entry.errors.length) ? 'Fix the errors above to make it installable.' : 'The manifest is invalid.',
     };
   }
   if (!canManage) {
@@ -109,7 +151,7 @@ export function installAction(entry, { canManage = false, stackRuntime = null } 
     return { action: 'uninstall', disabled: false, label: 'Uninstall', hint: '' };
   }
   const platforms = (entry.manifest && entry.manifest.platforms) || ['any'];
-  const mismatched = !platforms.includes('any') && stackRuntime && !platforms.includes(stackRuntime);
+  const mismatched = platformMismatch(entry.manifest, stackRuntime);
   return {
     action: 'install',
     disabled: false,
@@ -124,23 +166,71 @@ export function installAction(entry, { canManage = false, stackRuntime = null } 
 }
 
 // The status chip for an installed plugin's broker.
-export function sidecarStatus(entry) {
-  if (!entry || !entry.installed) return { state: 'not-installed', label: 'Not installed', tone: 'muted' };
+//   startingSince : ms timestamp of an install made from this page, or null
+//   now           : current ms timestamp (injected so the window is testable)
+// `reason` (possibly '') says WHY a broker is not running when we can tell.
+export function sidecarStatus(entry, { startingSince = null, now = Date.now(), stackRuntime = null } = {}) {
+  if (!entry || !entry.installed) return { state: 'not-installed', label: 'Not installed', tone: 'muted', reason: '' };
+  // No manifest, no broker — and nothing to start. Say it is broken rather than
+  // "Broker not running" (#2649).
+  if (entry.ok === false) return { state: 'invalid', label: 'Invalid entry', tone: 'danger', reason: '' };
   // A command-only plugin (#1798) ships no broker sidecar — its manifest omits
   // the `sidecar` block. There is nothing to run, so a broker-status chip is
   // misleading: report a neutral state rather than "Broker not running" (#1861).
-  // Only decide this when the manifest is readable; an invalid one (no manifest)
-  // falls through to the running/unknown logic below.
   if (entry.manifest && !entry.manifest.sidecar) {
-    return { state: 'none', label: 'No broker (command-only)', tone: 'muted' };
+    return { state: 'none', label: 'No broker (command-only)', tone: 'muted', reason: '' };
   }
-  if (entry.sidecarRunning === true) return { state: 'running', label: 'Broker running', tone: 'ok' };
+  if (entry.sidecarRunning === true) return { state: 'running', label: 'Broker running', tone: 'ok', reason: '' };
   if (entry.sidecarRunning === null || entry.sidecarRunning === undefined) {
     // Distinct from "stopped": we could not ask the orchestrator, and claiming
     // the broker is down would be a guess.
-    return { state: 'unknown', label: 'Broker status unknown', tone: 'muted' };
+    return { state: 'unknown', label: 'Broker status unknown', tone: 'muted', reason: '' };
   }
-  return { state: 'stopped', label: 'Broker not running', tone: 'warn' };
+  const mismatch = platformMismatch(entry.manifest, stackRuntime)
+    ? `This plugin declares ${entry.manifest.platforms.join(' / ')} but the stack runs ${stackRuntime}, so its broker cannot start here.`
+    : '';
+  // Just installed from this page: the broker is expected to take a few
+  // seconds, so "not running" would be wrong until the window runs out (#2649).
+  if (startingSince != null && !mismatch) {
+    if (now - startingSince < BROKER_START_WINDOW_MS) {
+      return { state: 'starting', label: 'Broker starting…', tone: 'muted', reason: '' };
+    }
+    return {
+      state: 'failed',
+      label: 'Broker did not start',
+      tone: 'warn',
+      reason: `The broker was not running ${Math.round(BROKER_START_WINDOW_MS / 1000)} s after install. `
+        + 'Its image may be missing (`make plugin-images`) or the runtime refused to start it — check the orchestrator log.',
+    };
+  }
+  return { state: 'stopped', label: 'Broker not running', tone: 'warn', reason: mismatch };
+}
+
+// The uninstall confirm's title/button/body. A broken entry is not a plugin, so
+// "Uninstall" and "the broker stops" would both be wrong for it (#2649).
+export function uninstallDialog(row) {
+  if (!row) return { title: '', confirmLabel: 'Uninstall', body: '' };
+  if (row.invalid) {
+    return {
+      title: `Remove ${row.id}?`,
+      confirmLabel: 'Remove',
+      body: `Deletes the directory "${row.id}" from the plugin registry. It is not a valid plugin, so no broker stops and no grant changes.`,
+    };
+  }
+  return { title: `Uninstall ${row.name}?`, confirmLabel: 'Uninstall', body: '' };
+}
+
+// Should the page keep re-reading /api/plugins? Only while a broker is starting.
+export function needsBrokerPoll(rows) {
+  return (rows || []).some((r) => r && r.status && r.status.state === 'starting');
+}
+
+// Ids whose install timestamp can be dropped because the broker is running now.
+export function settledStartIds(rows, startingSince) {
+  const since = startingSince || {};
+  return (rows || [])
+    .filter((r) => r && since[r.id] != null && r.status && r.status.state === 'running')
+    .map((r) => r.id);
 }
 
 // ─── build identity (#2646) ─────────────────────────────────────────────────
@@ -256,7 +346,7 @@ export function buildIdentity(entry) {
 }
 
 // Fold one registry entry into everything the row renders.
-export function pluginRegistryRow(entry, { canManage = false, stackRuntime = null } = {}) {
+export function pluginRegistryRow(entry, { canManage = false, stackRuntime = null, startingSince = null, now = Date.now() } = {}) {
   const manifest = entry && entry.manifest;
   return {
     id: entry ? entry.id : '',
@@ -264,7 +354,9 @@ export function pluginRegistryRow(entry, { canManage = false, stackRuntime = nul
     description: (manifest && manifest.description) || '',
     version: (manifest && manifest.version) || null,
     cliName: (manifest && manifest.cli && manifest.cli.name) || null,
-    scopes: (manifest && manifest.scopes) || ['team'],
+    // Without a manifest there is nothing to report: no scopes, no cap. The
+    // defaults below only describe a real plugin (#2649).
+    scopes: manifest ? (manifest.scopes || ['team']) : [],
     // The platforms the plugin declares (default ["any"]) and the manifest's
     // own grant default (#1691). Surfaced so the Plugins-page team-assignment
     // control can honour the platform-mismatch gate and reuse the same default
@@ -281,11 +373,12 @@ export function pluginRegistryRow(entry, { canManage = false, stackRuntime = nul
       ? manifest.credentials.map((c) => c && c.key).filter(Boolean)
       : [],
     capabilities: describeCapabilities(manifest),
-    quota: quotaSummary(manifest),
+    quota: manifest ? quotaSummary(manifest) : '',
     ok: !!(entry && entry.ok),
     errors: (entry && entry.errors) || [],
     installed: !!(entry && entry.installed),
-    status: sidecarStatus(entry),
+    invalid: isInvalidInstalled(entry),
+    status: sidecarStatus(entry, { startingSince, now, stackRuntime }),
     build: buildIdentity(entry),
     action: installAction(entry, { canManage, stackRuntime }),
     // #1599: a UI-bearing plugin that opted into global visibility. Surfaced so

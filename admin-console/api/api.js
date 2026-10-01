@@ -168,6 +168,7 @@ const skillDeletion = require('./skill-deletion');
 const skillMerge = require('./skill-merge');
 const skillImport = require('./skill-import');
 const skillGrantValidate = require('./skill-grant-validate');
+const skillPoolTeam = require('./skill-pool-team');
 const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archives');
 const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix, stampLiveLabels } = require('./label-suffix');
@@ -3070,7 +3071,10 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // construct's prior grant are preserved (flagged in the UI, never dropped).
   // Validate before any mutation so a bad grant can't half-apply.
   {
-    const known = knownSkillNamesFor(cfg.teamId);
+    // Known names = global pool + the team pool this construct seeds from — the
+    // Agent Team's (#2689), not the legacy human `teamId`, which rejected every
+    // team-only skill as unknown.
+    const known = knownSkillNamesFor(skillPoolTeam.agentPoolTeamId({ ...cfg, id: cfg.id || id }));
     if (Array.isArray(skills) && cfg.role !== 'team-member') {
       const v = skillGrantValidate.validateGrantNames(skills, known, cfg.skills);
       if (!v.ok) return res.status(400).json({ error: `Unknown skill(s): ${v.unknown.join(', ')} — pick from the list or create them first.` });
@@ -11289,10 +11293,15 @@ function commitSkillWrite({ destDir, overwrite, copyFrom, skillMd, provenance, s
 // team pool; the global pool keeps its existing /pool/skills paths untouched.
 const POOL_TEAM_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
-// True when a human Team with this id exists in the teams index.
+// True when `teamId` names a team pool target: an Agent Team (the `team`
+// agent with that id — what the Skills page pickers offer, #2393/#2689) or a
+// legacy human Team in the teams index.
 function resolveTeamExists(teamId) {
-  const teams = readJsonFile(TEAMS_INDEX, []);
-  return Array.isArray(teams) && teams.some(t => t.id === teamId);
+  if (!POOL_TEAM_ID_RE.test(teamId || '')) return false;
+  return skillPoolTeam.poolTeamExists(teamId, {
+    agentConfig: readJsonFile(path.join(AGENTS_DIR, path.basename(teamId), 'config.json'), null),
+    legacyTeams: readJsonFile(TEAMS_INDEX, []),
+  });
 }
 
 // Resolve a team skill directory with a containment check, or null if invalid.
@@ -12265,7 +12274,9 @@ function blockingGrantsForDeletion(plan) {
     const hasOverride = Array.isArray(cfg.skillsOverride) && cfg.skillsOverride.includes(plan.name);
     const grants = hasOverride || (Array.isArray(cfg.skills) && cfg.skills.includes(plan.name));
     if (!grants) continue;
-    const teamId = cfg.teamId || DEFAULT_TEAM_ID;
+    // The pool the grant resolves against is the one seeding reads (#2689):
+    // the Agent Team id, not the legacy human `teamId` every team agent carries.
+    const teamId = skillPoolTeam.agentPoolTeamId({ ...cfg, id: cfg.id || id });
     const r = resolveGrantTier(cfg.id || id, teamId, plan.name);
     if (!r) continue;
     const hits = plan.tier === 'team' ? (r.tier === 'team' && r.teamId === plan.teamId)
@@ -12633,8 +12644,9 @@ function transferSkillExistsAt(toRef, name) {
   return fs.existsSync(path.join(r.dir, 'SKILL.md'));
 }
 
-// Agent constructs that grant `name` (skills[] or skillsOverride), each with its
-// owning human teamId — the basis for the move-would-strand-grants guard.
+// Agent constructs that grant `name` (skills[] or skillsOverride), each with the
+// team pool its grant resolves against (#2689: the Agent Team id, as seeding
+// reads it) — the basis for the move-would-strand-grants guard.
 function agentsGrantingSkill(name) {
   const out = [];
   let ids;
@@ -12644,7 +12656,7 @@ function agentsGrantingSkill(name) {
     if (!cfg) continue;
     const granted = (Array.isArray(cfg.skills) && cfg.skills.includes(name)) ||
       (Array.isArray(cfg.skillsOverride) && cfg.skillsOverride.includes(name));
-    if (granted) out.push({ id: cfg.id || id, teamId: cfg.teamId || DEFAULT_TEAM_ID });
+    if (granted) out.push({ id: cfg.id || id, teamId: skillPoolTeam.agentPoolTeamId({ ...cfg, id: cfg.id || id }) });
   }
   return out;
 }
@@ -12666,19 +12678,22 @@ function archiveSkillDir(srcDir, fromRef, name, hash) {
   } catch { return null; }
 }
 
-// Best-effort activation of a freshly-landed team skill on every squad (role
-// 'team' agent) of the owning human team. Activation is keyed by squad id, not
-// the human team id that keys the pool dir (see the two-keyspace note), so we
-// fan out to each squad. Never rolls the transfer back on failure.
-async function activateTransferredTeamSkill(humanTeamId, name) {
+// Best-effort activation of a freshly-landed team skill on the Agent Team(s)
+// that seed from that pool. The pool dir is keyed by the Agent Team id (#2689 —
+// not the legacy human `teamId` every team agent still carries, which matched
+// nothing and left `skills` empty). Never rolls the transfer back on failure;
+// the caller reports an empty / failed result so the UI can say so.
+async function activateTransferredTeamSkill(poolTeamId, name) {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   const results = [];
   let ids;
   try { ids = fs.readdirSync(AGENTS_DIR); } catch { return results; }
+  const configs = [];
   for (const id of ids) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
-    if (!cfg || cfg.role !== 'team' || (cfg.teamId || DEFAULT_TEAM_ID) !== humanTeamId) continue;
-    const squadId = cfg.id || id;
+    if (cfg) configs.push({ ...cfg, id: cfg.id || id });
+  }
+  for (const squadId of skillPoolTeam.squadsForPoolTeam(configs, poolTeamId)) {
     try {
       const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(squadId)}/skills/activate`, {
         method: 'POST',

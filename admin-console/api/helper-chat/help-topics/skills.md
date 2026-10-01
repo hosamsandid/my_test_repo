@@ -118,7 +118,7 @@ Everything else on this page moves a skill between the tiers or reshapes it:
 |---|---|---|
 | **Promote to global** | Copies a team skill into the global pool; the team-tier copy stays put. | Team skill, side panel |
 | **Move to global** | Relocates a team skill into the global pool and retires the team copy (a recoverable snapshot is archived). | Team skill, side panel |
-| **Adopt** | Copies a global skill into one team's pool and activates it there, so that team owns a curatable copy. | Global skill, side panel |
+| **Adopt** | Copies a global skill into one team's pool and activates it there, so that team owns a curatable copy. The page then says whether the activation worked; if not, activate it in the team's **Skills** tab. | Global skill, side panel |
 | **Move to team** | Relocates a global skill into a team pool and retires the global copy (recoverable snapshot; System Admin only). | Global skill, side panel |
 | **Install into agent** | Activates a global skill for one running agent — see the chapter above. | Global skill, side panel |
 | **Publish** | Pushes an agent's edited skill up to the team pool and/or straight to global — see the chapter below. | Agent skill, side panel or the Knowledge page |

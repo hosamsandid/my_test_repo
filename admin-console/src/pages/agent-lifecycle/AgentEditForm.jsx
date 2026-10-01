@@ -55,7 +55,7 @@ import {
   labelStyle, inputStyle, helpTextStyle, PrimaryBtn, SecondaryBtn,
 } from './form-kit.jsx';
 import {
-  buildInitialForm, buildEditSubmit, hasOwnSkills, poolSectionError,
+  buildInitialForm, buildEditSubmit, hasOwnSkills, poolSectionError, skillsListUrl,
 } from './agent-edit-form-model.js';
 import { inheritedMcpPreview, switchMcpMode, memberMcpBlockers } from './member-mcp-view.js';
 import { TEAM_CONFIG_TABS, ENV_TAB_IDS, resolveTeamConfigTab } from './team-config-tabs-view.js';
@@ -509,10 +509,9 @@ export default function AgentEditForm({
   const ownSkills = hasOwnSkills(agent.role);
   // Grant-aware picker (#633): scope the pool to the agent's own team so its
   // team-tier skills are grantable, not just the global pool. Team-first
-  // resolution and shadowing markers are rendered by the picker.
-  const skillsUrl = agent.teamId
-    ? `/api/skills?teamId=${encodeURIComponent(agent.teamId)}`
-    : '/api/skills';
+  // resolution and shadowing markers are rendered by the picker. The pool is
+  // keyed by the Agent Team id, as seeding reads it (#2689).
+  const skillsUrl = skillsListUrl(agent);
   const { data: skillsData } = useApi(skillsUrl);
   const grantSkills = (skillsData || []).filter(s => s.source === 'pool' || s.source === 'team');
 

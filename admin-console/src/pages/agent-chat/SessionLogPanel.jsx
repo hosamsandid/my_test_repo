@@ -2,7 +2,9 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { Loader2, PanelRightClose, Info } from 'lucide-react';
 import { useSSE } from '../../hooks/useSSE';
 import { useAuth } from '../../auth/AuthContext';
+import { useApi } from '../../hooks/useApi';
 import LogEvent from './LogEvent';
+import { buildAuthorDirectory } from './message-author.js';
 import PinnedTodoPanel from './PinnedTodoPanel';
 import VirtualList from '../../components/VirtualList.jsx';
 import { EventErrorBoundary } from '../../components/ErrorBoundary.js';
@@ -97,6 +99,12 @@ export default function SessionLogPanel({
   // returning user never gets a flash; the effect flips it on for a newcomer.
   const { user } = useAuth();
   const username = user?.username;
+
+  // Names the author of `message.received` rows from the same directory the
+  // transcript uses (#2715). A failed/forbidden read falls back to the login
+  // subject stamped on the row; memoized so LogEvent's memo keeps holding.
+  const { data: directoryUsers } = useApi('/api/admin/users');
+  const authorDirectory = useMemo(() => buildAuthorDirectory(directoryUsers), [directoryUsers]);
   const [coachmarkSeen, setCoachmarkSeen]           = useState(true);
   const [coachmarkDismissed, setCoachmarkDismissed] = useState(false);
   useEffect(() => {
@@ -628,7 +636,7 @@ export default function SessionLogPanel({
                   marginLeft: 'var(--eb-space-1)',
                 }}
               >
-                <LogEvent event={ev} />
+                <LogEvent event={ev} authorDirectory={authorDirectory} />
               </div>
               </EventErrorBoundary>
             );

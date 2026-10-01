@@ -108,7 +108,7 @@ test('SessionLogPanel wraps every log row in an EventErrorBoundary (AC4)', () =>
   // The boundary must be OUTSIDE the hover/accent wrapper, so that wrapper
   // cannot itself throw past it.
   const boundaryAt = src.indexOf('<EventErrorBoundary');
-  const logEventAt = src.indexOf('<LogEvent event={ev} />');
+  const logEventAt = src.indexOf('<LogEvent event={ev}');
   assert.ok(boundaryAt > -1 && logEventAt > boundaryAt, 'LogEvent renders inside the boundary');
 });
 

@@ -13,6 +13,7 @@ import { rateLimitEventSummary, rateLimitEventDetailRows } from './rate-limit-ev
 import { buildSystemInitView } from './system-init.js';
 import { isLoopFired, loopFiredLabel } from './loop-run-view.js';
 import { SafeMarkdown } from './Message';
+import { receivedMessageAuthorName, EMPTY_AUTHOR_DIRECTORY } from './message-author.js';
 
 /**
  * One row in the SessionLogPanel.
@@ -28,6 +29,8 @@ import { SafeMarkdown } from './Message';
  *
  * Props:
  *   event:           the (possibly pre-merged) event object
+ *   authorDirectory: user directory (`buildAuthorDirectory`) that names the
+ *                    author of a `message.received` row (#2715); stable value
  *
  * Cross-panel hover dim (#1676) is driven by CSS off the `data-cid` set on the
  * wrapper in SessionLogPanel, so this component no longer takes a `dimmed`
@@ -84,7 +87,7 @@ function colorForType(type) {
   }
 }
 
-function LogEvent({ event }) {
+function LogEvent({ event, authorDirectory = EMPTY_AUTHOR_DIRECTORY }) {
   const [expanded, setExpanded] = useState(false);
   const type = event?.type || 'unknown';
   // A loop iteration reads as a loop, not a generic trigger (#1155 AC7).
@@ -145,7 +148,7 @@ function LogEvent({ event }) {
             {type}
           </span>
         </div>
-        <Body event={event} expanded={expanded} />
+        <Body event={event} expanded={expanded} authorDirectory={authorDirectory} />
       </div>
     </div>
   );
@@ -197,7 +200,7 @@ function hasExpansion(ev) {
 }
 
 
-function Body({ event, expanded }) {
+function Body({ event, expanded, authorDirectory }) {
   const COMPACT = 200;
   const baseStyle = {
     fontSize: 'var(--eb-text-sm)',
@@ -211,11 +214,14 @@ function Body({ event, expanded }) {
     case 'message.received': {
       const body = event.body || '';
       const display = expanded ? body : truncate(body, COMPACT);
+      // Never the raw Matrix sender (the row's `from`): it can be the shared admin
+      // account. Unknown author → the "from" segment is omitted (#2715).
+      const author = receivedMessageAuthorName(event, authorDirectory);
       return (
         <div style={{ ...baseStyle, fontStyle: 'italic' }}>
-          <span style={{ color: 'var(--eb-text-muted)' }}>← from </span>
-          <span style={{ color: 'var(--eb-text-primary)' }}>{event.from || 'unknown'}</span>
-          {body && <>: <span style={{ whiteSpace: expanded ? 'pre-wrap' : 'normal' }}>{display}</span></>}
+          <span style={{ color: 'var(--eb-text-muted)' }}>{author ? '← from ' : '←'}</span>
+          {author && <span style={{ color: 'var(--eb-text-primary)' }}>{author}</span>}
+          {body && <>{author ? ': ' : ' '}<span style={{ whiteSpace: expanded ? 'pre-wrap' : 'normal' }}>{display}</span></>}
         </div>
       );
     }

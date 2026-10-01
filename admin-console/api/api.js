@@ -165,7 +165,7 @@ const skillImport = require('./skill-import');
 const skillGrantValidate = require('./skill-grant-validate');
 const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archives');
 const { createTranscribeRoute } = require('./transcribe.js');
-const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
+const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix, stampLiveLabels } = require('./label-suffix');
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
 const { reposFromEnv, repoVars } = require('./team-repo-resolve');
 const { planCreatorMembership, creatorEnvironmentOwnership } = require('./creator-membership');
@@ -2868,6 +2868,12 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(agentDir, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  // Label suffix on live edits (#2718): a label this write introduces on a
+  // suffixed team (registry entry, human emit/consume, outcome setLabel,
+  // channel label, legacy emits) gets the team's stored suffix — before any
+  // validation below, so the gate check sees the name that is persisted.
+  const liveSuffix = teamLabelSuffixFor(cfg);
+  if (liveSuffix) req.body = stampLiveLabels(req.body || {}, liveSuffix);
   const { displayName, role, enabled, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, wipLimit, autoDispatch, pool, github, channels, assistLlmEndpointId } = req.body;
 
   // ── Label registry (#928/#981) ────────────────────────────────────────────
@@ -4379,6 +4385,12 @@ app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
       code: 'process-template-role-removed',
     });
   }
+  // Label suffix on live edits (#2718): a member added to a suffixed team —
+  // free-form (Flow Copilot live apply) or from a role template — gets the
+  // team's suffix on its triggers and label ports, like a role created with
+  // the team.
+  const liveSuffix = teamLabelSuffixFor(teamCfg);
+  if (liveSuffix) outBody = stampLiveLabels(outBody, liveSuffix);
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamId)}/members`, {
@@ -6337,7 +6349,11 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   if (denyUnlessCanManageAgent(req, res, agentDir)) return;
   const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
   const triggers = Array.isArray(cur) ? cur : [];
-  const newTrigger = stripTriggerAnnotations({ id: `t${Date.now()}`, ...req.body });
+  // Label suffix on live edits (#2718): labelFilter, claim and the label
+  // mentions in the trigger's prompt get the team's stored suffix.
+  const liveSuffix = teamLabelSuffixFor(readJsonFile(path.join(agentDir, 'config.json'), null));
+  const reqTrigger = liveSuffix ? stampLiveLabels(req.body || {}, liveSuffix, { trigger: true }) : req.body;
+  const newTrigger = stripTriggerAnnotations({ id: `t${Date.now()}`, ...reqTrigger });
   // Trigger ids (#2626): URL-safe shape (400), unique per agent (409) — a
   // shared id makes DELETE/PUT ambiguous and the agent runs only one of them.
   const ide = newTriggerIdError(triggers, newTrigger.id);
@@ -6408,7 +6424,11 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   if (at.error) return res.status(at.status).json({ error: at.error });
   const idx = at.index;
   const prev = triggers[idx];
-  const merged = stripTriggerAnnotations({ ...prev, ...req.body, id: triggerId });
+  // Label suffix on live edits (#2718) — see the POST handler. Only the edit's
+  // own fields are stamped; the stored trigger is merged in as it is.
+  const liveSuffix = teamLabelSuffixFor(readJsonFile(path.join(agentDir, 'config.json'), null));
+  const reqTrigger = liveSuffix ? stampLiveLabels(req.body || {}, liveSuffix, { trigger: true }) : req.body;
+  const merged = stripTriggerAnnotations({ ...prev, ...reqTrigger, id: triggerId });
   // Trigger-level `emits` was removed (#783): the agent/role level is canonical.
   // Ignore any supplied `emits` and drop a legacy field so an edit never
   // re-persists it (a persisted-but-ignored value can't create a phantom edge).
@@ -6581,6 +6601,20 @@ function truthyParam(v) { return v === '1' || v === 'true' || v === ''; }
 // bundle to read `labels[]` from, and gate-ness is no longer inferable from the
 // label's name. Unknown team / no registry → [] (every label is a plain agent
 // label; channel `gate: 'human'` ports still classify on their own).
+// The label suffix a live write to this agent must apply (#2718): the team
+// agent's own stored `labelSuffix`, or a member's parent team's. '' when the
+// team was created without one, so an unsuffixed team's writes stay untouched.
+function teamLabelSuffixFor(cfg) {
+  if (!cfg || typeof cfg !== 'object') return '';
+  let teamCfg = null;
+  if (cfg.role === 'team') teamCfg = cfg;
+  else if (typeof cfg.parentTeamId === 'string' && AGENT_ID_RE.test(cfg.parentTeamId)) {
+    teamCfg = readJsonFile(path.join(AGENTS_DIR, cfg.parentTeamId, 'config.json'), null);
+  }
+  const suffix = teamCfg && typeof teamCfg.labelSuffix === 'string' ? teamCfg.labelSuffix.trim() : '';
+  return suffix && validateSuffix(suffix).ok ? suffix : '';
+}
+
 function teamLabelRegistry(teamId) {
   if (!teamId || !AGENT_ID_RE.test(teamId)) return [];
   const cfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), {});
@@ -16949,7 +16983,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   // expansion (#987). Without it the stored humans registry keeps role keys while
   // the live graph's producer nodes are member ids, so the producer → human
   // reviewer touchpoint edge is orphaned on the newly materialised team.
-  const bundleHumans = remapHumanConsumesFrom(
+  let bundleHumans = remapHumanConsumesFrom(
     normalizeHumans(body.processTemplate?.humans),
     (f) => `${teamId}-${f}`,
   );
@@ -16971,9 +17005,12 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   let suffixWarnings = [];
   let suffixTokenSet = null;
   if (labelSuffix) {
-    const stamped = applyLabelSuffix(customRolesRaw, bundleLabels, labelSuffix);
+    const stamped = applyLabelSuffix(customRolesRaw, bundleLabels, labelSuffix, bundleHumans);
     customRolesRaw = stamped.members;
     bundleLabels = stamped.bundleLabels;
+    // The humans registry carries label names too (#2718) — stamped in the same
+    // pass so the live graph's human touchpoints meet their agent counterparts.
+    bundleHumans = stamped.humans;
     suffixWarnings = stamped.warnings;
     suffixTokenSet = stamped.tokenSet;
   }
@@ -17674,7 +17711,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // expansion (#987). Without it the stored humans registry keeps role keys while
   // the live graph's producer nodes are member ids, so the producer → human
   // reviewer touchpoint edge is orphaned on the newly materialised team.
-  const bundleHumans = remapHumanConsumesFrom(
+  let bundleHumans = remapHumanConsumesFrom(
     normalizeHumans(body.processTemplate?.humans),
     (f) => `${teamId}-${f}`,
   );
@@ -17694,9 +17731,12 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   let suffixWarnings = [];
   let suffixTokenSet = null;
   if (labelSuffix) {
-    const stamped = applyLabelSuffix(customRolesRaw, bundleLabels, labelSuffix);
+    const stamped = applyLabelSuffix(customRolesRaw, bundleLabels, labelSuffix, bundleHumans);
     customRolesRaw = stamped.members;
     bundleLabels = stamped.bundleLabels;
+    // The humans registry carries label names too (#2718) — stamped in the same
+    // pass so the live graph's human touchpoints meet their agent counterparts.
+    bundleHumans = stamped.humans;
     suffixWarnings = stamped.warnings;
     suffixTokenSet = stamped.tokenSet;
   }

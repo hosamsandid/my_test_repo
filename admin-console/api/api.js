@@ -42,6 +42,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, isTeamAdminOfAny
         canReassignCredential, credentialVisibleToTeam, personalLendToTeam, canViewUsageStatistics,
         resolveAgentTenant } = require('./scope');
 const { resolveAgentTeam } = require('./agent-team');
+const { ownerRespawnNeeded, markActivePersonal } = require('./personal-credential-active');
 const { createAgentManageGate } = require('./team-member-boundary');
 // Layered resource ownership (#2083, P5) — the shared tier shape for
 // environments and MCP servers. Byte-mirrored in orchestrator/resource-tier.js.
@@ -18442,7 +18443,9 @@ app.get('/api/ssh-keys', (req, res) => {
   // Team Admins see system credentials assigned to a team they administer plus
   // team credentials they own; System Admins see all.
   const scope = getScope(req);
-  res.json(listSshKeys().map(normalizeCredential).filter(k => visibleCredential(scope, k)));
+  const keys = listSshKeys();
+  // #2655: mark which personal key the runtime resolves (the owner's first one).
+  res.json(markActivePersonal(keys.map(normalizeCredential).filter(k => visibleCredential(scope, k)), keys));
 });
 
 app.post('/api/ssh-keys', apiLimiter, (req, res) => {
@@ -18502,11 +18505,15 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
     fingerprint: sshKeyFingerprint(trimmed),
     createdAt: new Date().toISOString(),
   };
-  saveSshKeysIndex([...existing, entry]);
+  const after = [...existing, entry];
+  saveSshKeysIndex(after);
   // Setting a personal credential also propagates to the owner's running agents
-  // (#1570 Phase 4) — a no-op for a team/system credential (falsy userId).
-  if (entry.scope === 'personal') notifyOwnerCredentialChange(entry.userId, 'personal-ssh-key-set');
-  res.status(201).json(normalizeCredential(entry));
+  // (#1570 Phase 4) — but only when it is the one they resolve (#2655): a second
+  // personal key is not used while the first exists, so it restarts nothing.
+  const ownerAgentsRestarted = entry.scope === 'personal'
+    && ownerRespawnNeeded({ before: existing, after, userId: entry.userId });
+  if (ownerAgentsRestarted) notifyOwnerCredentialChange(entry.userId, 'personal-ssh-key-set');
+  res.status(201).json({ ...normalizeCredential(entry), ...(entry.scope === 'personal' ? { ownerAgentsRestarted } : {}) });
 });
 
 // Server-side keypair generation. Returns the public key once so the user
@@ -18559,11 +18566,15 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
     fingerprint: sshFingerprintFromPubBlob(pubBlob),
     createdAt: new Date().toISOString(),
   };
-  saveSshKeysIndex([...existing, entry]);
+  const after = [...existing, entry];
+  saveSshKeysIndex(after);
   // Setting a personal credential also propagates to the owner's running agents
-  // (#1570 Phase 4) — a no-op for a team/system credential (falsy userId).
-  if (entry.scope === 'personal') notifyOwnerCredentialChange(entry.userId, 'personal-ssh-key-set');
-  res.status(201).json({ ...normalizeCredential(entry), publicKey: pubText });
+  // (#1570 Phase 4) — but only when it is the one they resolve (#2655): a second
+  // personal key is not used while the first exists, so it restarts nothing.
+  const ownerAgentsRestarted = entry.scope === 'personal'
+    && ownerRespawnNeeded({ before: existing, after, userId: entry.userId });
+  if (ownerAgentsRestarted) notifyOwnerCredentialChange(entry.userId, 'personal-ssh-key-set');
+  res.status(201).json({ ...normalizeCredential(entry), ...(entry.scope === 'personal' ? { ownerAgentsRestarted } : {}), publicKey: pubText });
 });
 
 // Reassign / rename an SSH key (#798). Renaming a team-scoped key is available
@@ -18651,11 +18662,15 @@ app.post('/api/ssh-keys/:id/rotate', heavyLimiter, (req, res) => {
   }
 
   const updated = { ...cred, fingerprint, rotatedAt: new Date().toISOString() };
-  saveSshKeysIndex(keys.map(k => (k.id === id ? updated : k)));
+  const after = keys.map(k => (k.id === id ? updated : k));
+  saveSshKeysIndex(after);
   // Propagate the replaced secret to the running agents that hold it — per-owner
-  // for a personal key (#1570 Phase 4), per-referencing-env for a team/system key.
+  // for a personal key (#1570 Phase 4; only when it is the one they resolve,
+  // #2655), per-referencing-env for a team/system key.
   if (normalizeCredential(updated).scope === 'personal') {
-    notifyOwnerCredentialChange(updated.userId, 'personal-ssh-key-rotated');
+    if (ownerRespawnNeeded({ after, userId: updated.userId, rotatedId: id })) {
+      notifyOwnerCredentialChange(updated.userId, 'personal-ssh-key-rotated');
+    }
   } else {
     respawnEnvsUsingSshKey(id, 'team-ssh-key-rotated');
   }
@@ -18670,7 +18685,9 @@ app.get('/api/github-tokens', (req, res) => {
   // SSH keys: Team Admins see system tokens assigned to a team they administer
   // plus team tokens they own; System Admins see all.
   const scope = getScope(req);
-  res.json(listGithubTokens().map(normalizeCredential).filter(t => visibleCredential(scope, t)));
+  const tokens = listGithubTokens();
+  // #2655: mark which personal token the runtime resolves (the owner's first one).
+  res.json(markActivePersonal(tokens.map(normalizeCredential).filter(t => visibleCredential(scope, t)), tokens));
 });
 
 app.post('/api/github-tokens', apiLimiter, (req, res) => {
@@ -18728,11 +18745,15 @@ app.post('/api/github-tokens', apiLimiter, (req, res) => {
     fingerprint: githubTokenFingerprint(trimmed),
     createdAt: new Date().toISOString(),
   };
-  saveGithubTokensIndex([...existing, entry]);
+  const after = [...existing, entry];
+  saveGithubTokensIndex(after);
   // Setting a personal credential also propagates to the owner's running agents
-  // (#1570 Phase 4) — a no-op for a team/system credential (falsy userId).
-  if (entry.scope === 'personal') notifyOwnerCredentialChange(entry.userId, 'personal-github-token-set');
-  res.status(201).json(normalizeCredential(entry));
+  // (#1570 Phase 4) — but only when it is the one they resolve (#2655): a second
+  // personal token is not used while the first exists, so it restarts nothing.
+  const ownerAgentsRestarted = entry.scope === 'personal'
+    && ownerRespawnNeeded({ before: existing, after, userId: entry.userId });
+  if (ownerAgentsRestarted) notifyOwnerCredentialChange(entry.userId, 'personal-github-token-set');
+  res.status(201).json({ ...normalizeCredential(entry), ...(entry.scope === 'personal' ? { ownerAgentsRestarted } : {}) });
 });
 
 // Reassign / rename a GitHub token (#798) — same role model as SSH keys above.
@@ -18805,12 +18826,16 @@ app.post('/api/github-tokens/:id/rotate', apiLimiter, (req, res) => {
     fingerprint: githubTokenFingerprint(trimmed),
     rotatedAt: new Date().toISOString(),
   };
-  saveGithubTokensIndex(tokens.map(t => (t.id === id ? updated : t)));
+  const after = tokens.map(t => (t.id === id ? updated : t));
+  saveGithubTokensIndex(after);
   // Propagate the replaced secret to the running agents that hold it. A personal
-  // token is baked per-owner (#1570 Phase 4); a team/system token is baked per
-  // environment, so fan the respawn out to every env that references it.
+  // token is baked per-owner (#1570 Phase 4) — only the one they resolve (#2655);
+  // a team/system token is baked per environment, so fan the respawn out to every
+  // env that references it.
   if (normalizeCredential(updated).scope === 'personal') {
-    notifyOwnerCredentialChange(updated.userId, 'personal-github-token-rotated');
+    if (ownerRespawnNeeded({ after, userId: updated.userId, rotatedId: id })) {
+      notifyOwnerCredentialChange(updated.userId, 'personal-github-token-rotated');
+    }
   } else {
     respawnEnvsUsingGithubToken(id, 'team-github-token-rotated');
   }

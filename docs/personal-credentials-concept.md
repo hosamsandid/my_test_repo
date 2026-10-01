@@ -150,6 +150,8 @@ Setting or rotating a person's personal credential **propagates by respawn**, re
 
 *Implemented (#1570, Phase 4):* the admin-console `notifyOwnerCredentialChange(userId)` (fired on personal SSH-key/GitHub-token **set** and **rotate**) calls `POST /internal/owners/:ownerId/respawn-agents` → `orchestrator.respawnAgentsForOwner`, the owner-scoped sibling of `respawnAgentsForEnvironment`. Owner matching is the pure `credential-resolution.selectAgentIdsForOwner` (over `resolveAgentOwnerId`, so a team-member resolves via its parent team's owner); disabled/not-running/tokenless agents are skipped exactly like the env path. This also closes the prior gap where a personal **SSH-key** change triggered no respawn at all.
 
+*Narrowed (#2655):* only a change to the personal credential the owner actually resolves respawns — see Amendment 4 below.
+
 ---
 
 ## 8 — Offboarding and lifecycle
@@ -372,3 +374,26 @@ for a further ticket rather than silently declaring the migration complete.
   new env→Agent-Team reverse-mapping step — a materially larger, separately riskier change. Flagged
   in the implementing PR for a dedicated follow-up ticket rather than guessed at or silently declared
   done.
+
+## 16 — Amendment 4 (#2655): only the resolved personal credential restarts and is announced
+
+An owner may hold several personal credentials of one kind, but the runtime resolves exactly one:
+`findPersonalCredentialState` (`orchestrator/credential-resolution.js`) takes the **first**
+`scope: 'personal'` entry of that owner in index order — the one added first. §7's "setting or
+rotating … propagates by respawn" was applied to every personal credential, so adding a second
+token or key restarted all of the owner's running agents and the console announced it as now used,
+although nothing an agent held had changed.
+
+- **Respawn only when the resolved credential changes.** The pure
+  `admin-console/api/personal-credential-active.js` mirrors the runtime pick
+  (`activePersonalCredentialId`). `ownerRespawnNeeded` gates `notifyOwnerCredentialChange`: on
+  create (SSH key create/generate, GitHub token create) only when the resolved id moved — in
+  practice, the owner's first personal credential of that kind; on rotate only when the rotated
+  credential is the resolved one. Rotating a credential that is not in use restarts nothing.
+  The personal create responses carry `ownerAgentsRestarted`.
+- **Delete is unchanged.** Deleting a personal credential still never respawns; it takes effect at
+  the agents' next start, even when it was the resolved one.
+- **The console shows which one is used.** `GET /api/ssh-keys` and `GET /api/github-tokens` add
+  `activePersonal` to every personal row (`markActivePersonal`, decided over the full index); the
+  **Used by** column reads *Active (personal)* or *Not in use*. There is no "make active" action —
+  switching means deleting the active one.

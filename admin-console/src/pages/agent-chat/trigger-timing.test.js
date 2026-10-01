@@ -13,6 +13,8 @@ import {
   resultLabel,
   triggerTiming,
   onceScheduleLabel,
+  pastOnceHint,
+  PAST_ONCE_HINT,
 } from './trigger-timing.js';
 
 const SUMMER = new Date('2026-07-15T10:00:00Z');
@@ -166,4 +168,32 @@ test('TriggersPanel drops trigger status that belongs to another agent', async (
   assert.match(src, /statusAgentRef\.current = agentId;\s*setTriggerStatus\(null\);\s*\}, \[agentId\]\);/);
   assert.match(src, /\.then\(\(body\) => \{\s*if \(statusAgentRef\.current === id\) setTriggerStatus\(/);
   assert.match(src, /\.catch\(\(\) => \{ if \(statusAgentRef\.current === id\) setTriggerStatus\(null\); \}\)/);
+});
+
+// ── #2682: a past `once` time is accepted but never silent ─────────────────
+test('pastOnceHint flags an absolute time in the past (or exactly now)', () => {
+  const now = new Date('2026-10-01T12:00:00Z');
+  assert.equal(pastOnceHint('2026-10-01T11:50:00.000Z', { now }), PAST_ONCE_HINT);
+  assert.equal(pastOnceHint('2026-10-01T12:00:00Z', { now }), PAST_ONCE_HINT);
+  assert.equal(pastOnceHint('2026-10-01T13:55:00+02:00', { now }), PAST_ONCE_HINT);
+  assert.match(PAST_ONCE_HINT, /in the past/);
+  assert.match(PAST_ONCE_HINT, /run immediately/);
+});
+
+test('pastOnceHint stays quiet for future, empty or unparseable values', () => {
+  const now = new Date('2026-10-01T12:00:00Z');
+  assert.equal(pastOnceHint('2026-10-01T12:10:00.000Z', { now }), null);
+  assert.equal(pastOnceHint('', { now }), null);
+  assert.equal(pastOnceHint('   ', { now }), null);
+  assert.equal(pastOnceHint(undefined, { now }), null);
+  assert.equal(pastOnceHint('not a date', { now }), null);
+});
+
+test('pastOnceHint reads a naive value as wall time in the scheduler zone', () => {
+  // 13:30 Berlin (CEST, +2) = 11:30Z → past; 14:30 Berlin = 12:30Z → future.
+  const now = new Date('2026-10-01T12:00:00Z');
+  assert.equal(pastOnceHint('2026-10-01T13:30:00', { now }), PAST_ONCE_HINT);
+  assert.equal(pastOnceHint('2026-10-01T14:30:00', { now }), null);
+  // Same naive value, UTC scheduler: 13:30Z is in the future.
+  assert.equal(pastOnceHint('2026-10-01T13:30:00', { now, schedulerZone: 'UTC' }), null);
 });

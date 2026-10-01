@@ -71,7 +71,7 @@ records written atomically (write-temp + rename):
 | Path | Record shape |
 |---|---|
 | `/workspace/teams/index.json` | `{ id, name, description, createdAt, updatedAt }` |
-| `/workspace/users/index.json` | `{ id, subject, email, displayName, systemAdmin, githubHandle, matrixUserId?, chatFontSize?, createdAt, updatedAt }` |
+| `/workspace/users/index.json` | `{ id, subject, email, displayName, systemAdmin, githubHandle, matrixUserId?, chatFontSize?, chatListFilter?, createdAt, updatedAt }` |
 | `/workspace/memberships/index.json` | `{ id, userId, teamId, role, createdAt, fromScopeId? }` |
 
 - **Team `id`** is an operator-facing slug (`^[a-z0-9][a-z0-9-]{0,63}$`), like a

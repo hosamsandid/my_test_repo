@@ -530,7 +530,9 @@ in pure, unit-tested `*-view.js`/model modules per the #651 convention (JSX
 uncovered). Key pieces:
 - `AgentList` — left rail (drag-reorder, grouping, disabled/stub opt-ins,
   pool-instance sub-grouping (#2297), lifecycle context menu via
-  `RailLifecycleHost`).
+  `RailLifecycleHost`). Multi-select team filter (#2740): `ListFilterControl` +
+  pure `list-selection.js`; the hidden-entry set is saved per user as
+  `chatListFilter` via `PUT /api/me/preferences`.
 - `ChatPanel` — backfill/pagination/optimistic-send/SSE tail; transcript
   **windowed** (`VirtualList`/`virtual-window.js`), stick-to-bottom. A
   `?msg=<event_id>` deep-link (#2310) bounded-backfills, scrolls to (via

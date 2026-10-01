@@ -2366,6 +2366,7 @@ export default function SkillsRegistry() {
         <div role={transferNotice.ok ? 'status' : 'alert'} style={{ color: transferNotice.ok ? 'var(--eb-status-success)' : 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)' }}>
           {!transferNotice.ok && <span aria-hidden="true" style={{ color: 'var(--eb-status-warning)' }}>⚠ </span>}
           {transferNotice.text}
+          <button type="button" onClick={() => setTransferNotice(null)} style={{ marginLeft: 'var(--eb-space-3)', background: 'none', border: 'none', color: 'var(--eb-text-secondary)', cursor: 'pointer' }}>Dismiss</button>
         </div>
       )}
 

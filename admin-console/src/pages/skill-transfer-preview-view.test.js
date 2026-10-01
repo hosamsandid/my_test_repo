@@ -78,4 +78,8 @@ test('SkillsRegistry.jsx surfaces the transfer activation notice', () => {
   assert.match(src, /activationNotice: transferActivationNotice\(data\)/);
   assert.match(src, /setTransferNotice\(skill\?\.activationNotice \|\| null\)/);
   assert.match(src, /\{transferNotice\.text\}/);
+  // Pin the visibility condition too, not only the rendered text.
+  assert.match(src, /\{transferNotice && \(/);
+  // The notice can be dismissed; it is otherwise only replaced by the next transfer.
+  assert.match(src, /onClick=\{\(\) => setTransferNotice\(null\)\}/);
 });

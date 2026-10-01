@@ -524,7 +524,7 @@ same question, "what wakes this agent", and every one of them delivers a
 |---|---|
 | **Cron (recurring)** | a 5-field schedule (`Minute Hour Day Month Weekday`) comes due. If the previous run of *this* trigger is still going, the tick is skipped rather than queued. |
 | **Once (one-shot)** | a specific date and time is reached. It then deletes itself — a reminder, not a schedule. |
-| **HTTP webhook** | something outside the platform sends `POST /hooks/<agentId>/<triggerId>` with the trigger's own `X-Hook-Secret`. Each trigger carries its own generated secret; there is no open mode. Used by CI pipelines, monitoring, GitHub webhooks. |
+| **HTTP webhook** | something outside the platform sends `POST /hooks/<agentId>/<triggerId>` with the trigger's own `X-Hook-Secret` — a GitHub webhook instead takes the secret as its **Secret** (verified via `X-Hub-Signature-256`). Each trigger carries its own generated secret; there is no open mode. Used by CI pipelines, monitoring, GitHub webhooks. |
 | **GitHub event** | the built-in poller sees a matching event on a repository of the agent's environment (about every 30 seconds). The full event payload is appended to the prompt as JSON. Needs a GitHub token on that environment. |
 | **Data flow (agent dependency)** | a teammate pushes to the team repository — the committed work *is* the hand-off. Under the hood this is a GitHub `push` subscription with a marker. |
 | **Plugin event** | a granted plugin's broker reports something (a Jira status change, say). Two filters narrow it — see *Which event vs. Only when* below. |

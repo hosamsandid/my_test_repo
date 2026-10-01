@@ -43,7 +43,7 @@ each other's git changes.
 The orchestrator exposes a second HTTP server on `HOOK_PORT` (default `4003`). External systems — CI pipelines, GitHub Actions, monitoring tools — can trigger agent prompts via an outbound POST to your LAN. No public ingress is required.
 
 **Endpoint:** `POST http://<host>:4003/hooks/<agentId>/<triggerId>`  
-**Header:** `X-Hook-Secret: <secret>`
+**Auth:** `X-Hook-Secret: <secret>` header, e.g. `curl -X POST -H "X-Hook-Secret: <secret>" http://<host>:4003/hooks/<agentId>/<triggerId>` — or, for a GitHub webhook (which cannot send custom headers), the secret as the webhook's **Secret**: the `X-Hub-Signature-256` HMAC over the body is verified instead (#2680). A signed GitHub `ping` returns 200 without firing. Bodies over 25 MB → 413.
 
 The webhook secret is generated automatically when the trigger is created. It is visible in the Admin Console trigger editor.
 

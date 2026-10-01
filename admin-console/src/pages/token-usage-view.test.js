@@ -9,6 +9,7 @@ import {
   GROUP_OPTIONS,
   UNKNOWN_GROUP_KEY,
   userLabelIndex,
+  agentTeamFilterOptions,
   userGroupCell,
   providerTierCell,
   formatInt,
@@ -84,6 +85,39 @@ test('userLabelIndex maps ids to display names and ignores junk entries', () => 
   // Non-array input is a load failure, not an empty directory of one.
   assert.equal(userLabelIndex(null).size, 0);
   assert.equal(userLabelIndex(undefined).size, 0);
+});
+
+// ── #2694: the Team filter lists Agent Teams ────────────────────────────────
+
+test('agentTeamFilterOptions lists only role:team agents as name + id, sorted', () => {
+  const opts = agentTeamFilterOptions([
+    { id: 'uitest-chat-agent-team', role: 'team', displayName: 'UI test team' },
+    { id: 'agent-studio-2-0', role: 'team', displayName: 'Agent Studio 2.0' },
+    { id: 'agent-studio-2-0-developer', role: 'developer', displayName: 'Developer' },
+    { id: 'bare-team', role: 'team' },
+    { id: 'same', role: 'team', displayName: 'same' },
+    { id: 'blank', role: 'team', displayName: '   ' },
+  ]);
+  assert.deepEqual(opts, [
+    { id: 'agent-studio-2-0', label: 'Agent Studio 2.0 (agent-studio-2-0)' },
+    { id: 'bare-team', label: 'bare-team' },
+    { id: 'blank', label: 'blank' },
+    { id: 'same', label: 'same' },
+    { id: 'uitest-chat-agent-team', label: 'UI test team (uitest-chat-agent-team)' },
+  ]);
+});
+
+test('agentTeamFilterOptions never offers the legacy access-scope team and tolerates junk', () => {
+  // The legacy /api/admin/teams shape ({ id: 'default', name }) has no role:'team'
+  // and is not an agent — feeding it in yields nothing, so `default` is gone.
+  assert.deepEqual(agentTeamFilterOptions([{ id: 'default', name: 'Default Team' }]), []);
+  assert.deepEqual(agentTeamFilterOptions(null), []);
+  assert.deepEqual(agentTeamFilterOptions({ error: 'nope' }), []);
+  assert.deepEqual(agentTeamFilterOptions([null, 'x', { role: 'team' }, { id: '', role: 'team' }]), []);
+  // A duplicate id (should not happen) collapses to one option.
+  assert.equal(agentTeamFilterOptions([
+    { id: 't', role: 'team', displayName: 'A' }, { id: 't', role: 'team', displayName: 'B' },
+  ]).length, 1);
 });
 
 test('userGroupCell names the unknown bucket as a gap, never as a person', () => {

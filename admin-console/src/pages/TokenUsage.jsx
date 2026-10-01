@@ -9,7 +9,7 @@ import InfoTip from '../components/InfoTip';
 import PageHelpButton from '../components/PageHelpButton';
 import { TOKEN_USAGE_HELP_SECTIONS } from './token-usage-help-sections.js';
 import { toRows as agentModelRows, modelOptions, filterRowsByModel, isCurrentModel } from './agent-models-view.js';
-import { TOKEN_CLASSES, CLASS_COLOR, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, isClassVisible, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, loadHiddenClasses, saveHiddenClasses, userLabelIndex, userGroupCell, providerTierCell, secondaryGroupOptions, groupValueCell } from './token-usage-view.js';
+import { TOKEN_CLASSES, CLASS_COLOR, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, isClassVisible, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, loadHiddenClasses, saveHiddenClasses, userLabelIndex, agentTeamFilterOptions, userGroupCell, providerTierCell, secondaryGroupOptions, groupValueCell } from './token-usage-view.js';
 
 // Trigger a browser download of an export URL. The endpoints are behind the
 // auth-cookie gate, so a same-origin anchor navigation carries the session.
@@ -243,6 +243,7 @@ const CONTROL_STYLE = {
 // Page-level team filter (#801). System-Admin-only page, so the operator sees
 // every team; the default "All teams" restores the full, unfiltered picture.
 // The chosen team id drives the `?team=` parameter on every usage request.
+// `teams` are Agent Teams from agentTeamFilterOptions (#2694): { id, label }.
 function TeamFilter({ teams, value, onChange }) {
   return (
     <label style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
@@ -250,7 +251,7 @@ function TeamFilter({ teams, value, onChange }) {
       <select value={value} onChange={(e) => onChange(e.target.value)} style={CONTROL_STYLE}>
         <option value="">All teams</option>
         {teams.map((t) => (
-          <option key={t.id} value={t.id}>{t.name || t.id}</option>
+          <option key={t.id} value={t.id}>{t.label}</option>
         ))}
       </select>
     </label>
@@ -848,8 +849,10 @@ export default function TokenUsage() {
   // Page-level team filter (#801): shared across both tabs so switching tabs
   // keeps the selected team. '' = all teams (the default, unfiltered view).
   const [team, setTeam] = useState('');
-  const { data: teamsData } = useApi('/api/admin/teams');
-  const teams = Array.isArray(teamsData) ? teamsData : [];
+  // #2694: the options are Agent Teams (role:'team' agents) — the id usage
+  // records are stamped with — never the legacy /api/admin/teams collection.
+  const { data: agentsData } = useApi('/api/agents');
+  const teams = useMemo(() => agentTeamFilterOptions(agentsData), [agentsData]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>

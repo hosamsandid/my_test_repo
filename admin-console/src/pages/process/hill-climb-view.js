@@ -309,6 +309,37 @@ function evidenceLines(card) {
     .map((e) => [e.type, e.ref, e.value != null ? String(e.value) : null].filter(Boolean).join(' · '));
 }
 
+// The panel notice after a card action (apply / rollback / dismiss). `err` is
+// the apiCall error, or null on success. When the server reports the change
+// WAS made but the card could not be marked (#2709: 502 applied-not-recorded
+// with applied:true, rolled-back-not-recorded with rolledBack:true), say so —
+// "Could not apply" would invite a second, stale apply of a change that is
+// already live.
+function cardActionNotice(action, err) {
+  if (!err) {
+    const done = action === 'apply' ? 'applied — its effect is measured over the next window'
+      : action === 'rollback' ? 'rolled back — the change was reverted'
+      : 'dismissed — it will not be raised again';
+    return { tone: 'info', text: `Card ${done}.` };
+  }
+  if (action === 'apply' && err.code === 'applied-not-recorded' && err.applied === true) {
+    return {
+      tone: 'error',
+      text: 'Card applied, but not recorded: the change WAS made (the trigger is deleted), '
+        + 'but the card could not be marked applied, so it stays Open and has no undo record. '
+        + 'Do not apply it again.',
+    };
+  }
+  if (action === 'rollback' && err.code === 'rolled-back-not-recorded' && err.rolledBack === true) {
+    return {
+      tone: 'error',
+      text: 'Card rolled back, but not recorded: the change WAS reverted, '
+        + 'but the card could not be marked rolled back. Do not roll it back again.',
+    };
+  }
+  return { tone: 'error', text: `Could not ${action} the card: ${err.message}` };
+}
+
 export {
   hasSnapshot,
   isMaintenance,
@@ -327,4 +358,5 @@ export {
   formatMetricValue,
   verdictLine,
   evidenceLines,
+  cardActionNotice,
 };

@@ -48,7 +48,8 @@ const CHECKS = {
       'ChatPanel must derive the budget banner from the bound provider health');
     assert.match(src, /\{providerBudgetWarning && \(\s*<div role="status"/,
       'the budget banner must render as a role="status" block');
-    const gates = src.match(/disabled=\{[^}]*\}/g) || [];
+    // #2713 folded the composer gate into one `composerDisabled` expression.
+    const gates = [...(src.match(/disabled=\{[^}]*\}/g) || []), ...(src.match(/const composerDisabled = [^;]*;/g) || [])];
     assert.ok(!gates.some(g => /providerBudgetWarning/.test(g)),
       'the budget banner must never disable sending (AC9: non-blocking)');
   },
@@ -64,7 +65,7 @@ const MUTATIONS = [
   { fires: 'budgetCellWiring', src: REGISTRY,
     apply: s => s.replace('row.readOnly ? row.budget : row.health?.budget', 'row.health?.budget') },
   { fires: 'chatBannerNonBlocking', src: CHAT,
-    apply: s => s.replace('disabled={disabled || !roomId', 'disabled={disabled || Boolean(providerBudgetWarning) || !roomId') },
+    apply: s => s.replace('const composerDisabled = disabled ||', 'const composerDisabled = disabled || Boolean(providerBudgetWarning) ||') },
 ];
 
 for (const { fires, src, apply } of MUTATIONS) {

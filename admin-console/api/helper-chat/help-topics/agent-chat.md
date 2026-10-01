@@ -356,6 +356,11 @@ immediately.
 **Drafts.** Whatever you have typed is kept per agent, so switching to another
 agent and back does not lose it.
 
+**Read-only as a System Admin.** A System Admin sees every team's chats but
+writes only in teams they belong to. In any other team the composer is
+read-only (Stop still works); **Open team sharing** in the hint leads to the
+team's Sharing tab, where you can add yourself.
+
 **Slash commands.** Typing **/** as the first character of a message opens a
 filterable list of the slash commands this agent has been provisioned with,
 navigable with **↑ ↓ Enter Esc Tab**. Picking one inserts it with the cursor

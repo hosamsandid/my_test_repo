@@ -678,7 +678,9 @@ Resolved **team-first then global** at seeding (`orchestrator/skill-source.js`).
 System Admin or Team Admin of any team — promote, publish, import, merge,
 create and edit all apply that one rule (#2178/#2180/#2307;
 `skill-transfer.js`'s `requiredPoolWritePermission`). **Team**:
-`/workspace/teams/<teamId>/skills/` (RW), Team-Admin-of-that-team-managed.
+`/workspace/teams/<teamId>/skills/` (RW), Team-Admin-of-that-team-managed;
+`<teamId>` = Agent Team id (`api/skill-pool-team.js` `agentPoolTeamId`, mirrors
+`agentKnowledgeTeamId`), never the legacy `cfg.teamId` (#2689).
 `/api/skills` tags `source` = `pool`/`team`/`agent`; `POST
 /api/skills/promote-to-global` lifts a team skill into the global pool.
 

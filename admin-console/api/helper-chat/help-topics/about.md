@@ -61,8 +61,9 @@ nothing away.
 Consequences worth knowing:
 
 - **Only humans are listed.** Commits authored by this stack's own agents are
-  filtered out by their internal, non-routable e-mail domains (`…@agents.local`,
-  `…@agent`, `…@local`) and by a `[bot]` marker in the name.
+  filtered out by their internal, non-routable e-mail domains (any `.local`
+  domain such as `…@agents.local` or `…@agent-studio.local`, its `.local.test`
+  variant, and a bare `…@agent`) and by a `[bot]` marker in the name.
 - **Identities are merged.** The same person committing under several e-mail
   addresses or name spellings collapses into one entry, and the spelling shown is
   the most complete one found — a full name with a space wins over a login-style

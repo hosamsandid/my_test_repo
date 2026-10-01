@@ -53,6 +53,36 @@ test('extractContributors: drops agent / bot / service identities (AC1/AC2)', ()
   assert.deepEqual(extractContributors(raw), ['Stefan Copetchi']);
 });
 
+test('isHumanIdentity: the whole .local / .local.test family is non-human (#2698)', () => {
+  // Identities that used to slip through the fixed host list.
+  assert.equal(isHumanIdentity({ name: 'Documentation Sync', email: 'documentation-sync@agent-studio.local' }), false);
+  assert.equal(isHumanIdentity({ name: 'agent-studio-2-0-reworker', email: 'reworker@agent.local' }), false);
+  assert.equal(isHumanIdentity({ name: 'r', email: 'r@a.local' }), false);
+  assert.equal(isHumanIdentity({ name: 'merger-test', email: 'merger@local.test' }), false);
+  assert.equal(isHumanIdentity({ name: 'agent-repo-synced', email: 'agent-repo-synced@agents.local' }), false);
+  assert.equal(isHumanIdentity({ name: 'x', email: 'x@sub.local.test' }), false);
+  assert.equal(isHumanIdentity({ name: 'X', email: 'X@AGENT.LOCAL' }), false);
+  // Anchored: a real domain that merely contains "local" stays human.
+  assert.equal(isHumanIdentity({ name: 'Lo Cal', email: 'lo.cal@localhost-corp.com' }), true);
+  assert.equal(isHumanIdentity({ name: 'Local Person', email: 'local@accenture.com' }), true);
+  assert.equal(isHumanIdentity({ name: 'Stefan Copetchi', email: 'stefan.copetchi@accenture.com' }), true);
+  assert.equal(isHumanIdentity({ name: 'Moritz Butzmann', email: 'moritz@example.com' }), true);
+});
+
+test('extractContributors: .local-family agents no longer appear as people (#2698)', () => {
+  const raw = [
+    '144\tagent-studio-2-0-reworker\tagent-studio-2-0-reworker@agents.local',
+    '3\tagent-studio-2-0-reworker\treworker@agent.local',
+    '7\tDocumentation Sync\tdocumentation-sync@agent-studio.local',
+    '1\tr\tr@a.local',
+    '2\tmerger-test\tmerger@local.test',
+    '5\tagent-repo-synced\tagent-repo-synced@agents.local',
+    '10\tStefan Copetchi\tstefan.copetchi@accenture.com',
+    '4\tPolychronakis, Harris\tharris.polychronakis@accenture.com',
+  ].join('\n');
+  assert.deepEqual(extractContributors(raw), ['Stefan Copetchi', 'Polychronakis, Harris']);
+});
+
 // --- de-duplication (AC5) ----------------------------------------------------
 
 test('extractContributors: merges name spellings that share an email (AC5)', () => {

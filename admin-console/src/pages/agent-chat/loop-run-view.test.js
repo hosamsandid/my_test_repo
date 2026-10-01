@@ -11,6 +11,8 @@ import {
   loopRecordSummary,
   buildLoopRecordModel,
   loopRecordToInitialValues,
+  liveLoopSignal,
+  runningLaunchedLoop,
 } from './loop-run-view.js';
 
 // ── buildLoopSummaryModel ────────────────────────────────────────────────────
@@ -218,4 +220,49 @@ test('loopRecordToInitialValues: seeds the launcher, drops id, keeps only set fi
 test('loopRecordToInitialValues: minimal record omits unset optional fields', () => {
   const vals = loopRecordToInitialValues({ outcome: 'done', config: { prompt: 'go', maxIterations: 3 } });
   assert.deepEqual(vals, { type: 'loop', prompt: 'go', maxIterations: 3 });
+});
+
+// ── live loop signals (#2683) ────────────────────────────────────────────────
+
+test('liveLoopSignal: a finished-loop record is a finished signal for its trigger', () => {
+  assert.deepEqual(
+    liveLoopSignal({ body: 'Loop finished', 'io.aee.loop-record': { triggerId: 'loop-1', outcome: 'exhausted', iterations: 2 } }),
+    { kind: 'finished', triggerId: 'loop-1' });
+  assert.deepEqual(liveLoopSignal({ 'io.aee.loop-record': { outcome: 'done' } }),
+    { kind: 'finished', triggerId: null });
+});
+
+test('liveLoopSignal: a loop trigger notice is an iteration signal', () => {
+  assert.deepEqual(
+    liveLoopSignal({ 'io.aee.trigger': { triggerId: 'loop-1', triggerType: 'loop', event: null } }),
+    { kind: 'iteration', triggerId: 'loop-1' });
+});
+
+test('liveLoopSignal: other messages and non-loop trigger notices are ignored', () => {
+  assert.equal(liveLoopSignal({ body: 'hello' }), null);
+  assert.equal(liveLoopSignal({ 'io.aee.trigger': { triggerId: 'c', triggerType: 'cron' } }), null);
+  assert.equal(liveLoopSignal({ 'io.aee.loop-record': null, 'io.aee.trigger': null }), null);
+  assert.equal(liveLoopSignal(null), null);
+  assert.equal(liveLoopSignal(undefined), null);
+});
+
+test('runningLaunchedLoop: picks the launched loop, never a declarative loop or other trigger', () => {
+  const list = [
+    { id: 'c', type: 'cron' },
+    { id: 'decl', type: 'loop' },
+    { id: 'run', type: 'loop', launched: true },
+  ];
+  assert.equal(runningLaunchedLoop(list, new Set()).id, 'run');
+  assert.equal(runningLaunchedLoop(list).id, 'run');
+  assert.equal(runningLaunchedLoop([{ id: 'c', type: 'cron' }], new Set()), null);
+  assert.equal(runningLaunchedLoop(null, new Set()), null);
+});
+
+test('runningLaunchedLoop: a loop the live timeline reported finished stays gone from a lagging list', () => {
+  const list = [{ id: 'run', type: 'loop', launched: true }];
+  assert.equal(runningLaunchedLoop(list, new Set(['run'])), null);
+  assert.equal(runningLaunchedLoop(list, ['run']), null);
+  // A different (newly started) loop is still reported.
+  const next = [...list, { id: 'run-2', type: 'loop', launched: true }];
+  assert.equal(runningLaunchedLoop(next, new Set(['run'])).id, 'run-2');
 });

@@ -1356,3 +1356,61 @@ test('the default grant resolver asks the orchestrator with the reserved grant t
     srv.close();
   }
 });
+
+// ── audit outcomes (the SDK rewrites any outcome outside its set to `ok`) ────
+
+const lastAudit = (sub) => auditLines().filter((l) => l.subcommand === sub).pop();
+
+test('audit: a Jira 403 on a read is recorded as domain-error, not ok', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
+  const restore = stubJira([], { status: 403 });
+  const srv = await listen();
+  try {
+    const r = await call(srv, 'GET', '/cli/show?issue=KAN-6', { token: TOKEN });
+    assert.equal(r.status, 403);
+    assert.equal(lastAudit('show').outcome, 'domain-error');
+  } finally { restore(); broker.scopeCredentials.delete('team-1'); srv.close(); }
+});
+
+test('audit: a transport failure on a write is recorded as unreachable', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
+  };
+  const srv = await listen();
+  try {
+    const r = await call(srv, 'POST', '/cli/comment', { token: TOKEN, body: { issue: 'KAN-1', body: 'x' } });
+    assert.ok(r.status >= 500, String(r.status));
+    assert.equal(lastAudit('comment').outcome, 'unreachable');
+  } finally { global.fetch = origFetch; broker.scopeCredentials.delete('team-1'); srv.close(); }
+});
+
+test('audit: a refused bare consume is recorded as usage-error', async () => {
+  const srv = await listen();
+  try {
+    const r = await call(srv, 'GET', '/cli/inbox?consume=1', { token: TOKEN });
+    assert.equal(r.status, 400);
+    assert.equal(lastAudit('inbox').outcome, 'usage-error');
+  } finally { srv.close(); }
+});
+
+test('audit: a wake the orchestrator answers with 500 is domain-error with the status in detail', async () => {
+  const orch = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end('{}'); });
+  });
+  await new Promise((r) => orch.listen(0, '127.0.0.1', r));
+  const prev = process.env.AEE_ORCHESTRATOR_URL;
+  process.env.AEE_ORCHESTRATOR_URL = `http://127.0.0.1:${orch.address().port}`;
+  try {
+    await broker.deliver({ scopeId: 'team-1', kind: 'events', events: [{ id: 'KAN-6:1', event: 'status_changed', issueKey: 'KAN-6', toStatus: 'Done' }] });
+    const line = lastAudit('wake');
+    assert.equal(line.outcome, 'domain-error');
+    assert.match(line.detail, /^http-500 /);
+  } finally {
+    if (prev === undefined) delete process.env.AEE_ORCHESTRATOR_URL; else process.env.AEE_ORCHESTRATOR_URL = prev;
+    orch.close();
+  }
+});

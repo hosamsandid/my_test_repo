@@ -115,6 +115,13 @@ function writeAudit(scopeId, actor, subcommand, outcome, detail, who) {
   } catch { /* best-effort */ }
 }
 
+// The SDK records any outcome outside its closed OUTCOMES set as `ok`, so a
+// failure must be mapped here: a transport failure (DNS/TLS/timeout — Jira was
+// not reached) is `unreachable`, anything Jira answered with is `domain-error`.
+function failureOutcome(err) {
+  return err && err.transport ? 'unreachable' : 'domain-error';
+}
+
 // Resolve a scope's Jira credential from the orchestrator-pushed per-scope map.
 // Returns null when the scope has no entry or an incomplete one (the poller
 // then logs "no usable credential" and skips it — a granted-but-unconfigured
@@ -191,7 +198,7 @@ async function deliver({ scopeId, kind, events, projectKey }) {
   if (kind === 'throttle-warning') {
     // Nothing to wake an agent about — the throttle already suppressed the
     // events. Record it and move on.
-    writeAudit(scopeId, scopeId, 'wake', 'throttled', kind);
+    writeAudit(scopeId, scopeId, 'wake', 'ok', `throttled:${kind}`);
     return;
   }
   const token = mint(PLUGIN_ID, scopeId, SIGNING_SECRET);
@@ -226,14 +233,15 @@ async function deliver({ scopeId, kind, events, projectKey }) {
       signal: ctrl.signal,
     });
     const out = await res.json().catch(() => ({}));
-    writeAudit(scopeId, scopeId, 'wake', res.ok ? 'ok' : `http-${res.status}`, `${kind}:${out.delivered ?? '?'}`);
+    const delivered = `${kind}:${out.delivered ?? '?'}`;
+    writeAudit(scopeId, scopeId, 'wake', res.ok ? 'ok' : 'domain-error', res.ok ? delivered : `http-${res.status} ${delivered}`);
     process.stdout.write(
       `[jira-broker] plugin-event ${res.ok ? `ok (${out.delivered ?? '?'} agent(s))` : `HTTP ${res.status}`} `
       + `→ ${scopeId} (${kind}, ${events.length} event(s))\n`,
     );
   } catch (err) {
     const reason = err && err.name === 'AbortError' ? `timeout after ${DELIVER_TIMEOUT_MS}ms` : err.message;
-    writeAudit(scopeId, scopeId, 'wake', 'error', reason);
+    writeAudit(scopeId, scopeId, 'wake', 'unreachable', reason);
     process.stdout.write(`[jira-broker] plugin-event FAILED → ${scopeId}: ${reason}\n`);
   } finally {
     clearTimeout(timer);
@@ -431,7 +439,7 @@ async function handleCli(req, res, cliPath) {
     }
     const parsed = parseConsumeIds(params.get('consume'));
     if (!parsed.ok) {
-      auditCall('inbox', 'refused', parsed.error);
+      auditCall('inbox', 'usage-error', parsed.error);
       return sendJson(res, parsed.status, { error: parsed.error, message: parsed.message });
     }
     const { entries, missing } = inboxStore.consumeIds(scopeId, parsed.ids);
@@ -513,7 +521,7 @@ async function handleCli(req, res, cliPath) {
       auditCall(op, 'ok', params.get('project') || params.get('issue') || params.get('jql') || '');
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall(op, 'error', err.message);
+      auditCall(op, failureOutcome(err), err.message);
       return sendJiraError(err);
     }
   }
@@ -536,7 +544,7 @@ async function handleCli(req, res, cliPath) {
       auditCall('sprint-list', 'ok', board);
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall('sprint-list', 'error', `${board}: ${err.message}`);
+      auditCall('sprint-list', failureOutcome(err), `${board}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -558,7 +566,7 @@ async function handleCli(req, res, cliPath) {
       auditCall('attachment', 'ok', `${issue}:${id}`);
       return sendJson(res, 200, { attachment });
     } catch (err) {
-      auditCall('attachment', 'error', `${issue}:${id}: ${err.message}`);
+      auditCall('attachment', failureOutcome(err), `${issue}:${id}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -582,7 +590,7 @@ async function handleCli(req, res, cliPath) {
     // An over-cap body is dropped to empty by readBody → parses to `{}` → the
     // filename/content checks below turn it into a clear 413, not a silent hang.
     if (!raw) {
-      auditCall('attach', 'error', 'body-too-large');
+      auditCall('attach', 'usage-error', 'body-too-large');
       return sendJson(res, 413, { error: `the upload exceeds the ${jira.ATTACHMENT_UPLOAD_MAX_BYTES}-byte limit for this plugin.` });
     }
     const body = parseJson(raw);
@@ -607,7 +615,7 @@ async function handleCli(req, res, cliPath) {
       auditCall('attach', 'ok', `${issue}:${attachment.id} (${filename})`);
       return sendJson(res, 200, { attachment });
     } catch (err) {
-      auditCall('attach', 'error', `${issue} ${filename}: ${err.message}`);
+      auditCall('attach', failureOutcome(err), `${issue} ${filename}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -649,7 +657,7 @@ async function handleCli(req, res, cliPath) {
       auditCall('create', 'ok', `${project}:${result.epic.key} +${result.stories.filter((s) => s.ok).length}/${result.stories.length} stories`);
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall('create', 'error', `${project}: ${err.message}`);
+      auditCall('create', failureOutcome(err), `${project}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -683,7 +691,7 @@ async function handleCli(req, res, cliPath) {
       auditCall('sprint-create', 'ok', `${board}:${result.sprint.id || result.sprint.name}`);
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall('sprint-create', 'error', `${board}: ${err.message}`);
+      auditCall('sprint-create', failureOutcome(err), `${board}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -712,7 +720,7 @@ async function handleCli(req, res, cliPath) {
       auditCall('sprint-bulk-create', 'ok', `${board}:${result.created}/${result.requested}`);
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall('sprint-bulk-create', 'error', `${board}: ${err.message}`);
+      auditCall('sprint-bulk-create', failureOutcome(err), `${board}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -742,7 +750,7 @@ async function handleCli(req, res, cliPath) {
       auditCall('sprint-close', 'ok', `${board}:${result.sprint.id}`);
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall('sprint-close', 'error', `${board}: ${err.message}`);
+      auditCall('sprint-close', failureOutcome(err), `${board}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -767,7 +775,7 @@ async function handleCli(req, res, cliPath) {
       auditCall('sprint-start', 'ok', `${board}:${result.sprint.id}`);
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall('sprint-start', 'error', `${board}: ${err.message}`);
+      auditCall('sprint-start', failureOutcome(err), `${board}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -792,10 +800,10 @@ async function handleCli(req, res, cliPath) {
       });
       const closeState = result.close.ok ? 'closed' : (result.close.skipped ? 'none' : 'close-fail');
       const startState = result.start.ok ? 'started' : 'start-fail';
-      auditCall('sprint-advance', result.failed ? 'partial' : 'ok', `${board}:${closeState}/${startState}`);
+      auditCall('sprint-advance', result.failed ? 'domain-error' : 'ok', `${result.failed ? 'partial ' : ''}${board}:${closeState}/${startState}`);
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall('sprint-advance', 'error', `${board}: ${err.message}`);
+      auditCall('sprint-advance', failureOutcome(err), `${board}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -863,7 +871,7 @@ async function handleCli(req, res, cliPath) {
       auditCall(op, 'ok', detail);
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall(op, 'error', `${issue}: ${err.message}`);
+      auditCall(op, failureOutcome(err), `${issue}: ${err.message}`);
       return sendJiraError(err);
     }
   }

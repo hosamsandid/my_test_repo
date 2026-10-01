@@ -1,8 +1,12 @@
 # Jira plugin — more event kinds than `status_changed`
 
-> Status: **future plan, not started** (assessed 2026-09-17). Companion to
+> Status: **§5 first batch implemented** (`issue_created`, `comment_added`
+> with `origin`, generic `field_changed`; 2026-09-25) — the rest stays parked
+> (assessed 2026-09-17). Companion to
 > `docs/jira-plugin-plan.md` (the shipped plugin; §11 links here) and
-> `docs/jira-plugin.md` (the how-to). Nothing here changes the platform: the
+> `docs/jira-plugin.md` (the how-to). The step-by-step implementation plan
+> (PR breakdown, contracts, upgrade path) is
+> `docs/jira-plugin-events-implementation.md`. Nothing here changes the platform: the
 > wake stays generic (`plugin-event`, D5) and every addition is broker-side plus
 > a manifest `events[]` entry — the trigger form, the key picker and the help
 > follow from the manifest automatically (`docs/plugin-system-concept.md` §4.1).

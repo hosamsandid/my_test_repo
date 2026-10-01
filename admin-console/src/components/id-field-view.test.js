@@ -16,6 +16,14 @@ test('deriveIdFromName slugs a display name (spaces → hyphens)', () => {
   assert.equal(deriveIdFromName(null), '');
 });
 
+test('deriveIdFromName never leaves edge or doubled hyphens (#2654)', () => {
+  assert.equal(deriveIdFromName('uitest Q02 Gen Ä!'), 'uitest-q02-gen');
+  assert.equal(deriveIdFromName('! leading'), 'leading');
+  assert.equal(deriveIdFromName('a - b'), 'a-b');
+  assert.equal(deriveIdFromName('-'), '');
+  assert.equal(deriveIdFromName('Ä Ö'), '');
+});
+
 test('sanitizeId drops disallowed chars without hyphenating spaces', () => {
   assert.equal(sanitizeId('litellm-prod'), 'litellm-prod');
   assert.equal(sanitizeId('LiteLLM Prod'), 'litellmprod'); // spaces dropped, not hyphenated

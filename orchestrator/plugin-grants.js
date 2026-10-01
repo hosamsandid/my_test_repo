@@ -114,6 +114,21 @@ function planAgentPluginGrantEdit(cfg, grant, active, loadCfg = null) {
   return { field, list };
 }
 
+// The grant a DEACTIVATE may still revoke once the plugin's manifest is gone
+// (uninstalled, or its manifest no longer validates — #2651). Uninstalling
+// deliberately keeps grants, so without this a leftover grant could only be
+// revoked by re-installing the plugin first. Only an existing grant qualifies:
+// `currentGrant` is the list the edit will act on, and an id it does not carry
+// returns null so the caller keeps the "not installed" error. Activation never
+// qualifies — nothing can be seeded without a manifest. The stored granularity
+// is returned so the edit and the member fan-out match what is on the construct.
+function uninstalledRevokeGrant(active, currentGrant, pluginId) {
+  if (active) return null;
+  const id = typeof pluginId === 'string' ? pluginId.trim() : '';
+  if (!id) return null;
+  return pluginGrantFor(currentGrant, id);
+}
+
 // Plan the per-member fan-out of a team plugin (de)activation, mirroring
 // `planSkillSync`. Pure: takes the member configs, returns one action per
 // member. The team-level grant carries the granularity, so `grant` is the full
@@ -153,4 +168,5 @@ module.exports = {
   pluginGrantFor,
   planAgentPluginGrantEdit,
   planPluginSync,
+  uninstalledRevokeGrant,
 };

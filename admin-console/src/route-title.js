@@ -45,13 +45,24 @@ export const ROUTE_TITLES = {
   '/about': 'About',
 };
 
+// Own keys only: a plain-object map would resolve ids like `constructor` or
+// `toString` to built-in functions and print their source (#2650).
+function pluginTitleOf(pluginTitles, id) {
+  return (pluginTitles && Object.hasOwn(pluginTitles, id) && pluginTitles[id]) || id;
+}
+
 // Resolve a pathname to a human page name, handling the dynamic child routes the
 // same way the breadcrumb does: `/plugins/:id/view` carries its id so two plugin
 // tabs stay distinguishable, while `/chats/:agentId` deliberately does not (#1921
 // — the selected agent is already highlighted in that page's own left rail).
 // Returns null for a route we don't recognise, so the caller can fall back cleanly.
-export function pageNameForPath(pathname) {
+// `pluginTitles` ({ [pluginId]: displayName }, #2650) names a plugin viewer by
+// its display name; an id without an entry still reads as the raw id.
+export function pageNameForPath(pathname, pluginTitles = {}) {
   if (!pathname || typeof pathname !== 'string') return null;
+  // React Router ignores a trailing slash, so `/plugins/x/view/` renders the
+  // same page as `/plugins/x/view` — resolve the title the same way (#2650).
+  pathname = pathname.replace(/(.)\/+$/, '$1');
   if (ROUTE_TITLES[pathname]) return ROUTE_TITLES[pathname];
   // "/" redirects to /chats — label the tab for the destination, not the raw slash.
   if (pathname === '/') return ROUTE_TITLES['/chats'];
@@ -60,14 +71,14 @@ export function pageNameForPath(pathname) {
   // already highlighted in the page's left-rail list.
   if (pathname.startsWith('/chats/')) return ROUTE_TITLES['/chats'];
   const pluginView = pathname.match(/^\/plugins\/([^/]+)\/view$/);
-  if (pluginView) return `Plugins / ${pluginView[1]}`;
+  if (pluginView) return `Plugins / ${pluginTitleOf(pluginTitles, pluginView[1])}`;
   return null;
 }
 
 // The full document.title for a pathname: "<Page> · Agent Studio", or just the
 // app name for an unknown route (login screen, wizard sub-steps, 404) — we never
 // surface a raw path in the tab.
-export function documentTitleForPath(pathname) {
-  const name = pageNameForPath(pathname);
+export function documentTitleForPath(pathname, pluginTitles = {}) {
+  const name = pageNameForPath(pathname, pluginTitles);
   return name ? `${name} · ${APP_NAME}` : APP_NAME;
 }

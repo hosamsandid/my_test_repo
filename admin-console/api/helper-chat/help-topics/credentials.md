@@ -73,16 +73,22 @@ and **Used by**, plus a rename/reassign pencil and a delete bin per row.
 
 - **Generate new keypair** — the server creates a fresh ed25519 pair, keeps the
   private half, and shows you the **public** key exactly once, with a *Copy public
-  key* button and a link straight to GitHub's *Add new SSH key* form. There is no
+  key* button and a link straight to GitHub's *Add new SSH key* form. If the
+  browser cannot copy (for example on plain `http`), the key is left selected and
+  the panel asks you to press Ctrl+C. There is no
   second chance to read it here; if you lose it, generate a new pair.
 - **Paste existing key** — you supply a private key you already have. The panel
   keeps a step-by-step guide for producing one
   (`ssh-keygen -t ed25519 -C "agent-studio-deploy-key"`) and for registering the
   public half under GitHub → *Settings* → *SSH and GPG keys* → *New SSH key*.
+  The key is parsed when you save it (OpenSSH or PEM format; passphrase-protected
+  keys are accepted), so a truncated or garbled paste is refused right away
+  instead of failing later when an agent clones.
 
 Either way the key gets a **Name** (a human label) and an **ID** (auto-derived
-from the name, editable), and you pick its ownership tier — see *Ownership tiers
-and privacy* below.
+from the name, editable: lowercase letters, digits and single hyphens, not
+starting or ending with a hyphen), and you pick its ownership tier — see
+*Ownership tiers and privacy* below.
 
 **Prefer a deploy key where you can.** A key registered on a single repository as
 a read-only deploy key is the narrowest useful credential in the system, and it is
@@ -145,8 +151,9 @@ and exactly which permissions to tick.
   **Pull requests** read & write, **Workflows** read & write, plus organisation
   **Members** read-only (the equivalent of `read:org`).
 
-Then give the token a **Name** and an **ID**, choose its ownership tier, and paste
-the value — fine-grained tokens start with `github_pat_`, classic ones with
+Then give the token a **Name** and an **ID** (same rules as for SSH keys),
+choose its ownership tier, and paste the value into the masked field (the eye
+button shows it) — fine-grained tokens start with `github_pat_`, classic ones with
 `ghp_`.
 
 **Two things happen exactly once.** GitHub shows a token value only at creation,

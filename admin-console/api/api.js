@@ -79,6 +79,7 @@ const { listPersonalResources } = require('./personal-resource-view');
 // Resolve the immutable identity stamp for an SSH key / GitHub token, honouring a
 // client override behind the flag ("mark a personal credential as service", #2360).
 const { resolveStampedIdentity } = require('./credential-identity');
+const { credentialName, isValidNewCredentialId, sshPrivateKeyError } = require('./credential-input');
 const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
         WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
 const { buildAssistModelOptions } = require('./assist-model-options');
@@ -3338,6 +3339,10 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
         artifact: c.artifact, from: c.from,
         ...(typeof c.label === 'string' && c.label.trim() ? { label: c.label.trim() } : {}),
         ...(c.gate === 'human' ? { gate: 'human' } : {}),
+        // Authored wake-instruction override (#868) — dropping it here lost it
+        // on every live channel write (#2717); the reconciler feeds it into the
+        // derived listener's prompt.
+        ...(typeof c.wakePrompt === 'string' && c.wakePrompt.trim() ? { wakePrompt: c.wakePrompt.trim() } : {}),
         // Claim opt-out (#958) — must survive the live port write, otherwise
         // reconcileTeamGithubChannels re-stamps the claim the author just turned
         // off. Only the non-default is persisted.
@@ -18317,7 +18322,8 @@ app.get('/api/ssh-keys', (req, res) => {
 });
 
 app.post('/api/ssh-keys', apiLimiter, (req, res) => {
-  const { name, privateKey, id: rawId } = req.body || {};
+  const { privateKey, id: rawId } = req.body || {};
+  const name = credentialName(req.body?.name);
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (!privateKey || typeof privateKey !== 'string') {
     return res.status(400).json({ error: 'privateKey (string) is required' });
@@ -18330,15 +18336,16 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
     return res.status(403).json({ error: 'forbidden: you may not create this credential', code: 'forbidden' });
   }
   const trimmed = privateKey.trim();
-  if (!/-----BEGIN [A-Z ]+PRIVATE KEY-----/.test(trimmed)) {
-    return res.status(400).json({ error: 'privateKey does not look like an SSH private key' });
-  }
+  // Parse the key, not just its BEGIN marker (#2654) — garbage between the
+  // armour lines used to be stored and only failed when an agent cloned.
+  const keyError = sshPrivateKeyError(trimmed);
+  if (keyError) return res.status(400).json({ error: keyError });
 
   const existing = listSshKeys();
   let id;
   if (rawId !== undefined && rawId !== null && String(rawId).trim() !== '') {
     id = String(rawId).trim();
-    if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and hyphens only' });
+    if (!SSH_KEY_ID_RE.test(id) || !isValidNewCredentialId(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and single hyphens only, and must not start or end with a hyphen' });
     if (existing.some(k => k.id === id)) return res.status(409).json({ error: `SSH key id '${id}' already exists` });
   } else {
     // Generate a stable, filesystem-safe id from the name
@@ -18381,10 +18388,9 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
 // Server-side keypair generation. Returns the public key once so the user
 // can paste it into GitHub; the private key never leaves the workspace.
 app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
-  const { name, comment, id: rawId } = req.body || {};
-  if (!name || typeof name !== 'string') {
-    return res.status(400).json({ error: 'name is required' });
-  }
+  const { comment, id: rawId } = req.body || {};
+  const name = credentialName(req.body?.name);
+  if (!name) return res.status(400).json({ error: 'name is required' });
   const scope = getScope(req);
   let ownership;
   try { ownership = resolveCredentialOwnership(req.body, scope.userId); }
@@ -18396,7 +18402,7 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
   let id;
   if (rawId !== undefined && rawId !== null && String(rawId).trim() !== '') {
     id = String(rawId).trim();
-    if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and hyphens only' });
+    if (!SSH_KEY_ID_RE.test(id) || !isValidNewCredentialId(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and single hyphens only, and must not start or end with a hyphen' });
     if (existing.some(k => k.id === id)) return res.status(409).json({ error: `SSH key id '${id}' already exists` });
   } else {
     const baseId = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
@@ -18513,9 +18519,8 @@ app.post('/api/ssh-keys/:id/rotate', heavyLimiter, (req, res) => {
       return res.status(400).json({ error: 'privateKey (string) is required, or set generate:true' });
     }
     const trimmed = privateKey.trim();
-    if (!/-----BEGIN [A-Z ]+PRIVATE KEY-----/.test(trimmed)) {
-      return res.status(400).json({ error: 'privateKey does not look like an SSH private key' });
-    }
+    const keyError = sshPrivateKeyError(trimmed);
+    if (keyError) return res.status(400).json({ error: keyError });
     fs.writeFileSync(keyPath, trimmed.endsWith('\n') ? trimmed : trimmed + '\n', { mode: 0o600 });
     try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
     fingerprint = sshKeyFingerprint(trimmed);
@@ -18545,7 +18550,8 @@ app.get('/api/github-tokens', (req, res) => {
 });
 
 app.post('/api/github-tokens', apiLimiter, (req, res) => {
-  const { name, token, id: rawId } = req.body || {};
+  const { token, id: rawId } = req.body || {};
+  const name = credentialName(req.body?.name);
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (!token || typeof token !== 'string') {
     return res.status(400).json({ error: 'token (string) is required' });
@@ -18568,7 +18574,7 @@ app.post('/api/github-tokens', apiLimiter, (req, res) => {
   let id;
   if (rawId !== undefined && rawId !== null && String(rawId).trim() !== '') {
     id = String(rawId).trim();
-    if (!GH_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and hyphens only' });
+    if (!GH_TOKEN_ID_RE.test(id) || !isValidNewCredentialId(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and single hyphens only, and must not start or end with a hyphen' });
     if (existing.some(t => t.id === id)) return res.status(409).json({ error: `GitHub token id '${id}' already exists` });
   } else {
     const baseId = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');

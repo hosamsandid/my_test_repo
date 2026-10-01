@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router';
 import {
   ArrowLeft, ArrowRight, Check, AlertCircle, Github,
@@ -12,11 +12,14 @@ import KnowledgeLearningSections, {
 } from '../components/KnowledgeLearningConfig';
 import StepProcess, { BundleRolesSummary, BundleFlowPreview, LintBadges } from './team-setup/StepProcess';
 import { buildReviewFields } from './team-setup/review-fields';
+import { goLiveNotice, bundleUsesGithub } from './team-setup/go-live-notice';
+import { wizardHasUnsavedInput } from './team-setup/leave-guard';
 // The shared "Launch" step (#1668, epic #1661 Phase E) — the same component the
 // Flows-canvas Materialize dialog renders, so the two front doors that turn a
 // design into running agents can't diverge. It owns the streaming submit +
 // progress/collision/error feedback; the wizard collects the team identity on
-// its earlier steps and shows only the extend / materialize-now toggles here.
+// its earlier steps and shows only the materialize-now toggle here (the wizard
+// is create-only, so it offers no extend toggle — #2658).
 import LaunchStep from './process/LaunchStep';
 import { useHelpSubject } from '../context/HelperChatContext.jsx';
 // The id/suffix rules live in the shared launch core (single source with the
@@ -466,7 +469,7 @@ function StepEnvironmentSelect({
           <p style={{ margin: 0 }}>
             Optionally reuse an existing <strong style={{ color: 'var(--eb-text-primary)' }}>Environment</strong> —
             it already bundles the repository, credentials and knowledge sources. Pick nothing and the team
-            gets a fresh, repo-less one of its own (#2168 A2 — no environment to name or find first).
+            gets a fresh, repo-less one of its own — no environment to name or find first.
           </p>
         </div>
 
@@ -663,12 +666,23 @@ function StepReview({ form, environments, sshKeys, githubTokens, mcpServers, mcp
   const env = (environments || []).find(e => e.id === form.environmentId);
   const sshKey = sshKeys?.find(k => k.id === form.sshKeyId);
   const ghToken = githubTokens?.find(t => t.id === form.githubTokenId);
+  // #2658: the caller's own lists only hold credentials they can see, so a
+  // credential the environment references but the caller can't see (another
+  // user's personal token) used to read as "no credential". The env detail
+  // carries metadata-only descriptors for exactly those (`credentialRefs`).
+  const { data: envDetail } = useApi(form.environmentId ? `/api/environments/${encodeURIComponent(form.environmentId)}` : null);
+  // Personal credentials are owner-only, so a personal token in the caller's
+  // list is the caller's own — and the caller becomes this team's Team Admin,
+  // whose personal token carries the team's GitHub writes.
+  const personalToken = (Array.isArray(githubTokens) ? githubTokens : []).find(t => t.scope === 'personal');
   const knowledge = (form.mcpSelections || []).filter(s => s.serverId);
   // Scalar summary fields (label/value + empty-state placeholders) derived by a
   // pure, unit-tested helper; the knowledge-learning constants come from the
   // shared React component module and are passed through as plain data.
   const fields = buildReviewFields({
     form, env, sshKey, ghToken,
+    credentialRefs: envDetail?.credentialRefs,
+    personalToken,
     knowledgeMeta: {
       defaults: KNOWLEDGE_LEARNING_DEFAULTS,
       autonomyLevels: AUTONOMY_LEVELS,
@@ -729,6 +743,8 @@ function StepReview({ form, environments, sshKeys, githubTokens, mcpServers, mcp
         <GoLiveNotice
           agentCount={(form.processBundle?.roles || []).length}
           repoLabel={repoSlug(form.repoUrl) || form.repoUrl}
+          materializeNow={form.materializeNow}
+          usesGithub={bundleUsesGithub(form.processBundle)}
         />
         <ErrorBox message={error} />
       </div>
@@ -746,33 +762,37 @@ function StepReview({ form, environments, sshKeys, githubTokens, mcpServers, mcp
 // cost note stayed on their pages. Only the follow-up advice (staging the
 // rollout by disabling members on the Agents page) moved into the team-setup
 // topic, reachable from the "?" next to the heading.
-function GoLiveNotice({ agentCount, repoLabel }) {
-  const agents = agentCount > 0 ? `${agentCount} agent${agentCount === 1 ? '' : 's'}` : 'the team’s agents';
+function GoLiveNotice({ agentCount, repoLabel, materializeNow, usesGithub }) {
+  // #2658: the wording follows stub mode and repository presence — the copy is
+  // derived by the pure, unit-tested go-live-notice.js.
+  const notice = goLiveNotice({ agentCount, repoLabel, materializeNow, usesGithub });
+  const accent = notice.tone === 'warning' ? 'var(--eb-status-warning)' : 'var(--eb-border-default)';
   return (
     <div style={{
       display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start',
       padding: 'var(--eb-space-3) var(--eb-space-4)',
-      background: 'var(--eb-status-warning-bg)',
-      border: '1px solid var(--eb-status-warning)',
+      background: notice.tone === 'warning' ? 'var(--eb-status-warning-bg)' : 'var(--eb-bg-elevated)',
+      border: `1px solid ${accent}`,
       borderRadius: 'var(--eb-radius-md)',
       fontSize: 'var(--eb-text-sm)',
       color: 'var(--eb-text-secondary)',
       lineHeight: 1.6,
     }}>
-      <AlertTriangle size={18} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
+      <AlertTriangle size={18} style={{ color: notice.tone === 'warning' ? 'var(--eb-status-warning)' : 'var(--eb-text-muted)', flexShrink: 0, marginTop: 2 }} />
       <div>
         <div style={{
-          fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-warning)',
+          fontWeight: 'var(--eb-font-semibold)', color: notice.tone === 'warning' ? 'var(--eb-status-warning)' : 'var(--eb-text-primary)',
           marginBottom: 'var(--eb-space-1)', display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
         }}>
           What happens next
-          <PageHelpButton label="What does Create team provision?" size={13} style={{ padding: 0, flexShrink: 0, color: 'var(--eb-status-warning)' }} />
+          <PageHelpButton label="What does Create team provision?" size={13} style={{ padding: 0, flexShrink: 0, color: 'inherit' }} />
         </div>
         <p style={{ margin: 0 }}>
-          Creating the team provisions {agents} that go live immediately and begin watching{' '}
-          {repoLabel ? <code>{repoLabel}</code> : 'the bound repository'} for issues and pull requests,
-          acting autonomously from that moment.
+          {notice.before}{notice.code ? <code>{notice.code}</code> : null}{notice.after}
         </p>
+        {notice.repoWarning && (
+          <p style={{ margin: 'var(--eb-space-2) 0 0', color: 'var(--eb-status-warning)' }}>{notice.repoWarning}</p>
+        )}
       </div>
     </div>
   );
@@ -834,7 +854,9 @@ export default function TeamSetup() {
     labelSuffix: '',
     // Launch toggles surfaced by the shared LaunchStep on the Review step.
     // materializeNow defaults on — the wizard has always materialized members
-    // immediately (the backend default), now made explicit (#1668).
+    // immediately (the backend default), now made explicit (#1668). `extend`
+    // stays false: the Team step refuses an existing id and the wizard offers
+    // no extend toggle (#2658), so a proactive extend could only dead-end.
     extend: false,
     materializeNow: true,
     sshKeyId: '',
@@ -856,6 +878,17 @@ export default function TeamSetup() {
     processBundle: null,      // processTemplateVersion-1 bundle
     processLints: null,       // authoritative lints for the current bundle
   });
+
+  // Reload / tab-close guard (#2658): the wizard keeps no draft, so warn before
+  // the browser discards the input. In-app navigation (Back/Next) is unaffected.
+  const [launched, setLaunched] = useState(false);
+  const unsaved = wizardHasUnsavedInput({ step, form, launched });
+  useEffect(() => {
+    if (!unsaved) return undefined;
+    const handler = (e) => { e.preventDefault(); e.returnValue = ''; return ''; };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [unsaved]);
 
   const { data: templatesResp, loading: tplLoading } = useApi('/api/agent-templates');
   const { data: environments, loading: envsLoading, refetch: refetchEnvs } = useApi('/api/environments');
@@ -1042,6 +1075,7 @@ export default function TeamSetup() {
   // created, else the first created agent (unchanged behaviour). Keep the brief
   // success card visible before navigating away.
   function onLaunchComplete(result) {
+    setLaunched(true);
     const land = landingAgent(result?.created);
     setTimeout(() => {
       if (land) navigate(`/chats/${land}`);
@@ -1159,7 +1193,7 @@ export default function TeamSetup() {
       {/* The final step delegates the launch to the shared LaunchStep — the same
           component the Flows-canvas Materialize dialog renders (#1668). The team
           identity + environment are already collected on earlier steps, so only
-          the extend / materialize-now toggles show here; LaunchStep owns the
+          the materialize-now toggle shows here; LaunchStep owns the
           "Create team" button, the streaming submit, and the progress /
           collision / rollback / success feedback. */}
       {isLast && (
@@ -1168,7 +1202,7 @@ export default function TeamSetup() {
           environments={environments}
           values={form}
           onChange={patch => setForm(f => ({ ...f, ...patch }))}
-          fields={['extend', 'materializeNow']}
+          fields={['materializeNow']}
           extraBody={launchExtraBody()}
           onComplete={onLaunchComplete}
           onBusyChange={setLaunchBusy}

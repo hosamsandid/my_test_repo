@@ -163,8 +163,8 @@ const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit, p
 // Plugin system (#1516). The grant is the sibling of the skill grant — it lives
 // on the agent construct, never on the environment — and (de)activation is the
 // same additive live file sync, no respawn (#1547).
-const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantFor, normalizeGrantList } = require("./plugin-grants");
-const { planWorkspaceSync, planCliRefresh } = require("./plugin-sync");
+const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantFor, normalizeGrantList, uninstalledRevokeGrant } = require("./plugin-grants");
+const { planWorkspaceSync, withStoredCliNames, withStoredCommandNamespaces, uninstalledCommandRevokes, PLUGINS_DIR, planCliRefresh } = require("./plugin-sync");
 const { resolveAgentStateDir } = require("./agent-state-dir");
 const mcpSeed = require("./mcp-seed");
 const { resolveScopeId, scopeIdFromGrantScope } = require("./plugin-scope");
@@ -12743,9 +12743,26 @@ class Orchestrator {
   // Apply one agent's move from prevGrant to nextGrant.
   async _syncPluginIntoWorkspace(id, cfg, prevGrant, nextGrant) {
     const manifests = pluginRegistry.installedManifests();
+    const dir = agentDir(id);
+    // Migrate a legacy `.aee/` to `.agent-studio/` before the plan's relative
+    // paths (`.agent-studio/bin`, `.agent-studio/plugins`) are read or written,
+    // so an upgraded agent's plugin CLIs/grants move with the rename instead of
+    // splitting across two dirs (#1549).
+    resolveAgentStateDir(dir);
+    // A revoked plugin that is no longer installed has no manifest to name its
+    // CLI; read the name back from the config file seeded with it (#2651).
+    const readStoredConfig = (pluginId) => {
+      try { return JSON.parse(fs.readFileSync(path.join(dir, PLUGINS_DIR, `${pluginId}.json`), "utf8")); }
+      catch { return null; }
+    };
+    // Its command namespace is read the same way, before the plan removes the
+    // config file (#2657).
+    const storedPrevGrant = withStoredCommandNamespaces(
+      withStoredCliNames(prevGrant, manifests, readStoredConfig), manifests, readStoredConfig,
+    );
     const plan = planWorkspaceSync({
       agentCfg: cfg,
-      prevGrant,
+      prevGrant: storedPrevGrant,
       nextGrant,
       manifests,
       resolveScopeId,
@@ -12753,12 +12770,6 @@ class Orchestrator {
       networkNameFor: perAgentNetworkName,
     });
 
-    const dir = agentDir(id);
-    // Migrate a legacy `.aee/` to `.agent-studio/` before the plan's relative
-    // paths (`.agent-studio/bin`, `.agent-studio/plugins`) are written, so an
-    // upgraded agent's plugin CLIs/grants move with the rename instead of
-    // splitting across two dirs (#1549).
-    resolveAgentStateDir(dir);
     const written = [];
     const removed = [];
     const errors = [];
@@ -12888,6 +12899,12 @@ class Orchestrator {
           commandReseedPaths.push(...projectPluginScaffold(id, pDir, pm, { remove: true }));
         }
       }
+      // A revoked plugin that is no longer installed is not in `manifests`;
+      // remove its commands under the namespace its seeded config recorded.
+      for (const { namespace } of uninstalledCommandRevokes(storedPrevGrant, nextGrant, manifests)) {
+        const nsRel = projectSkillCommands(id, namespace, null, seededCmds, { remove: true });
+        if (nsRel) commandReseedPaths.push(nsRel);
+      }
       writeSeededCommands(id, seededCmds);
     } catch (err) {
       console.warn(`[Orchestrator] plugin command sync ${id}: ${err.message}`);
@@ -12994,11 +13011,18 @@ class Orchestrator {
 
   // Validate that a plugin may be granted at the requested granularity. The UI
   // bounds the choice too, but the server is the authority (§4.4).
-  _resolvePluginGrant(pluginId, scopeGranularity) {
+  // A deactivate of a grant `currentGrant` still carries is allowed without a
+  // manifest (#2651): uninstalling keeps grants, and revoking one only removes
+  // files and the prompt line — it must not require a re-install first.
+  _resolvePluginGrant(pluginId, scopeGranularity, { active = true, currentGrant = [] } = {}) {
     const id = typeof pluginId === "string" ? pluginId.trim() : "";
     if (!id) throw new Error("pluginId required");
     const entry = pluginRegistry.readPluginManifest(id);
-    if (!entry.ok) throw new Error(`Plugin '${id}' is not installed or its manifest is invalid`);
+    if (!entry.ok) {
+      const orphan = uninstalledRevokeGrant(active, currentGrant, id);
+      if (orphan) return { manifest: null, granularity: orphan.scopeGranularity };
+      throw new Error(`Plugin '${id}' is not installed or its manifest is invalid`);
+    }
     const granularity = scopeGranularity || defaultGranularity(entry.manifest);
     const problem = assertGranularityGrantable(entry.manifest, granularity);
     if (problem) throw new Error(problem);
@@ -13013,7 +13037,9 @@ class Orchestrator {
     const teamCfg = loadAgentConfig(teamId);
     if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
     if (teamCfg.role !== "team") throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
-    const { granularity } = this._resolvePluginGrant(pluginId, scopeGranularity);
+    const { granularity } = this._resolvePluginGrant(pluginId, scopeGranularity, {
+      active, currentGrant: normalizeGrantList(teamCfg.plugins),
+    });
     const id = pluginId.trim();
 
     const before = Array.isArray(teamCfg.plugins) ? teamCfg.plugins.slice() : [];
@@ -13073,7 +13099,9 @@ class Orchestrator {
     const cfg = loadAgentConfig(id);
     if (!cfg) throw new Error(`Agent '${id}' not found`);
     if (cfg.role === "team") throw new Error(`Agent '${id}' is a team — use the team route`);
-    const { granularity } = this._resolvePluginGrant(pluginId, scopeGranularity);
+    const { granularity } = this._resolvePluginGrant(pluginId, scopeGranularity, {
+      active, currentGrant: effectivePlugins(cfg, loadAgentConfig),
+    });
     const pid = pluginId.trim();
 
     const prev = effectivePlugins(cfg, loadAgentConfig);

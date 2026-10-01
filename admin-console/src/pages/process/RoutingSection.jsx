@@ -60,7 +60,7 @@ function humanConsuming(humans, entry) {
 // The Outcomes editor holds a local draft and persists only on Save (or when a
 // suggestion is confirmed) — nothing is written implicitly, so a declined
 // suggestion persists nothing (AC4).
-export default function RoutingSection({ node, peers = [], lints = [], labels = [], humans = [], humanOps, ops, onChanged, focusOutcome = null, focusSection = null, mode }) {
+export default function RoutingSection({ node, peers = [], lints = [], labels = [], humans = [], humanOps, ops, onChanged, onOutcomesDirtyChange, focusOutcome = null, focusSection = null, mode }) {
   const [outcomes, setOutcomes] = useState(null);   // { mode, options[] } local draft
   const [loaded, setLoaded] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -85,6 +85,10 @@ export default function RoutingSection({ node, peers = [], lints = [], labels = 
     })();
     return () => { alive = false; };
   }, [node.id]);
+
+  // #2660: the host inspector guards close / tab switch on this draft, which
+  // otherwise dies with this component.
+  useEffect(() => { onOutcomesDirtyChange?.(dirty); }, [dirty]);
 
   const mutate = (next) => { setOutcomes(next); setDirty(true); setSaved(false); setSuggested(false); };
 
@@ -412,7 +416,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
 
       {editChannel && (
         <EditHandoffDialog
-          edge={{ on: 'github', from: editChannel.from, to: node.id, artifact: editChannel.artifact, label: editChannel.label || '', gate: editChannel.gate }}
+          edge={{ on: 'github', from: editChannel.from, to: node.id, artifact: editChannel.artifact, label: editChannel.label || '', gate: editChannel.gate, wakePrompt: editChannel.wakePrompt || '' }}
           fromName={nameOf(editChannel.from)} toName={node.displayName || node.id}
           ops={ops}
           onClose={closeEdits} onDone={afterEdit} />

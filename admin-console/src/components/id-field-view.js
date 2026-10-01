@@ -25,13 +25,19 @@ const SAFE_ID_CHARS = /[^a-z0-9-]/g;
 export const ID_FORMAT_HINT =
   'Lowercase letters, numbers and hyphens only.';
 
-/** Reduce a name to a slug: lowercase, spaces → hyphens, drop the rest. */
+/**
+ * Reduce a name to a slug: lowercase, spaces → hyphens, drop the rest, then
+ * collapse hyphen runs and trim edge hyphens — a name ending in a dropped
+ * symbol ("Gen Ä!") must not derive a dangling `gen-` (#2654).
+ */
 export function deriveIdFromName(name) {
   return String(name || '')
     .trim()
     .toLowerCase()
     .replace(/\s+/g, '-')
-    .replace(SAFE_ID_CHARS, '');
+    .replace(SAFE_ID_CHARS, '')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
 /**

@@ -49,10 +49,18 @@ function normalize(pathname) {
   return p.toLowerCase();
 }
 
+// Own keys only: a plain-object map would resolve ids like `constructor` or
+// `toString` to built-in functions and print their source (#2650).
+function pluginTitleOf(pluginTitles, id) {
+  return (pluginTitles && Object.hasOwn(pluginTitles, id) && pluginTitles[id]) || id;
+}
+
 // Resolve a pathname to its breadcrumb label, handling the dynamic route
 // shapes (Agent-Chat room, plugin viewer). A path that matches no route
-// reads NOT_FOUND_LABEL — never the raw pathname (#2615).
-export function breadcrumbFor(pathname) {
+// reads NOT_FOUND_LABEL — never the raw pathname (#2615). `pluginTitles`
+// ({ [pluginId]: displayName }, #2650) names a plugin viewer by its display
+// name; an id without an entry still reads as the raw id.
+export function breadcrumbFor(pathname, pluginTitles = {}) {
   const p = normalize(pathname);
   if (BREADCRUMBS[p]) return BREADCRUMBS[p];
   // "/" redirects to /chats — label it for the destination (as route-title.js
@@ -67,6 +75,6 @@ export function breadcrumbFor(pathname) {
   if (/^\/chats\/[^/]+$/.test(p)) return BREADCRUMBS['/chats'];
   // Match on the original casing so the plugin id is shown as typed.
   const pluginView = String(pathname || '').replace(/\/+$/, '').match(/^\/plugins\/([^/]+)\/view$/i);
-  if (pluginView) return `Plugins / ${pluginView[1]}`;
+  if (pluginView) return `Plugins / ${pluginTitleOf(pluginTitles, pluginView[1])}`;
   return NOT_FOUND_LABEL;
 }

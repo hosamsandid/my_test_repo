@@ -34,6 +34,13 @@ const BIN_DIR = path.posix.join(STATE_DIR, 'bin');
 const PLUGINS_DIR = path.posix.join(STATE_DIR, 'plugins');
 const CONFIG_MODE = 0o600; // token lives here — never group/other readable
 const BIN_MODE = 0o755;
+// Mirror of plugin-manifest.js CLI_NAME_RE. A CLI name that did NOT come from a
+// validated manifest (a revoke of an uninstalled plugin, #2651) is checked
+// against it before it becomes a path to delete.
+const CLI_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+// Mirror of plugin-manifest.js COMMANDS_NAMESPACE_RE (a plugin id matches it
+// too), for a stored command namespace read back from the workspace (#2657).
+const COMMAND_NAMESPACE_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 // Where a plugin's CLI and per-agent config live in a granted workspace.
 function agentPluginPaths(pluginId, cliName) {
@@ -53,8 +60,20 @@ function sidecarEndpoint(manifest) {
 }
 
 // The per-agent config object written to `.agent-studio/plugins/<id>.json`.
-function pluginConfigFile({ pluginId, scopeId, endpoint, token, cliName }) {
-  return { pluginId, scopeId, endpoint, token, cliName };
+// A plugin that ships commands also records the namespace they were projected
+// under, so a revoke after uninstall can still remove them (#2657).
+function pluginConfigFile({ pluginId, scopeId, endpoint, token, cliName, commandNamespace }) {
+  const cfg = { pluginId, scopeId, endpoint, token, cliName };
+  if (commandNamespace) cfg.commandNamespace = commandNamespace;
+  return cfg;
+}
+
+// The `.claude/commands` namespace a plugin's commands are projected under
+// (the orchestrator's command sync uses the same rule), or null when the
+// plugin ships no commands.
+function pluginCommandNamespace(manifest) {
+  if (!manifest || !manifest.commands) return null;
+  return manifest.commands.namespace || manifest.id;
 }
 
 // Plan the workspace + network reconciliation for ONE agent moving from a
@@ -102,8 +121,18 @@ function planWorkspaceSync({
   for (const [id, grant] of nextById) {
     const manifest = manifests[id];
     if (!manifest) continue; // uninstalled out from under the grant — skip, nothing to seed
-    if (!manifest.cli) continue; // command-only plugin — command files projected separately in orchestrator
     const prev = prevById.get(id);
+    const commandNamespace = pluginCommandNamespace(manifest);
+    if (!manifest.cli) {
+      // Command-only plugin — its command files are projected separately in the
+      // orchestrator. A fresh grant only records their namespace (#2657); there
+      // is no CLI, token or network.
+      if (!prev && commandNamespace) {
+        const { configPath } = agentPluginPaths(id, id);
+        write.push({ path: configPath, mode: CONFIG_MODE, content: { pluginId: id, commandNamespace }, pluginId: id });
+      }
+      continue;
+    }
     const { binPath, configPath } = agentPluginPaths(id, manifest.cli.name);
     const scopeId = resolveScopeId(agentCfg, grant.scopeGranularity);
     const token = scopeId ? mintToken(id, scopeId) : null;
@@ -117,7 +146,7 @@ function planWorkspaceSync({
       write.push({
         path: configPath,
         mode: CONFIG_MODE,
-        content: pluginConfigFile({ pluginId: id, scopeId, endpoint: sidecarEndpoint(manifest), token, cliName: manifest.cli.name }),
+        content: pluginConfigFile({ pluginId: id, scopeId, endpoint: sidecarEndpoint(manifest), token, cliName: manifest.cli.name, commandNamespace }),
         pluginId: id,
       });
       if (network) connect.push({ pluginId: id, network });
@@ -128,7 +157,7 @@ function planWorkspaceSync({
       write.push({
         path: configPath,
         mode: CONFIG_MODE,
-        content: pluginConfigFile({ pluginId: id, scopeId, endpoint: sidecarEndpoint(manifest), token, cliName: manifest.cli.name }),
+        content: pluginConfigFile({ pluginId: id, scopeId, endpoint: sidecarEndpoint(manifest), token, cliName: manifest.cli.name, commandNamespace }),
         pluginId: id,
       });
     }
@@ -141,14 +170,68 @@ function planWorkspaceSync({
     // Prefer the live manifest for the CLI name; fall back to a stored one on
     // the grant so an uninstalled plugin can still be cleaned up.
     const manifest = manifests[id];
-    if (manifest && !manifest.cli) continue; // command-only plugin — no bin/config/network to remove
-    const cliName = (manifest && manifest.cli && manifest.cli.name) || grant.cliName || id;
+    if (manifest && !manifest.cli) {
+      // Command-only plugin — no bin or network; drop only its namespace record.
+      if (pluginCommandNamespace(manifest)) remove.push(agentPluginPaths(id, id).configPath);
+      continue;
+    }
+    const stored = typeof grant.cliName === 'string' && CLI_NAME_RE.test(grant.cliName) ? grant.cliName : null;
+    const cliName = (manifest && manifest.cli && manifest.cli.name) || stored || id;
     const { binPath, configPath } = agentPluginPaths(id, cliName);
     remove.push(binPath, configPath);
     if (network) disconnect.push({ pluginId: id, network });
   }
 
   return { write, remove, connect, disconnect };
+}
+
+// Carry the CLI name onto the revoked entries of a PREVIOUS grant whose plugin
+// is no longer installed (#2651). Without a manifest, planWorkspaceSync would
+// fall back to the plugin id as the bin name (`.agent-studio/bin/<pluginId>`),
+// which is not the file that was seeded, so the real CLI would stay on the
+// agent's PATH. The seeded config file (`pluginConfigFile`) recorded `cliName`
+// at grant time; `readStoredConfig(pluginId)` returns that parsed file or null.
+// The file lives in the agent-writable workspace, so a name that is not a
+// plain CLI slug is ignored rather than trusted as a path.
+function withStoredCliNames(prevGrant, manifests = {}, readStoredConfig) {
+  return (prevGrant || []).map((g) => {
+    if (!g || !g.id || manifests[g.id] || g.cliName) return g;
+    let stored = null;
+    try { stored = typeof readStoredConfig === 'function' ? readStoredConfig(g.id) : null; } catch { stored = null; }
+    const cliName = stored && typeof stored.cliName === 'string' ? stored.cliName : null;
+    return cliName && CLI_NAME_RE.test(cliName) ? { ...g, cliName } : g;
+  });
+}
+
+// Carry the command namespace onto the revoked entries of a PREVIOUS grant
+// whose plugin is no longer installed (#2657) — the command sibling of
+// withStoredCliNames. The orchestrator's command sync walks installed manifests
+// only, so without this an uninstalled plugin's `.claude/commands/<namespace>`
+// would stay in the workspace. Read BEFORE the plan removes the config file.
+// The file is agent-writable, so a namespace that is not a plain slug is ignored.
+function withStoredCommandNamespaces(prevGrant, manifests = {}, readStoredConfig) {
+  return (prevGrant || []).map((g) => {
+    if (!g || !g.id || manifests[g.id] || g.commandNamespace) return g;
+    let stored = null;
+    try { stored = typeof readStoredConfig === 'function' ? readStoredConfig(g.id) : null; } catch { stored = null; }
+    const ns = stored && typeof stored.commandNamespace === 'string' ? stored.commandNamespace : null;
+    return ns && COMMAND_NAMESPACE_RE.test(ns) ? { ...g, commandNamespace: ns } : g;
+  });
+}
+
+// The command namespaces to unproject for revoked grants whose plugin is no
+// longer installed: [{ pluginId, namespace }]. Installed plugins are handled by
+// the orchestrator's manifest-driven loop; a grant without a valid stored
+// namespace (never recorded, or tampered with) is skipped.
+function uninstalledCommandRevokes(prevGrant = [], nextGrant = [], manifests = {}) {
+  const nextIds = new Set((nextGrant || []).map((g) => g && g.id));
+  const out = [];
+  for (const g of prevGrant || []) {
+    if (!g || !g.id || nextIds.has(g.id) || manifests[g.id]) continue;
+    if (typeof g.commandNamespace !== 'string' || !COMMAND_NAMESPACE_RE.test(g.commandNamespace)) continue;
+    out.push({ pluginId: g.id, namespace: g.commandNamespace });
+  }
+  return out;
 }
 
 // Which of ONE agent's granted CLI copies differ from the registry. The grant
@@ -191,4 +274,8 @@ module.exports = {
   pluginConfigFile,
   planWorkspaceSync,
   planCliRefresh,
+  withStoredCliNames,
+  withStoredCommandNamespaces,
+  uninstalledCommandRevokes,
+  pluginCommandNamespace,
 };

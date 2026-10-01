@@ -332,9 +332,14 @@ export async function wireChannel({ ops }, { from, to, artifact, label, gate, au
   });
 }
 
-/** Edit a channel port in place (same (artifact, from, label) key). */
-export async function updateChannel({ ops }, { to, spec }) {
-  await (ops.updateChannel || ops.addChannel)(to, spec);
+/**
+ * Edit a channel port. `prevLabel` (#2717) is the label the channel had when
+ * the editor opened: a changed label renames that port in place instead of
+ * upserting a sibling under the new key. Without it, the edit stays on the
+ * spec's own (artifact, from, label) key.
+ */
+export async function updateChannel({ ops }, { to, spec, prevLabel }) {
+  await ops.updateChannel(to, spec, { prevLabel });
 }
 
 /**

@@ -24,7 +24,9 @@ import {
 import { environmentsUsingSshKey, usageCountLabel, usageTooltip } from './credential-usage';
 import { CREDENTIALS_HELP_SECTIONS } from './credentials-help-sections.js';
 import { usePageActions } from '../context/PageActionsContext';
-import { loadPersonalCredentialChangeNotice } from './effective-identity-view.js';
+import {
+  loadPersonalCredentialChangeNotice, personalUsageCell, personalCreateRestartNote, replaceRestartNote,
+} from './effective-identity-view.js';
 
 const inputStyle = {
   width: '100%',
@@ -198,7 +200,7 @@ function PublicKeyReveal({ publicKey, onDone }) {
 }
 
 function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, generated, onDoneGenerated,
-                      teams, isSysAdmin, adminTeamIds }) {
+                      teams, isSysAdmin, adminTeamIds, hasActivePersonal }) {
   const [mode, setMode] = useState('generate');
   const [name, setName] = useState('');
   const [id, setId] = useState('');
@@ -222,14 +224,18 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
   const canPaste    = name.trim() && privateKey.trim() && ownershipReady;
   const canGenerate = name.trim() && ownershipReady;
 
+  const restartNote = personalCreateRestartNote({ kind: 'ssh', scope: ownership.scope, hasActivePersonal });
   const ownershipFields = (
-    <CredentialOwnership
-      value={ownership}
-      onChange={setOwnership}
-      teams={teams}
-      isSysAdmin={isSysAdmin}
-      adminTeamIds={adminTeamIds}
-    />
+    <>
+      <CredentialOwnership
+        value={ownership}
+        onChange={setOwnership}
+        teams={teams}
+        isSysAdmin={isSysAdmin}
+        adminTeamIds={adminTeamIds}
+      />
+      {restartNote && <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)' }}>{restartNote}</div>}
+    </>
   );
 
   return (
@@ -439,7 +445,9 @@ export default function SshKeys() {
   const [baselineNotice, setBaselineNotice] = useState(null);
   const announceBaselineChange = (entry, action) => {
     if (entry?.scope !== 'personal') return;
-    loadPersonalCredentialChangeNotice(url => apiCall('GET', url), { kind: 'ssh', action }).then(setBaselineNotice);
+    loadPersonalCredentialChangeNotice(url => apiCall('GET', url), {
+      kind: 'ssh', action, credentialId: entry.id, restarted: entry.ownerAgentsRestarted === true,
+    }).then(setBaselineNotice);
   };
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
@@ -458,6 +466,8 @@ export default function SshKeys() {
   // the OWNER of a personal row must get edit/rotate/delete, not a lock (mirrors
   // ModelRegistry #2403).
   const caller = { isSysAdmin, adminTeamIds, userId: user?.userId };
+  // #2655: only the caller's first personal key is used — a further one restarts nothing.
+  const hasActivePersonal = rows.some(r => r.scope === 'personal' && r.activePersonal && r.userId === user?.userId);
 
   // Which Working Environments reference each key (#1141). `envs` is null until
   // /api/environments resolves (or if the caller may not read it) — the "Used by"
@@ -512,6 +522,16 @@ export default function SshKeys() {
     {
       key: '_usedBy', label: 'Used by', sortable: false,
       render: (_, row) => {
+        // #2655: a personal credential is never referenced by an environment —
+        // say whether the runtime uses it instead of a meaningless "None".
+        const personal = personalUsageCell(row, 'ssh');
+        if (personal) {
+          return (
+            <span title={personal.title} style={{ fontSize: 'var(--eb-text-xs)', color: personal.active ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)', fontWeight: personal.active ? 'var(--eb-font-medium)' : undefined }}>
+              {personal.label}
+            </span>
+          );
+        }
         if (!envsLoaded) {
           return <span title="Environment usage is loading or unavailable" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>—</span>;
         }
@@ -711,6 +731,7 @@ export default function SshKeys() {
             teams={teams}
             isSysAdmin={isSysAdmin}
             adminTeamIds={adminTeamIds}
+            hasActivePersonal={hasActivePersonal}
           />
         )}
       </SidePanel>
@@ -751,9 +772,7 @@ export default function SshKeys() {
                 <code style={{ display: 'block', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>{rotateTarget.id}</code>
               </p>
               <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>
-                Keeps the same id, name and ownership. Every environment that references this key
-                has its running agents <strong>restarted</strong> so they pick up the new key — a running
-                loop or trigger is cut off, so replace at a quiet moment. Remember to add the new public
+                {replaceRestartNote(rotateTarget, 'ssh')} Remember to add the new public
                 key as a deploy key on GitHub.
               </div>
               <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>

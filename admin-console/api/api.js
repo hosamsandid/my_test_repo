@@ -84,6 +84,7 @@ const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
         WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
 const { buildAssistModelOptions } = require('./assist-model-options');
 const llmHealth = require('./llm-health');
+const llmBudget = require('./llm-budget');
 const { normalizeDiscoveredModels } = require('./model-discovery');
 const {
   PROBE_PLACEHOLDER_MODEL,
@@ -1704,13 +1705,55 @@ function llmHealthConfig() {
     baseMs: llmHealth.coerceMs(process.env.AEE_LLM_HEALTH_BACKOFF_BASE_MS, llmHealth.DEFAULT_BACKOFF_BASE_MS),
     maxMs: llmHealth.coerceMs(process.env.AEE_LLM_HEALTH_BACKOFF_MAX_MS, llmHealth.DEFAULT_BACKOFF_MAX_MS),
     staleMs: llmHealth.coerceMs(process.env.AEE_LLM_HEALTH_STALE_MS, llmHealth.DEFAULT_STALE_MS),
+    // #2732: budget usage % at which Health turns orange (Warning).
+    budgetWarnPct: llmBudget.coercePct(process.env.AEE_LLM_HEALTH_BUDGET_WARN_PCT, llmBudget.DEFAULT_WARN_PCT),
   };
+}
+
+// The client-facing view of one health record (AC3/AC6), with the configured
+// budget Warning threshold applied (#2732).
+function llmHealthView(record) {
+  return llmHealth.healthView(record, { warnPct: llmHealthConfig().budgetWarnPct });
 }
 
 // The client-facing health view for one endpoint id (AC3/AC6). No record →
 // { status: 'unknown' }.
 function llmHealthViewFor(id, map = loadLlmHealthMap()) {
-  return llmHealth.healthView(map[id]);
+  return llmHealthView(map[id]);
+}
+
+// #2732: the provider's spending budget, read alongside every health probe via
+// LiteLLM's free /key/info + /team/info management reads (llm-budget.js). Never
+// throws; a failed read is recorded as 'unavailable' and never fails the probe.
+// Skipped when the probe could not reach the endpoint at all — the budget read
+// would only time out a second time.
+async function lookupLlmBudget(baseUrl, token, authType, probe) {
+  if (probe && probe.status === 0) return { status: 'unavailable', reason: 'provider unreachable' };
+  try {
+    return await llmBudget.lookupBudget({ baseUrl, token, authType: normalizeAuthType(authType) }, httpGetJson);
+  } catch (err) {
+    return { status: 'unavailable', reason: 'request failed' };
+  }
+}
+
+// The read-only "Inherited from .env" row (#2732 edge case) is a LiteLLM
+// endpoint too: its budget is refreshed on the poller's cadence and kept in the
+// health map under this reserved key. It has no health probe of its own.
+const ENV_FALLBACK_HEALTH_KEY = '__env__';
+
+async function refreshEnvFallbackBudget() {
+  const baseUrl = (process.env.ANTHROPIC_BASE_URL || '').trim();
+  const token = (process.env.ANTHROPIC_AUTH_TOKEN || '').trim();
+  const map = loadLlmHealthMap();
+  if (!baseUrl) {
+    if (map[ENV_FALLBACK_HEALTH_KEY]) { delete map[ENV_FALLBACK_HEALTH_KEY]; saveLlmHealthMap(map); }
+    return;
+  }
+  if (!llmHealth.isDue(map[ENV_FALLBACK_HEALTH_KEY], Date.now(), llmHealthConfig())) return;
+  const budget = await lookupLlmBudget(baseUrl, token, 'api-key', null);
+  const fresh = loadLlmHealthMap();
+  fresh[ENV_FALLBACK_HEALTH_KEY] = { checkedAt: new Date().toISOString(), budget };
+  saveLlmHealthMap(fresh);
 }
 
 // Guard against two overlapping probes of the same endpoint (the poller and an
@@ -1721,14 +1764,18 @@ const llmHealthInFlight = new Set();
 // throws (probeLlmEndpointTest always resolves within its 8s timeout). Re-reads
 // the health map immediately before writing so a concurrent probe's result is
 // not clobbered.
-async function probeAndRecordHealth(ep) {
+//
+// `knownProbe` lets the Test-connection route record the probe it already ran
+// (plus a fresh budget read, #2732 AC1) instead of probing twice.
+async function probeAndRecordHealth(ep, knownProbe = null) {
   if (!ep || !ep.id || llmHealthInFlight.has(ep.id)) return null;
   llmHealthInFlight.add(ep.id);
   try {
     const token = readLlmEndpointToken(ep.authTokenId);
-    const probe = await probeLlmEndpointTest(ep.baseUrl, token, ep.authType);
+    const probe = knownProbe || await probeLlmEndpointTest(ep.baseUrl, token, ep.authType);
+    const budget = await lookupLlmBudget(ep.baseUrl, token, ep.authType, probe);
     const map = loadLlmHealthMap();
-    map[ep.id] = llmHealth.applyProbeResult(map[ep.id], probe);
+    map[ep.id] = llmHealth.applyProbeResult(map[ep.id], probe, Date.now(), budget);
     saveLlmHealthMap(map);
     return map[ep.id];
   } catch (err) {
@@ -1760,12 +1807,12 @@ async function runLlmHealthPass() {
   llmHealthPassBusy = true;
   try {
     const endpoints = listLlmEndpoints();
-    if (!endpoints.length) return;
     const cfg = llmHealthConfig();
     const dueIds = new Set(llmHealth.selectDueEndpointIds(endpoints, loadLlmHealthMap(), Date.now(), cfg));
     for (const ep of endpoints) {
       if (dueIds.has(ep.id)) await probeAndRecordHealth(ep);
     }
+    await refreshEnvFallbackBudget();
   } catch (err) {
     console.error(`[LLM-Health] Poll pass error: ${err.message}`);
   } finally {
@@ -13182,7 +13229,7 @@ app.get('/api/llm-endpoints', (req, res) => {
     // renders it on page load with no click (AC3). No record → 'unknown' (AC6).
     // maskLlmEndpointForCaller drops the token tail/fingerprint for a global-only
     // view (#2136 finding 3a) — an ordinary-reach caller is unchanged.
-    .map(ep => ({ ...maskLlmEndpointForCaller(scope, ep), health: llmHealth.healthView(healthMap[ep.id]) })));
+    .map(ep => ({ ...maskLlmEndpointForCaller(scope, ep), health: llmHealthView(healthMap[ep.id]) })));
 });
 
 // Selection options for the global assist model selector (#1210). Distinct from
@@ -13204,7 +13251,11 @@ app.get('/api/assist/model-options', (req, res) => {
 // provider-shaped record so the Model Providers page can show the operator
 // what "inherit from .env" resolves to. Never selectable as an llmEndpointId.
 app.get('/api/llm-env-fallback', (req, res) => {
-  res.json(buildEnvFallbackProvider());
+  const provider = buildEnvFallbackProvider();
+  // #2732: the .env row's budget (refreshed by the health poller); health
+  // itself is never evaluated for this row.
+  if (provider) provider.budget = llmBudget.budgetView(loadLlmHealthMap()[ENV_FALLBACK_HEALTH_KEY]?.budget);
+  res.json(provider);
 });
 
 app.get('/api/llm-endpoints/:id', (req, res) => {
@@ -13350,7 +13401,7 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
   // immediately. Best-effort (never throws; ~8s worst case only on an actually
   // unreachable endpoint — exactly when the signal is worth waiting for).
   const health = await probeAndRecordHealth(entry);
-  res.status(201).json({ ...maskLlmEndpoint(entry), health: llmHealth.healthView(health) });
+  res.status(201).json({ ...maskLlmEndpoint(entry), health: llmHealthView(health) });
 });
 
 app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
@@ -13545,7 +13596,7 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   // AC4: re-probe on save so an edit (e.g. a repointed base URL or a rotated
   // token) reflects its new reachability immediately. Best-effort.
   const health = await probeAndRecordHealth(next);
-  res.json({ ...maskLlmEndpoint(next), health: llmHealth.healthView(health) });
+  res.json({ ...maskLlmEndpoint(next), health: llmHealthView(health) });
 });
 
 app.put('/api/llm-endpoints/:id/models', apiLimiter, (req, res) => {
@@ -13964,7 +14015,11 @@ app.post('/api/llm-endpoints/:id/test', heavyLimiter, async (req, res) => {
   // otherwise (#800). The raw token is never returned, only a pass/fail probe.
   if (!ep || !providerVisible(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
   const token = readLlmEndpointToken(ep.authTokenId);
-  res.json(await probeLlmEndpointTest(ep.baseUrl, token, ep.authType));
+  const probe = await probeLlmEndpointTest(ep.baseUrl, token, ep.authType);
+  // #2732 AC1: a test also refreshes the persisted health + budget, so the
+  // table reflects it without waiting for the next poll.
+  await probeAndRecordHealth(ep, probe);
+  res.json(probe);
 });
 
 app.post('/api/llm-endpoints/:id/discover-models', heavyLimiter, async (req, res) => {

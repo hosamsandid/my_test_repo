@@ -35,7 +35,7 @@ import { groupAgentsByTeam, hiddenAgentsNotice, boundAgentsLead, respawnFailureL
 import { describeSubmitState } from './model-provider-submit-state.js';
 import { endpointAssistExclusion, assistExclusionInName, assistExclusionInBaseUrl } from '../context/assist-selector-exclusion.js';
 import { usePageActions } from '../context/PageActionsContext';
-import { healthCellModel, healthCellDetail } from './provider-health-view.js';
+import { healthCellModel, healthCellDetail, budgetCellModel } from './provider-health-view.js';
 import { useHelpSubject } from '../context/HelperChatContext';
 import { OVERLAY_MODEL_PROVIDER } from '../context/page-help-view.js';
 import { MODELS_HELP_SECTIONS } from './models-help-sections.js';
@@ -1310,13 +1310,14 @@ export default function ModelRegistry() {
         if (row.readOnly) return '—'; // the .env fallback row is not a probed endpoint
         const { label, tone } = healthCellModel(v);
         const color = tone === 'ok' ? 'var(--eb-status-success)'
+                    : tone === 'warning' ? 'var(--eb-status-warning)'
                     : tone === 'error' ? 'var(--eb-status-error)'
                     : 'var(--eb-text-secondary)';
         const detail = healthCellDetail(v);
         return (
           <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2, fontSize: 'var(--eb-text-xs)' }}>
             <span title={detail} style={{ color, fontWeight: 600 }}>{label}</span>
-            {v && v.status === 'error' && (
+            {v && (v.status === 'error' || v.status === 'warning') && (
               <span title={detail} style={{
                 color: 'var(--eb-text-secondary)', maxWidth: 220,
                 overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
@@ -1325,6 +1326,51 @@ export default function ModelRegistry() {
             {v && v.checkedAt && (
               <span style={{ color: 'var(--eb-text-muted)' }}><WhenCell iso={v.checkedAt} /></span>
             )}
+          </span>
+        );
+      },
+    },
+    {
+      // Provider spending budget (#2732), read with every health probe from
+      // LiteLLM's /key/info + /team/info. The .env row carries it top-level
+      // (`row.budget`); a registered provider on its health view. `—` when the
+      // provider has no budget (or no budget API) — never a failure.
+      key: 'budget',
+      label: (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)' }}>
+          Budget
+          <span onClick={e => e.stopPropagation()} style={{ display: 'inline-flex' }}>
+            <PageHelpButton
+              label="What the Budget column means"
+              size={13}
+              section={MODELS_HELP_SECTIONS.budget}
+              style={{ padding: 0 }}
+            />
+          </span>
+        </span>
+      ),
+      sortable: false,
+      render: (_, row) => {
+        const budget = row.readOnly ? row.budget : row.health?.budget;
+        const m = budgetCellModel(budget, row.readOnly ? null : row.health?.status);
+        if (m.text === '—') {
+          return (
+            <span title={m.title} style={{ display: 'inline-flex', flexDirection: 'column', gap: 2, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+              <span>—</span>
+              {m.hint && <span style={{ color: 'var(--eb-text-secondary)' }}>{m.hint}</span>}
+            </span>
+          );
+        }
+        const pctColor = m.tone === 'error' ? 'var(--eb-status-error)'
+                       : m.tone === 'warning' ? 'var(--eb-status-warning)'
+                       : 'var(--eb-text-secondary)';
+        return (
+          <span title={m.title} style={{ display: 'inline-flex', flexDirection: 'column', gap: 2, fontSize: 'var(--eb-text-xs)' }}>
+            <span style={{ fontFamily: 'var(--eb-font-mono)', whiteSpace: 'nowrap' }}>{m.text}</span>
+            <span style={{ whiteSpace: 'nowrap' }}>
+              <span style={{ color: pctColor, fontWeight: 600 }}>{m.pct}</span>
+              <span style={{ color: 'var(--eb-text-muted)' }}> · {m.source}{m.reset ? ` · resets ${m.reset}` : ''}</span>
+            </span>
           </span>
         );
       },

@@ -1751,3 +1751,12 @@ test('#2716 a label becomes unused once its last reference is removed', () => {
   const unused = buildProcessGraph([{ id: 'a', role: 'agent', emits: [], triggers: [] }], registry);
   assert.deepEqual(unused.unusedLabels, ['handoff']);
 });
+
+test('#2716 a registry human gate set by an outcome setLabel is in use (not unused)', () => {
+  const g = buildProcessGraph([
+    withOutcomes('a', 'exactlyOne', [{ id: 'ok', actions: [{ type: 'setLabel', label: ' approved ' }] }]),
+  ], { labels: [{ name: 'approved', humanGate: true }] });
+  assert.deepEqual(g.unusedLabels, []);
+  // The gate stays out of the emit projection — the lint still reports it.
+  assert.ok(g.lints.some(l => l.code === 'human-label-as-outcome'));
+});

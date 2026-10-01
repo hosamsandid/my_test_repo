@@ -758,6 +758,14 @@ function buildProcessGraph(agents, options) {
     for (const e of h.emits) referencedLabels.add(e);
     for (const c of h.consumes) if (c.label) referencedLabels.add(c.label);
   }
+  // An outcome `setLabel` is a reference even for a registry human gate:
+  // `n.emits` drops those (the `human-label-as-outcome` lint owns them), so the
+  // raw outcome labels are counted unfiltered — otherwise deleting the "unused"
+  // entry would strip the gate flag of a label the flow still sets.
+  for (const a of list) {
+    if (!isAuthoredOutcomes(a.outcomes)) continue;
+    for (const { label } of outcomeEmitPairs(a.outcomes)) referencedLabels.add(label);
+  }
   const unusedLabels = [...new Set(classifier.registryNames)]
     .filter(name => !referencedLabels.has(name)).sort();
 

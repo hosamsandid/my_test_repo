@@ -422,3 +422,11 @@ test('isArchivableSessionPath: the filter really drops the pointer from an fs.cp
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('itemKeyFromInstanceId inverts poolInstanceId for its own role only (#2760)', () => {
+  const id = pool.poolInstanceId('t', 'developer', 42);
+  assert.equal(pool.itemKeyFromInstanceId(id, 't-developer'), '42');
+  assert.equal(pool.itemKeyFromInstanceId(id, 't-reviewer'), null);
+  assert.equal(pool.itemKeyFromInstanceId('t-developer-i', 't-developer'), null);
+  assert.equal(pool.itemKeyFromInstanceId(null, 't-developer'), null);
+});

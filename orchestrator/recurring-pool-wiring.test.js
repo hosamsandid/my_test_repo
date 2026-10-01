@@ -120,9 +120,17 @@ test("concurrency: no wipLimit/maxInstances configured refuses to dispatch rathe
   assert.match(src, /console\.warn\(`\[AgentPool\] \$\{teamId\}: \$\{role\.id\} has no wipLimit\/maxInstances configured/);
 });
 
-test("dispatch reuses the SAME spawn hand as the SDLC binding (spawnPoolInstance), not a new one, with no repo/rework", () => {
+test("dispatch reuses the SAME spawn hand as the SDLC binding (startPoolSpawn → spawnPoolInstance), not a new one, with no repo/rework", () => {
   const src = fn("recurringPoolSweepTeam");
-  assert.match(src, /await spawnPoolInstance\(teamId, role\.cfg, instanceId, itemId, \{ repoFullName: null, directReworkRef: null \}\);/);
+  // #2760: through the slot-claiming wrapper, so an in-flight spawn counts against the cap.
+  assert.match(src, /await startPoolSpawn\(teamId, role\.cfg, instanceId, itemId, \{ repoFullName: null, directReworkRef: null \}\);/);
+  assert.match(fn("routePooledDispatch"), /startPoolSpawn\(teamId, cfg, decision\.instanceId, itemKey,/);
+});
+
+test("#2760: items still provisioning count as taken for the recurring limit", () => {
+  const src = fn("recurringPoolSweepTeam");
+  assert.match(src, /poolSpawns\.provisioningIds\(role\.id\)/);
+  assert.match(src, /\.\.\.provisioningItemIds,/);
 });
 
 test("instance ids are the SAME item-keyed identity function as the SDLC binding (D11)", () => {

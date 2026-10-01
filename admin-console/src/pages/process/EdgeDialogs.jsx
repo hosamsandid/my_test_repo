@@ -686,8 +686,13 @@ export function AgentToPersonDialog({ from, to, fromName, toName, ops = liveOps,
   // the graph builder); an unflagged label is a plain delivery that never blocks.
   const labelIsGate = isLabelChoice && isGateLabel(labels, chosenLabel);
   const labelIsBrake = isLabelChoice && isBrakeLabel(labels, chosenLabel);
+  // #2706: the gate label is written into the person's emits and the
+  // consumer's labelFilter/claim — it must be one GitHub keeps whole.
+  const wiresGate = isArtifactChoice && !!wakeTo;
+  const gateLabelErr = wiresGate ? labelNameError(gateLabel) : null;
 
   async function submit() {
+    if (gateLabelErr) { setError(gateLabelErr); return; }
     setSaving(true); setError(null);
     try {
       const entry = isLabelChoice
@@ -700,7 +705,7 @@ export function AgentToPersonDialog({ from, to, fromName, toName, ops = liveOps,
       // target is always a plain consume — no PR/Issue delivery is created (AC2).
       await submitAgentToPerson({ ops, humanOps }, {
         from, human: to, entry,
-        ...(isArtifactChoice && wakeTo ? { wake: { to: wakeTo, gateLabel } } : {}),
+        ...(wiresGate ? { wake: { to: wakeTo, gateLabel: gateLabel.trim() } } : {}),
       });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
@@ -739,13 +744,14 @@ export function AgentToPersonDialog({ from, to, fromName, toName, ops = liveOps,
               Completes the review gate in one go: {toName || to} applies the label,
               the consumer wakes (claim stamped). Leave empty to wire it later.
             </small>
+            {gateLabelErr && <small style={errStyle}>{gateLabelErr}</small>}
           </Field>
         )}
         {error && <span style={errStyle}>{error}</span>}
         <div style={actions}>
           {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
           <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
-          <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Wiring…' : 'Wire delivery'}</button>
+          <button onClick={submit} disabled={saving || !!gateLabelErr} style={primary}>{saving ? 'Wiring…' : 'Wire delivery'}</button>
         </div>
       </div>
     </SidePanel>

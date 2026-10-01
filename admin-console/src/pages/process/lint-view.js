@@ -32,6 +32,8 @@ const LINT_INFO = {
   'wake-target-unresolved': { title: 'Hand-off names no reachable agent', fix: 'Point the hand-off at another agent on this team — a person has no queue, and an agent cannot hand off to itself.' },
   'wake-target-disabled': { title: 'Hand-off target cannot receive it', fix: "Re-enable the target's hand-off input, or the wake is queued and then dropped." },
   'wake-without-note': { title: 'Hand-off carries no context', fix: 'Add a sentence of context — it is what the target and the event log get instead of a label.' },
+  // Wake label whose every consumer is switched off (#2754).
+  'wake-label-no-live-consumer': { title: 'Nobody picks this label up', fix: 'Switch the consuming agent (or its trigger on this label) back on, or route the label to an agent that is running.' },
 };
 
 const SEVERITY_WORD = { error: 'Error', warning: 'Warning', info: 'Info' };

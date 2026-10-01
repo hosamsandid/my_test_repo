@@ -1887,6 +1887,44 @@ test("armWake (#2525): no-op without a wake label or with the edge dedup switche
   assert.equal(poller.armWake({ repo: "org/repo", triggerId: "t", kind: "issue", number: 1, label: "ready" }), false);
 });
 
+test("disarmWake (#2754): after a released claim the re-added wake fires even with no unlabeled event seen (PR shape)", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    poller._saveState = () => {};
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+    poller.armWake({ repo: "org/repo", triggerId: "t1785499525109689", kind: "issue", number: 2754, label: "ready" });
+    poller.armWake({ repo: "org/repo", triggerId: "t1785499525109689", kind: "pr", number: 2754, label: "ready" });
+    poller.armWake({ repo: "org/repo", triggerId: "t1785499525109689", kind: "issue", number: 2754, label: "other" });
+
+    // Without the disarm, the re-add's snapshot still names `ready`: dropped.
+    const before = labeledIssueEvent("2754-a", "ready", ["ready", "other"], 2754);
+    await poller._fanOutBatch("org/repo", [before], readyDeveloperSub(), "tok");
+    assert.equal(enqueued.length, 0);
+
+    assert.equal(poller.disarmWake({ repo: "org/repo", number: 2754, label: "ready" }), true);
+    const armedKeys = Object.keys(poller.state["org/repo"].armed).map((k) => JSON.parse(k));
+    assert.deepEqual(armedKeys.map((k) => k[3]), ["other"]);
+
+    const readded = labeledIssueEvent("2754-b", "ready", ["ready", "other"], 2754);
+    await poller._fanOutBatch("org/repo", [readded], readyDeveloperSub(), "tok");
+    assert.equal(enqueued.length, 1);
+    assert.equal(enqueued[0].entry.github.eventId, "2754-b");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("disarmWake (#2754): no-op with the edge dedup off or nothing armed for the repo", () => {
+  const poller = new GitHubPoller();
+  poller._saveState = () => { throw new Error("must not save"); };
+  assert.equal(poller.disarmWake({ repo: "org/none", number: 1, label: "ready" }), false);
+  poller._wakeEdgeDedup = false;
+  assert.equal(poller.disarmWake({ repo: "org/repo", number: 1, label: "ready" }), false);
+});
+
 // ── #2571: optional "pushed by agent" producer filter on push triggers ──────
 
 const { computePollPlan } = require("./github-poller");

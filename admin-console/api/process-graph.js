@@ -415,6 +415,9 @@ function buildProcessGraph(agents, options) {
       ...(authored ? { outcomes: normalizeOutcomes(a.outcomes) } : {}),
       // DM-only front door: nothing wakes it from git, it talks to a human.
       isEntryPoint: !hasGithubEvent,
+      // Switched off (#2754) — carried only when false so an enabled or
+      // template node stays byte-identical.
+      ...(a.enabled === false ? { enabled: false } : {}),
     };
   });
   const nodeIds = new Set(nodes.map(n => n.id));
@@ -966,6 +969,26 @@ function computeLints(nodes, edges, classifier) {
           message: `\`${n.id}\` outcome \`${w.outcome}\` hands off to \`${w.to}\` with no note — a sentence of context is what makes the hand-off readable in the event log and useful to \`${w.to}\`.` });
       }
     }
+  }
+  // A wake label every listener of which is switched off (#2754): the agent is
+  // disabled, or its trigger on that label is. The label still lands on GitHub,
+  // but nothing ever picks the item up — on the Flow Control board it reads
+  // "nobody picks it up". A label with NO listener at all is already
+  // `dead-end-emitter`/`outcome-without-consumer`.
+  const labelListeners = new Map(); // label -> [{ nodeId, live }]
+  for (const n of nodes) {
+    for (const t of (n.triggers || [])) {
+      const l = labelListenKey(t);
+      if (!l) continue;
+      if (!labelListeners.has(l)) labelListeners.set(l, []);
+      labelListeners.get(l).push({ nodeId: n.id, live: n.enabled !== false && t.enabled !== false });
+    }
+  }
+  for (const [label, listeners] of labelListeners) {
+    if (listeners.some(x => x.live)) continue;
+    const ids = [...new Set(listeners.map(x => x.nodeId))];
+    lints.push({ code: 'wake-label-no-live-consumer', severity: 'warning', label, nodeId: ids[0],
+      message: `\`${label}\` wakes only ${ids.map(id => `\`${id}\``).join(', ')}, and ${ids.length === 1 ? 'it is' : 'all are'} switched off — an item carrying it is never picked up.` });
   }
   // The former `direct-handoff-candidate` hint (#2032) only ever fired on edges
   // that had already opted out of GitHub delivery via the internal transport.

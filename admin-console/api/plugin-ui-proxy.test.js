@@ -252,3 +252,19 @@ test('bodyWasParsed: an unread stream is streamed through, even with body-parser
   assert.equal(bodyWasParsed({ body: undefined, readableEnded: true }), false); // Express 5, no parser ran
   assert.equal(bodyWasParsed(null), false);
 });
+
+// Source guard: pluginUiProxy (api.js) must decide re-serialisation with
+// bodyWasParsed — a bare `req._body === true` is false under Express 5, the
+// proxy then streams an already-read request and the sidecar gets an empty body
+// (saving the Jira Watch config page wiped the team's watches).
+test('pluginUiProxy re-serialises the body via bodyWasParsed(req), not req._body', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, 'api.js'), 'utf8');
+  const start = src.indexOf('function pluginUiProxy(req, res)');
+  assert.ok(start > 0, 'pluginUiProxy not found in api.js');
+  const end = src.indexOf('\nfunction ', start + 1);
+  const body = src.slice(start, end > start ? end : undefined);
+  assert.match(body, /const parsedBody = bodyWasParsed\(req\);/);
+  assert.doesNotMatch(body, /req\._body\s*===/);
+});

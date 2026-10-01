@@ -166,3 +166,45 @@ test('coercePct: positive numbers pass, everything else falls back to 90', () =>
   assert.equal(B.coercePct(undefined), 90);
   assert.equal(B.coercePct('abc'), 90);
 });
+
+// AC12: what GET model-options serves a caller who cannot see the provider row.
+test('redactHealthBudget: keeps status, pct and source; drops every amount', () => {
+  const H = require('./llm-health');
+  const record = (spend, ok = true, reason = null) => ({
+    checkedAt: '2026-10-01T00:00:00Z', ok, status: ok ? 200 : 0, reason,
+    budget: { status: 'ok', budget: { source: 'team', spend, maxBudget: 2000, budgetDuration: '30d', resetAt: '2026-10-31T00:00:00Z' } },
+  });
+
+  const warn = B.redactHealthBudget(H.healthView(record(1840)));
+  assert.equal(warn.status, 'warning');
+  assert.equal(warn.reason, 'Budget 92 % used (team)');
+  assert.deepEqual(warn.budget, { status: 'ok', source: 'team', pct: 92 });
+
+  const over = B.redactHealthBudget(H.healthView(record(2080)));
+  assert.equal(over.status, 'error');
+  assert.equal(over.reason, 'Budget 104 % used (team)');
+
+  const plain = B.redactHealthBudget(H.healthView(record(100)));
+  assert.equal(plain.status, 'ok');
+  assert.equal(plain.reason, null);
+  assert.deepEqual(plain.budget, { status: 'ok', source: 'team', pct: 5 });
+
+  // A probe-failure reason is not a budget line — kept as is.
+  const down = B.redactHealthBudget(H.healthView(record(1840, false, 'HTTP 502')));
+  assert.equal(down.status, 'error');
+  assert.equal(down.reason, 'HTTP 502');
+
+  for (const v of [warn, over, plain, down]) {
+    assert.doesNotMatch(JSON.stringify(v), /\$|1,?840|2,?000|2,?080|30d|2026-10-31/);
+  }
+});
+
+test('redactHealthBudget: no budget / none / unavailable / unknown pass through', () => {
+  assert.equal(B.redactHealthBudget(null), null);
+  const unknown = { status: 'unknown', reason: null, checkedAt: null, httpStatus: null, budget: null };
+  assert.deepEqual(B.redactHealthBudget(unknown), unknown);
+  const none = { status: 'ok', reason: null, checkedAt: 'x', httpStatus: 200, budget: { status: 'none' } };
+  assert.deepEqual(B.redactHealthBudget(none), none);
+  const unavailable = { ...none, budget: { status: 'unavailable', reason: 'HTTP 500' } };
+  assert.deepEqual(B.redactHealthBudget(unavailable), unavailable);
+});

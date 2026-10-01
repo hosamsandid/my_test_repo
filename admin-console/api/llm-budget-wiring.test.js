@@ -11,7 +11,9 @@
 //   - Test connection records health + budget, not just returns the probe (AC1);
 //   - the poll pass also refreshes the read-only .env row's budget (edge case);
 //   - every client-facing health view applies the configured warn threshold
-//     (AC6/AC7) — a raw llmHealth.healthView(record) would silently use 90.
+//     (AC6/AC7) — a raw llmHealth.healthView(record) would silently use 90;
+//   - model-options strips budget amounts for a caller who cannot see the
+//     provider row (AC12 — another member's personal-provider lend).
 //
 // api.js cannot be `require`d in a unit test (it boots Express and reaches for
 // the orchestrator), so this reads the source — the drift-guard technique of
@@ -86,6 +88,14 @@ const CHECKS = {
     assert.deepEqual(outsideWrapper, [],
       'a route serves llmHealth.healthView(record) directly — use llmHealthView() so the threshold applies');
   },
+
+  /** AC12: model-options strips budget amounts for a caller who can't see the provider row. */
+  modelOptionsRedactsBudget(src) {
+    const body = block(src, "app.get('/api/agents/:id/model-options',");
+    assert.match(body,
+      /endpointHealth: endpoint\s*\?\s*\(providerReadVisible\(scope, endpoint\)\s*\?\s*llmHealthViewFor\(endpoint\.id\)\s*:\s*llmBudget\.redactHealthBudget\(llmHealthViewFor\(endpoint\.id\)\)\)/,
+      'model-options must serve llmBudget.redactHealthBudget(...) unless the caller can read the provider row');
+  },
 };
 
 for (const [name, check] of Object.entries(CHECKS)) {
@@ -121,6 +131,12 @@ const MUTATIONS = [
     apply: (s) => s.replace(
       'health: llmHealthView(healthMap[ep.id])',
       'health: llmHealth.healthView(healthMap[ep.id])'),
+  },
+  {
+    fires: 'modelOptionsRedactsBudget',
+    apply: (s) => s.replace(
+      ': llmBudget.redactHealthBudget(llmHealthViewFor(endpoint.id)))',
+      ': llmHealthViewFor(endpoint.id))'),
   },
 ];
 

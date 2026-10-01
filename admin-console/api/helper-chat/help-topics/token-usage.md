@@ -35,8 +35,8 @@ Two things bound what you see:
   Admin or Team Member gets a 403 on the underlying endpoints, not a filtered
   view. There is no reduced version of this page for other roles.
 - **The page-level Team filter** narrows every figure, all three tabs and both
-  exports to one access scope. It is shared across the tabs, so switching tabs
-  keeps the filter.
+  exports to one Agent Team (listed by name and id). It is shared across the
+  tabs, so switching tabs keeps the filter.
 
 Only **agent runs** are recorded. The console's own AI helpers — the Flow
 Copilot, *Generate agent prompt*, the improvement analyst, the Help panel's Ask

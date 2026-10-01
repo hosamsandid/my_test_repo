@@ -29,12 +29,18 @@
 
   <div style="padding:1rem; max-width:640px;">
     <p class="hint">
-      Which Jira projects the broker polls for status changes, and — per project —
-      which target statuses matter. A watch fires on a transition <em>into any</em>
+      Which Jira projects the broker polls, and — per project — which events it
+      forwards and which target statuses matter. A watch fires on a transition <em>into any</em>
       of its statuses; type a status and press <kbd>Enter</kbd> to add it (Save adopts
       a status still being typed); leave the set empty to fire on every status change. A change
       wakes only the agents that carry a <code>plugin-event</code> trigger for
       <code>jira</code> — configured per agent in Agent&nbsp;Chat&nbsp;→&nbsp;Triggers.
+    </p>
+    <p class="hint">
+      The status chips apply to status changes only. When you tick more than one
+      kind of event, set <em>Which event</em> on every <code>plugin-event</code>
+      trigger for <code>jira</code> — a trigger with that left blank (and no
+      <em>Only when…</em> filter) wakes on every kind you forward.
     </p>
 
     <div id="rows"></div>

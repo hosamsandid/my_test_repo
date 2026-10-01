@@ -40,8 +40,10 @@ const {
 const { WatchStore } = require('./watch-store');
 const { InboxStore } = require('./inbox-store');
 const { ActivityStore } = require('./activity-store');
+const { OwnWritesStore } = require('./own-writes-store');
 const { JiraPoller } = require('./poller');
 const { deriveWatchHealth, summariseWatchHealth } = require('./watch-health');
+const { EVENT_KINDS, EVENT_ID_RE, AGENT_COMMENT_MARKER, describeEvent } = require('./event-extract');
 const jira = require('./jira-client');
 const { checkScopeCredential } = require('./credential-check');
 const brokerPolicy = require('./broker-policy');
@@ -68,6 +70,15 @@ const inboxStore = new InboxStore({ stateDir: STATE_DIR, ttlSeconds: cfg.quota.t
 // Its own 14-day retention + row cap — deliberately NOT the manifest quota,
 // which counts inbox objects (see activity-store.js).
 const activityStore = new ActivityStore({ stateDir: STATE_DIR });
+// What this broker itself wrote to Jira, so the poller can stamp `origin` on
+// the events those writes come back as (own-writes-store.js).
+const ownWritesStore = new OwnWritesStore({ stateDir: STATE_DIR });
+
+// Recording an own write must never fail the write the agent asked for — the
+// cost of a lost record is one `origin: human` on the echo, not an error.
+function recordOwnWrite(fn) {
+  try { fn(); } catch (err) { process.stderr.write(`[jira-broker] own-writes record failed: ${err.message}\n`); }
+}
 const audit = auditWriter(AUDIT_DIR, { retentionMs: 30 * 24 * 3600 * 1000 });
 
 // Per-watch health from the poll cursors, keyed by the watch's projectKey. When
@@ -102,6 +113,13 @@ function writeAudit(scopeId, actor, subcommand, outcome, detail, who) {
       ...(who && who.identity ? { identity: who.identity, interactive: who.interactive === true } : {}),
     });
   } catch { /* best-effort */ }
+}
+
+// The SDK records any outcome outside its closed OUTCOMES set as `ok`, so a
+// failure must be mapped here: a transport failure (DNS/TLS/timeout — Jira was
+// not reached) is `unreachable`, anything Jira answered with is `domain-error`.
+function failureOutcome(err) {
+  return err && err.transport ? 'unreachable' : 'domain-error';
 }
 
 // Resolve a scope's Jira credential from the orchestrator-pushed per-scope map.
@@ -148,11 +166,15 @@ function orchestratorUrl() {
   return (process.env.AEE_ORCHESTRATOR_URL || 'http://orchestrator:4002').replace(/\/+$/, '');
 }
 
+// The wake's one-line summary. A digest is single-kind (the poller fans out
+// per kind), so its noun comes from the first event's kind.
 function summariseEvents(kind, events, { projectKey } = {}) {
-  if (kind === 'digest') return `${events.length} status changes${projectKey ? ` in ${projectKey}` : ''}`;
-  const e = events[0] || {};
-  const issue = e.issueKey || e.projectKey || '';
-  return `${issue}${e.fromStatus && e.toStatus ? `: ${e.fromStatus} → ${e.toStatus}` : ''}`.trim() || 'status change';
+  const first = events[0] || {};
+  if (kind === 'digest') {
+    const noun = (EVENT_KINDS[first.event] && EVENT_KINDS[first.event].noun) || 'events';
+    return `${events.length} ${noun}${projectKey ? ` in ${projectKey}` : ''}`;
+  }
+  return describeEvent(first);
 }
 
 // A wake POST must settle fast — the poll loop holds `running` across it (one
@@ -176,14 +198,15 @@ async function deliver({ scopeId, kind, events, projectKey }) {
   if (kind === 'throttle-warning') {
     // Nothing to wake an agent about — the throttle already suppressed the
     // events. Record it and move on.
-    writeAudit(scopeId, scopeId, 'wake', 'throttled', kind);
+    writeAudit(scopeId, scopeId, 'wake', 'ok', `throttled:${kind}`);
     return;
   }
   const token = mint(PLUGIN_ID, scopeId, SIGNING_SECRET);
   const first = events[0] || {};
   const eventId = kind === 'digest' ? null : (first.id || null);
   const body = {
-    event: first.event || 'status_changed',
+    // Every extractor sets `event` explicitly; there is no default kind.
+    event: first.event,
     summary: summariseEvents(kind, events, { projectKey }),
     // Omit rather than send an explicit null for a digest (the validator
     // accepts either, but the entry shape prefers omission).
@@ -210,14 +233,15 @@ async function deliver({ scopeId, kind, events, projectKey }) {
       signal: ctrl.signal,
     });
     const out = await res.json().catch(() => ({}));
-    writeAudit(scopeId, scopeId, 'wake', res.ok ? 'ok' : `http-${res.status}`, `${kind}:${out.delivered ?? '?'}`);
+    const delivered = `${kind}:${out.delivered ?? '?'}`;
+    writeAudit(scopeId, scopeId, 'wake', res.ok ? 'ok' : 'domain-error', res.ok ? delivered : `http-${res.status} ${delivered}`);
     process.stdout.write(
       `[jira-broker] plugin-event ${res.ok ? `ok (${out.delivered ?? '?'} agent(s))` : `HTTP ${res.status}`} `
       + `→ ${scopeId} (${kind}, ${events.length} event(s))\n`,
     );
   } catch (err) {
     const reason = err && err.name === 'AbortError' ? `timeout after ${DELIVER_TIMEOUT_MS}ms` : err.message;
-    writeAudit(scopeId, scopeId, 'wake', 'error', reason);
+    writeAudit(scopeId, scopeId, 'wake', 'unreachable', reason);
     process.stdout.write(`[jira-broker] plugin-event FAILED → ${scopeId}: ${reason}\n`);
   } finally {
     clearTimeout(timer);
@@ -228,6 +252,7 @@ const poller = new JiraPoller({
   watchStore,
   inboxStore,
   activityStore,
+  ownWritesStore,
   resolveCredential,
   deliver,
   intervalMs: Number(process.env.JIRA_POLL_INTERVAL_MS) || undefined,
@@ -277,8 +302,8 @@ function query(req) {
 // teammate's events. A stale CLI copy sending `consume=1` gets a 400 that
 // names the fix instead of a silent team-wide drain. An agent may only ever
 // drain the ids its own wake named (a convention the CLI keeps — the broker
-// cannot tell agents apart, one scope token per team).
-const EVENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}:[A-Za-z0-9._-]{1,64}$/;
+// cannot tell agents apart, one scope token per team). `EVENT_ID_RE` lives in
+// event-extract.js so every extractor's ids are tested against the same rule.
 // Ids travel in the GET query string; 200 ids at the regex's maximum length
 // would exceed Node's 16 KB header limit (431, fails closed) — realistic ids
 // (`KAN-6:10312`) fit ~1000×.
@@ -414,7 +439,7 @@ async function handleCli(req, res, cliPath) {
     }
     const parsed = parseConsumeIds(params.get('consume'));
     if (!parsed.ok) {
-      auditCall('inbox', 'refused', parsed.error);
+      auditCall('inbox', 'usage-error', parsed.error);
       return sendJson(res, parsed.status, { error: parsed.error, message: parsed.message });
     }
     const { entries, missing } = inboxStore.consumeIds(scopeId, parsed.ids);
@@ -482,16 +507,21 @@ async function handleCli(req, res, cliPath) {
         const fieldsParam = (params.get('fields') || '').trim();
         const requested = fieldsParam ? fieldsParam.split(',').map((f) => f.trim()).filter(Boolean) : [];
         const { customNames } = jira.partitionFields(requested);
+        // `show --comment <id>`: one comment's full text — the rest of a
+        // `comment_added` wake whose `body` was cut (`bodyTruncated`).
+        const commentId = (params.get('comment') || '').trim();
+        if (commentId && !/^\d+$/.test(commentId)) return sendJson(res, 400, { error: 'a --comment id is numeric (the wake payload\'s commentId)' });
         result = {
           issue: await jira.getIssue(cred, issue, {
             customFields: jira.mergeCustomFieldNames(defaultCustomFields, customNames),
           }),
         };
+        if (commentId) result.comment = await jira.getComment(cred, issue, commentId);
       }
       auditCall(op, 'ok', params.get('project') || params.get('issue') || params.get('jql') || '');
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall(op, 'error', err.message);
+      auditCall(op, failureOutcome(err), err.message);
       return sendJiraError(err);
     }
   }
@@ -514,7 +544,7 @@ async function handleCli(req, res, cliPath) {
       auditCall('sprint-list', 'ok', board);
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall('sprint-list', 'error', `${board}: ${err.message}`);
+      auditCall('sprint-list', failureOutcome(err), `${board}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -536,7 +566,7 @@ async function handleCli(req, res, cliPath) {
       auditCall('attachment', 'ok', `${issue}:${id}`);
       return sendJson(res, 200, { attachment });
     } catch (err) {
-      auditCall('attachment', 'error', `${issue}:${id}: ${err.message}`);
+      auditCall('attachment', failureOutcome(err), `${issue}:${id}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -560,7 +590,7 @@ async function handleCli(req, res, cliPath) {
     // An over-cap body is dropped to empty by readBody → parses to `{}` → the
     // filename/content checks below turn it into a clear 413, not a silent hang.
     if (!raw) {
-      auditCall('attach', 'error', 'body-too-large');
+      auditCall('attach', 'usage-error', 'body-too-large');
       return sendJson(res, 413, { error: `the upload exceeds the ${jira.ATTACHMENT_UPLOAD_MAX_BYTES}-byte limit for this plugin.` });
     }
     const body = parseJson(raw);
@@ -579,10 +609,13 @@ async function handleCli(req, res, cliPath) {
     }
     try {
       const attachment = await jira.addAttachment(cred, issue, { filename, buffer, mimeType: body.mimeType });
+      // Jira logs an upload as an `Attachment` changelog item (fieldId
+      // `attachment`) — a field_changed the poller will see.
+      recordOwnWrite(() => ownWritesStore.recordField(scopeId, issue, 'attachment'));
       auditCall('attach', 'ok', `${issue}:${attachment.id} (${filename})`);
       return sendJson(res, 200, { attachment });
     } catch (err) {
-      auditCall('attach', 'error', `${issue} ${filename}: ${err.message}`);
+      auditCall('attach', failureOutcome(err), `${issue} ${filename}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -614,11 +647,17 @@ async function handleCli(req, res, cliPath) {
         allowList: cred.writableCustomFields || [],
         attribution: `Created by an agent on team "${scopeId}" via Agent Studio.`,
         issueTypes: body.issueTypes && typeof body.issueTypes === 'object' ? body.issueTypes : undefined,
+        // Each created issue is ours; its follow-up `status` transition (and
+        // whatever fields that sets) is covered by the wildcard field record.
+        onCreated: (key) => recordOwnWrite(() => {
+          ownWritesStore.recordIssue(scopeId, key);
+          ownWritesStore.recordField(scopeId, key, '*');
+        }),
       });
       auditCall('create', 'ok', `${project}:${result.epic.key} +${result.stories.filter((s) => s.ok).length}/${result.stories.length} stories`);
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall('create', 'error', `${project}: ${err.message}`);
+      auditCall('create', failureOutcome(err), `${project}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -652,7 +691,7 @@ async function handleCli(req, res, cliPath) {
       auditCall('sprint-create', 'ok', `${board}:${result.sprint.id || result.sprint.name}`);
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall('sprint-create', 'error', `${board}: ${err.message}`);
+      auditCall('sprint-create', failureOutcome(err), `${board}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -681,7 +720,7 @@ async function handleCli(req, res, cliPath) {
       auditCall('sprint-bulk-create', 'ok', `${board}:${result.created}/${result.requested}`);
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall('sprint-bulk-create', 'error', `${board}: ${err.message}`);
+      auditCall('sprint-bulk-create', failureOutcome(err), `${board}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -711,7 +750,7 @@ async function handleCli(req, res, cliPath) {
       auditCall('sprint-close', 'ok', `${board}:${result.sprint.id}`);
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall('sprint-close', 'error', `${board}: ${err.message}`);
+      auditCall('sprint-close', failureOutcome(err), `${board}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -736,7 +775,7 @@ async function handleCli(req, res, cliPath) {
       auditCall('sprint-start', 'ok', `${board}:${result.sprint.id}`);
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall('sprint-start', 'error', `${board}: ${err.message}`);
+      auditCall('sprint-start', failureOutcome(err), `${board}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -761,10 +800,10 @@ async function handleCli(req, res, cliPath) {
       });
       const closeState = result.close.ok ? 'closed' : (result.close.skipped ? 'none' : 'close-fail');
       const startState = result.start.ok ? 'started' : 'start-fail';
-      auditCall('sprint-advance', result.failed ? 'partial' : 'ok', `${board}:${closeState}/${startState}`);
+      auditCall('sprint-advance', result.failed ? 'domain-error' : 'ok', `${result.failed ? 'partial ' : ''}${board}:${closeState}/${startState}`);
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall('sprint-advance', 'error', `${board}: ${err.message}`);
+      auditCall('sprint-advance', failureOutcome(err), `${board}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -783,13 +822,15 @@ async function handleCli(req, res, cliPath) {
     const body = parseJson(await readBody(req));
     const issue = String(body.issue || '').trim();
     if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });
-    const attribution = `Posted by an agent on team "${scopeId}" via Agent Studio.`;
+    // Opens every agent comment; the comment extractor keys `origin` on it.
+    const attribution = `${AGENT_COMMENT_MARKER} "${scopeId}" via Agent Studio.`;
     try {
       let result;
       if (op === 'comment') {
         const text = String(body.body || '').trim();
         if (!text) return sendJson(res, 400, { error: 'a comment body is required' });
         result = await jira.addComment(cred, issue, { body: text, attribution });
+        if (result && result.id) recordOwnWrite(() => ownWritesStore.recordComment(scopeId, issue, result.id));
       } else if (op === 'update') {
         const text = String(body.description || '').trim();
         if (!text) return sendJson(res, 400, { error: 'a description is required' });
@@ -797,6 +838,8 @@ async function handleCli(req, res, cliPath) {
           description: text,
           attribution: `Description rewritten by an agent on team "${scopeId}" via Agent Studio.`,
         });
+        // Unused by today's kinds; a future description_changed needs it.
+        recordOwnWrite(() => ownWritesStore.recordDescription(scopeId, issue));
       } else if (op === 'set-field') {
         const field = String(body.field || '').trim();
         if (!field) return sendJson(res, 400, { error: 'a field name is required' });
@@ -810,8 +853,17 @@ async function handleCli(req, res, cliPath) {
           jsonValue: hasJson ? body.valueJson : undefined,
           allowList: cred.writableCustomFields || [],
         });
+        // A no-op re-set writes nothing to Jira, so there is no echo to mark.
+        if (result && result.changed) {
+          recordOwnWrite(() => ownWritesStore.recordField(scopeId, issue, result.fieldId || field));
+        }
       } else {
         result = await jira.transitionIssue(cred, issue, { toStatus: body.to });
+        // The status change itself has no `origin` (a transition is meant to
+        // wake the next stage), but Jira logs `resolution` and any
+        // transition-screen field in the same history — those field_changed
+        // echoes are ours.
+        recordOwnWrite(() => ownWritesStore.recordField(scopeId, issue, '*'));
       }
       const detail = op === 'transition' ? `${issue}→${body.to || ''}`
         : op === 'set-field' ? `${issue}.${String(body.field || '').trim()}`
@@ -819,7 +871,7 @@ async function handleCli(req, res, cliPath) {
       auditCall(op, 'ok', detail);
       return sendJson(res, 200, result);
     } catch (err) {
-      auditCall(op, 'error', `${issue}: ${err.message}`);
+      auditCall(op, failureOutcome(err), `${issue}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -909,12 +961,19 @@ async function handleUiApi(req, res, apiPath, viewer) {
   // broker watches.
   if (apiPath === '/admin/watch' && req.method === 'GET') {
     const conf = watchStore.loadConfig(team);
-    return sendJson(res, 200, { watches: conf.watches, setBy: conf.setBy, setAt: conf.setAt });
+    // `eventKinds` drives the per-watch checkboxes, so the admin page never
+    // hard-codes a kind the broker cannot produce.
+    const eventKinds = Object.entries(EVENT_KINDS).map(([name, k]) => ({ name, label: k.label }));
+    return sendJson(res, 200, { watches: conf.watches, eventKinds, setBy: conf.setBy, setAt: conf.setAt });
   }
   if (apiPath === '/admin/watch' && req.method === 'PUT') {
     const body = parseJson(await readBody(req));
+    // The page always sends a `watches` array (`[]` to clear). A body without
+    // one — empty or unparseable, e.g. lost in a proxy — must never be read as
+    // "no watches": that silently wiped a team's whole config.
+    if (!Array.isArray(body.watches)) return sendJson(res, 400, { error: 'a watches array is required' });
     const conf = watchStore.setConfig(team, {
-      watches: Array.isArray(body.watches) ? body.watches : [],
+      watches: body.watches,
       setBy: viewer.sub || 'admin',
     });
     return sendJson(res, 200, { ok: true, watches: conf.watches });
@@ -989,7 +1048,10 @@ const handleHealth = healthEndpoint(async () => ({
 }));
 const handleTeardown = teardownScopeEndpoint((scopeId) => {
   scopeCredentials.delete(String(scopeId));
-  return { reaped: watchStore.teardown(scopeId) + inboxStore.teardown(scopeId) + activityStore.teardown(scopeId) };
+  return {
+    reaped: watchStore.teardown(scopeId) + inboxStore.teardown(scopeId) + activityStore.teardown(scopeId)
+      + ownWritesStore.teardown(scopeId),
+  };
 }, { secret: SIGNING_SECRET });
 
 // PUT /internal/scope-credentials — the orchestrator's per-scope credential push
@@ -1089,4 +1151,4 @@ if (require.main === module) {
   poller.start();
 }
 
-module.exports = { handleRequest, httpServer, watchStore, inboxStore, activityStore, poller, resolveCredential, resolveSiteSettings, _setGrantResolver, deliver, scopeCredentials, PLUGIN_ID, SIGNING_SECRET, DIGEST_MAX_EVENTS };
+module.exports = { handleRequest, httpServer, watchStore, inboxStore, activityStore, ownWritesStore, poller, resolveCredential, resolveSiteSettings, _setGrantResolver, deliver, scopeCredentials, PLUGIN_ID, SIGNING_SECRET, DIGEST_MAX_EVENTS };

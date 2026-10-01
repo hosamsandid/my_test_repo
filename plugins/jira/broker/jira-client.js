@@ -15,7 +15,7 @@
 // request with the runtime `fetch`. Same pure-core / I/O-edge split as
 // github-issues-broker/github-client.js and test-mgmt-broker/vendor-client.js.
 
-const { resolveJiraApiBase } = require('./event-extract');
+const { resolveJiraApiBase, adfToText } = require('./event-extract');
 
 // One JQL search page is 100 issues; MAX_PAGES caps total issues considered for
 // a single project in a single poll (100 × 20 = 2000) — generous enough that a
@@ -72,7 +72,9 @@ function buildProjectJql(projectKey, windowMinutes) {
 function buildJqlSearchBody(jql, nextPageToken) {
   const body = {
     jql,
-    fields: ['summary', 'status', 'issuetype'],
+    // `created`/`reporter`/`priority` feed the issue_created extractor,
+    // `comment` the comment_added one.
+    fields: ['summary', 'status', 'issuetype', 'created', 'reporter', 'priority', 'comment'],
     expand: 'changelog',
     maxResults: PAGE_SIZE,
   };
@@ -100,6 +102,10 @@ function shapeIssue(raw) {
     summary: fields.summary == null ? '' : String(fields.summary),
     status,
     issueType: issueTypeOf(fields),
+    created: fields.created ? String(fields.created) : null,
+    reporter: fields.reporter && fields.reporter.displayName ? String(fields.reporter.displayName) : null,
+    priority: fields.priority && fields.priority.name ? String(fields.priority.name) : null,
+    comment: fields.comment && typeof fields.comment === 'object' ? fields.comment : null,
     changelog: raw.changelog || null,
   };
 }
@@ -511,6 +517,26 @@ async function getIssue(cred, issueKey, { env, customFields } = {}) {
     /* transitions unavailable → omit the key rather than fail the whole read */
   }
   return out;
+}
+
+// One comment in full (CLI `show <key> --comment <id>`) — how an agent reads
+// the rest of a `comment_added` wake whose `body` was cut (`bodyTruncated`).
+// The body is the same plain text the wake carries (event-extract.js
+// `adfToText`), uncut. An unknown id is Jira's 404, mapped like any read.
+async function getComment(cred, issueKey, commentId, { env } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const raw = await requestJson({
+    base,
+    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment/${encodeURIComponent(commentId)}`,
+    authHeader: auth,
+  });
+  return {
+    id: String(raw.id == null ? commentId : raw.id),
+    author: raw.author && raw.author.displayName ? String(raw.author.displayName) : null,
+    created: raw.created ? String(raw.created) : null,
+    body: adfToText(raw.body),
+  };
 }
 
 // The full (uncapped) attachment list for one issue — the ownership check
@@ -936,6 +962,35 @@ async function searchIssues(cred, { jql, fields, customFields, limit, env } = {}
   return issues;
 }
 
+// The newest comments of one issue, newest first, stopping at the first one
+// created before `sinceIso` — the backfill for a search response whose comment
+// list was cut short (event-extract.js `isCommentListTruncated`). Returned
+// oldest-first like the search response's own list. Bounded by MAX_PAGES.
+const COMMENT_PAGE_SIZE = 50;
+async function fetchRecentComments(cred, issueKey, { sinceIso, env } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const since = Date.parse(sinceIso);
+  const out = [];
+  let startAt = 0;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const res = await requestJson({
+      base,
+      path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment?orderBy=-created&startAt=${startAt}&maxResults=${COMMENT_PAGE_SIZE}`,
+      authHeader: auth,
+    });
+    const values = Array.isArray(res.comments) ? res.comments : [];
+    let reachedOld = false;
+    for (const c of values) {
+      if (!Number.isNaN(since) && Date.parse(c.created) < since) { reachedOld = true; break; }
+      out.push(c);
+    }
+    startAt += values.length;
+    if (reachedOld || values.length === 0 || (typeof res.total === 'number' && startAt >= res.total)) break;
+  }
+  return out.reverse();
+}
+
 // Run an arbitrary JQL (spike diagnostics only — `probe --jql`). Same shaping as
 // searchProjectIssues but the caller owns the whole query.
 async function searchJql(cred, jql, { env } = {}) {
@@ -1191,7 +1246,7 @@ async function setCustomField(cred, issueKey, { fieldName, value, jsonValue, all
     });
     const current = (cur.fields || {})[id];
     if (fieldValueMatches(current, String(value))) {
-      return { issueKey: key, field: name, changed: false, value: renderCustomFieldValue(current) };
+      return { issueKey: key, field: name, fieldId: id, changed: false, value: renderCustomFieldValue(current) };
     }
   }
   // A write — NOT retried on a transport failure (F6), like updateDescription.
@@ -1202,7 +1257,7 @@ async function setCustomField(cred, issueKey, { fieldName, value, jsonValue, all
     authHeader: auth,
     body: { fields: { [id]: shaped } },
   });
-  return { issueKey: key, field: name, changed: true, value: hasJson ? jsonValue : value };
+  return { issueKey: key, field: name, fieldId: id, changed: true, value: hasJson ? jsonValue : value };
 }
 
 // ── issue creation: one Epic + its child Stories (#2424) ─────────────────────
@@ -1298,7 +1353,10 @@ function collectCustomFieldNames(epic, stories) {
   return out;
 }
 
-async function createEpicWithStories(cred, { projectKey, epic, stories, allowList, attribution, issueTypes, env } = {}) {
+// `onCreated(key)` fires the moment each issue exists — before the next create
+// — so the broker's own-writes registry knows the key before any poll can see
+// it (a large epic spans several poll ticks).
+async function createEpicWithStories(cred, { projectKey, epic, stories, allowList, attribution, issueTypes, env, onCreated } = {}) {
   const project = String(projectKey || '').trim();
   if (!project) { const e = new Error('a project key is required'); e.status = 400; throw e; }
   if (!epic || typeof epic !== 'object') { const e = new Error('an epic is required'); e.status = 400; throw e; }
@@ -1372,6 +1430,7 @@ async function createEpicWithStories(cred, { projectKey, epic, stories, allowLis
   const epicFields = buildCreateFields({ projectKey: project, issueTypeName: epicTypeName, spec: epic, fieldMeta, attribution });
   const epicCreated = await createIssue(base, auth, epicFields);
   const epicKey = epicCreated.key;
+  if (typeof onCreated === 'function') onCreated(epicKey);
   const epicOut = { key: epicKey, url: browseUrl(epicKey), summary: String(epic.summary).trim() };
   await applyStatus(epicKey, epic.status, epicOut);
 
@@ -1385,6 +1444,7 @@ async function createEpicWithStories(cred, { projectKey, epic, stories, allowLis
       if (catalog.epicLinkId) storyFields[catalog.epicLinkId] = epicKey;
       else storyFields.parent = { key: epicKey };
       const created = await createIssue(base, auth, storyFields);
+      if (typeof onCreated === 'function') onCreated(created.key);
       const out = { summary: String(s.summary).trim(), key: created.key, url: browseUrl(created.key), ok: true };
       await applyStatus(created.key, s.status, out);
       storyResults.push(out);
@@ -1964,6 +2024,7 @@ module.exports = {
   whoAmI,
   serverInfo,
   searchProjectIssues,
+  fetchRecentComments,
   listProjectIssues,
   searchIssues,
   clampSearchLimit,
@@ -1974,6 +2035,7 @@ module.exports = {
   searchJql,
   fetchFullChangelog,
   getIssue,
+  getComment,
   getIssueAttachments,
   downloadAttachmentContent,
   getAttachment,

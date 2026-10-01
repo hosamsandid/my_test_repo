@@ -27,7 +27,7 @@ test('jqlQuote: backslash is escaped BEFORE the quote, so `\\"` cannot close the
 });
 
 test('buildJqlSearchBody: fields + changelog expansion; expand is a STRING on /search/jql; nextPageToken only when given', () => {
-  assert.deepEqual(jc.buildJqlSearchBody('jql'), { jql: 'jql', fields: ['summary', 'status', 'issuetype'], expand: 'changelog', maxResults: 100 });
+  assert.deepEqual(jc.buildJqlSearchBody('jql'), { jql: 'jql', fields: ['summary', 'status', 'issuetype', 'created', 'reporter', 'priority', 'comment'], expand: 'changelog', maxResults: 100 });
   assert.equal(typeof jc.buildJqlSearchBody('jql').expand, 'string'); // array form is a 400 on this endpoint
   assert.equal(jc.buildJqlSearchBody('jql', 'TOK').nextPageToken, 'TOK');
 });
@@ -36,11 +36,20 @@ test('changelogPath: encodes the issue key and paginates', () => {
   assert.equal(jc.changelogPath('ENG-1', 100), '/rest/api/3/issue/ENG-1/changelog?startAt=100&maxResults=100');
 });
 
-test('shapeIssue: narrows to key/summary/status/issueType/changelog', () => {
+test('shapeIssue: narrows to key/summary/status/issueType/created/reporter/priority/comment/changelog', () => {
   assert.deepEqual(
     jc.shapeIssue({ key: 'ENG-1', fields: { summary: 'S', status: { name: 'In Progress' }, issuetype: { name: 'Bug' } }, changelog: { total: 1, histories: [] } }),
-    { key: 'ENG-1', summary: 'S', status: 'In Progress', issueType: 'Bug', changelog: { total: 1, histories: [] } },
+    { key: 'ENG-1', summary: 'S', status: 'In Progress', issueType: 'Bug', created: null, reporter: null, priority: null, comment: null, changelog: { total: 1, histories: [] } },
   );
+  const withComments = { total: 3, comments: [{ id: '1' }] };
+  assert.deepEqual(jc.shapeIssue({ key: 'ENG-4', fields: { comment: withComments } }).comment, withComments);
+  const full = jc.shapeIssue({ key: 'ENG-3', fields: {
+    summary: 'S', created: '2026-01-01T11:58:00.000+0000',
+    reporter: { displayName: 'Jane', accountId: 'x', emailAddress: 'j@x' }, priority: { name: 'High', id: '2' },
+  } });
+  assert.equal(full.created, '2026-01-01T11:58:00.000+0000');
+  assert.equal(full.reporter, 'Jane');
+  assert.equal(full.priority, 'High');
   assert.equal(jc.shapeIssue({ key: 'ENG-2', fields: { summary: 'S' } }).issueType, null);
   assert.equal(jc.shapeIssue(null), null);
 });
@@ -253,6 +262,20 @@ test('listProjectStatuses: a blank project key is a 400 before any HTTP (#2421)'
       (e) => e.status === 400,
     );
     assert.equal(called, false); // fails fast — no Jira call for a missing key
+  });
+});
+
+test('getComment: reads one comment in full as plain text (show --comment, the rest of a bodyTruncated wake)', async () => {
+  const long = 'x'.repeat(5000);
+  await withFetch((url) => {
+    assert.match(url, /\/rest\/api\/3\/issue\/KAN-6\/comment\/10042$/);
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      id: '10042', created: '2026-09-08T09:00:00Z', author: { displayName: 'Jane' },
+      body: { type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text: long }] }] },
+    }) };
+  }, async () => {
+    const c = await jc.getComment(CRED, 'KAN-6', '10042', { env: CRED.env });
+    assert.deepEqual(c, { id: '10042', author: 'Jane', created: '2026-09-08T09:00:00Z', body: long });
   });
 });
 
@@ -806,7 +829,7 @@ test('setCustomField: resolves name → id, shapes by type, and PUTs {fields:{id
     return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'ENG-1', fields: { customfield_20001: null } }) };
   }, async (calls) => {
     const r = await jc.setCustomField(CRED, 'ENG-1', { fieldName: 'Team', value: '42', allowList: ['Team'], env: CRED.env });
-    assert.deepEqual(r, { issueKey: 'ENG-1', field: 'Team', changed: true, value: '42' });
+    assert.deepEqual(r, { issueKey: 'ENG-1', field: 'Team', fieldId: 'customfield_20001', changed: true, value: '42' });
     const put = calls.find((c) => c.opts && c.opts.method === 'PUT');
     assert.match(put.url, /\/rest\/api\/3\/issue\/ENG-1$/);
     assert.deepEqual(JSON.parse(put.opts.body), { fields: { customfield_20001: { id: '42' } } });
@@ -1084,7 +1107,9 @@ test('createEpicWithStories: creates the epic then each story linked via native 
     if (isTransitionList(url) && opts.method === 'POST') return { ok: true, status: 204, text: async () => '' }; // apply
     throw new Error(`unexpected ${opts && opts.method} ${url}`);
   }, async (calls) => {
+    const seen = [];
     const r = await jc.createEpicWithStories(CRED, {
+      onCreated: (key) => seen.push({ key, createsSoFar: calls.filter((c) => isCreate(c.url, c.opts)).length }),
       projectKey: 'KAN',
       epic: { summary: 'Q4 revamp', description: 'the ask' },
       stories: [{ summary: 'Design', assignee: 'acc-1', status: 'In Progress', fields: { Team: '42', 'Story point estimate': 5 } }],
@@ -1093,6 +1118,8 @@ test('createEpicWithStories: creates the epic then each story linked via native 
       env: CRED.env,
     });
     assert.equal(r.epic.key, 'KAN-100');
+    // onCreated fires per issue, right after ITS create — before the next one
+    assert.deepEqual(seen, [{ key: 'KAN-100', createsSoFar: 1 }, { key: 'KAN-101', createsSoFar: 2 }]);
     assert.match(r.epic.url, /\/browse\/KAN-100$/);
     assert.equal(r.created, 2);
     assert.equal(r.failed, 0);
@@ -1414,6 +1441,25 @@ test('bulkCreateSprints: an explicit --start overrides continue-from-latest (no 
     assert.equal(listed, false); // --start given → no need to read existing sprints
     assert.equal(r.requested, 1);
     assert.equal(r.sprints[0].startDate, '2026-01-05T00:00:00.000Z');
+  });
+});
+
+// ── fetchRecentComments (comment_added backfill) ────────────────────────────
+
+test('fetchRecentComments: newest-first pages, stops at the first comment older than since, returns oldest-first', async () => {
+  const c = (id, created) => ({ id, created, body: { type: 'doc', content: [] } });
+  await withFetch((url) => {
+    assert.match(url, /\/rest\/api\/3\/issue\/KAN-6\/comment\?orderBy=-created&startAt=\d+&maxResults=50$/);
+    const startAt = Number(/startAt=(\d+)/.exec(url)[1]);
+    const pages = {
+      0: { total: 120, comments: [c('9', '2026-01-01T11:59:00Z'), c('8', '2026-01-01T11:58:00Z')] },
+      2: { total: 120, comments: [c('7', '2026-01-01T11:57:00Z'), c('6', '2026-01-01T11:00:00Z'), c('5', '2026-01-01T10:59:00Z')] },
+    };
+    return { ok: true, status: 200, text: async () => JSON.stringify(pages[startAt] || { total: 120, comments: [] }) };
+  }, async (calls) => {
+    const out = await jc.fetchRecentComments(CRED, 'KAN-6', { sinceIso: '2026-01-01T11:50:00Z', env: CRED.env });
+    assert.deepEqual(out.map((x) => x.id), ['7', '8', '9']);
+    assert.equal(calls.length, 2, 'stops paging once it reaches an old comment');
   });
 });
 

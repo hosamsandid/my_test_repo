@@ -202,6 +202,9 @@ test('cli reads: /projects, /list, /show need the per-scope credential and call 
     if (url.includes('/search/jql')) {
       return { ok: true, status: 200, text: async () => JSON.stringify({ issues: [{ key: 'KAN-6', fields: { summary: 'Login', status: { name: 'Ready for Dev' } } }] }) };
     }
+    if (/\/comment\/10042$/.test(url)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ id: '10042', author: { displayName: 'Jane' }, body: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'full text' }] }] } }) };
+    }
     // getIssue
     return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'KAN-6', fields: { summary: 'Login', status: { name: 'Ready for Dev' } } }) };
   };
@@ -218,6 +221,15 @@ test('cli reads: /projects, /list, /show need the per-scope credential and call 
     const show = await call(srv, 'GET', '/cli/show?issue=KAN-6', { token: TOKEN });
     assert.equal(show.status, 200);
     assert.equal(show.body.issue.key, 'KAN-6');
+    assert.ok(!('comment' in show.body)); // a plain show carries no comment
+
+    // show --comment <id>: the full text of one comment (bodyTruncated wakes)
+    const withComment = await call(srv, 'GET', '/cli/show?issue=KAN-6&comment=10042', { token: TOKEN });
+    assert.equal(withComment.status, 200);
+    assert.equal(withComment.body.issue.key, 'KAN-6');
+    assert.deepEqual(withComment.body.comment, { id: '10042', author: 'Jane', created: null, body: 'full text' });
+    const badComment = await call(srv, 'GET', '/cli/show?issue=KAN-6&comment=..%2Fx', { token: TOKEN });
+    assert.equal(badComment.status, 400);
 
     // arbitrary JQL search, scoped by the credential, shaped like /list
     const search = await call(srv, 'GET', '/cli/search?jql=issuetype+%3D+Story&limit=5', { token: TOKEN });
@@ -412,9 +424,13 @@ test('cli writes: comment + transition are role-gated (pass for team scope), cre
     const c = await call(srv, 'POST', '/cli/comment', { token: TOKEN, body: { issue: 'KAN-6', body: 'picked up' } });
     assert.equal(c.status, 200);
     assert.equal(c.body.issueKey, 'KAN-6');
+    // recorded before the reply → the poller stamps its echo origin: agent
+    assert.ok(broker.ownWritesStore.snapshot('team-1').comments['KAN-6:c1']);
 
     const t = await call(srv, 'POST', '/cli/transition', { token: TOKEN, body: { issue: 'KAN-6', to: 'In Progress' } });
     assert.equal(t.status, 200);
+    // a transition records the wildcard field write (resolution & screen fields echo as origin: agent)
+    assert.equal(broker.ownWritesStore.snapshot('team-1').fields['KAN-6|*'].length, 1);
     assert.equal(t.body.applied, 'Go');
 
     // a scope with no credential → 400, not a 500
@@ -489,7 +505,9 @@ test('cli writes: /set-field sets an allow-listed custom field, refuses one that
   try {
     const ok = await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', field: 'Team', value: '42' } });
     assert.equal(ok.status, 200);
-    assert.deepEqual(ok.body, { issueKey: 'KAN-6', field: 'Team', changed: true, value: '42' });
+    assert.deepEqual(ok.body, { issueKey: 'KAN-6', field: 'Team', fieldId: 'customfield_20001', changed: true, value: '42' });
+    // the write is in the own-writes registry under the field id (→ origin: agent on the echo)
+    assert.equal(broker.ownWritesStore.snapshot('team-1').fields['KAN-6|customfield_20001'].length, 1);
     const put = seen.find((s) => s.method === 'PUT');
     assert.deepEqual(JSON.parse(put.body), { fields: { customfield_20001: { id: '42' } } });
 
@@ -539,7 +557,7 @@ test('cli writes: /set-field with an empty writable-custom-fields allow-list per
     // no admin ever named "Team", yet with an empty allow-list the write succeeds
     const ok = await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', field: 'Team', value: '42' } });
     assert.equal(ok.status, 200);
-    assert.deepEqual(ok.body, { issueKey: 'KAN-6', field: 'Team', changed: true, value: '42' });
+    assert.deepEqual(ok.body, { issueKey: 'KAN-6', field: 'Team', fieldId: 'customfield_30001', changed: true, value: '42' });
     const put = seen.find((s) => s.method === 'PUT');
     assert.deepEqual(JSON.parse(put.body), { fields: { customfield_30001: { id: '42' } } });
 
@@ -621,6 +639,9 @@ test('cli writes: /create-epic creates an epic + child stories, allow-list-gatin
     assert.equal(ok.body.created, 2);
     assert.equal(ok.body.failed, 0);
     assert.equal(ok.body.stories[0].key, 'KAN-2');
+    // every created key is in the own-writes registry (→ origin: agent on the echo)
+    assert.deepEqual(Object.keys(broker.ownWritesStore.snapshot('team-1').issues).sort(), ['KAN-1', 'KAN-2']);
+    assert.ok(broker.ownWritesStore.snapshot('team-1').fields['KAN-2|*'], 'a created story is covered for its follow-up transition');
     // the story create linked to the epic (native parent) and shaped Team
     const story = created.find((f) => f.issuetype.name === 'Story');
     assert.deepEqual(story.parent, { key: 'KAN-1' });
@@ -673,8 +694,19 @@ test('ui /admin: team-admin only; PUT replaces the watch config', async () => {
     assert.equal(put.status, 200);
     assert.deepEqual(put.body.watches.map((w) => w.projectKey), ['KAN']); // blank dropped by normalizeWatch
 
+    // a body without a watches array (lost in a proxy) is refused, never read as "clear"
+    for (const bad of ['', '{}', 'not json']) {
+      const r = await ui('/ui/api/admin/watch?team=team-1', { method: 'PUT', headers: { ...admin, 'Content-Type': 'application/json' }, body: bad });
+      assert.equal(r.status, 400, `body ${JSON.stringify(bad)}`);
+    }
+
     const get = await ui('/ui/api/admin/watch?team=team-1', { headers: admin });
     assert.deepEqual(get.body.watches[0].statusFilters, ['Ready for Dev', 'In Review']);
+    assert.deepEqual(get.body.watches[0].events, ['status_changed']); // migrated default
+    // the checkbox vocabulary comes from the broker, one entry per KNOWN_EVENTS kind
+    const { KNOWN_EVENTS } = require('./event-extract');
+    assert.deepEqual(get.body.eventKinds.map((k) => k.name), KNOWN_EVENTS);
+    assert.ok(get.body.eventKinds.every((k) => typeof k.label === 'string' && k.label));
     assert.equal(get.body.setBy, 'a');
   } finally {
     broker.watchStore.teardown('team-1');
@@ -1322,5 +1354,63 @@ test('the default grant resolver asks the orchestrator with the reserved grant t
     global.fetch = origFetch;
     broker._setGrantResolver(SERVICE_GRANT);
     srv.close();
+  }
+});
+
+// ── audit outcomes (the SDK rewrites any outcome outside its set to `ok`) ────
+
+const lastAudit = (sub) => auditLines().filter((l) => l.subcommand === sub).pop();
+
+test('audit: a Jira 403 on a read is recorded as domain-error, not ok', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
+  const restore = stubJira([], { status: 403 });
+  const srv = await listen();
+  try {
+    const r = await call(srv, 'GET', '/cli/show?issue=KAN-6', { token: TOKEN });
+    assert.equal(r.status, 403);
+    assert.equal(lastAudit('show').outcome, 'domain-error');
+  } finally { restore(); broker.scopeCredentials.delete('team-1'); srv.close(); }
+});
+
+test('audit: a transport failure on a write is recorded as unreachable', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
+  };
+  const srv = await listen();
+  try {
+    const r = await call(srv, 'POST', '/cli/comment', { token: TOKEN, body: { issue: 'KAN-1', body: 'x' } });
+    assert.ok(r.status >= 500, String(r.status));
+    assert.equal(lastAudit('comment').outcome, 'unreachable');
+  } finally { global.fetch = origFetch; broker.scopeCredentials.delete('team-1'); srv.close(); }
+});
+
+test('audit: a refused bare consume is recorded as usage-error', async () => {
+  const srv = await listen();
+  try {
+    const r = await call(srv, 'GET', '/cli/inbox?consume=1', { token: TOKEN });
+    assert.equal(r.status, 400);
+    assert.equal(lastAudit('inbox').outcome, 'usage-error');
+  } finally { srv.close(); }
+});
+
+test('audit: a wake the orchestrator answers with 500 is domain-error with the status in detail', async () => {
+  const orch = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end('{}'); });
+  });
+  await new Promise((r) => orch.listen(0, '127.0.0.1', r));
+  const prev = process.env.AEE_ORCHESTRATOR_URL;
+  process.env.AEE_ORCHESTRATOR_URL = `http://127.0.0.1:${orch.address().port}`;
+  try {
+    await broker.deliver({ scopeId: 'team-1', kind: 'events', events: [{ id: 'KAN-6:1', event: 'status_changed', issueKey: 'KAN-6', toStatus: 'Done' }] });
+    const line = lastAudit('wake');
+    assert.equal(line.outcome, 'domain-error');
+    assert.match(line.detail, /^http-500 /);
+  } finally {
+    if (prev === undefined) delete process.env.AEE_ORCHESTRATOR_URL; else process.env.AEE_ORCHESTRATOR_URL = prev;
+    orch.close();
   }
 });

@@ -27,6 +27,7 @@ import {
   railMenuItems,
   teamOptions,
 } from './rail-lifecycle.js';
+import { SHOW_ALL } from './list-selection.js';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
 import {
   ADD_MEMBER_TITLE, MATERIALIZE_NOW_DEFAULT, MATERIALIZE_NOW_HINT, MATERIALIZE_NOW_LABEL,
@@ -74,8 +75,8 @@ import {
  *        Reported rather than owned by the rail: every request lives here, and
  *        a **Materialize** clones repositories, so the row must not look
  *        untouched for the length of it.
- * @param {{kind:string, id?:string}} props.listFilter
- *        the rail's current filter spec. Read for one thing only: after an
+ * @param {{hidden:string[]}} props.listFilter
+ *        the rail's current team selection (#2740, list-selection.js). Read for one thing only: after an
  *        import, whether the new agent is inside it (#1956 AC4) — a narrowed
  *        filter would otherwise swallow it with a success message that says it
  *        joined the list.
@@ -89,7 +90,7 @@ import {
  */
 const RailLifecycleHost = forwardRef(function RailLifecycleHost({
   request, onClose, chatAgents, onChanged, onOpenSettings, onMarkAsUnread,
-  statuses = {}, listFilter = { kind: 'all' }, onBusyIdsChange = null,
+  statuses = {}, listFilter = SHOW_ALL, onBusyIdsChange = null,
 }, ref) {
   const navigate = useNavigate();
   const location = useLocation();

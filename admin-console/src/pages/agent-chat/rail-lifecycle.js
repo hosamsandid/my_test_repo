@@ -14,6 +14,7 @@
  */
 
 import { buildAgentMenu, buildTeamMenu, isChatOpenable } from '../agent-lifecycle/agent-lifecycle-menu.js';
+import { isEntryShown, INDIVIDUAL_KEY } from './list-selection.js';
 
 /**
  * Per-user opt-in to seeing disabled agents in the rail (AC6/AC7). Stored under
@@ -154,12 +155,12 @@ export function isTeamLocked(agent, agents) {
  * @returns {string|null} the note to append to the success message, or null
  */
 export function importedAgentFilterNote(filter, agentId, parentTeamId) {
-  const kind = filter && filter.kind;
-  if (!kind || kind === 'all') return null;
-  // Names the option verbatim as the filter's <select> renders it.
-  const HIDDEN = ' The list filter is hiding it — switch it to "All agents" to see it.';
-  if (kind === 'agent') return filter.id === agentId ? null : HIDDEN;
-  if (kind === 'team') return filter.id === parentTeamId ? null : HIDDEN;
+  // Names the control and its entries as the filter panel renders them (#2740).
+  const HIDDEN = ' The team filter is hiding it — tick its team (or "Select all") in the filter above the list to see it.';
+  if (parentTeamId) return isEntryShown(filter, `team:${parentTeamId}`) ? null : HIDDEN;
+  // Without a team the import response cannot say whether the agent lands as
+  // its own team or as an ungrouped row — report it hidden only when both are.
+  if (!isEntryShown(filter, INDIVIDUAL_KEY) && !isEntryShown(filter, `team:${agentId}`)) return HIDDEN;
   return null;
 }
 

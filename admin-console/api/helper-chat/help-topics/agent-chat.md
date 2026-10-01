@@ -147,7 +147,7 @@ The left rail lists every agent you can see, and clicking one opens its room —
 except a team's own header row, which has no room to open (see below).
 
 **Grouping and order.** Agents that belong to an Agent Team are grouped under
-that team; standalone agents are collected under *Single agents*. When every row
+that team; standalone agents are collected under *Individual agents*. When every row
 in a group shares one environment, its member rows stay single-line and drop
 that environment from their own line; a member that deviates keeps its own
 environment line. The team header's second line no longer repeats that shared
@@ -171,8 +171,14 @@ a run you did not start (the hollow-green FYI) never roll up, so collapsing a te
 keeps reducing noise. Expand it and the marker gives way to the per-agent dots
 again.
 
-**Finding an agent.** The filter box above the list narrows it as you type. Next
-to it, the **eye** toggle is the *show disabled agents* opt-in: disabled agents
+**Finding an agent.** The team filter above the list (it reads *All agents*, a
+team's name, or *N of M teams*) opens a panel with one checkbox per team plus
+*Individual agents*: tick the ones to show. A search box narrows the entries,
+**Select all** / **Deselect all** act on the listed ones, and the quick filters
+(*Only my private teams*, *Teams I am a member of*, *… Team Admin*, *… regular
+member*) replace the selection in one click. Your selection is saved to your
+account; teams added later are shown by default. Reordering groups needs every
+team shown. Next to it, the **eye** toggle is the *show disabled agents* opt-in: disabled agents
 are hidden by default, because most of the time they are noise. Turning it on is
 the only thing that widens what the list asks the server for.
 

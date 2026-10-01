@@ -114,7 +114,7 @@ A **loop** trigger runs the agent's prompt repeatedly. Each try starts with a fr
 
 | Field | Type | Description |
 |---|---|---|
-| `until` | `{ command: string }` | Shell command run after each try. The loop finishes as soon as it exits `0`. Omit to run the full iteration cap. |
+| `until` | `{ command: string }` | Shell command (`sh -c`, in the agent workspace) run after each try. The loop finishes as soon as it exits `0`. Omit to run the full iteration cap. |
 | `verify` | `{ command: string }` or `{ agentId: string }` or `{ flow: true }` or `{ selfGraded: true }` | A separate gate that must pass for a try to count. A shell command (exit `0` = pass), a different agent that reviews the work, `{ flow: true }` to delegate to the flow's wired downstream QS chain (no inline gate — use when the loop starts a review pipeline), or `{ selfGraded: true }` (standalone agents only). Team agents that omit `verify` have a sibling reviewer enforced server-side. |
 | `maxTokens` | integer | Stop once this many tokens have been consumed across all tries. Common values: `500000` (small), `2000000` (medium), `8000000` (large). Omit for no token cap. |
 | `minGapSeconds` | integer | Minimum wait between tries. `0` (default) chains immediately. |

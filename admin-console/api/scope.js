@@ -666,6 +666,12 @@ function describeAuthz({ username, adminUsername, users = [], memberships = [], 
   // (#2397). Off by default; anyone without a record (env single-admin) gets the
   // off default too.
   const chatNotifyOnBack = !!(self && self.chatNotifyOnBack === true);
+  // Per-user Agent-Chat rail team selection (#2740): the entries the caller has
+  // hidden. `null` when never saved, so the client can tell "no server value
+  // yet" (migrate the old browser-local filter once) from "everything shown".
+  const chatListFilter = (self && self.chatListFilter && Array.isArray(self.chatListFilter.hidden))
+    ? { hidden: self.chatListFilter.hidden.filter(k => typeof k === 'string') }
+    : null;
   return {
     admin: scope.all,                    // full visibility: env admin OR System Admin
     envAdmin,                            // env single-admin credential
@@ -678,6 +684,7 @@ function describeAuthz({ username, adminUsername, users = [], memberships = [], 
     githubHandle,
     chatFontSize,
     chatNotifyOnBack,
+    chatListFilter,
     teams,
   };
 }

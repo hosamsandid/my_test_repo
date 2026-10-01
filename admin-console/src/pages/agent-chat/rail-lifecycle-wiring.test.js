@@ -190,7 +190,7 @@ test('the rail "+" control and its menu are gone, not merely unrendered (AC2)', 
   assert.doesNotMatch(host, /'new-agent'/);
   assert.doesNotMatch(host, /'import-agent'/);
   // The rail header row itself stays — it still carries the filter.
-  assert.match(agentChat, /<FilterSelect/);
+  assert.match(agentChat, /<ListFilterControl/);
 });
 
 test('New Agent hands over to the launcher; Import opens the picker in one click (AC3/AC4)', () => {

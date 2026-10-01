@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { createTeamsStore, DEFAULT_TEAM_ID, normalizeGithubHandle, coerceGithubHandle, coerceChatFontSize, coerceChatNotifyOnBack } = require('./teams-store');
+const { createTeamsStore, DEFAULT_TEAM_ID, normalizeGithubHandle, coerceGithubHandle, coerceChatFontSize, coerceChatNotifyOnBack, coerceChatListFilter } = require('./teams-store');
 
 function freshStore() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'teams-store-'));
@@ -322,6 +322,52 @@ test('chatNotifyOnBack: only persisted when true; false/blank clears it', () => 
   assert.equal(store.updateUser(plain.id, { displayName: 'Plain' }).chatNotifyOnBack, true);
   // A non-boolean is rejected at the store boundary.
   assert.throws(() => store.updateUser(plain.id, { chatNotifyOnBack: 'on' }), /must be a boolean/);
+});
+
+// ---- Agent-Chat rail team selection (#2740) -------------------------------
+
+test('chatListFilter: coerce accepts { hidden: string[] }, folds duplicates, treats blank as unset', () => {
+  assert.deepEqual(coerceChatListFilter({ hidden: ['team:a', 'singles', 'team:a'] }), { hidden: ['team:a', 'singles'] });
+  assert.deepEqual(coerceChatListFilter({ hidden: [] }), { hidden: [] });
+  assert.equal(coerceChatListFilter(undefined), undefined);
+  assert.equal(coerceChatListFilter(null), undefined);
+  assert.equal(coerceChatListFilter(''), undefined);
+  assert.throws(() => coerceChatListFilter(['team:a']), /hidden array/);
+  assert.throws(() => coerceChatListFilter({ hidden: 'team:a' }), /hidden array/);
+  assert.throws(() => coerceChatListFilter({ hidden: [42] }), /non-empty strings/);
+  assert.throws(() => coerceChatListFilter({ hidden: [''] }), /non-empty strings/);
+  assert.throws(() => coerceChatListFilter({ hidden: ['x'.repeat(513)] }), /non-empty strings/);
+  const tooMany = Array.from({ length: 2001 }, (_, i) => `team:t${i}`);
+  assert.throws(() => coerceChatListFilter({ hidden: tooMany }), /at most 2000/);
+});
+
+test('chatListFilter: an oversized hidden array is rejected before its entries are inspected', () => {
+  // 2001 non-string entries: the size check must fire first, not the per-key one.
+  assert.throws(() => coerceChatListFilter({ hidden: Array(2001).fill(42) }), /at most 2000 entries/);
+  // A huge array must be rejected without iterating it (no O(n²) dedupe on the event loop).
+  const huge = new Proxy(Array(1_000_000).fill('team:x'), {
+    get(target, prop, receiver) {
+      if (prop === Symbol.iterator) throw new Error('hidden was iterated');
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  assert.throws(() => coerceChatListFilter({ hidden: huge }), /at most 2000 entries/);
+  // Duplicates up to the cap are still folded.
+  assert.deepEqual(coerceChatListFilter({ hidden: Array(2000).fill('team:a') }), { hidden: ['team:a'] });
+});
+
+test('chatListFilter: update stores it, leaves it alone when absent, blank clears it', () => {
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'filter@corp.com' });
+  assert.equal(u.chatListFilter, undefined);
+  assert.deepEqual(store.updateUser(u.id, { chatListFilter: { hidden: ['team:a'] } }).chatListFilter, { hidden: ['team:a'] });
+  assert.deepEqual(store.getUser(u.id).chatListFilter, { hidden: ['team:a'] });
+  // An untouched update leaves the saved selection alone.
+  assert.deepEqual(store.updateUser(u.id, { displayName: 'F' }).chatListFilter, { hidden: ['team:a'] });
+  // Unknown properties are not carried over into the stored record.
+  assert.deepEqual(store.updateUser(u.id, { chatListFilter: { hidden: [], extra: 1 } }).chatListFilter, { hidden: [] });
+  assert.equal(store.updateUser(u.id, { chatListFilter: null }).chatListFilter, undefined);
+  assert.throws(() => store.updateUser(u.id, { chatListFilter: { hidden: [1] } }), /non-empty strings/);
 });
 
 test('users: delete cascades memberships', () => {

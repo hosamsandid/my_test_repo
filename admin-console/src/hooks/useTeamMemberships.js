@@ -28,11 +28,15 @@ const POLL_MS = 5_000;
 /**
  * @param {boolean} [enabled=true] Gate the poll (e.g. only while the rail is
  *   mounted). When false the hook idles and reports empty lists.
- * @returns {{ memberships: object[], directory: object[] }}
+ * @returns {{ memberships: object[], directory: object[], loaded: boolean }}
+ *   `loaded` turns true after the first successful fetch, so a consumer that
+ *   would compute something *wrong* from the empty pre-load lists (the rail
+ *   filter's membership quick filters, #2740) can wait instead.
  */
 export function useTeamMemberships(enabled = true) {
   const [memberships, setMemberships] = useState([]);
   const [directory, setDirectory] = useState([]);
+  const [loaded, setLoaded] = useState(false);
 
   // Last raw JSON per endpoint, so an unchanged tick skips setState and keeps
   // the array reference stable for the memoized rail rows downstream.
@@ -54,6 +58,7 @@ export function useTeamMemberships(enabled = true) {
       const dRaw = JSON.stringify(dList);
       if (mRaw !== rawMembershipsRef.current) { rawMembershipsRef.current = mRaw; setMemberships(mList); }
       if (dRaw !== rawDirectoryRef.current) { rawDirectoryRef.current = dRaw; setDirectory(dList); }
+      setLoaded(true);
     } catch (e) {
       // A 401 is already routed to the login flow by `apiCall`
       // (`notifyIfUnauthorized`); stop polling behind an expired session. Any
@@ -87,7 +92,7 @@ export function useTeamMemberships(enabled = true) {
     };
   }, [enabled, fetchOnce]);
 
-  return { memberships, directory };
+  return { memberships, directory, loaded };
 }
 
 export default useTeamMemberships;

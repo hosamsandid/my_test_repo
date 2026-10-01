@@ -416,7 +416,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
 
       {editChannel && (
         <EditHandoffDialog
-          edge={{ on: 'github', from: editChannel.from, to: node.id, artifact: editChannel.artifact, label: editChannel.label || '', gate: editChannel.gate }}
+          edge={{ on: 'github', from: editChannel.from, to: node.id, artifact: editChannel.artifact, label: editChannel.label || '', gate: editChannel.gate, wakePrompt: editChannel.wakePrompt || '' }}
           fromName={nameOf(editChannel.from)} toName={node.displayName || node.id}
           ops={ops}
           onClose={closeEdits} onDone={afterEdit} />

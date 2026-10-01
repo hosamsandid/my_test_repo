@@ -3338,6 +3338,10 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
         artifact: c.artifact, from: c.from,
         ...(typeof c.label === 'string' && c.label.trim() ? { label: c.label.trim() } : {}),
         ...(c.gate === 'human' ? { gate: 'human' } : {}),
+        // Authored wake-instruction override (#868) — dropping it here lost it
+        // on every live channel write (#2717); the reconciler feeds it into the
+        // derived listener's prompt.
+        ...(typeof c.wakePrompt === 'string' && c.wakePrompt.trim() ? { wakePrompt: c.wakePrompt.trim() } : {}),
         // Claim opt-out (#958) — must survive the live port write, otherwise
         // reconcileTeamGithubChannels re-stamps the claim the author just turned
         // off. Only the non-default is persisted.

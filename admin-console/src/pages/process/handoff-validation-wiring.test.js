@@ -84,6 +84,15 @@ test('#2665: the webhook form refuses a placeholder prompt', () => {
   assert.match(src, /\{promptErr && <small style=\{errStyle\}>\{promptErr\}<\/small>\}/);
 });
 
+test('#2706: AgentToPersonDialog validates the gate label and keeps Wire delivery disabled while it is invalid', () => {
+  const src = component('AgentToPersonDialog');
+  assert.match(src, /const gateLabelErr = wiresGate \? labelNameError\(gateLabel\) : null;/);
+  assert.match(saveHead(src, 'submit'), /if \(gateLabelErr\) \{ setError\(gateLabelErr\); return; \}/);
+  assert.match(src, /\{gateLabelErr && <small style=\{errStyle\}>\{gateLabelErr\}<\/small>\}/);
+  assert.match(src, /disabled=\{saving \|\| !!gateLabelErr\}/);
+  assert.match(src, /wake: \{ to: wakeTo, gateLabel: gateLabel\.trim\(\) \}/);
+});
+
 test('#2665: the channel dialog marks an existing channel and does not create it again', () => {
   const src = component('CreateChannelDialog');
   assert.match(src, /existingChannels \}\) \{/);

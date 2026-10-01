@@ -533,7 +533,8 @@ same question, "what wakes this agent", and every one of them delivers a
 ### Cron and once: time zone and status
 
 Cron runs in **Europe/Berlin** (your time is shown if it differs); a once time
-is your local time. Rows show next/last run, or a red warning if the agent
+is your local time; a past one is flagged and runs at the next sync (about a
+minute), then is removed. Rows show next/last run, or a red warning if the agent
 cannot schedule the trigger. The container clock can drift on a Podman VM; a
 forward correction fires whatever it skips.
 
@@ -605,7 +606,7 @@ A loop re-runs the same prompt until the goal is reached:
   that must pass, another agent that reviews each try, or the flow's downstream
   reviewers. A failed check is fed back into the next try's prompt. Team agents
   must not grade their own work — leave it blank and a sibling reviewer is
-  re-applied server-side. Pick *the flow checks the hand-off* when each try ends
+  re-applied server-side (with no teammate in the team, the agent checks itself). Pick *the flow checks the hand-off* when each try ends
   in a PR or a label that a wired QS chain already reviews, so the same reviewer
   does not check the work twice.
 

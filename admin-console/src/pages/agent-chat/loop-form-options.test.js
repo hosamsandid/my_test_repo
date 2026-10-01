@@ -10,6 +10,7 @@ import {
   deriveGap,
   resolveTokenBudget,
   resolveGapSeconds,
+  loopVerifierCopy,
 } from './loop-form-options.js';
 
 // ── Option catalogues (#1083 AC2/AC3/AC4) ───────────────────────────────────
@@ -123,4 +124,35 @@ test('resolveGapSeconds: custom validates a non-negative number, zero omits', ()
   assert.equal(resolveGapSeconds('custom', '0'), undefined);
   assert.equal(resolveGapSeconds('custom', ''), undefined);
   assert.equal(resolveGapSeconds('custom', '-1'), undefined);
+});
+
+// ── #2682: verifier copy never promises a teammate that does not exist ──────
+test('loopVerifierCopy: a team agent without siblings is told it checks its own work', () => {
+  const c = loopVerifierCopy({ isTeamAgent: true, siblings: [] });
+  assert.match(c.noneLabel, /no teammate available/i);
+  assert.doesNotMatch(c.noneLabel, /assigned automatically/);
+  assert.match(c.notice, /No teammate available/);
+  assert.match(c.notice, /checks its own work/);
+  assert.match(c.notice, /command/);
+  assert.doesNotMatch(c.notice, /assigned automatically/);
+  assert.equal(c.enforced, false);
+  // A malformed roster reads like an empty one.
+  assert.deepEqual(loopVerifierCopy({ isTeamAgent: true }), c);
+});
+
+test('loopVerifierCopy: a team agent with a sibling keeps the auto-assign promise', () => {
+  const c = loopVerifierCopy({ isTeamAgent: true, siblings: [{ id: 't-reviewer', displayName: 'Reviewer' }] });
+  assert.match(c.noneLabel, /a teammate is assigned automatically/);
+  assert.match(c.notice, /must not grade their own work/);
+  assert.equal(c.noticeTone, 'warning');
+  assert.equal(c.enforced, true);
+});
+
+test('loopVerifierCopy: a standalone agent (or roster still loading) has no notice', () => {
+  for (const roster of [null, undefined, { isTeamAgent: false, siblings: [] }]) {
+    const c = loopVerifierCopy(roster);
+    assert.equal(c.noneLabel, 'No one (the agent judges itself)');
+    assert.equal(c.notice, null);
+    assert.equal(c.enforced, false);
+  }
 });

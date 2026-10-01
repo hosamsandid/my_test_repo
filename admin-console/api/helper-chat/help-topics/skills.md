@@ -84,7 +84,7 @@ The verbs on this page hide three genuinely different mechanics, and mixing them
 up is the usual source of *"why doesn't my agent have that skill?"*:
 
 - **Grant** — the *list of names* an agent, or its whole team, is entitled to.
-  You grant on the **Agents** page, in the **Agent Team Wizard**, or on the
+  You grant in Agent Chat **Settings**, in the **Agent Team Wizard**, or on the
   **Knowledge** page. A grant is a declaration, not a file copy. (Working
   Environments carry repositories, credentials, MCP servers and context folders —
   never skills.)

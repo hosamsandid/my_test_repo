@@ -11,6 +11,8 @@ import {
   deleteTargetFor,
   isTeamLocked,
   importedAgentFilterNote,
+  resetToStubNotice,
+  materializedNotice,
   railMenuItems,
   matrixAgentsUrl,
   mergeAgentConfigs,
@@ -538,4 +540,17 @@ test('#1958 — the relabel preserves the gating the entry arrived with', () => 
   }).items.find(i => i.key === 'add-member');
   assert.equal(noRights.disabled, true);
   assert.equal(noRights.title, NO_RIGHTS_HINT);
+});
+
+test('#2705 AC1 — resetToStubNotice names the agent, the wipe and the way back', () => {
+  const text = resetToStubNotice({ id: 'acme-qa', displayName: 'QA' });
+  assert.match(text, /^'QA' was reset to a stub/);
+  assert.match(text, /workspace was wiped/);
+  assert.match(text, /Materialize it from its row menu/);
+  assert.match(resetToStubNotice({ id: 'acme-qa' }), /^'acme-qa' /);
+});
+
+test('#2705 AC2 — materializedNotice names the agent', () => {
+  assert.equal(materializedNotice({ id: 'acme-qa', displayName: 'QA' }), "'QA' was materialized and started.");
+  assert.match(materializedNotice({ id: 'acme-qa' }), /^'acme-qa' /);
 });

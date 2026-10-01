@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { UNAUTHORIZED_EVENT } from '../auth/AuthContext';
 import { nextRosterState } from '../pages/agent-chat/roster-diff.js';
-import { shouldTickPoll, shouldRefreshOnVisible } from './agent-roster-poll.js';
+import { shouldTickPoll, shouldRefreshOnVisible, isStaleRosterResponse } from './agent-roster-poll.js';
 
 // Live-roster poll for the Agent Chat left rail (#2311).
 //
@@ -52,6 +52,10 @@ export function AgentRosterProvider({ showDisabled, buildUrl, children }) {
   // UNAUTHORIZED_EVENT dispatch below already routes the app back to login.
   const stoppedRef = useRef(false);
   const hiddenRef = useRef(typeof document !== 'undefined' ? document.hidden : false);
+  // Request ordering (#2705): every fetch takes the next number, and a response
+  // older than the newest applied one is dropped (`isStaleRosterResponse`).
+  const requestSeqRef = useRef(0);
+  const appliedSeqRef = useRef(0);
 
   // `reason` distinguishes a foreground fetch (initial load, url change, or an
   // explicit caller-triggered `refetch()` — e.g. after a lifecycle mutation)
@@ -69,6 +73,7 @@ export function AgentRosterProvider({ showDisabled, buildUrl, children }) {
     if (stoppedRef.current) return;
     const silent = reason === 'poll';
     if (reason === 'foreground' && !hasDataRef.current) setLoading(true);
+    const seq = ++requestSeqRef.current;
 
     try {
       const res = await fetch(url);
@@ -83,6 +88,8 @@ export function AgentRosterProvider({ showDisabled, buildUrl, children }) {
         throw new Error(`HTTP ${res.status}`);
       }
       const fetched = await res.json();
+      if (isStaleRosterResponse(seq, appliedSeqRef.current)) return;
+      appliedSeqRef.current = seq;
       hasDataRef.current = true;
       // `nextRosterState` adopts the first successful payload outright — even an
       // empty one, so `agents` leaves its initial `null` and the rail can render

@@ -142,7 +142,7 @@ export function buildAgentMenu({ agent, canManage = true, locked = false, busy =
     items.push({
       key: 'clone',
       label: 'Clone…',
-      ...gate(isStub, isStub ? 'Activate the agent before cloning it.' : undefined),
+      ...gate(isStub, isStub ? 'Materialize the agent before cloning it.' : undefined),
     });
   }
 
@@ -161,7 +161,7 @@ export function buildAgentMenu({ agent, canManage = true, locked = false, busy =
     items.push({
       key: 'extract-template',
       label: 'Save as template…',
-      ...gate(isStub, isStub ? 'Activate the agent before saving it as a template.' : undefined),
+      ...gate(isStub, isStub ? 'Materialize the agent before saving it as a template.' : undefined),
     });
   }
 

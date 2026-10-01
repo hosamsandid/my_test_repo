@@ -41,7 +41,7 @@ test('AC2 — on arrival a hiding filter is dropped, the list is asked to reveal
 test('AC6 — the chat pane explains a stub / a pending agent instead of "pick an agent"', () => {
   assert.match(chat, /waitingForNewAgent=\{awaitingReveal\}/);
   assert.match(chat, /stubAgent=\{routedAgent && agentState\(routedAgent\) === 'stub' \? routedAgent : null\}/);
-  assert.match(chat, /revealEmptyStateCopy\(\{ waiting: waitingForNewAgent, stubAgent \}\)/);
+  assert.match(chat, /revealEmptyStateCopy\(\{ waiting: waitingForNewAgent, stubAgent, materializingAgent \}\)/);
 });
 
 test('AC2 — the list expands the team group, opens the stub section and scrolls the row', () => {

@@ -164,6 +164,28 @@ export function importedAgentFilterNote(filter, agentId, parentTeamId) {
 }
 
 /**
+ * Success toast after **Reset to stub** (#2705 AC1). Clone, Import and Save as
+ * template all confirm themselves; a reset is the one lifecycle action that
+ * used to just move the row into the collapsed *Not materialized yet* group in
+ * silence. Says what was lost (the workspace) and how to bring the agent back,
+ * naming the menu entry verbatim.
+ */
+export function resetToStubNotice(agent) {
+  const name = (agent && (agent.displayName || agent.id)) || 'The agent';
+  return `'${name}' was reset to a stub — its workspace was wiped. `
+    + 'Materialize it from its row menu to start it again.';
+}
+
+/**
+ * Success toast after **Materialize** (#2705 AC2), shown once the roster
+ * already carries the enabled record — not merely once the PUT returned.
+ */
+export function materializedNotice(agent) {
+  const name = (agent && (agent.displayName || agent.id)) || 'The agent';
+  return `'${name}' was materialized and started.`;
+}
+
+/**
  * The activity states in which "mark as unread" has nothing to do: the row is
  * already unread, or it is not a readable chat at all. Kept as data so the one
  * rule survives a reword — it is the same set the hover icon used before #1938

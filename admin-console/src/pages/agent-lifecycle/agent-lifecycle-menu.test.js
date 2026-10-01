@@ -110,6 +110,15 @@ test('a stub is not exportable and its clone/template/reset entries are inert', 
   assert.equal(byKey(items, 'toggle-enabled').disabled, false);
 });
 
+test('#2705 AC3 — a stub\'s inert entries name the action the menu offers: Materialize', () => {
+  const items = buildAgentMenu({ agent: { role: 'agent', token: null, enabled: false } });
+  assert.equal(byKey(items, 'toggle-enabled').label, 'Materialize');
+  for (const key of ['clone', 'extract-template']) {
+    assert.match(byKey(items, key).title, /^Materialize the agent before /, key);
+    assert.doesNotMatch(byKey(items, key).title, /Activate/, key);
+  }
+});
+
 test('#2232 — the retired convert-to-team entry no longer appears on any role', () => {
   // Phase C of epic #2229 retires the manual, per-agent "Convert into a
   // team..." action (#2052) in favour of a one-time operator-invoked sweep —

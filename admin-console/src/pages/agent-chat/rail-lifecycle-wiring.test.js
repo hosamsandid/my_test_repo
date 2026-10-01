@@ -122,7 +122,7 @@ test('disabling probes first so a mid-run agent gets the drain/abort dialog', ()
 
 test('a create or import lands in the list without a reload (AC3)', () => {
   assert.match(host, /refresh\(\)/);
-  assert.match(host, /if \(onChanged\) onChanged\(\)/);
+  assert.match(host, /if \(onChanged\) await onChanged\(\)/);
 });
 
 // --------------------------------------------------------------------- #1938
@@ -470,4 +470,38 @@ test('a team the caller may see but not manage gets a read-only notice, never an
   assert.match(agentChat, /const canManage = team\?\.canManage !== false;/);
   assert.match(agentChat, /canManage \? \(\s*<AgentSettingsPanel/);
   assert.match(agentChat, /<TeamReadOnlyNotice team=\{team\} \/>/);
+});
+
+// --------------------------------------------------------------------- #2705
+
+test('#2705 AC1 — both reset-to-stub paths confirm with a success toast', () => {
+  const confirmed = host.slice(host.indexOf('async function deactivateConfirmed'), host.indexOf('async function deactivateMode'));
+  const mode = host.slice(host.indexOf('async function deactivateMode'), host.indexOf('async function confirmDelete'));
+  assert.match(confirmed, /setNotice\(resetToStubNotice\(target\)\)/);
+  assert.match(mode, /setNotice\(resetToStubNotice\(agent\)\)/);
+});
+
+test('#2705 AC2 — Materialize is reported in flight until the roster re-read, then toasts', () => {
+  const toggle = host.slice(host.indexOf('async function toggleEnabled'), host.indexOf('async function disableConfirmed'));
+  assert.match(toggle, /const materializing = agentState\(agent\) === 'stub';/);
+  assert.match(toggle, /if \(materializing\) markMaterializing\(agent\.id, true\);/);
+  // The notice and the release both wait for the refreshed roster.
+  assert.match(toggle, /await refresh\(\);\s*setNotice\(materializedNotice\(agent\)\);/);
+  assert.match(toggle, /finally \{[\s\S]*if \(materializing\) markMaterializing\(agent\.id, false\);/);
+  assert.match(host, /if \(onChanged\) await onChanged\(\);/);
+  assert.match(host, /onMaterializingIdsChange\(materializingIds\)/);
+});
+
+test('#2705 AC2 — the chat pane holds the in-progress card instead of a chat while materializing', () => {
+  assert.match(agentChat, /onMaterializingIdsChange=\{handleMaterializingIdsChange\}/);
+  assert.match(agentChat, /const materializingAgent = routedAgent && railMaterializingIds\.has\(routedAgent\.id\) \? routedAgent : null;/);
+  assert.match(agentChat, /effectiveRoutedAgent && !materializingAgent && isChatOpenable\(effectiveRoutedAgent\)/);
+  assert.match(agentChat, /materializingAgent=\{materializingAgent\}/);
+  assert.match(agentChat, /revealEmptyStateCopy\(\{ waiting: waitingForNewAgent, stubAgent, materializingAgent \}\)/);
+});
+
+test('#2705 — the roster poll drops a response older than the newest applied one', () => {
+  const roster = code(read('../../context/AgentRosterContext.jsx'));
+  assert.match(roster, /const seq = \+\+requestSeqRef\.current;/);
+  assert.match(roster, /if \(isStaleRosterResponse\(seq, appliedSeqRef\.current\)\) return;\s*appliedSeqRef\.current = seq;/);
 });

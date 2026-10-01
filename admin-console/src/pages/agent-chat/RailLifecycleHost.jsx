@@ -17,14 +17,16 @@ import {
   ResetToStubDialog, TeamEnableDialog, TeamActionResultDialog,
   renderDeleteMessage,
 } from '../agent-lifecycle/AgentLifecycleDialogs.jsx';
-import { deleteDialogCopy, cascadeResidueNotice } from '../agent-lifecycle/agent-lifecycle-menu.js';
+import { deleteDialogCopy, cascadeResidueNotice, agentState } from '../agent-lifecycle/agent-lifecycle-menu.js';
 import RowContextMenu from '../../components/RowContextMenu.jsx';
 import {
   deleteTargetFor,
   existingIds as existingIdsOf,
   importedAgentFilterNote,
+  materializedNotice,
   mergeAgentConfigs,
   railMenuItems,
+  resetToStubNotice,
   teamOptions,
 } from './rail-lifecycle.js';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
@@ -74,6 +76,12 @@ import {
  *        Reported rather than owned by the rail: every request lives here, and
  *        a **Materialize** clones repositories, so the row must not look
  *        untouched for the length of it.
+ * @param {(ids:Set<string>) => void} props.onMaterializingIdsChange
+ *        the subset of those ids whose mutation is a **Materialize** (#2705
+ *        AC2), so the chat pane can say "Materializing…" instead of keeping the
+ *        stub's "choose Materialize" copy for the length of the clone. An id
+ *        leaves the set only after the re-read roster carries the enabled
+ *        record, so the pane never sees the stale pre-enable row in between.
  * @param {{kind:string, id?:string}} props.listFilter
  *        the rail's current filter spec. Read for one thing only: after an
  *        import, whether the new agent is inside it (#1956 AC4) — a narrowed
@@ -90,6 +98,7 @@ import {
 const RailLifecycleHost = forwardRef(function RailLifecycleHost({
   request, onClose, chatAgents, onChanged, onOpenSettings, onMarkAsUnread,
   statuses = {}, listFilter = { kind: 'all' }, onBusyIdsChange = null,
+  onMaterializingIdsChange = null,
 }, ref) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -107,6 +116,10 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
   // one the menu's own `busy` gate reads, so the rail's spinner and the menu's
   // greyed-out entry can never disagree about what is in flight.
   useEffect(() => { if (onBusyIdsChange) onBusyIdsChange(busyIds); }, [busyIds, onBusyIdsChange]);
+  const [materializingIds, setMaterializingIds] = useState(() => new Set());
+  useEffect(() => {
+    if (onMaterializingIdsChange) onMaterializingIdsChange(materializingIds);
+  }, [materializingIds, onMaterializingIdsChange]);
   const [actionError, setActionError] = useState(null);
   const [notice, setNotice] = useState(null);
 
@@ -163,18 +176,22 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
     if (configs === null) loadConfigs();
   }, [request, configs, loadConfigs]);
 
-  /** Re-read both the chat list and our configs after a mutation. */
-  const refresh = useCallback(() => {
-    if (onChanged) onChanged();
+  /**
+   * Re-read both the chat list and our configs after a mutation. Resolves once
+   * the chat list has been re-read, for the one caller that must not let go of
+   * its in-progress state before the roster reflects the change (Materialize).
+   */
+  const refresh = useCallback(async () => {
     loadConfigs();
+    if (onChanged) await onChanged();
   }, [onChanged, loadConfigs]);
 
   function markBusy(id, busy) {
-    setBusyIds(prev => {
-      const next = new Set(prev);
-      if (busy) next.add(id); else next.delete(id);
-      return next;
-    });
+    setBusyIds(prev => toggledSet(prev, id, busy));
+  }
+
+  function markMaterializing(id, on) {
+    setMaterializingIds(prev => toggledSet(prev, id, on));
   }
 
   function closePanel() {
@@ -200,7 +217,12 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
   // --------------------------------------------------------------- per-agent
 
   async function toggleEnabled(agent) {
+    // A stub's "enable" is a Materialize (#1957): Matrix user, workspace seed,
+    // repository clones — long enough that the chat pane must say it is running
+    // (#2705 AC2).
+    const materializing = agentState(agent) === 'stub';
     markBusy(agent.id, true);
+    if (materializing) markMaterializing(agent.id, true);
     try {
       if (agent.enabled !== false) {
         // Probe without a mode first: the orchestrator answers 409 + a warning
@@ -220,11 +242,20 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
       } else {
         await apiCall('PUT', `/api/agents/${encodeURIComponent(agent.id)}`, { enabled: true });
       }
-      refresh();
+      if (materializing) {
+        // Held until the roster has the enabled record: clearing the
+        // in-progress state on the PUT alone let the pane fall back to the
+        // stale pre-enable row for a poll cycle.
+        await refresh();
+        setNotice(materializedNotice(agent));
+      } else {
+        refresh();
+      }
     } catch (e) {
       setActionError(e.message);
     } finally {
       markBusy(agent.id, false);
+      if (materializing) markMaterializing(agent.id, false);
     }
   }
 
@@ -255,6 +286,7 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
         return;
       }
       if (!res.ok) { setActionError(data.error || `HTTP ${res.status}`); return; }
+      setNotice(resetToStubNotice(target));
       refresh();
     } catch (e) {
       setActionError(e.message);
@@ -269,6 +301,7 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
     markBusy(agent.id, true);
     try {
       await apiCall('POST', `/api/agents/${encodeURIComponent(agent.id)}/deactivate`, { mode });
+      setNotice(resetToStubNotice(agent));
       refresh();
     } catch (e) {
       setActionError(e.message);
@@ -754,6 +787,13 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
 });
 
 export default RailLifecycleHost;
+
+/** A copy of `set` with `id` added (`on`) or removed — state sets are never mutated in place. */
+function toggledSet(set, id, on) {
+  const next = new Set(set);
+  if (on) next.add(id); else next.delete(id);
+  return next;
+}
 
 // The wrapping variant of the team-create wizard's `checkboxRow`
 // (`process/LaunchStep.jsx`) — same tokens, same `flex-start` + `marginTop: 3`

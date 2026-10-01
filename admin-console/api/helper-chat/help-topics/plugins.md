@@ -94,9 +94,9 @@ is nothing to install.)
 
 A grant on a team agent is **inherited by that team's member agents**, unless a
 member overrides it. You can grant from this page (per team, on each installed
-card — see *Assigning a plugin to a team on this page* below) or per agent on the
-**Agents** page — both use the same activation path, so there is no second grant
-model to keep in step.
+card — see *Assigning a plugin to a team on this page* below) or per agent in its
+Agent Chat **Settings** tab — both use the same activation path, so there is no
+second grant model to keep in step.
 
 Because the two steps are independent, so are their undos:
 **uninstalling revokes nothing**, and revoking a grant does not stop the broker.
@@ -256,8 +256,8 @@ capability.
 ## Assigning a plugin to a team on this page
 
 Installed cards carry a **Team assignment** control — the grant, made where you
-just installed the plugin, instead of one agent at a time on the Agents page. It
-reuses the same activation path the Agents page uses, so there is no second grant
+just installed the plugin, instead of one agent at a time in Agent Chat. It
+reuses the same activation path Agent Chat uses, so there is no second grant
 model and no second place to check.
 
 - It appears on **installed** cards only, and disappears with the card when the

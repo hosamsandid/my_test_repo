@@ -105,3 +105,17 @@ test('#2704 — keyboard behaviour is unchanged: the row still owns Alt+↑/↓ 
   assert.match(agentRow, /if \(openable\) \{ onSelect\(agent\.id\); return; \}/);
   assert.match(header, /onClick=\{onActivate\}/);
 });
+
+test('#2704 — labelled indicator spans beside the buttons carry role="img"', () => {
+  // Outside a button a bare `span[aria-label]` is aria-prohibited-attr, so the
+  // grip and the row's status dot must keep their img role.
+  const grip = list.match(/function DragGrip\([\s\S]*?\n\}/)[0];
+  assert.match(grip, /<span\s+role="img"\s+aria-label="Drag to reorder"/);
+  assert.match(agentRow, /<span\s+role="img"\s+title=\{dot\.label\}\s+aria-label=\{dot\.label\}/);
+});
+
+test('#2704 — a kebab click opens the menu without selecting the row', () => {
+  // The kebab is a sibling of the main button inside the row wrapper, whose
+  // onClick selects the agent; only stopPropagation keeps the click off it.
+  assert.match(kebab, /function open\(e\) \{\s+e\.stopPropagation\(\);/);
+});

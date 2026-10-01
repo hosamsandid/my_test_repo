@@ -456,11 +456,11 @@ function StatisticsTab({ team }) {
   return (
     <>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
-        <select value={rangeKey} onChange={(e) => setRangeKey(e.target.value)} style={CONTROL_STYLE}>
+        <select value={rangeKey} onChange={(e) => setRangeKey(e.target.value)} style={CONTROL_STYLE} aria-label="Time range">
           {RANGE_PRESETS.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
         </select>
         <label style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Group by</label>
-        <select value={groupBy} onChange={(e) => setGroupBy(e.target.value)} style={CONTROL_STYLE}>
+        <select value={groupBy} onChange={(e) => setGroupBy(e.target.value)} style={CONTROL_STYLE} aria-label="Group by">
           {GROUP_OPTIONS.map((g) => <option key={g.key} value={g.key}>{g.label}</option>)}
         </select>
         {/* #2440: optional second grouping level. "None" restores the exact
@@ -693,7 +693,7 @@ function WorkItemsTab({ team }) {
   return (
     <>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
-        <select value={rangeKey} onChange={(e) => setRangeKey(e.target.value)} style={CONTROL_STYLE}>
+        <select value={rangeKey} onChange={(e) => setRangeKey(e.target.value)} style={CONTROL_STYLE} aria-label="Time range">
           {RANGE_PRESETS.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
         </select>
         <button onClick={refetch} style={{ ...CONTROL_STYLE, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
@@ -801,11 +801,11 @@ function AgentModelsTab({ team }) {
   return (
     <>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
-        <select value={rangeKey} onChange={(e) => setRangeKey(e.target.value)} style={CONTROL_STYLE}>
+        <select value={rangeKey} onChange={(e) => setRangeKey(e.target.value)} style={CONTROL_STYLE} aria-label="Time range">
           {RANGE_PRESETS.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
         </select>
         <label style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Model</label>
-        <select value={model} onChange={(e) => setModel(e.target.value)} style={CONTROL_STYLE}>
+        <select value={model} onChange={(e) => setModel(e.target.value)} style={CONTROL_STYLE} aria-label="Model">
           <option value="">All models</option>
           {models.map((m) => <option key={m} value={m}>{m}</option>)}
         </select>

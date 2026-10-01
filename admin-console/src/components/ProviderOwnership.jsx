@@ -1,4 +1,5 @@
 import React from 'react';
+import { providerTeamName } from '../pages/provider-ownership-view.js';
 
 // Radio-card Ownership control for Model Providers (#2360). ONE axis —
 // Personal / Team(s) / Global — replacing the old "Global checkbox + System(assign
@@ -9,7 +10,9 @@ import React from 'react';
 //
 // `value` is { scope: 'personal'|'team'|'global', teamIds: string[] }; `onChange`
 // receives the next state. `teams` is the ALREADY-FILTERED selectable team set
-// (the agent teams the caller may assign, each { id, name }).
+// (the agent teams the caller may assign, each { id, name }). `names` (id → name,
+// every known team) and `deletedTeamIds` (server-flagged, #2691) label a set
+// member outside `teams`: a known name, "<id> (deleted team)", or the raw id.
 
 const labelStyle = {
   fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
@@ -29,10 +32,10 @@ const chipStyle = {
   fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)',
 };
 
-export default function ProviderOwnership({ value, onChange, options = [], teams = [], disabled = false }) {
+export default function ProviderOwnership({ value, onChange, options = [], teams = [], names = {}, deletedTeamIds = [], disabled = false }) {
   const own = value || { scope: 'personal', teamIds: [] };
   const teamIds = Array.isArray(own.teamIds) ? own.teamIds : [];
-  const nameOf = (id) => (teams.find(t => t.id === id)?.name) || `${id} (legacy)`;
+  const nameOf = (id) => (teams.find(t => t.id === id)?.name) || providerTeamName(id, names, deletedTeamIds);
   const available = teams.filter(t => !teamIds.includes(t.id));
 
   const pick = (scope) => {

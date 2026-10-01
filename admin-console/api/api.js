@@ -174,6 +174,7 @@ const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
 const { reposFromEnv, repoVars } = require('./team-repo-resolve');
 const { planCreatorMembership, creatorEnvironmentOwnership } = require('./creator-membership');
 const { validateTeamProviderAvailability } = require('./team-provider-check');
+const { pruneTeamFromProviders } = require('./provider-team-prune');
 const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
 const { admitsToChatList } = require('./matrix-agent-list');
 const { parseMemberMaterialize } = require('./member-materialize');
@@ -4587,6 +4588,8 @@ app.delete('/api/agents/:id', heavyLimiter, async (req, res) => {
     if (!resp.ok) {
       return res.status(resp.status).json(data);
     }
+    // #2691: a deleted Agent Team leaves every provider set it was auto-added to.
+    if (delCfg && delCfg.role === 'team') removeTeamFromProviders(id);
     // A team delete cascades to its members. A member the cascade could not
     // remove is residue the caller has to know about (#1960 AC2) — reported in
     // the `{ id, kind, error }` shape the team fan-out's `rollbackWarnings`
@@ -5580,9 +5583,9 @@ function canManageProvider(scope, ep) {
 // #2360 clone/reuse auto-append: when a team is materialised onto an environment
 // whose default provider is TEAM-scoped, add that team to the provider's set so
 // the team can actually use it — the whole point of "a clone keeps a working
-// provider without duplicating it". Best-effort + idempotent + dangling-safe: a
-// stale team id (team creation later fails) simply never matches at consumption,
-// so it is harmless; a failure here never blocks team creation. Global/personal
+// provider without duplicating it". Best-effort + idempotent; a failure here
+// never blocks team creation. The id is removed again when the team is deleted
+// or its creation rolls back (removeTeamFromProviders, #2691). Global/personal
 // providers are left untouched (global already serves all).
 function ensureTeamOnEnvProvider(env, teamAgentId) {
   if (!env || !env.llmEndpointId || !teamAgentId) return;
@@ -5597,6 +5600,20 @@ function ensureTeamOnEnvProvider(env, teamAgentId) {
     saveLlmEndpointsIndex(list);
   } catch (err) {
     console.warn(`[api] could not add team '${teamAgentId}' to env provider: ${err.message}`);
+  }
+}
+
+// #2691: the counterpart of ensureTeamOnEnvProvider — drop a deleted Agent
+// Team's id from every team provider's set, so it no longer shows as an owner.
+// A provider the team solely owns is left as is (never ownerless; see
+// provider-team-prune.js). Best-effort: a failure never fails the delete.
+function removeTeamFromProviders(teamAgentId) {
+  if (!teamAgentId) return;
+  try {
+    const { list, pruned } = pruneTeamFromProviders(listLlmEndpoints(), teamAgentId);
+    if (pruned.length) saveLlmEndpointsIndex(list);
+  } catch (err) {
+    console.warn(`[api] could not remove team '${teamAgentId}' from providers: ${err.message}`);
   }
 }
 
@@ -13239,8 +13256,17 @@ app.get('/api/llm-endpoints', (req, res) => {
     // renders it on page load with no click (AC3). No record → 'unknown' (AC6).
     // maskLlmEndpointForCaller drops the token tail/fingerprint for a global-only
     // view (#2136 finding 3a) — an ordinary-reach caller is unchanged.
-    .map(ep => ({ ...maskLlmEndpointForCaller(scope, ep), health: llmHealthView(healthMap[ep.id]) })));
+    .map(ep => ({ ...maskLlmEndpointForCaller(scope, ep), health: llmHealthView(healthMap[ep.id]), ...deletedTeamIdsView(ep) })));
 });
+
+// #2691: the ids in a team provider's set that name no current Agent Team, so
+// the Models page can label them "deleted team" instead of guessing from the
+// caller's (scoped) team list. Ids the UI resolves by name — e.g. the legacy
+// human team 'default' — are labelled by name first. Omitted when empty.
+function deletedTeamIdsView(ep) {
+  const deletedTeamIds = providerTeamSet(ep).filter(t => !agentTeamExists(t));
+  return deletedTeamIds.length ? { deletedTeamIds } : {};
+}
 
 // Selection options for the global assist model selector (#1210). Distinct from
 // GET /api/llm-endpoints (the management list, visibleCredential-filtered): this
@@ -17312,6 +17338,8 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     }
     if (created.team) {
       await rollbackDelete(created.team, 'team');
+      // #2691: undo ensureTeamOnEnvProvider's auto-append for the rolled-back team.
+      removeTeamFromProviders(created.team);
     }
     if (created.env) {
       try {

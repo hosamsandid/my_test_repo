@@ -259,6 +259,22 @@ test('wireReviewGate wires the whole triangle in one call (+ rejection leg)', as
   assert.deepEqual(rej.claim, { remove: 'rework', add: 'rework:wip' });
 });
 
+test('#2706: wireReviewGate refuses an unusable gate or rejection label before any write', async () => {
+  for (const bad of [
+    { gateLabel: 'uitest ok, bad' },
+    { gateLabel: 'two words' },
+    { gateLabel: 'ready', rejectLabel: 'needs, rework' },
+  ]) {
+    const bundle = freshBundle();
+    const before = clone(bundle);
+    await assert.rejects(
+      wireReviewGate(makeDraftLike(bundle), { from: 'ba', human: 'p', to: 'dev', artifact: 'pr', ...bad }),
+      /Label names can't contain/,
+    );
+    assert.deepEqual(bundle, before, `nothing may be written for ${JSON.stringify(bad)}`);
+  }
+});
+
 test('convergence (§4.5): assembly orders and re-runs produce identical persisted state', async () => {
   const spec = { from: 'ba', human: 'p', to: 'dev', artifact: 'pr', gateLabel: 'ship-it' };
 

@@ -1706,3 +1706,48 @@ test('lint: label-target-mismatch accepts a listener subscribed to both labeled 
   const g = buildProcessGraph([merger([{ type: 'setLabel', label: 'x', target: 'pr' }]), both]);
   assert.equal(mismatches(g).length, 0);
 });
+
+// ── #2716: registry entries no flow element references are reported unused ──
+
+test('#2716 unusedLabels lists only registry entries no flow element references', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', role: 'agent', emits: ['ready-for-review'], triggers: [
+      { id: 'dev-t', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' },
+    ] },
+    { id: 'rev', role: 'agent', triggers: [], channels: [
+      { artifact: 'pr', from: 'dev', label: 'ready-for-review' },
+      { artifact: 'issue', from: 'dev', label: 'needs-approval', gate: 'human' },
+    ] },
+    withOutcomes('merger', 'exactlyOne', [{ id: 'ok', actions: [{ type: 'setLabel', label: 'merged' }] }]),
+  ], {
+    labels: [
+      { name: 'ready', humanGate: true },          // trigger labelFilter
+      { name: 'ready-for-review' },                 // emit + channel port
+      { name: 'needs-approval' },                   // inline channel gate only
+      { name: 'merged' },                           // outcome setLabel
+      { name: 'old-jvc', humanGate: true },         // nothing
+      { name: '  stale  ', brake: true },           // nothing, padded
+      { name: 'human-only' },                       // human-role emit
+      { name: 'human-brake' },                      // human-role consume
+    ],
+    humans: [{ id: 'po', emits: ['human-only'], consumes: [{ label: 'human-brake' }] }],
+  });
+  assert.deepEqual(g.unusedLabels, ['old-jvc', 'stale']);
+  // The registry seed still keeps unused entries (and their flags) in graph.labels (#928).
+  assert.deepEqual(g.labels.find(l => l.name === 'old-jvc'), { name: 'old-jvc', humanGate: true, brake: false });
+  assert.ok(g.labels.some(l => l.name === 'stale'));
+});
+
+test('#2716 unusedLabels is empty without a registry and never lists referenced-only labels', () => {
+  const g = buildProcessGraph([{ id: 'dev', role: 'agent', emits: ['x'], triggers: [] }]);
+  assert.deepEqual(g.unusedLabels, []);
+  assert.ok(g.labels.some(l => l.name === 'x'));
+});
+
+test('#2716 a label becomes unused once its last reference is removed', () => {
+  const registry = { labels: [{ name: 'handoff', brake: true }] };
+  const used = buildProcessGraph([{ id: 'a', role: 'agent', emits: ['handoff'], triggers: [] }], registry);
+  assert.deepEqual(used.unusedLabels, []);
+  const unused = buildProcessGraph([{ id: 'a', role: 'agent', emits: [], triggers: [] }], registry);
+  assert.deepEqual(unused.unusedLabels, ['handoff']);
+});

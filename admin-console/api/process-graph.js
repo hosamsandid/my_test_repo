@@ -326,7 +326,8 @@ function humanNode(h) {
  *   [{ id, name, description?, stage?, emits?, consumes? }]. Synthesized as
  *   `kind: 'human'` nodes; their `emits` classify as gates, and their `consumes`
  *   bind the #981 `@human` gate/brake/delivery edges to the named node.
- * @returns {{ nodes, edges, gates, labels }}
+ * @returns {{ nodes, edges, gates, labels, unusedLabels }}
+ *   `unusedLabels` (#2716): sorted registry names no flow element references.
  */
 function buildProcessGraph(agents, options) {
   const list = Array.isArray(agents) ? agents : [];
@@ -424,7 +425,13 @@ function buildProcessGraph(agents, options) {
   const allListenKeys = new Set();
   const labelMeta = new Map(); // name -> { humanGate, brake }
 
-  const noteLabel = (name) => {
+  // Labels some flow element references (#2716) — everything noteLabel sees
+  // EXCEPT the registry seed below, plus human-role emits/consumes. A registry
+  // entry outside this set is "unused": it is in graph.labels only because of
+  // its own registry entry, so the Label registry panel may offer to delete it.
+  const referencedLabels = new Set();
+  const noteLabel = (name, { seed = false } = {}) => {
+    if (!seed) referencedLabels.add(name);
     if (!labelMeta.has(name)) {
       labelMeta.set(name, { humanGate: isHumanGate(name), brake: isBrake(name) });
     }
@@ -434,7 +441,7 @@ function buildProcessGraph(agents, options) {
   // when no port references it yet — otherwise the flag that makes it a gate or
   // a brake would be silently dropped on export and the label would come back
   // as a plain agent label.
-  for (const name of classifier.registryNames) noteLabel(name);
+  for (const name of classifier.registryNames) noteLabel(name, { seed: true });
 
   const addEmit = (label, agentId) => {
     if (!emitIndex.has(label)) emitIndex.set(label, new Set());
@@ -745,6 +752,14 @@ function buildProcessGraph(agents, options) {
 
   const gates = [...gateSet].sort().map(label => ({ label, humanOnly: true }));
   const labels = [...labelMeta.keys()].sort().map(name => ({ name, ...labelMeta.get(name) }));
+  // Human roles (#987) reference labels without entering labelMeta (their
+  // emits must stay out of the emit index) — they still count as "in use".
+  for (const h of humanRoles) {
+    for (const e of h.emits) referencedLabels.add(e);
+    for (const c of h.consumes) if (c.label) referencedLabels.add(c.label);
+  }
+  const unusedLabels = [...new Set(classifier.registryNames)]
+    .filter(name => !referencedLabels.has(name)).sort();
 
   // Named human roles (#987) join the node set as first-class `kind: 'human'`
   // boxes. Appended last so every agent-side loop above ran over the agent
@@ -755,7 +770,7 @@ function buildProcessGraph(agents, options) {
   const allNodes = humanRoles.length ? [...nodes, ...humanRoles] : nodes;
 
   return {
-    nodes: allNodes, edges, gates, labels,
+    nodes: allNodes, edges, gates, labels, unusedLabels,
     humanTouchpoints: computeHumanTouchpoints(allNodes, edges, humanIds),
     lints: computeLints(allNodes, edges, classifier),
   };

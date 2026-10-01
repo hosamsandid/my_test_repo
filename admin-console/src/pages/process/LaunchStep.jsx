@@ -22,6 +22,7 @@ import {
   SUFFIX_MAX,
   NEW_REPO_LESS_ENV,
   NEW_REPO_LESS_ENV_LABEL,
+  environmentChoiceRequired,
 } from './launch-team.js';
 import { describeMaterializeError } from './materialize-error.js';
 import { PROVISION_NOW_LABEL, PROVISION_NOW_HINT } from './create-team-copy.js';
@@ -93,9 +94,12 @@ export default function LaunchStep({
   const selectedEnv = envList.find(e => e.id === values.environmentId) || null;
   const selectedRepos = selectedEnv ? reposForEnv(selectedEnv) : [];
   const noEnvs = envsLoaded && envList.length === 0;
-  // Only while there IS a list to pick from — an empty platform has nothing to
-  // choose and still launches repo-less (#2168 A2).
-  const requireEnvironment = requireEnvironmentChoice && has('environment') && envsLoaded && !noEnvs;
+  // Lifted only on a confirmed-empty platform (nothing to choose — launches
+  // repo-less, #2168 A2); stays on while the list is loading or failed to load.
+  const requireEnvironment = environmentChoiceRequired({
+    requireEnvironmentChoice, hasEnvironmentField: has('environment'), envsLoaded, envCount: envList.length,
+  });
+  const environmentsPending = !envsLoaded;
   const newRepoLessChosen = values.environmentId === NEW_REPO_LESS_ENV;
 
   function handleEvent(ev) {
@@ -144,7 +148,7 @@ export default function LaunchStep({
     const settledId = normalizeTeamId(values.teamId);
     if (settledId !== values.teamId) set({ teamId: settledId });
     const settled = { ...values, teamId: settledId };
-    const err = validateLaunch({ ...settled, requireEnvironment, hasProvider });
+    const err = validateLaunch({ ...settled, requireEnvironment, environmentsPending, hasProvider });
     if (err) { setError(err); setErrorDetail(null); return; }
     setError(null); setErrorDetail(null);
     if (!ack) setTokenWarn(null);
@@ -186,7 +190,7 @@ export default function LaunchStep({
   // the old `envBlocking`, which decided disabled-ness with no connection to the
   // message a caller might show. `launchBlockReason` settles the team id first,
   // so a trailing dash mid-edit never flickers the reason (see its own comment).
-  const launchReason = launchBlockReason({ ...values, requireEnvironment, hasProvider });
+  const launchReason = launchBlockReason({ ...values, requireEnvironment, environmentsPending, hasProvider });
   const launchBlocked = !!launchReason;
   // The no-environment empty state (below) already carries this exact reason —
   // do not repeat it a second time next to the button (#2157 AC3: the two must

@@ -27,6 +27,8 @@ import {
   NEW_REPO_LESS_ENV,
   NEW_REPO_LESS_ENV_LABEL,
   PICK_ENVIRONMENT_ERROR,
+  ENVIRONMENTS_PENDING_ERROR,
+  environmentChoiceRequired,
 } from './launch-team.js';
 
 test('slugify: lowercase, dash runs, trim dashes, 40-char cap', () => {
@@ -541,4 +543,24 @@ test('buildLaunchBody: the explicit repo-less choice sends the same body as no e
   assert.equal('environmentId' in chosen, false);
   assert.deepEqual(chosen, none);
   assert.equal(buildLaunchBody({ teamId: 't', teamName: 'T', environmentId: 'env' }).environmentId, 'env');
+});
+
+// #2737 review B1 — the gate must hold while the environment list is loading or
+// failed to load (MaterializeDialog keeps envsLoaded false on a failed fetch,
+// #2157 AC6); only a confirmed-empty platform lifts it (#2168 A2).
+test('environmentChoiceRequired: lifted only for a loaded, empty environment list', () => {
+  const on = { requireEnvironmentChoice: true, hasEnvironmentField: true };
+  assert.equal(environmentChoiceRequired({ ...on, envsLoaded: false, envCount: 0 }), true, 'loading / fetch failed');
+  assert.equal(environmentChoiceRequired({ ...on, envsLoaded: true, envCount: 2 }), true, 'list to pick from');
+  assert.equal(environmentChoiceRequired({ ...on, envsLoaded: true, envCount: 0 }), false, 'empty platform');
+  assert.equal(environmentChoiceRequired({ ...on, hasEnvironmentField: false, envsLoaded: true, envCount: 2 }), false);
+  assert.equal(environmentChoiceRequired({ hasEnvironmentField: true, envsLoaded: false, envCount: 0 }), false, 'opt-in');
+});
+
+test('launchBlockReason: blocks with a loading-specific reason while environments are pending', () => {
+  const values = { teamId: 'team', teamName: 'Team', environmentId: '' };
+  assert.equal(launchBlockReason({ ...values, requireEnvironment: true, environmentsPending: true }), ENVIRONMENTS_PENDING_ERROR);
+  assert.equal(validateLaunch({ ...values, requireEnvironment: true, environmentsPending: true }), ENVIRONMENTS_PENDING_ERROR);
+  // Pending alone never blocks a caller that does not require a choice.
+  assert.equal(launchBlockReason({ ...values, environmentsPending: true }), null);
 });

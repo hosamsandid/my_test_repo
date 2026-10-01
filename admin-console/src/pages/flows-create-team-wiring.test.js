@@ -457,10 +457,13 @@ test('#2737 — LaunchStep wires the explicit choice into the picker AND the gat
   assert.match(launch, /<option value=\{NEW_REPO_LESS_ENV\}>\{NEW_REPO_LESS_ENV_LABEL\}<\/option>/);
   // Both the disabled-state reason and submit's own validation see it, so the
   // button and the submit path cannot disagree.
-  assert.match(launch, /launchBlockReason\(\{ \.\.\.values, requireEnvironment, hasProvider \}\)/);
-  assert.match(launch, /validateLaunch\(\{ \.\.\.settled, requireEnvironment, hasProvider \}\)/);
-  // Never on an empty platform: there is nothing to choose there (#2168 A2).
-  assert.match(launch, /const requireEnvironment = requireEnvironmentChoice && has\('environment'\) && envsLoaded && !noEnvs;/);
+  assert.match(launch, /launchBlockReason\(\{ \.\.\.values, requireEnvironment, environmentsPending, hasProvider \}\)/);
+  assert.match(launch, /validateLaunch\(\{ \.\.\.settled, requireEnvironment, environmentsPending, hasProvider \}\)/);
+  // The gate is the pure helper (lifted only on a confirmed-empty platform,
+  // #2168 A2; held while loading / after a failed fetch — review B1), fed the
+  // raw load state rather than a pre-filtered `envsLoaded && !noEnvs`.
+  assert.match(launch, /const requireEnvironment = environmentChoiceRequired\(\{\s*requireEnvironmentChoice, hasEnvironmentField: has\('environment'\), envsLoaded, envCount: envList\.length,\s*\}\);/);
+  assert.match(launch, /const environmentsPending = !envsLoaded;/);
   // Opt-in — the Team-Setup wizard keeps its behaviour.
   assert.match(launch, /requireEnvironmentChoice = false,/);
 });

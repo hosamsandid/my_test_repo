@@ -51,6 +51,21 @@ export const NEW_REPO_LESS_ENV = '__new-repo-less__';
 export const NEW_REPO_LESS_ENV_LABEL = 'New repo-less environment (no repository)';
 export const PICK_ENVIRONMENT_ERROR =
   `Pick a working environment — or “${NEW_REPO_LESS_ENV_LABEL}” for a team without a repository.`;
+// Shown instead while the environment list is still loading (or failed to load —
+// the dialog shows that error itself, #2157 AC6): the picker is disabled then, so
+// "Pick a working environment" would point at a control the user cannot use.
+export const ENVIRONMENTS_PENDING_ERROR = 'Waiting for the working environments to load before a team can be created.';
+
+// #2737: whether Create team must wait for an explicit environment choice. The
+// gate is lifted ONLY for the confirmed-empty platform (list loaded, zero
+// environments — nothing to choose, so it launches repo-less, #2168 A2). While
+// the list is loading or failed to load (`envsLoaded` false) it stays on, or the
+// button would be enabled and post a body with no environmentId — a repo-less
+// team the user never chose.
+export function environmentChoiceRequired({ requireEnvironmentChoice, hasEnvironmentField, envsLoaded, envCount } = {}) {
+  if (!requireEnvironmentChoice || !hasEnvironmentField) return false;
+  return !(envsLoaded && envCount === 0);
+}
 
 // Slug rules shared by both entry points (was duplicated in MaterializeDialog,
 // TeamSetup and LaunchStep's own `slugifyLocal`, all collapsed onto this one —
@@ -151,13 +166,17 @@ export function isRepoLessEnv(env) {
 //
 // `requireEnvironment` (#2737) is opt-in per caller: when true, an empty
 // `environmentId` blocks until the user picks an environment or
-// `NEW_REPO_LESS_ENV` explicitly. Callers only set it while there IS a list to
-// pick from, so an empty platform still launches repo-less (#2168 A2).
-export function validateLaunch({ teamId, teamName, labelSuffix, environmentId, requireEnvironment = false, hasProvider = true } = {}) {
+// `NEW_REPO_LESS_ENV` explicitly. Callers derive it with
+// `environmentChoiceRequired`, which lifts it only on a confirmed-empty
+// platform, so that one still launches repo-less (#2168 A2).
+//
+// `environmentsPending` swaps that reason for ENVIRONMENTS_PENDING_ERROR while
+// the list has not loaded — the gate itself is the same.
+export function validateLaunch({ teamId, teamName, labelSuffix, environmentId, requireEnvironment = false, environmentsPending = false, hasProvider = true } = {}) {
   if (!TEAM_ID_RE.test(String(teamId || ''))) return TEAM_ID_ERROR;
   if (!String(teamName || '').trim()) return 'Team name required.';
   if (labelSuffix && !SUFFIX_RE.test(labelSuffix)) return SUFFIX_ERROR;
-  if (requireEnvironment && !environmentId) return PICK_ENVIRONMENT_ERROR;
+  if (requireEnvironment && !environmentId) return environmentsPending ? ENVIRONMENTS_PENDING_ERROR : PICK_ENVIRONMENT_ERROR;
   if (!hasProvider) return NO_PROVIDER_ERROR;
   return null;
 }

@@ -148,8 +148,13 @@ atomic write like the other stores:
   descriptions: { "<issueKey>": "<iso>" } }
 ```
 
-- `server.js` records **before** responding to the CLI (the poll that observes
-  the write is ≥ 1 tick away, so the write never races the read):
+- `server.js` records **before** responding to the CLI. A poll that is
+  already running can still see the write in its search before the record
+  lands, so `poller.js` reads the registry per issue, after that issue's
+  backfills, not once per poll. What remains is a write whose Jira call
+  completes while the broker is between its search and that issue's read: it
+  reads `origin: human` (one self-wake, caught by the per-issue throttle);
+  comments are covered anyway by the marker fallback. The records:
   `/comment` → the comment id; `/create-epic` → the epic key and every created
   story key; `/set-field` → issue + field id when `changed` (`setCustomField`
   returns the resolved `fieldId` for this); `/attachment/add` → issue +
@@ -290,8 +295,8 @@ Goal: after this PR `status_changed` behaves identically and every later PR is
 - `poller.js`: call it; `resolveCredential` unchanged.
 - `promptLine` + manifest `description`: a wake may be a new issue, a comment
   or a field change — read `event` (and `origin` on a comment) from the wake
-  payload before acting; `aee-jira show` for the full text when
-  `bodyTruncated`.
+  payload before acting; `aee-jira show <key> --comment <commentId>` for the
+  full text when `bodyTruncated`.
 - Help: a dedicated *"Avoid the comment loop"* section — `origin = human` on
   every `comment_added` trigger unless the agent is deliberately waiting for a
   teammate's comment; then filter on `origin = agent` **and** something else,
@@ -386,7 +391,7 @@ No file under `orchestrator/`, `admin-console/` or `broker-sdk/` (the
   (they would be *new* ids, so they must never coexist with the generic one on
   the same watch — decide then).
 - **Comment body clamp** — 2000 chars inline + `bodyTruncated`; the full text
-  is one `aee-jira show`/`inbox` away (the inbox entry holds the clamped body
+  is one `aee-jira show <key> --comment <commentId>` away (the inbox entry holds the clamped body
   too — the inbox is not a comment store).
 - **Traffic on a busy project** — the per-issue throttle (5/h, shared across
   kinds) and the per-kind digests bound it; opt-in per watch is the real

@@ -499,11 +499,16 @@ async function handleCli(req, res, cliPath) {
         const fieldsParam = (params.get('fields') || '').trim();
         const requested = fieldsParam ? fieldsParam.split(',').map((f) => f.trim()).filter(Boolean) : [];
         const { customNames } = jira.partitionFields(requested);
+        // `show --comment <id>`: one comment's full text — the rest of a
+        // `comment_added` wake whose `body` was cut (`bodyTruncated`).
+        const commentId = (params.get('comment') || '').trim();
+        if (commentId && !/^\d+$/.test(commentId)) return sendJson(res, 400, { error: 'a --comment id is numeric (the wake payload\'s commentId)' });
         result = {
           issue: await jira.getIssue(cred, issue, {
             customFields: jira.mergeCustomFieldNames(defaultCustomFields, customNames),
           }),
         };
+        if (commentId) result.comment = await jira.getComment(cred, issue, commentId);
       }
       auditCall(op, 'ok', params.get('project') || params.get('issue') || params.get('jql') || '');
       return sendJson(res, 200, result);

@@ -202,6 +202,9 @@ test('cli reads: /projects, /list, /show need the per-scope credential and call 
     if (url.includes('/search/jql')) {
       return { ok: true, status: 200, text: async () => JSON.stringify({ issues: [{ key: 'KAN-6', fields: { summary: 'Login', status: { name: 'Ready for Dev' } } }] }) };
     }
+    if (/\/comment\/10042$/.test(url)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ id: '10042', author: { displayName: 'Jane' }, body: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'full text' }] }] } }) };
+    }
     // getIssue
     return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'KAN-6', fields: { summary: 'Login', status: { name: 'Ready for Dev' } } }) };
   };
@@ -218,6 +221,15 @@ test('cli reads: /projects, /list, /show need the per-scope credential and call 
     const show = await call(srv, 'GET', '/cli/show?issue=KAN-6', { token: TOKEN });
     assert.equal(show.status, 200);
     assert.equal(show.body.issue.key, 'KAN-6');
+    assert.ok(!('comment' in show.body)); // a plain show carries no comment
+
+    // show --comment <id>: the full text of one comment (bodyTruncated wakes)
+    const withComment = await call(srv, 'GET', '/cli/show?issue=KAN-6&comment=10042', { token: TOKEN });
+    assert.equal(withComment.status, 200);
+    assert.equal(withComment.body.issue.key, 'KAN-6');
+    assert.deepEqual(withComment.body.comment, { id: '10042', author: 'Jane', created: null, body: 'full text' });
+    const badComment = await call(srv, 'GET', '/cli/show?issue=KAN-6&comment=..%2Fx', { token: TOKEN });
+    assert.equal(badComment.status, 400);
 
     // arbitrary JQL search, scoped by the credential, shaped like /list
     const search = await call(srv, 'GET', '/cli/search?jql=issuetype+%3D+Story&limit=5', { token: TOKEN });

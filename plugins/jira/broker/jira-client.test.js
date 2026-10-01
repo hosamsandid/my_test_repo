@@ -265,6 +265,20 @@ test('listProjectStatuses: a blank project key is a 400 before any HTTP (#2421)'
   });
 });
 
+test('getComment: reads one comment in full as plain text (show --comment, the rest of a bodyTruncated wake)', async () => {
+  const long = 'x'.repeat(5000);
+  await withFetch((url) => {
+    assert.match(url, /\/rest\/api\/3\/issue\/KAN-6\/comment\/10042$/);
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      id: '10042', created: '2026-09-08T09:00:00Z', author: { displayName: 'Jane' },
+      body: { type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text: long }] }] },
+    }) };
+  }, async () => {
+    const c = await jc.getComment(CRED, 'KAN-6', '10042', { env: CRED.env });
+    assert.deepEqual(c, { id: '10042', author: 'Jane', created: '2026-09-08T09:00:00Z', body: long });
+  });
+});
+
 test('getIssue: a failed transitions lookup degrades to omitting availableTransitions (#2421)', async () => {
   await withFetch((url) => {
     if (isFieldList(url)) return fieldListResponse();

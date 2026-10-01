@@ -223,7 +223,6 @@ class JiraPoller {
     // Flatten every issue's changelog (backfilling any that the search truncated).
     const events = [];
     const windowStartIso = new Date(this.now() - windowMinutes * 60_000).toISOString();
-    const ownWrites = this._ownWrites(scopeId);
     for (const issue of issues) {
       let changelog = issue.changelog;
       // Backfill when the search truncated the changelog OR did not inline it at
@@ -239,9 +238,6 @@ class JiraPoller {
           this.log(`[jira-poller] ${issue.key}: changelog backfill failed (${err.message}) — using what the search returned`);
         }
       }
-      events.push(...extractStatusChangeEvents({ ...issue, changelog }, { projectKey, siteBase }));
-      events.push(...extractIssueCreatedEvents(issue, { projectKey, siteBase, windowStartIso, ownWrites }));
-      events.push(...extractFieldChangeEvents({ ...issue, changelog }, { projectKey, siteBase, ownWrites }));
       // A busy issue's comment list is cut short in the search response; fetch
       // the ones inside the window (a failure keeps what the search returned).
       let comment = issue.comment;
@@ -253,6 +249,13 @@ class JiraPoller {
           this.log(`[jira-poller] ${issue.key}: comment backfill failed (${err.message}) — using what the search returned`);
         }
       }
+      // Read the own-writes registry per issue, after its backfills: a write
+      // whose change the search already returned but whose broker response
+      // landed later in this poll is then still matched (`origin: agent`).
+      const ownWrites = this._ownWrites(scopeId);
+      events.push(...extractStatusChangeEvents({ ...issue, changelog }, { projectKey, siteBase }));
+      events.push(...extractIssueCreatedEvents(issue, { projectKey, siteBase, windowStartIso, ownWrites }));
+      events.push(...extractFieldChangeEvents({ ...issue, changelog }, { projectKey, siteBase, ownWrites }));
       events.push(...extractCommentEvents({ ...issue, comment }, { projectKey, siteBase, windowStartIso, ownWrites }));
     }
 

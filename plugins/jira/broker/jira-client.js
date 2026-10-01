@@ -15,7 +15,7 @@
 // request with the runtime `fetch`. Same pure-core / I/O-edge split as
 // github-issues-broker/github-client.js and test-mgmt-broker/vendor-client.js.
 
-const { resolveJiraApiBase } = require('./event-extract');
+const { resolveJiraApiBase, adfToText } = require('./event-extract');
 
 // One JQL search page is 100 issues; MAX_PAGES caps total issues considered for
 // a single project in a single poll (100 × 20 = 2000) — generous enough that a
@@ -517,6 +517,26 @@ async function getIssue(cred, issueKey, { env, customFields } = {}) {
     /* transitions unavailable → omit the key rather than fail the whole read */
   }
   return out;
+}
+
+// One comment in full (CLI `show <key> --comment <id>`) — how an agent reads
+// the rest of a `comment_added` wake whose `body` was cut (`bodyTruncated`).
+// The body is the same plain text the wake carries (event-extract.js
+// `adfToText`), uncut. An unknown id is Jira's 404, mapped like any read.
+async function getComment(cred, issueKey, commentId, { env } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const raw = await requestJson({
+    base,
+    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment/${encodeURIComponent(commentId)}`,
+    authHeader: auth,
+  });
+  return {
+    id: String(raw.id == null ? commentId : raw.id),
+    author: raw.author && raw.author.displayName ? String(raw.author.displayName) : null,
+    created: raw.created ? String(raw.created) : null,
+    body: adfToText(raw.body),
+  };
 }
 
 // The full (uncapped) attachment list for one issue — the ownership check
@@ -2015,6 +2035,7 @@ module.exports = {
   searchJql,
   fetchFullChangelog,
   getIssue,
+  getComment,
   getIssueAttachments,
   downloadAttachmentContent,
   getAttachment,

@@ -25,7 +25,7 @@ Reads:
     aee-jira statuses --project KAN               # every workflow status the project supports, grouped by issue type
     aee-jira list --project KAN [--status "Ready for Dev"]   # a project's issues
     aee-jira search --jql "<JQL>" [--fields key,summary,status,Team] [--limit N]   # arbitrary JQL, scoped to your team
-    aee-jira show KAN-6 [--fields "Team,Sprint"]   # one issue (summary, status, type, assignee, created/updated, parent/epic key, URL, attachments, availableTransitions; --fields adds custom fields)
+    aee-jira show KAN-6 [--fields "Team,Sprint"] [--comment <id>]   # one issue (summary, status, type, assignee, created/updated, parent/epic key, URL, attachments, availableTransitions; --fields adds custom fields; --comment adds one comment in full)
     aee-jira attachment get KAN-6 10312 [--out path]   # fetch one attachment's content by id
     aee-jira sprint list --board "Team Scrum Board"     # a Scrum board's sprints (resolved by board name)
 
@@ -434,6 +434,11 @@ def build_parser():
         help='comma-separated custom field names to also read, by their Jira name (e.g. "Team,Sprint"); '
              "an empty field comes back as null, distinguishing it from a set one",
     )
+    p_show.add_argument(
+        "--comment",
+        help="also read one comment in full by its id (a comment_added wake's commentId) — "
+             "the rest of a body cut short (bodyTruncated)",
+    )
 
     p_att = sub.add_parser("attachment", parents=[common], help="read an issue's attachments (list them with `show`)")
     att_sub = p_att.add_subparsers(dest="att_cmd")
@@ -609,6 +614,8 @@ def main(argv=None):
         q = {"issue": args.issue}
         if args.fields:
             q["fields"] = args.fields
+        if args.comment:
+            q["comment"] = args.comment
         path = "/show?" + urllib.parse.urlencode(q)
     elif args.cmd == "attachment":
         att_cmd = getattr(args, "att_cmd", None)

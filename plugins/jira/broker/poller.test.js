@@ -580,6 +580,24 @@ test('field_changed: a field the broker set itself carries origin: agent', async
   assert.deepEqual(h.delivered.map((d) => [d.events[0].field, d.events[0].origin]), [['Team', 'agent'], ['priority', 'human']]);
 });
 
+test('field_changed: a write recorded while the poll is running (after its search) still reads origin: agent', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['field_changed'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch((url) => {
+    if (url.includes('/changelog')) {
+      // the /set-field response lands mid-poll: Jira already returned the change
+      h.ownWritesStore.recordField('team-1', 'ENG-1', 'customfield_20001');
+      return { body: { isLast: true, values: [
+        mixedHistory('910', '2026-01-01T11:59:30Z', [{ field: 'Team', fieldtype: 'custom', fieldId: 'customfield_20001', fromString: null, toString: 'Blue' }]),
+      ] } };
+    }
+    return { body: { isLast: true, issues: [issue('ENG-1', [])] } }; // no inline histories → changelog backfill
+  });
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => [d.events[0].field, d.events[0].origin]), [['Team', 'agent']]);
+});
+
 test('field_changed: an old field change on a re-touched issue is stale, not fired', async () => {
   const h = harness();
   h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['field_changed'] }] });

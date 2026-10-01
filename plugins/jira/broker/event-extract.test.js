@@ -251,7 +251,7 @@ test('extractFieldChangeEvents: status + assignee in one history → only the as
     field: 'assignee',
     fieldId: 'assignee',
     fieldType: 'jira',
-    from: null,
+    from: '',
     to: 'Bob',
     origin: 'human',
     issueUrl: 'https://acme.atlassian.net/browse/KAN-6',

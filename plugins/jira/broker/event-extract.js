@@ -37,7 +37,7 @@ const AGENT_COMMENT_MARKER = 'Posted by an agent on team';
 
 // A comment's plain-text `body` in the wake payload is cut here and flagged
 // `bodyTruncated: "true"` (a string, so it stays a filterable top-level
-// string); `aee-jira show` has the full text.
+// string); `aee-jira show <key> --comment <commentId>` reads it in full.
 const COMMENT_BODY_MAX = 2000;
 
 // Changelog fields that never become a `field_changed`: `status` is its own
@@ -47,7 +47,9 @@ const COMMENT_BODY_MAX = 2000;
 const FIELD_CHANGED_DENY = ['status', 'description', 'rank'];
 
 // `from`/`to` ride in the wake payload and the inbox; a long free-text field
-// (Environment, a text custom field) is cut here — `aee-jira show` has it all.
+// (Environment, a text custom field) is cut here. The full value stays in the
+// issue's Jira history; `aee-jira show --fields "<name>"` reads a custom
+// field's current value uncut.
 const FIELD_VALUE_MAX = 500;
 
 // How far apart an own-writes stamp and a changelog history's `created` may be
@@ -73,7 +75,7 @@ function describeEvent(ev) {
   }
   if (e.event === 'issue_created') return `${key} created${e.summary ? `: ${e.summary}` : ''}`;
   if (e.event === 'comment_added') return `${key}: comment by ${e.author || 'someone'}${e.origin ? ` (${e.origin})` : ''}`;
-  if (e.event === 'field_changed') return `${key}: ${e.field || e.fieldId || 'field'} ${e.from ?? '∅'} → ${e.to ?? '∅'}`;
+  if (e.event === 'field_changed') return `${key}: ${e.field || e.fieldId || 'field'} ${e.from || '∅'} → ${e.to || '∅'}`;
   return key || String(e.event || 'event');
 }
 
@@ -183,8 +185,10 @@ function extractIssueCreatedEvents(issue, { projectKey, siteBase, windowStartIso
   }];
 }
 
+// An absent value (an unassign has no `toString`) is "", not null: the
+// manifest promises "empty when cleared", and payloadFilter matches strings only.
 function clampValue(v) {
-  if (v == null) return null;
+  if (v == null) return '';
   const s = String(v);
   return s.length > FIELD_VALUE_MAX ? `${s.slice(0, FIELD_VALUE_MAX - 1)}…` : s;
 }
@@ -218,7 +222,7 @@ function resolveFieldOrigin(issueKey, item, createdIso, ownWrites) {
 // One `field_changed` event per changelog item whose field is not denylisted.
 // One history can change several fields, so the id is
 // `<key>:<historyId>.<fieldId>`. `from`/`to` are Jira's display strings
-// (`null` when absent — an unassign has no `toString`).
+// (`""` when absent — an unassign has no `toString`).
 function extractFieldChangeEvents(issue, { projectKey, siteBase, ownWrites } = {}) {
   const events = [];
   if (!issue || !issue.key) return events;

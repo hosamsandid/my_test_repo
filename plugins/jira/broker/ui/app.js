@@ -150,8 +150,8 @@
       return 'comment' + originTag(ev) + (text ? ': <span class="hint">' + esc(text.length > 80 ? text.slice(0, 79) + '…' : text) + '</span>' : '');
     }
     if (kind === 'field_changed') {
-      return esc(ev.field || ev.fieldId || 'field') + ': ' + esc(ev.from == null ? '∅' : ev.from)
-        + ' <span class="arr">→</span> ' + esc(ev.to == null ? '∅' : ev.to) + originTag(ev);
+      return esc(ev.field || ev.fieldId || 'field') + ': ' + esc(ev.from || '∅')
+        + ' <span class="arr">→</span> ' + esc(ev.to || '∅') + originTag(ev);
     }
     return esc(KIND_LABEL[kind] || kind) + originTag(ev);
   }

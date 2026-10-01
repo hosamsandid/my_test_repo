@@ -14970,9 +14970,10 @@ app.delete('/api/admin/users/:id/password', apiLimiter, (req, res) => {
   return proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}/password`);
 });
 
-// Self-service per-user preferences (#1437, #2397). A logged-in user updates
-// their OWN profile settings (Agent-Chat transcript font size; the "agent you
-// messaged is back" browser-notification opt-in) without
+// Self-service per-user preferences (#1437, #2397, #2740). A logged-in user
+// updates their OWN profile settings (Agent-Chat transcript font size; the
+// "agent you messaged is back" browser-notification opt-in; the Agent-Chat
+// rail team selection) without
 // System-Admin rights. The write is pinned to the caller's OWN resolved userId
 // (never an id from the request), so — unlike the admin CRUD above — it can
 // touch no other user's record. Since #2059 every authenticated caller resolves
@@ -14991,6 +14992,10 @@ app.put('/api/me/preferences', apiLimiter, (req, res) => {
   }
   if (req.body && req.body.chatNotifyOnBack !== undefined) {
     patch.chatNotifyOnBack = req.body.chatNotifyOnBack;
+  }
+  // Agent-Chat rail team selection (#2740) — validated by teamsStore.
+  if (req.body && req.body.chatListFilter !== undefined) {
+    patch.chatListFilter = req.body.chatListFilter;
   }
   if (Object.keys(patch).length === 0) {
     return res.status(400).json({ error: 'No supported preference in request body', code: 'no_preference' });

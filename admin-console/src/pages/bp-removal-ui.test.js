@@ -84,7 +84,7 @@ test('every swept surface still contains its own code after the strip', () => {
   // Without this, a strip that ate a file whole would make each `doesNotMatch`
   // below pass for the wrong reason (the Phase-1 lesson from orchestrator.js).
   const signatures = {
-    'AgentChat.jsx': /function FilterSelect/,
+    'AgentChat.jsx': /function RailHeaderToggle/,
     'agent-chat/AgentList.jsx': /function iconForRole/,
     'agent-chat/ChatPanel.jsx': /HeaderOverflowMenu/,
     'agent-chat/agent-list-model.js': /export function buildGroups/,

@@ -134,6 +134,36 @@ function coerceChatNotifyOnBack(raw) {
   return raw;
 }
 
+// Per-user Agent-Chat rail team selection (#2740). Stored as the entries the
+// user has *hidden* (`team:<id>` keys plus `singles` for the Individual agents
+// block), not the ones shown, so a team that becomes visible later is shown by
+// default. A pure view preference: it never widens what the user may see.
+// Blank/absent clears it (everything shown); anything else must be
+// `{ hidden: string[] }`. Duplicates are folded and the list is bounded so a
+// runaway client cannot bloat the user record.
+const CHAT_LIST_FILTER_MAX_KEYS = 2000;
+const CHAT_LIST_FILTER_MAX_KEY_LENGTH = 512;
+
+function coerceChatListFilter(raw) {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'object' || Array.isArray(raw) || !Array.isArray(raw.hidden)) {
+    throw badRequest('chatListFilter must be an object with a hidden array');
+  }
+  // Bound the raw array before touching its entries: request bodies are not
+  // size-capped on the orchestrator, so the cap must hold ahead of the loop.
+  if (raw.hidden.length > CHAT_LIST_FILTER_MAX_KEYS) {
+    throw badRequest(`chatListFilter.hidden may hold at most ${CHAT_LIST_FILTER_MAX_KEYS} entries`);
+  }
+  const hidden = new Set();
+  for (const key of raw.hidden) {
+    if (typeof key !== 'string' || !key || key.length > CHAT_LIST_FILTER_MAX_KEY_LENGTH) {
+      throw badRequest(`chatListFilter.hidden entries must be non-empty strings of at most ${CHAT_LIST_FILTER_MAX_KEY_LENGTH} characters`);
+    }
+    hidden.add(key);
+  }
+  return { hidden: [...hidden] };
+}
+
 // A membership's `teamId` may name an **Agent Team** as well as a legacy access
 // scope (#2077 D1; self-service creation, #2081). This module owns
 // teams/users/memberships and has no agent access, so the second half of that
@@ -333,6 +363,12 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
       // rather than storing an explicit `false` (#2397).
       if (cnb === true) user.chatNotifyOnBack = true;
       else delete user.chatNotifyOnBack;
+    }
+    if (patch.chatListFilter !== undefined) {
+      const clf = coerceChatListFilter(patch.chatListFilter);
+      // A blank value clears the selection back to "everything shown" (#2740).
+      if (clf === undefined) delete user.chatListFilter;
+      else user.chatListFilter = clf;
     }
     user.updatedAt = nowIso();
     users[idx] = user;
@@ -733,6 +769,7 @@ module.exports = {
   coerceGithubHandle,
   coerceChatFontSize,
   coerceChatNotifyOnBack,
+  coerceChatListFilter,
   CHAT_FONT_SIZE_MIN,
   CHAT_FONT_SIZE_MAX,
   CHAT_FONT_SIZE_DEFAULT,

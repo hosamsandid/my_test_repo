@@ -15,6 +15,7 @@
  */
 
 import { agentState } from '../agent-lifecycle/agent-lifecycle-menu.js';
+import { matchesSelection } from './list-selection.js';
 
 /** Stable key for a group across the ordering / drag / collapse maps. */
 export function groupKey(g) {
@@ -199,20 +200,12 @@ export function orderModel(rawGroups, rawSingles, sidebarOrder) {
 }
 
 /**
- * Decide whether an agent passes the current filter spec.
- *  - { kind: 'all' }                       → everyone
- *  - { kind: 'team', id }                  → the team header (if visible) + its members
- *  - { kind: 'agent', id }                 → only the agent with this id
+ * Decide whether an agent passes the rail's team selection (#2740): its team
+ * (or, for an ungrouped row, the Individual agents block) must not be hidden.
+ * A missing selection shows everyone. See `list-selection.js` for the shape.
  */
 export function matchesFilter(agent, filter) {
-  if (!filter || filter.kind === 'all') return true;
-  if (filter.kind === 'team') {
-    if (agent.role === 'team'        && agent.id === filter.id) return true;
-    if (agent.role === 'team-member' && agent.parentTeamId === filter.id) return true;
-    return false;
-  }
-  if (filter.kind === 'agent') return agent.id === filter.id;
-  return true;
+  return matchesSelection(agent, filter);
 }
 
 /**

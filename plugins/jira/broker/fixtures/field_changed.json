@@ -1,0 +1,52 @@
+{
+  "id": "10042",
+  "key": "KAN-12",
+  "fields": {
+    "summary": "Checkout fails on Safari",
+    "issuetype": {
+      "name": "Bug"
+    },
+    "status": {
+      "name": "To Do"
+    },
+    "created": "2025-11-03T09:00:00.000+0000",
+    "reporter": {
+      "displayName": "Jane Doe",
+      "accountId": "acc-jane"
+    },
+    "priority": {
+      "name": "High"
+    },
+    "comment": {
+      "total": 0,
+      "maxResults": 0,
+      "startAt": 0,
+      "comments": []
+    }
+  },
+  "changelog": {
+    "startAt": 0,
+    "maxResults": 1,
+    "total": 1,
+    "histories": [
+      {
+        "id": "10501",
+        "author": {
+          "displayName": "Jane Doe"
+        },
+        "created": "2026-01-01T11:59:00.000+0000",
+        "items": [
+          {
+            "field": "Sprint",
+            "fieldtype": "custom",
+            "fieldId": "customfield_10020",
+            "from": "4",
+            "fromString": "KAN Sprint 3",
+            "to": "5",
+            "toString": "KAN Sprint 4"
+          }
+        ]
+      }
+    ]
+  }
+}

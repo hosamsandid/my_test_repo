@@ -1699,6 +1699,31 @@ def _ask_user_question_payload(tool_input) -> dict | None:
     return {"version": 1, "questions": out_questions}
 
 
+_CHAT_AUTHOR_FIELD = "io.aee.author"
+
+
+def _chat_author(content):
+    """The console-stamped author of a human chat message (#2065, #2715).
+
+    The Matrix `sender` is not the person who wrote the message: a console
+    user without a personal Matrix identity posts through the shared admin
+    account. The console stamps the real author under `io.aee.author`; keep
+    just its `userId` / `subject` strings so the session log can name the same
+    person the transcript bubble does. `None` when no usable stamp is present.
+    """
+    if not isinstance(content, dict):
+        return None
+    raw = content.get(_CHAT_AUTHOR_FIELD)
+    if not isinstance(raw, dict):
+        return None
+    author = {}
+    for key in ("userId", "subject"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            author[key] = value.strip()[:256]
+    return author or None
+
+
 _ASK_ANSWER_FIELD = "io.aee.ask-answer"
 _ASK_ANSWER_MAX_LABELS = 50
 
@@ -8049,12 +8074,17 @@ async def run_dm_listener() -> None:
         # needed.
         await workspace_gate.acquire_chat_turn()
         try:
-            _append_event(room_id, {
+            content = (getattr(event, "source", None) or {}).get("content")
+            received = {
                 "type": "message.received",
                 "correlationId": correlation_id,
                 "from": sender,
                 "body": body[:4000],
-            })
+            }
+            author = _chat_author(content)
+            if author:
+                received["author"] = author
+            _append_event(room_id, received)
 
             # Custom slash commands (#1796): recognise a provisioned `/command`
             # so it is fed verbatim (Claude Code expands it), and neutralise an
@@ -8065,7 +8095,6 @@ async def run_dm_listener() -> None:
                 _agent_workdir() / ".claude" / "commands")
             # A multi-select quick-reply answer (#2523) is resumed with every
             # selected label from its structured `io.aee.ask-answer`.
-            content = (getattr(event, "source", None) or {}).get("content")
             prepared = _prepare_chat_prompt(_ask_answer_prompt(body, content),
                                             known_commands)
             send_body = prepared["prompt"]

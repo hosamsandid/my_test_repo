@@ -95,8 +95,15 @@ A lightweight 1:1 chat for talking to Matrix agents directly inside the Admin Co
 
 ```jsonc
 // Wrapper events emitted by agent-runner.js itself
+// `from` is the raw Matrix sender: for a console user without a personal
+// Matrix identity that is the shared admin account, so the console never shows
+// it. `author` is copied from the message's `io.aee.author` stamp (#2715) and is
+// what the session log names, resolved like the transcript badge; it is absent
+// on rows recorded before #2715 and on messages from other Matrix clients, and
+// the log then shows no name.
 { "ts":"2026-05-05T10:12:00.000Z", "type":"message.received",
-  "correlationId":"$evt:abc",  "from":"@admin:local", "body":"..." }
+  "correlationId":"$evt:abc",  "from":"@admin:local", "body":"...",
+  "author":{ "userId":"...", "subject":"..." } }
 { "ts":"...", "type":"claude.invoke",       "correlationId":"$evt:abc", "promptChars":1234 }
 { "ts":"...", "type":"message.posted",      "correlationId":"$evt:abc", "eventId":"$evt:def" }
 { "ts":"...", "type":"error",               "correlationId":"$evt:abc", "stage":"claude", "message":"..." }

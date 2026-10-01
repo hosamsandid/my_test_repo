@@ -517,7 +517,7 @@ export default function Briefings() {
   }, [proc, staleFlowParam, setSearchParams]);
 
   const navigate = useNavigate();
-  const { data: agents } = useApi('/api/agents');
+  const { data: agents, refetch: refetchAgents } = useApi('/api/agents');
   const { data: environments } = useApi('/api/environments');
   const { data: draftsList, refetch: refetchDrafts } = useApi('/api/process/drafts');
 
@@ -1125,6 +1125,7 @@ export default function Briefings() {
                 scope={proc}
                 onNavigate={selectProc}
                 onDraftsChanged={refetchDrafts}
+                onTeamsChanged={refetchAgents}
                 pendingImport={pendingImport}
                 onImportConsumed={clearPendingImport}
                 onImportClosed={closeImportPreview}

@@ -2,9 +2,11 @@
  *
  * team-admin only (the broker re-enforces the role from the signed viewer
  * headers). Replaces #1539's `env.jiraProjects[]` and the `jira-event` trigger
- * fields: a list of `{ projectKey, statusFilters: string[] }` rows. Each project
- * holds a SET of target statuses (chips) and fires on a transition into any of
- * them; an empty set fires on any status change. Which agents a change wakes is
+ * fields: a list of `{ projectKey, statusFilters: string[], events: string[] }`
+ * rows. `events` is the row's opt-in set of event kinds (checkboxes, served
+ * by the broker as `eventKinds`; status changes only by default). The status
+ * chips gate status changes only: a transition into any of them fires; an
+ * empty set fires on any status change. Which agents an event wakes is
  * decided per-agent by a `plugin-event` trigger, not here.
  */
 (function () {
@@ -15,7 +17,7 @@
   var base = location.pathname.replace(/\/(index\.html|admin(\.html)?)$/, '/');
   if (base.slice(-1) !== '/') base += '/';
   function API(p) { return base + 'api' + p; }
-  var state = { team: null, teams: [], watches: [] };
+  var state = { team: null, teams: [], watches: [], eventKinds: [] };
 
   var bl = $('backLink');
   if (bl) bl.href = base;
@@ -60,13 +62,23 @@
         return '<span class="mini-chip removable">' + esc(s)
           + '<button data-rm="' + i + ':' + j + '" aria-label="remove">✕</button></span>';
       }).join('');
-      return '<div class="watch-editor-row">'
+      var kinds = state.eventKinds.length > 1
+        ? '<div class="kind-editor">' + state.eventKinds.map(function (k) {
+          var on = w.events.indexOf(k.name) >= 0;
+          return '<label class="kind-check"><input type="checkbox" data-ev="' + i + '" value="' + esc(k.name) + '"'
+            + (on ? ' checked' : '') + ' /> ' + esc(k.label) + '</label>';
+        }).join('') + '</div>'
+        : '';
+      return '<div class="watch-editor-block">'
+        + '<div class="watch-editor-row">'
         + '<input data-i="' + i + '" data-k="projectKey" class="pk-input" placeholder="KAN" value="' + esc(w.projectKey || '') + '" />'
         + '<div class="chip-editor">'
         + chips
         + '<input data-add="' + i + '" class="chip-add" placeholder="' + (chips ? 'add status, Enter' : 'status + Enter (blank = any)') + '" />'
         + '</div>'
         + '<button data-del="' + i + '" class="btn ghost sm" aria-label="remove project">Remove</button>'
+        + '</div>'
+        + kinds
         + '</div>';
     }).join('') || '<div class="empty">No projects watched.</div>';
 
@@ -94,6 +106,14 @@
         render();
       };
     });
+    Array.prototype.forEach.call($('rows').querySelectorAll('input[data-ev]'), function (cb) {
+      cb.onchange = function () {
+        var w = state.watches[Number(cb.dataset.ev)];
+        var at = w.events.indexOf(cb.value);
+        if (cb.checked && at < 0) w.events.push(cb.value);
+        if (!cb.checked && at >= 0) w.events.splice(at, 1);
+      };
+    });
     Array.prototype.forEach.call($('rows').querySelectorAll('button[data-del]'), function (b) {
       b.onclick = function () { commitPending(); state.watches.splice(Number(b.dataset.del), 1); render(); };
     });
@@ -102,15 +122,20 @@
   function load() {
     err(null); msg('');
     api('/admin/watch?' + teamQS()).then(function (r) {
+      state.eventKinds = r.eventKinds || [];
       state.watches = (r.watches || []).map(function (w) {
-        return { projectKey: w.projectKey || '', statusFilters: (w.statusFilters || []).slice() };
+        return {
+          projectKey: w.projectKey || '',
+          statusFilters: (w.statusFilters || []).slice(),
+          events: (w.events && w.events.length ? w.events : ['status_changed']).slice(),
+        };
       });
       $('meta').textContent = r.setBy ? ('Last saved by ' + r.setBy + (r.setAt ? ' on ' + r.setAt : '')) : '';
       render();
     }).catch(function (e) { err(e.message); });
   }
 
-  $('add').onclick = function () { commitPending(); state.watches.push({ projectKey: '', statusFilters: [] }); render(); };
+  $('add').onclick = function () { commitPending(); state.watches.push({ projectKey: '', statusFilters: [], events: ['status_changed'] }); render(); };
 
   $('save').onclick = function () {
     commitPending();
@@ -121,6 +146,9 @@
         var out = { projectKey: (w.projectKey || '').trim() };
         var sf = (w.statusFilters || []).map(function (s) { return String(s).trim(); }).filter(Boolean);
         if (sf.length) out.statusFilters = sf;
+        // All boxes unticked saves as the default (status changes) — the
+        // broker would normalise an empty set to that anyway.
+        if (w.events && w.events.length) out.events = w.events.slice();
         return out;
       })
       .filter(function (w) { return w.projectKey; });

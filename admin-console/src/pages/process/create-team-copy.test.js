@@ -13,6 +13,7 @@ import {
   PROVISION_NOW_HINT,
   draftStatusLine,
   createdTeamNotice,
+  importedBlueprintCounts,
 } from './create-team-copy.js';
 
 // ─── The one verb (#2053 D1/D2, AC1/AC5/AC13) ────────────────────────────────
@@ -140,4 +141,15 @@ test('AC12 — the import path gets its own wording, because there is no draft',
   assert.equal(createdTeamNotice('Acme', {}), draft);
   // Still nothing to say without a name, on either path.
   assert.equal(createdTeamNotice('', { fromImport: true }), '');
+});
+
+// #2737 — the import banner counts what the Create team dialog counts: the
+// bundle's agent roles, with human roles named separately.
+test('import banner counts agents only, and names human roles apart', () => {
+  const roles = n => Array.from({ length: n }, (_, i) => ({ id: `r${i}` }));
+  assert.equal(importedBlueprintCounts({ roles: roles(10), humans: roles(3) }), '10 agents · 3 human roles');
+  assert.equal(importedBlueprintCounts({ roles: roles(1), humans: roles(1) }), '1 agent · 1 human role');
+  assert.equal(importedBlueprintCounts({ roles: roles(4) }), '4 agents');
+  assert.equal(importedBlueprintCounts({ roles: roles(4), humans: [] }), '4 agents');
+  assert.equal(importedBlueprintCounts(null), '0 agents');
 });

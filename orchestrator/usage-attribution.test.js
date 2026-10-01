@@ -12,36 +12,56 @@ const {
   providerTierOf,
 } = require('./usage-attribution');
 
+// Personal identities have the reserved `@u-<16 hex>` shape (#1458); only
+// those can name a person (#2721 AC7).
+const THORSTEN = '@u-1111111111111111:aee.local';
+const ADA = '@u-aaaaaaaaaaaaaaaa:aee.local';
+const STRANGER = '@u-5555555555555555:aee.local';
+const SHARED_ADMIN = '@k-zyskowski_accent:local';
+
 const users = [
-  { id: 'u-thorsten', subject: 'thorsten@example.com', matrixUserId: '@thorsten:aee.local' },
-  { id: 'u-ada', subject: 'ada@example.com', matrixUserId: '@ada:aee.local' },
+  { id: 'u-thorsten', subject: 'thorsten@example.com', matrixUserId: THORSTEN },
+  { id: 'u-ada', subject: 'ada@example.com', matrixUserId: ADA },
   { id: 'u-nomatrix', subject: 'nomatrix@example.com' }, // never chat-provisioned
 ];
 
 // ── userIdForMatrixId ───────────────────────────────────────────────────────
 
 test('userIdForMatrixId maps a Matrix sender onto the platform account', () => {
-  assert.equal(userIdForMatrixId(users, '@ada:aee.local'), 'u-ada');
+  assert.equal(userIdForMatrixId(users, ADA), 'u-ada');
 });
 
 test('userIdForMatrixId is case-insensitive and trims', () => {
-  assert.equal(userIdForMatrixId(users, '  @ADA:AEE.LOCAL '), 'u-ada');
+  assert.equal(userIdForMatrixId(users, '  @U-AAAAAAAAAAAAAAAA:AEE.LOCAL '), 'u-ada');
 });
 
 test('userIdForMatrixId never invents an id', () => {
-  assert.equal(userIdForMatrixId(users, '@stranger:aee.local'), null);
+  assert.equal(userIdForMatrixId(users, STRANGER), null);
   assert.equal(userIdForMatrixId(users, ''), null);
   assert.equal(userIdForMatrixId(users, null), null);
-  assert.equal(userIdForMatrixId(null, '@ada:aee.local'), null);
+  assert.equal(userIdForMatrixId(null, ADA), null);
   // A user record with no matrixUserId must not match a blank/absent sender.
   assert.equal(userIdForMatrixId(users, undefined), null);
+});
+
+test('the shared admin account never resolves to a person, even if a record carries it (#2721 AC7)', () => {
+  const poisoned = [...users, { id: 'u-colleague', subject: 'k@example.com', matrixUserId: SHARED_ADMIN }];
+  assert.equal(userIdForMatrixId(poisoned, SHARED_ADMIN), null);
+  // Agent accounts are service identities too.
+  const agentRecord = [{ id: 'u-x', matrixUserId: '@my-assistant:local' }];
+  assert.equal(userIdForMatrixId(agentRecord, '@my-assistant:local'), null);
+  // …and the turn falls back to the baseline, like an unknown sender.
+  assert.deepEqual(
+    resolveUsageAttribution({ requestedBy: { matrixUserId: SHARED_ADMIN }, users: poisoned, ownerId: 'u-ada' }),
+    { userId: 'u-ada', kind: 'agent-owner' },
+  );
 });
 
 // ── resolveUsageAttribution ─────────────────────────────────────────────────
 
 test('interactive chat turn → the requesting user (AC1)', () => {
   const got = resolveUsageAttribution({
-    requestedBy: { matrixUserId: '@thorsten:aee.local' },
+    requestedBy: { matrixUserId: THORSTEN },
     users,
     ownerId: 'u-ada',
   });
@@ -56,7 +76,7 @@ test('autonomous / triggered run → the agent owner (AC3)', () => {
 
 test('unknown sender falls back to the agent owner rather than dropping the spend', () => {
   const got = resolveUsageAttribution({
-    requestedBy: { matrixUserId: '@stranger:aee.local' },
+    requestedBy: { matrixUserId: STRANGER },
     users,
     ownerId: 'u-ada',
   });
@@ -80,7 +100,7 @@ test('a non-string owner id is still usable (coerced), a numeric 0 is not an acc
 });
 
 test('a malformed requestedBy block cannot crash or leak a raw value', () => {
-  for (const bad of ['@ada:aee.local', 42, [], { matrixUserId: 7 }]) {
+  for (const bad of [ADA, 42, [], { matrixUserId: 7 }]) {
     const got = resolveUsageAttribution({ requestedBy: bad, users, ownerId: 'u-ada' });
     assert.deepEqual(got, { userId: 'u-ada', kind: 'agent-owner' });
   }
@@ -88,7 +108,7 @@ test('a malformed requestedBy block cannot crash or leak a raw value', () => {
 
 test('every kind resolveUsageAttribution can return is declared', () => {
   const produced = [
-    resolveUsageAttribution({ requestedBy: { matrixUserId: '@ada:aee.local' }, users }).kind,
+    resolveUsageAttribution({ requestedBy: { matrixUserId: ADA }, users }).kind,
     resolveUsageAttribution({ ownerId: 'u-ada' }).kind,
     resolveUsageAttribution().kind,
   ];

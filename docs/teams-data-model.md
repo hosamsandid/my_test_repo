@@ -82,11 +82,13 @@ records written atomically (write-temp + rename):
   generated UUID.
 - **User `matrixUserId`** *(optional, #1458)* is the human's own Matrix account
   — `@u-<16 hex of sha256(subject)>:local` — provisioned when the record is
-  created (best-effort and backgrounded, so it may be absent briefly or on a
-  single-operator stack that has no user records). It is a non-secret pointer
-  only; the matching access token is stored server-side in a separate per-user
-  file (`users/matrix/<userId>.json`), never on this record. See
-  [`docs/multi-user-concept.md`](multi-user-concept.md) Amendment 1.
+  created (best-effort and backgrounded, so it may be absent briefly), and
+  backfilled at startup / retried periodically when missing (#2721). Only a
+  personal `@u-…` id is accepted; a pointer at the shared admin is cleared at
+  startup. It is a non-secret pointer only; the matching access token is stored
+  server-side in a separate per-user file (`users/matrix/<userId>.json`), never
+  on this record. See [`docs/multi-user-concept.md`](multi-user-concept.md)
+  Amendments 1 and 3.
 - **Membership `fromScopeId`** is present only on records the D6 migration
   (#2077) created when it fanned an access-scope membership out to the Agent
   Teams in that scope — it records which access scope the grant was derived

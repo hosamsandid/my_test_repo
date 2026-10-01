@@ -66,3 +66,12 @@ export function clearDraft(agentId, store = typeof localStorage !== 'undefined' 
     /* ignore */
   }
 }
+
+/**
+ * The composer value after a send was refused (#2721 AC5 — e.g. the user's chat
+ * identity is not ready yet): the unsent text comes back, unless the user has
+ * already started typing something new, which is never overwritten.
+ */
+export function restoreUnsentText(current, unsent) {
+  return current && current.trim() ? current : (unsent || current || '');
+}

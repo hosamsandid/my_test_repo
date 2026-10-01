@@ -25,6 +25,7 @@
 // budget-enforcement concept (#1484); this is attribution & visibility only.
 
 const { endpointScope } = require('./assist-binding');
+const { isHumanMatrixUserId } = require('./human-matrix-identity');
 
 // The attribution kinds, strongest signal first. `kind` travels with the record
 // so a reader can tell a charge that a human actually asked for from one that
@@ -51,9 +52,16 @@ function nonEmptyString(v) {
 // Case-insensitive because Matrix ids are lower-cased localparts, and the store
 // compares subjects the same way. Returns null when nothing matches — a
 // deleted / never-provisioned human is NOT invented into an id.
+//
+// Only a PERSONAL identity (`@u-<hash>:local`, human-matrix-identity.js) can
+// name a person (#2721 AC7). The shared admin account and every agent account
+// are service identities: a turn they sent is attributed to nobody — the
+// baseline, exactly like an unknown sender — even if some user record were to
+// carry such an id, because one such record would otherwise hand that user's
+// personal credentials and cost centre every other console user's chat turns.
 function userIdForMatrixId(users, matrixUserId) {
   const want = nonEmptyString(matrixUserId);
-  if (!want) return null;
+  if (!want || !isHumanMatrixUserId(want.toLowerCase())) return null;
   const list = Array.isArray(users) ? users : [];
   const lower = want.toLowerCase();
   const hit = list.find((u) => u && nonEmptyString(u.matrixUserId)

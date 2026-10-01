@@ -16,6 +16,25 @@ export function passwordLabel(u) {
   return u && u.hasPassword ? 'Set' : 'None';
 }
 
+// The per-user chat identity status (#2721 AC8): the orchestrator decorates
+// each record with `matrixIdentity: { status: 'ready'|'pending'|'failed',
+// error?, lastAttemptAt? }`. A record without it (an older orchestrator) reads
+// as pending — never as ready.
+const CHAT_IDENTITY_LABELS = { ready: 'Ready', pending: 'Pending', failed: 'Failed' };
+export function chatIdentityLabel(u) {
+  const status = u && u.matrixIdentity && u.matrixIdentity.status;
+  return CHAT_IDENTITY_LABELS[status] || CHAT_IDENTITY_LABELS.pending;
+}
+
+// Tooltip text for a failed identity: the last error and when it happened,
+// plus that it is retried automatically. Empty for any other status.
+export function chatIdentityDetail(u) {
+  const mi = u && u.matrixIdentity;
+  if (!mi || mi.status !== 'failed') return '';
+  const when = mi.lastAttemptAt ? ` (last attempt ${mi.lastAttemptAt})` : '';
+  return `${mi.error || 'Provisioning failed'}${when} — retried automatically.`;
+}
+
 // Flatten sanitized user records into DataTable rows. DataTable sorts + filters
 // by `row[col.key]` only, so every sortable/filterable value must live as a
 // top-level primitive key on the row; the original record is preserved under
@@ -28,6 +47,7 @@ export function usersToRows(users = []) {
     email: u.email || '',
     systemAdminLabel: systemAdminLabel(u),
     passwordLabel: passwordLabel(u),
+    chatIdentityLabel: chatIdentityLabel(u),
     _user: u,
   }));
 }

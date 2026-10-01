@@ -684,7 +684,9 @@ before it moves from catalog to roadmap.
     wake this plugin introduced), `aee-jira` read/write CLI, `/` + `/admin` UI.
     See `docs/jira-plugin.md`.
 23. **Documentation publishing** — push generated docs to
-    Confluence/SharePoint spaces per team.
+    Confluence/SharePoint spaces per team. Confluence is planned as the
+    second Atlassian plugin (read/search, ownership-tiered writes, page and
+    comment events): `docs/confluence-plugin-plan.md`.
 24. **Notification bridge** — outbound Teams/Slack/e-mail summaries beyond
     Matrix; broker rate-limits and templates.
 25. **Observability query** — read-only Grafana/Prometheus/Loki queries so an
@@ -847,6 +849,14 @@ before it moves from catalog to roadmap.
   per-agent stacks — the natural reading for a container sandbox — while a
   shared, expensive backend simply omits the field and keeps the `team`
   default. See §4.4.
+- **In-place plugin upgrade**: `POST /api/plugins/:id/install` 409s on an
+  installed plugin, and uninstall reaps every scope's plugin credential
+  (`plugin-credential-store.js`) — so upgrading a credential-bearing plugin
+  (Jira's event kinds, `docs/jira-plugin-events-implementation.md` §6) is a
+  documented manual file refresh, not an action. Wanted: an install
+  `?force=1` (or an *Upgrade* action) that overwrites the registry copy and
+  restarts the broker while keeping credentials and state. Deferred until a
+  second plugin needs it.
 - **Claude Code plugins as "agent plugins"**: worth adopting the CLI's own
   marketplace format as a distribution channel for agent-side content
   (skills, commands, hooks)? It solves a different problem than this

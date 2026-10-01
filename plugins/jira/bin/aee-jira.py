@@ -19,13 +19,13 @@ the team's service account is used.
 Reads:
 
     aee-jira whoami                               # the resolved plugin scope
-    aee-jira inbox                                # peek: every queued status-change event in the team's inbox
+    aee-jira inbox                                # peek: every queued event in the team's inbox
     aee-jira inbox --consume KAN-6:10312 [ID…]   # drain exactly the events YOUR wake named (payload `id` / `events[].id`)
     aee-jira projects                             # the projects in this team's scope
     aee-jira statuses --project KAN               # every workflow status the project supports, grouped by issue type
     aee-jira list --project KAN [--status "Ready for Dev"]   # a project's issues
     aee-jira search --jql "<JQL>" [--fields key,summary,status,Team] [--limit N]   # arbitrary JQL, scoped to your team
-    aee-jira show KAN-6 [--fields "Team,Sprint"]   # one issue (summary, status, type, assignee, created/updated, parent/epic key, URL, attachments, availableTransitions; --fields adds custom fields)
+    aee-jira show KAN-6 [--fields "Team,Sprint"] [--comment <id>]   # one issue (summary, status, type, assignee, created/updated, parent/epic key, URL, attachments, availableTransitions; --fields adds custom fields; --comment adds one comment in full)
     aee-jira attachment get KAN-6 10312 [--out path]   # fetch one attachment's content by id
     aee-jira sprint list --board "Team Scrum Board"     # a Scrum board's sprints (resolved by board name)
 
@@ -395,7 +395,7 @@ def build_parser():
 
     sub.add_parser("whoami", parents=[common], help="show the resolved plugin scope")
 
-    p_inbox = sub.add_parser("inbox", parents=[common], help="the queued status-change events that woke you")
+    p_inbox = sub.add_parser("inbox", parents=[common], help="the queued Jira events (status changes, new issues, comments, field changes) that woke you")
     p_inbox.add_argument(
         "--consume", nargs="+", metavar="EVENT_ID", default=None,
         help="drain exactly these event ids (from your wake payload: `id`, or `events[].id` in a digest); "
@@ -433,6 +433,11 @@ def build_parser():
         "--fields",
         help='comma-separated custom field names to also read, by their Jira name (e.g. "Team,Sprint"); '
              "an empty field comes back as null, distinguishing it from a set one",
+    )
+    p_show.add_argument(
+        "--comment",
+        help="also read one comment in full by its id (a comment_added wake's commentId) — "
+             "the rest of a body cut short (bodyTruncated)",
     )
 
     p_att = sub.add_parser("attachment", parents=[common], help="read an issue's attachments (list them with `show`)")
@@ -609,6 +614,8 @@ def main(argv=None):
         q = {"issue": args.issue}
         if args.fields:
             q["fields"] = args.fields
+        if args.comment:
+            q["comment"] = args.comment
         path = "/show?" + urllib.parse.urlencode(q)
     elif args.cmd == "attachment":
         att_cmd = getattr(args, "att_cmd", None)

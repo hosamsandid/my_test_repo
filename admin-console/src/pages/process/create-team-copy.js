@@ -111,6 +111,22 @@ export function createdTeamNotice(teamName, { fromImport = false } = {}) {
 }
 
 /**
+ * The import-preview banner's member count (#2737), e.g. `10 agents · 3 human
+ * roles`. It used to print `graph.nodes.length`, which counts the synthesized
+ * `kind: 'human'` nodes too, so the banner said 13 agents where the Create team
+ * dialog — and the result — said 10. Both now read the same source: the
+ * bundle's `roles` are the agents (what the dialog counts and what gets
+ * created), its `humans` are declarative and only named when there are any.
+ */
+export function importedBlueprintCounts(bundle) {
+  const agents = Array.isArray(bundle?.roles) ? bundle.roles.length : 0;
+  const humans = Array.isArray(bundle?.humans) ? bundle.humans.length : 0;
+  const agentText = `${agents} ${agents === 1 ? 'agent' : 'agents'}`;
+  if (!humans) return agentText;
+  return `${agentText} · ${humans} ${humans === 1 ? 'human role' : 'human roles'}`;
+}
+
+/**
  * The action that closes the confirmation and opens what was created — in
  * Agent Chat, on the team's first agent (#2521), since talking to the new
  * agents is what comes next. It used to read "Open team" and lead back to the

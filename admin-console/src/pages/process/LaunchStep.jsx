@@ -20,6 +20,9 @@ import {
   SUFFIX_HINT,
   TEAM_ID_MAX,
   SUFFIX_MAX,
+  NEW_REPO_LESS_ENV,
+  NEW_REPO_LESS_ENV_LABEL,
+  environmentChoiceRequired,
 } from './launch-team.js';
 import { describeMaterializeError } from './materialize-error.js';
 import { PROVISION_NOW_LABEL, PROVISION_NOW_HINT } from './create-team-copy.js';
@@ -60,6 +63,10 @@ export default function LaunchStep({
   // disabled during that fetch — the check re-runs on every render, so it
   // still catches the true zero-provider case before submit.
   hasUsableProvider,
+  // #2737: require an explicit environment choice (an existing environment or
+  // the "New repo-less environment" option) instead of treating "— select —"
+  // as repo-less. Off by default so the Team-Setup wizard is unchanged.
+  requireEnvironmentChoice = false,
 }) {
   const [submitting, setSubmitting] = useState(false);
   const [progressSteps, setProgressSteps] = useState(null);
@@ -87,6 +94,13 @@ export default function LaunchStep({
   const selectedEnv = envList.find(e => e.id === values.environmentId) || null;
   const selectedRepos = selectedEnv ? reposForEnv(selectedEnv) : [];
   const noEnvs = envsLoaded && envList.length === 0;
+  // Lifted only on a confirmed-empty platform (nothing to choose — launches
+  // repo-less, #2168 A2); stays on while the list is loading or failed to load.
+  const requireEnvironment = environmentChoiceRequired({
+    requireEnvironmentChoice, hasEnvironmentField: has('environment'), envsLoaded, envCount: envList.length,
+  });
+  const environmentsPending = !envsLoaded;
+  const newRepoLessChosen = values.environmentId === NEW_REPO_LESS_ENV;
 
   function handleEvent(ev) {
     if (ev.type === 'plan') {
@@ -134,7 +148,7 @@ export default function LaunchStep({
     const settledId = normalizeTeamId(values.teamId);
     if (settledId !== values.teamId) set({ teamId: settledId });
     const settled = { ...values, teamId: settledId };
-    const err = validateLaunch({ ...settled, hasProvider });
+    const err = validateLaunch({ ...settled, requireEnvironment, environmentsPending, hasProvider });
     if (err) { setError(err); setErrorDetail(null); return; }
     setError(null); setErrorDetail(null);
     if (!ack) setTokenWarn(null);
@@ -176,7 +190,7 @@ export default function LaunchStep({
   // the old `envBlocking`, which decided disabled-ness with no connection to the
   // message a caller might show. `launchBlockReason` settles the team id first,
   // so a trailing dash mid-edit never flickers the reason (see its own comment).
-  const launchReason = launchBlockReason({ ...values, hasProvider });
+  const launchReason = launchBlockReason({ ...values, requireEnvironment, environmentsPending, hasProvider });
   const launchBlocked = !!launchReason;
   // The no-environment empty state (below) already carries this exact reason —
   // do not repeat it a second time next to the button (#2157 AC3: the two must
@@ -274,6 +288,9 @@ export default function LaunchStep({
               <Field label="Working environment">
                 <select value={values.environmentId || ''} onChange={e => set({ environmentId: e.target.value })} style={input} disabled={!envsLoaded}>
                   <option value="">{envsLoaded ? '— select —' : 'Loading…'}</option>
+                  {requireEnvironmentChoice && envsLoaded && (
+                    <option value={NEW_REPO_LESS_ENV}>{NEW_REPO_LESS_ENV_LABEL}</option>
+                  )}
                   {envList.map(env => (
                     <option key={env.id} value={env.id}>{env.name || env.id}</option>
                   ))}
@@ -298,7 +315,7 @@ export default function LaunchStep({
               ))}
             </div>
           )}
-          {has('environment') && isRepoLessEnv(selectedEnv) && (
+          {has('environment') && (isRepoLessEnv(selectedEnv) || newRepoLessChosen) && (
             <div style={{ ...infoBox, color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
               This environment has no repository — the team will run without one. Its
               agents can still chat and use their skills, but GitHub hand-offs (PR /

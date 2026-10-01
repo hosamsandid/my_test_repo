@@ -11,6 +11,7 @@ const { WatchStore } = require('./watch-store');
 const { InboxStore } = require('./inbox-store');
 const { ActivityStore } = require('./activity-store');
 const { deriveWatchHealth } = require('./watch-health');
+const { OwnWritesStore } = require('./own-writes-store');
 
 // A fake Jira: one project's issues keyed by call, driven per test.
 function fakeFetch(script) {
@@ -33,11 +34,14 @@ function harness(opts = {}) {
   const watchStore = new WatchStore({ stateDir: dir });
   const inboxStore = new InboxStore({ stateDir: dir, ...(opts.inbox || {}) });
   const activityStore = new ActivityStore({ stateDir: dir, now: opts.now });
+  // the poller's clock, so a record made "now" lines up with the fixtures
+  const ownWritesStore = new OwnWritesStore({ stateDir: dir, now: opts.now || (() => Date.parse('2026-01-01T12:00:00Z')) });
   const delivered = [];
   const poller = new JiraPoller({
     watchStore,
     inboxStore,
     activityStore,
+    ownWritesStore,
     resolveCredential: opts.resolveCredential || (() => ({ siteUrl: 'acme', email: 'bot@acme.com', apiToken: 'tok' })),
     deliver: async (payload) => { delivered.push(payload); },
     env: { JIRA_API_BASE: 'http://fake-jira:8080' },
@@ -45,7 +49,7 @@ function harness(opts = {}) {
     now: opts.now || (() => Date.parse('2026-01-01T12:00:00Z')),
     ...opts.poller,
   });
-  return { dir, watchStore, inboxStore, activityStore, poller, delivered };
+  return { dir, watchStore, inboxStore, activityStore, ownWritesStore, poller, delivered };
 }
 
 const issue = (key, histories) => ({ key, fields: { summary: `${key} summary` }, changelog: { histories } });
@@ -429,4 +433,259 @@ test('the project cap counts GATED events across every watch on the project (F7 
   try { await h.poller._tick(); } finally { restore2(); }
   assert.deepEqual(h.delivered.map((d) => d.kind), ['digest']);
   assert.equal(h.delivered[0].events.length, 4);
+});
+
+test('every delivered status change carries event: status_changed; a watch whose events set is explicit still gates by status', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['status_changed'], statusFilters: ['Done'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [issue('ENG-1', [
+    statusHistory('501', 'To Do', 'In Progress', '2026-01-01T11:58:00Z'),
+    statusHistory('502', 'In Progress', 'Done', '2026-01-01T11:59:00Z'),
+  ])] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(h.delivered.length, 1);
+  assert.equal(h.delivered[0].events[0].event, 'status_changed');
+  const filtered = h.activityStore.list('team-1').filter((r) => r.outcome === 'filtered');
+  assert.equal(filtered.length, 1);
+  assert.match(filtered[0].detail, /In Progress is not a watched status/);
+});
+
+// ── issue_created ───────────────────────────────────────────────────────────
+
+const createdIssue = (key, created, histories = []) => ({
+  key, fields: { summary: `${key} summary`, created, status: { name: 'To Do' }, reporter: { displayName: 'Jane' }, priority: { name: 'High' } },
+  changelog: { histories },
+});
+
+test('issue_created: not forwarded unless the watch opts in (recorded as filtered)', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG' }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [createdIssue('ENG-9', '2026-01-01T11:58:00.000+0000', [statusHistory('1', 'A', 'B', '2026-01-01T11:58:00Z')])] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => d.events[0].event), ['status_changed']);
+  const f = h.activityStore.list('team-1').find((r) => r.outcome === 'filtered');
+  assert.equal(f.event.event, 'issue_created');
+  assert.match(f.detail, /issue_created is not watched/);
+});
+
+test('issue_created + status change in one poll → two single-kind wakes', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['status_changed', 'issue_created'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [createdIssue('ENG-9', '2026-01-01T11:58:00.000+0000', [statusHistory('1', 'To Do', 'In Progress', '2026-01-01T11:59:00Z')])] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(h.delivered.length, 2);
+  assert.deepEqual(h.delivered.map((d) => d.events.map((e) => e.event)), [['issue_created'], ['status_changed']]);
+  const created = h.delivered[0].events[0];
+  assert.equal(created.id, 'ENG-9:created');
+  assert.equal(created.reporter, 'Jane');
+  assert.equal(created.priority, 'High');
+  assert.equal(created.status, 'To Do');
+  assert.equal(created.origin, 'human');
+  assert.deepEqual(h.inboxStore.list('team-1').map((e) => e.event.id).sort(), ['ENG-9:1', 'ENG-9:created']);
+});
+
+test('issue_created fires once: the next poll sees the same issue again and stays quiet', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['issue_created'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const script = () => ({ body: { isLast: true, issues: [createdIssue('ENG-9', '2026-01-01T11:58:00.000+0000')] } });
+  let restore = fakeFetch(script);
+  try { await h.poller._tick(); } finally { restore(); }
+  restore = fakeFetch(script);
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(h.delivered.length, 1);
+});
+
+test('issue_created on the baseline poll is recorded, not fired', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['issue_created'] }] });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [createdIssue('ENG-9', '2026-01-01T11:58:00.000+0000')] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(h.delivered.length, 0);
+  assert.deepEqual(h.watchStore.getCursor('team-1', 'acme::ENG').seen, ['ENG-9:created']);
+});
+
+test('issue_created: an issue created before the previous poll (first seen late) is stale, not fired', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['issue_created'] }] });
+  // inside the 10-min JQL window, but before lastPolledAt minus grace
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:59:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [createdIssue('ENG-9', '2026-01-01T11:51:00.000+0000')] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(h.delivered.length, 0);
+  assert.equal(h.activityStore.list('team-1')[0].outcome, 'stale');
+});
+
+test('issue_created: an issue the broker created itself carries origin: agent', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['issue_created'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  h.ownWritesStore.recordIssue('team-1', 'ENG-9');
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [
+    createdIssue('ENG-9', '2026-01-01T11:58:00.000+0000'),
+    createdIssue('ENG-10', '2026-01-01T11:58:30.000+0000'),
+  ] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => [d.events[0].issueKey, d.events[0].origin]), [['ENG-9', 'agent'], ['ENG-10', 'human']]);
+});
+
+// ── field_changed ───────────────────────────────────────────────────────────
+
+const mixedHistory = (id, created, items) => ({ id, created, author: { displayName: 'Jane' }, items });
+
+test('field_changed: one history with status + assignee → one status wake and one field wake; Rank never fires', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['status_changed', 'field_changed'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [issue('ENG-1', [mixedHistory('700', '2026-01-01T11:59:00Z', [
+    { field: 'status', fieldId: 'status', fromString: 'To Do', toString: 'In Progress' },
+    { field: 'assignee', fieldId: 'assignee', fromString: null, toString: 'Bob' },
+    { field: 'Rank', fieldId: 'customfield_10019', fromString: '', toString: 'Ranked higher' },
+  ])])] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => d.events.map((e) => e.id)), [['ENG-1:700'], ['ENG-1:700.assignee']]);
+  assert.equal(h.delivered[1].events[0].event, 'field_changed');
+});
+
+test('field_changed: a sprint-planning bulk move folds into one status digest and one field digest (two wakes, not 20)', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['status_changed', 'field_changed'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const issues = Array.from({ length: 10 }, (_, i) => issue(`ENG-${i + 1}`, [mixedHistory(`80${i}`, '2026-01-01T11:59:00Z', [
+    { field: 'status', fieldId: 'status', fromString: 'Backlog', toString: 'Ready for Dev' },
+    { field: 'Sprint', fieldtype: 'custom', fieldId: 'customfield_10020', fromString: '', toString: 'Sprint 4' },
+  ])]));
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => [d.kind, d.events[0].event, d.events.length]), [
+    ['digest', 'status_changed', 10],
+    ['digest', 'field_changed', 10],
+  ]);
+  assert.match(h.activityStore.list('team-1').find((r) => r.event.event === 'field_changed').detail, /10 field changes in ENG/);
+});
+
+test('field_changed: a field the broker set itself carries origin: agent', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['field_changed'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  h.ownWritesStore.recordField('team-1', 'ENG-1', 'customfield_20001'); // stamped at the harness clock, 12:00
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [issue('ENG-1', [
+    mixedHistory('900', '2026-01-01T11:59:30Z', [{ field: 'Team', fieldtype: 'custom', fieldId: 'customfield_20001', fromString: null, toString: 'Blue' }]),
+    mixedHistory('901', '2026-01-01T11:59:40Z', [{ field: 'priority', fieldId: 'priority', fromString: 'Low', toString: 'High' }]),
+  ])] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => [d.events[0].field, d.events[0].origin]), [['Team', 'agent'], ['priority', 'human']]);
+});
+
+test('field_changed: a write recorded while the poll is running (after its search) still reads origin: agent', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['field_changed'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch((url) => {
+    if (url.includes('/changelog')) {
+      // the /set-field response lands mid-poll: Jira already returned the change
+      h.ownWritesStore.recordField('team-1', 'ENG-1', 'customfield_20001');
+      return { body: { isLast: true, values: [
+        mixedHistory('910', '2026-01-01T11:59:30Z', [{ field: 'Team', fieldtype: 'custom', fieldId: 'customfield_20001', fromString: null, toString: 'Blue' }]),
+      ] } };
+    }
+    return { body: { isLast: true, issues: [issue('ENG-1', [])] } }; // no inline histories → changelog backfill
+  });
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => [d.events[0].field, d.events[0].origin]), [['Team', 'agent']]);
+});
+
+test('field_changed: an old field change on a re-touched issue is stale, not fired', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['field_changed'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:59:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [issue('ENG-1', [
+    mixedHistory('950', '2025-12-01T09:00:00Z', [{ field: 'labels', fieldId: 'labels', fromString: '', toString: 'old' }]),
+  ])] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(h.delivered.length, 0);
+  assert.equal(h.activityStore.list('team-1')[0].outcome, 'stale');
+});
+
+// ── comment_added ───────────────────────────────────────────────────────────
+
+const adfDoc = (...lines) => ({ type: 'doc', version: 1, content: lines.map((t) => ({ type: 'paragraph', content: [{ type: 'text', text: t }] })) });
+const commented = (key, comments, total) => ({
+  key, fields: { summary: `${key} summary`, comment: { total: total == null ? comments.length : total, comments } }, changelog: { histories: [] },
+});
+const jc = (id, created, lines, author = 'Jane') => ({ id, created, author: { displayName: author }, body: adfDoc(...lines) });
+
+test('comment_added: a human comment wakes; the agent\'s own (registered) comment is delivered with origin: agent', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['comment_added'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  h.ownWritesStore.recordComment('team-1', 'ENG-1', '501');
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [commented('ENG-1', [
+    jc('500', '2026-01-01T11:58:00.000+0000', ['Can you clarify the AC?']),
+    jc('501', '2026-01-01T11:59:00.000+0000', ['Posted by an agent on team "team-1" via Agent Studio.', 'Clarified.'], 'Admin'),
+  ])] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => [d.events[0].id, d.events[0].origin, d.events[0].body]), [
+    ['ENG-1:c500', 'human', 'Can you clarify the AC?'],
+    ['ENG-1:c501', 'agent', 'Clarified.'],
+  ]);
+});
+
+test('comment_added: a truncated comment list triggers exactly one backfill call for that issue', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['comment_added'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const backfills = [];
+  const restore = fakeFetch((url) => {
+    if (url.includes('/search/jql')) {
+      return { body: { isLast: true, issues: [
+        commented('ENG-1', [jc('1', '2025-06-01T00:00:00Z', ['ancient'])], 40), // search inlined an old one, 40 exist
+        commented('ENG-2', [jc('2', '2026-01-01T11:58:00Z', ['complete list'])]),
+      ] } };
+    }
+    if (url.includes('/comment?')) {
+      backfills.push(url);
+      return { body: { total: 40, comments: [jc('41', '2026-01-01T11:59:00Z', ['newest']), jc('40', '2025-12-31T00:00:00Z', ['old'])] } };
+    }
+    return { body: { isLast: true, values: [] } }; // changelog backfill for the history-less issues
+  });
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(backfills.length, 1);
+  assert.match(backfills[0], /\/issue\/ENG-1\/comment\?/);
+  assert.deepEqual(h.delivered.map((d) => d.events[0].id).sort(), ['ENG-1:c41', 'ENG-2:c2']);
+});
+
+test('comment_added: a comment created before the previous poll on a re-touched issue is stale', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['comment_added'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:59:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [commented('ENG-1', [jc('600', '2026-01-01T11:52:00Z', ['earlier'])])] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(h.delivered.length, 0);
+  assert.equal(h.activityStore.list('team-1')[0].outcome, 'stale');
+});
+
+test('field_changed: fields changed by an agent transition (resolution in the same history) read origin: agent', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['status_changed', 'field_changed'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  h.ownWritesStore.recordField('team-1', 'ENG-1', '*'); // what /transition records
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [
+    issue('ENG-1', [mixedHistory('990', '2026-01-01T11:59:50Z', [
+      { field: 'status', fieldId: 'status', fromString: 'In Review', toString: 'Done' },
+      { field: 'resolution', fieldId: 'resolution', fromString: null, toString: 'Done' },
+    ])]),
+    issue('ENG-2', [mixedHistory('991', '2026-01-01T11:59:50Z', [
+      { field: 'resolution', fieldId: 'resolution', fromString: null, toString: 'Done' },
+    ])]),
+  ] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  const fields = h.delivered.filter((d) => d.events[0].event === 'field_changed').map((d) => [d.events[0].issueKey, d.events[0].origin]);
+  assert.deepEqual(fields, [['ENG-1', 'agent'], ['ENG-2', 'human']]);
+  // the status change itself stays origin-less and still wakes the next stage
+  const status = h.delivered.find((d) => d.events[0].event === 'status_changed').events[0];
+  assert.equal('origin' in status, false);
 });

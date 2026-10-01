@@ -488,6 +488,9 @@ a { color: var(--eb-accent-primary); }
 
 /* admin watch-config editor rows */
 .watch-editor-row { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 8px; }
+.watch-editor-block { margin-bottom: 14px; }
+.kind-editor { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: -2px 0 0 130px; font-size: var(--eb-text-sm); color: var(--eb-text-secondary); }
+.kind-check { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
 .pk-input {
   font: inherit; font-size: var(--eb-text-base); padding: 6px 9px; border-radius: var(--eb-radius-md);
   border: 1px solid var(--eb-border-hover); background: var(--eb-bg-elevated); color: var(--eb-text-primary);

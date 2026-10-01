@@ -194,7 +194,7 @@ const {
   DEFAULT_AGENT_IMAGE: BUILTIN_AGENT_IMAGE,
 } = require('./toolchain-registry');
 const { resolveSpecKitCommand, hasUnresolvedPlaceholders } = require('./speckit-content');
-const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
+const { deriveScopeList, enforceUiRoute, signViewerHeaders, bodyWasParsed } = require('./plugin-ui-proxy');
 const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole, viewerTeamRoles } = require('./plugin-ui-viewer');
 const pluginCredView = require('./plugin-credential-view');
 const { PLUGIN_ID_RE, invalidPluginIdMessage, isRemovableRegistryDirName } = require('./plugin-registry-ids');
@@ -10616,7 +10616,7 @@ function pluginUiProxy(req, res) {
     // globally, before any route). Re-serialise it so a document PUT still
     // reaches the sidecar; any other content type was left untouched and is
     // streamed straight through.
-    const parsedBody = req._body === true;
+    const parsedBody = bodyWasParsed(req);
     let payload = null;
     if (parsedBody) {
       payload = Buffer.from(typeof req.body === 'string' ? req.body : JSON.stringify(req.body == null ? {} : req.body));

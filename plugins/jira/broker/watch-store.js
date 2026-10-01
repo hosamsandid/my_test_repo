@@ -14,7 +14,11 @@
 // session inside the sidecar, by `spike.js watch` editing this store directly.
 //
 // A watch is:
-//   { projectKey, statusFilters?: string[], jql?, wake: { agentIds? | "all-granted" } }
+//   { projectKey, statusFilters?: string[], events: string[], jql?, wake: { agentIds? | "all-granted" } }
+//
+// `events` is the opt-in set of event kinds this watch forwards (event-
+// extract.js `KNOWN_EVENTS`); it defaults to `["status_changed"]` on read.
+// `statusFilters` gate `status_changed` only.
 //
 // `statusFilters` is a SET of target statuses — the watch fires on a transition
 // into any of them (an empty / absent set = fire on any status change). A legacy
@@ -33,6 +37,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { KNOWN_EVENTS, DEFAULT_WATCH_EVENTS } = require('./event-extract');
 
 // A scopeId is a plugin-scope token subject. Constrain it to a safe path
 // segment (defense in depth — the orchestrator only ever mints well-formed ids).
@@ -69,6 +74,13 @@ function normalizeWatch(w) {
     if (t && !statusFilters.includes(t)) statusFilters.push(t);
   }
   if (statusFilters.length) out.statusFilters = statusFilters;
+  // `events` is the watch's opt-in set of event kinds. Absent / empty / all
+  // unknown → `["status_changed"]`, so a watch written before event kinds
+  // existed is exactly as noisy as it was. Unknown names are dropped; the set
+  // is kept in KNOWN_EVENTS order so a round trip is stable.
+  const rawEvents = Array.isArray(w.events) ? w.events : [];
+  const events = KNOWN_EVENTS.filter((k) => rawEvents.includes(k));
+  out.events = events.length ? events : DEFAULT_WATCH_EVENTS.slice();
   if (typeof w.jql === 'string' && w.jql.trim()) out.jql = w.jql.trim();
   const wake = w.wake && typeof w.wake === 'object' ? w.wake : {};
   if (Array.isArray(wake.agentIds) && wake.agentIds.length) {

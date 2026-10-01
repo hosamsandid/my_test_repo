@@ -71,6 +71,16 @@ make seed-plugins      # lays plugins/jira/ into the pool
 Then **Administration → Plugins → Jira → Install** (System Admin). Install starts
 the broker sidecar and grants the plugin to nobody.
 
+**Upgrading an installed Jira plugin** (e.g. to get the event kinds). Do
+**not** uninstall and reinstall — uninstall reaps every team's Jira credential.
+Instead: `make plugin-images` + `make seed-plugins` as above, then copy
+`plugin.json`, `bin/` and `help/` from `plugins/jira/` over the installed
+copy at `/workspace/plugins/jira/` and restart the stack (`make restart`). The
+registry re-validates the manifest on read, granted agents get the new
+`aee-jira` on the next plugin reconcile, and watch configs, cursors and the
+inbox survive on the plugin's state volume. Existing watches stay *status
+changes only* until a Team Admin ticks another kind.
+
 ### 2. Grant it to a team
 
 On the same page, the Jira card's team-assign control — or a per-agent grant on
@@ -127,14 +137,20 @@ was saved. Deleting a user account deletes their personal credentials.
 
 The Jira plugin's **Watch config** page (`/admin`, team-admin — reached from the
 "Watch config" link on the plugin's main page): a list of
-`{ projectKey, statusFilters? }` rows.
+`{ projectKey, statusFilters?, events }` rows.
 
 - `projectKey` — e.g. `KAN`.
+- `events` — which **kinds** of event the row forwards (checkboxes):
+  *Status changes* (`status_changed`), *New issues* (`issue_created`),
+  *Comments* (`comment_added`), *Other field changes* (`field_changed`). Default
+  — and the migration for a row saved before kinds existed — is status changes
+  only, so an upgrade never makes a watch noisier.
 - `statusFilters` — a **set** of target statuses (chips). An empty set fires on
   **any** status change; add one or more (exact match, case-sensitive — copy
   each from Jira) to fire only on transitions **into any of them**, e.g.
   `Ready for Dev` + `In Review`. A config written before multi-status support
   (a singular `statusFilter` string) is migrated to a one-element set on read.
+  The set gates status changes only — never another kind.
 
 ### 5. Give the agents a `plugin-event` trigger
 
@@ -144,7 +160,7 @@ per-agent trigger: Agent Chat → **Triggers** → add → type **Plugin event**
 | Field | |
 |---|---|
 | Plugin | `jira` (picked from the installed plugins) |
-| Which event | *Any event* or `status_changed` (the only event the plugin sends). Offered as a select from the manifest's `events[]`. A status name is **not** an event — the form flags one as *not an event this plugin declares*. |
+| Which event | `status_changed`, `issue_created`, `comment_added`, `field_changed`, or *Any event*. Offered as a select from the manifest's `events[]`. Once a watch forwards more than one kind, set it on **every** trigger — *Any event* with no *Only when…* wakes on every kind. A status name is **not** an event — the form flags one as *not an event this plugin declares*. |
 | Only when… | **which status wakes this agent** — condition rows `field = value`, e.g. `toStatus = Ready for Dev`; the field picker lists the payload keys below with an example. No conditions = every watched transition wakes this agent. Stored as `payloadFilter: { toStatus: "Ready for Dev" }`. |
 | Wake instruction | what the agent should do — e.g. *"Take the event id(s) from the event payload, run `aee-jira inbox --consume <id>…`, read the issue with `aee-jira show`, refine the description and write it back with `aee-jira update`, then move it on with `aee-jira transition`."* |
 
@@ -168,6 +184,58 @@ The fields a `status_changed` payload carries, all plain strings:
 | `created` | ISO timestamp of the transition; rarely useful for routing (an exact-match filter on a timestamp never matches twice) |
 | `summary` | the issue title at the time of the transition; rarely useful for routing (exact-match on a title is brittle — it changes) |
 | `issueUrl` | the Jira browse link; not useful for routing |
+
+The fields an `issue_created` payload carries (plus `id` = `<issueKey>:created`,
+`created`, `summary`, `issueUrl` as above; `author` = the reporter):
+
+| Key | |
+|---|---|
+| `origin` | `human`, or `agent` when this team's agents created the issue (`aee-jira create-epic`) — the broker records every issue it creates. Filter `origin = human` on a triage trigger so an agent's own tickets do not wake it |
+| `issueType` / `projectKey` / `issueKey` | as above |
+| `status` / `priority` | what the issue was created with |
+| `reporter` | who created it (display name) — the Team Admin's account for an agent-created issue, which is why `origin` exists |
+
+The fields a `field_changed` payload carries — one event per changed field,
+id `<issueKey>:<changelogId>.<fieldId>` (one history can change several
+fields):
+
+| Key | |
+|---|---|
+| `field` | the field's display name as Jira reports it (`assignee`, `priority`, `labels`, `Sprint`, `Fix Version`, `Attachment`, …) |
+| `fieldId` | the stable id (`assignee`, `fixVersions`, `customfield_10020`) — route custom fields on this; their display names vary per site |
+| `from` / `to` | Jira's display strings, cut at 500 characters; absent side = `""` (an unassign has no `to`), never `null`. A trigger cannot filter on an empty value (`payloadFilter` ignores empty values), so catch a cleared field with a `field` filter and read `to` in the wake |
+| `fieldType` | `jira` or `custom` |
+| `origin` | `agent` when the change matches a write this team's agents made through the broker (`set-field`, `attachment add`) on the same issue + field within ±2 minutes — or any field on an issue an agent transitioned or created in that window (`resolution`, transition-screen fields) — else `human` |
+
+Never a `field_changed`: `status` (its own kind), `description` (an agent's
+`aee-jira update` would wake it — a separate kind, not yet built) and `Rank`
+(every board drag writes one). Several labels changed at once arrive as one
+item, space-separated, as Jira logs them.
+
+The fields a `comment_added` payload carries — id `<issueKey>:c<commentId>`:
+
+| Key | |
+|---|---|
+| `origin` | `agent` when this team's agents posted it (`aee-jira comment` — the broker records every comment id it creates, and as a restart-safe fallback recognises the *"Posted by an agent on team …"* line every agent comment opens with), else `human` |
+| `author` | the commenter's display name — the Team Admin's account for an agent's comment, which is why `origin` exists |
+| `commentId` | Jira's comment id |
+| `body` | the comment as plain text (Atlassian Document Format flattened; the agent provenance line dropped), cut at 2000 characters |
+| `bodyTruncated` | `"true"` when `body` was cut — `aee-jira show <issueKey> --comment <commentId>` returns the full text |
+
+**Put `origin = human` on every `comment_added` trigger.** Without it an agent
+that answers with `aee-jira comment` wakes on its own answer and answers again;
+the platform's loop protection is frequency-only (5 wakes per issue per hour),
+so it would slow that loop, not stop it. Waiting for a *teammate agent's*
+comment is the one reason for `origin = agent` — then add a second condition
+that separates the two agents. The help topic's *Avoid the comment loop*
+section says the same for the console.
+
+Only comments **created** inside the poll window are events; editing an
+existing comment is not. An issue with more comments than the search response
+inlines gets one extra `GET /issue/{key}/comment` for its newest ones.
+
+Every wake is **single-kind**: a poll that sees a new issue and a status change
+sends two wakes, one per kind, so *Which event* always matches cleanly.
 
 A burst digest matches when **any** of its folded events matches, and the woken
 agent receives the digest **projected to its own filter**: only the folded
@@ -203,7 +271,7 @@ broker; the agent never sees the token.
 | `aee-jira statuses --project KAN` | every workflow status the project supports, grouped by issue type (`[{ issueType, statuses: [{ name, category }] }]`, `category` = Jira's coarse `new`/`indeterminate`/`done` bucket). The full set the workflow allows, independent of any one issue's current state — for planning or checking what a workflow supports before an issue reaches a given status. Complements `show`'s per-issue `availableTransitions` |
 | `aee-jira list --project KAN [--status "Ready for Dev"]` | a project's issues, most-recently-updated first |
 | `aee-jira search --jql "<JQL>" [--fields …] [--limit N]` | run an arbitrary JQL query for filters `list` can't express (a `created`/`updated` range, an empty custom field, a summary match, …). The query runs under the team's bound credential, so it can only ever return issues on that site and in projects the credential may browse — the JQL cannot escape the team's scope. `--fields` selects the returned fields: a name matching a standard column narrows the projection (default all: `key,summary,status,issueType,assignee,updated,parent,url`; `parent` is the parent/epic key); any other name is read as a **custom field** and rides alongside the row under `customFields` (unioned with the admin `readable-custom-fields` allow-list). `--limit` caps results (default 100, max 2000). Read-only, shaped exactly like `list` |
-| `aee-jira show KAN-6 [--fields "Team,Sprint"]` | one issue (summary, status, assignee, created/updated, parent/epic key, URL) — and, when the issue has any, its attachments (filename, id, MIME type, size, author). `parent` is the native parent (team-managed) or the resolved Epic Link (company-managed), so an agent can `show` it to traverse Story→Epic. It also carries `availableTransitions` (`[{ transition, toStatus }, …]`) — the moves reachable from the issue's current status, so an agent can pick a `transition --to` without guessing-then-parsing a failed attempt. `--fields` additionally reads **custom fields** by their Jira name (unioned with the admin `readable-custom-fields` set) under `customFields`; an unset field comes back as `null`, so an empty value is distinguishable from a set one |
+| `aee-jira show KAN-6 [--fields "Team,Sprint"] [--comment <id>]` | one issue (summary, status, assignee, created/updated, parent/epic key, URL) — and, when the issue has any, its attachments (filename, id, MIME type, size, author). `parent` is the native parent (team-managed) or the resolved Epic Link (company-managed), so an agent can `show` it to traverse Story→Epic. It also carries `availableTransitions` (`[{ transition, toStatus }, …]`) — the moves reachable from the issue's current status, so an agent can pick a `transition --to` without guessing-then-parsing a failed attempt. `--fields` additionally reads **custom fields** by their Jira name (unioned with the admin `readable-custom-fields` set) under `customFields`; an unset field comes back as `null`, so an empty value is distinguishable from a set one. `--comment <id>` adds one comment in full under `comment` (`id`, `author`, `created`, `body` as plain text) — how an agent reads a `comment_added` wake whose `body` was cut (`bodyTruncated`) |
 | `aee-jira attachment get KAN-6 10312 [--out PATH]` | fetch one attachment's content by id (the id comes from `show`). A text file (`.txt`/`.md`/`.json`/…) prints inline; a binary file (image, PDF) is decoded and saved under `.agent-studio/jira-attachments/` (or `--out`). An id not on the issue — or one deleted since `show` listed it — is a clean domain error. Files over the fetch cap (default 10 MB, `JIRA_ATTACHMENT_MAX_BYTES`) are refused with a message, not truncated |
 | `aee-jira attachment add KAN-6 <path> [<path>…]` | upload one or more local files as new attachments. Each path becomes a **separate** attachment (Jira never overwrites — a same-named upload is a new, additional file). Every path is checked to exist, be readable and be within the upload cap (default 10 MB, `JIRA_ATTACHMENT_UPLOAD_MAX_BYTES`) *before* any upload starts; when several files are given and one upload fails, the others still go through and the result reports per-file success/failure with each created id (`--json` for machine-readable). The bytes travel to the broker, which does the multipart upload server-side — the token never reaches the agent. A missing/foreign issue key, disabled attachments or an over-instance-limit file surface as clean domain errors |
 | `aee-jira comment KAN-6 --body "…"` | add a comment (attributed to *"an agent on team …"*) |
@@ -251,7 +319,7 @@ member of a granted team), two tabs:
     the next retry time, a short log of the actual errors with timestamps,
     a **Retry now** button (team-admin), and a pointer to
     *Plugins → Jira → Credentials*.
-  - **Inbox** — the status changes queued for this team's agents.
+  - **Inbox** — the events queued for this team's agents.
 - **Activity** — the retained event log (see below).
 
 The **Watch config** link (team-admin only) opens `/admin` — the
@@ -273,10 +341,10 @@ Chat help.
 Two records, for two audiences:
 
 - **Activity tab** (the plugin's `/` route) — the plugin's own retained log:
-  every fresh status change the poller saw in a watched project and what it did
+  every fresh event the poller saw in a watched project and what it did
   with it — `woke agents` / `folded into digest` / `throttled` /
-  `not a watched status` / `baseline`. Grouped by day, filterable by issue type
-  and by *Watched* vs *All activity* (the latter also shows transitions the
+  `not watched` / `baseline`. Grouped by day, filterable by event kind (once
+  more than one kind is present), issue type and *Watched* vs *All activity* (the latter also shows transitions the
   poller saw but did not act on). Kept **14 days**, independent of the agent
   inbox. This is the `JiraEventLog.jsx` #1539 deferred, at zero platform cost.
 - **Platform GitHub Event Log** (`/github-events`) — every *wake* also writes one
@@ -344,6 +412,13 @@ with the service account.
 
 ## Limits
 
+- **Throttle shared across kinds.** The per-issue 5-wakes-per-hour throttle
+  counts every kind together — it is loop protection for one issue's
+  conversation, and a comment loop is exactly what it must catch. A status
+  change plus four comments on one issue in one hour drops the fifth wake
+  (`throttled` on the Activity tab; the event is still in the log).
+- **Poll only, no Jira webhooks.** Every kind is found by the same ~60 s JQL
+  poll; nothing is instant.
 - **No claim-label analogue.** Nothing in Jira marks an issue "picked up" the way
   a GitHub `ready` → `ready:wip` swap does.
 - **Not on the Process Canvas.** A Jira wake is not a flow edge; it does not

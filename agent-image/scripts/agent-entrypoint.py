@@ -131,6 +131,10 @@ def _is_human_sender(agent_user_id: str, sender: str, members: list[str]) -> boo
 # verdict, and how often to poll for it. Overridable for tests / slow reviewers.
 VERIFY_WAIT_SEC = int(os.environ.get("LOOP_VERIFY_WAIT_SEC", "1800"))
 VERIFY_POLL_SEC = float(os.environ.get("LOOP_VERIFY_POLL_SEC", "10"))
+# Loop `until.command` / `verify.command` (#2745): shell commands such as
+# `npm test`, so they get far more headroom than the 30 s preCheck default.
+LOOP_COMMAND_TIMEOUT_SEC = max(
+    1, int(os.environ.get("LOOP_COMMAND_TIMEOUT_MS", "600000")) // 1000)
 
 # A triggered run whose claude invocation dies on a transient infra error
 # (API 5xx, connection closed mid-response) gets exactly one retry after this
@@ -4314,6 +4318,51 @@ def _run_pre_check(script_path: str, env: dict) -> tuple[int, str]:
     return proc.returncode, (proc.stdout or "")[:4000]
 
 
+def _run_loop_command(command: str, env: dict) -> tuple[int, str]:
+    """Run a loop's ``until.command`` / ``verify.command`` (#2745).
+
+    Unlike ``_run_pre_check`` (a script *path*), loop commands are shell
+    command lines (``npm test && test ! -s fix_plan.md``), so they run through
+    ``/bin/sh -c`` in the agent workspace. Returns ``(exit_code, output)``;
+    the output carries stdout plus stderr, and a spawn error or timeout is
+    reported as text with a non-zero code, so the loop feedback / outcome DM
+    always shows why the command failed instead of an empty block.
+    """
+    full_env = {**os.environ, **(env or {})}
+    try:
+        cwd = _agent_workdir()
+        cwd = str(cwd) if cwd.is_dir() else None
+    except Exception:
+        cwd = None
+    try:
+        proc = subprocess.run(
+            ["/bin/sh", "-c", command],
+            env=full_env,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=LOOP_COMMAND_TIMEOUT_SEC,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        msg = f"loop command timed out after {LOOP_COMMAND_TIMEOUT_SEC}s: {command}"
+        print(f"[Runner] {msg}", file=sys.stderr)
+        return 124, msg
+    except Exception as exc:
+        msg = f"loop command could not be started: {exc}"
+        print(f"[Runner] {msg}", file=sys.stderr)
+        return 127, msg
+
+    out = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    if err:
+        print(f"[Runner] loop command stderr: {err[:400]}", file=sys.stderr)
+    if proc.returncode != 0 and not (out or err):
+        out = f"(command exited {proc.returncode} with no output)"
+    combined = "\n".join(part for part in (out, f"[stderr]\n{err}" if err else "") if part)
+    return proc.returncode, combined[:4000]
+
+
 def _validate_loop_trigger(trigger: dict) -> tuple[bool, str]:
     """Validate a `loop` trigger's stop contract (#932).
 
@@ -4369,8 +4418,8 @@ def _validate_verify_spec(verify) -> tuple[bool, str]:
 
     A verifier takes exactly one of four shapes:
 
-    - ``{"command": "<sh>", "env": {}}`` — an exit-code gate (reuses
-      ``_run_pre_check``).
+    - ``{"command": "<sh>", "env": {}}`` — an exit-code gate (a shell
+      command line, run by ``_run_loop_command``).
     - ``{"agentId": "<other-agent>"}`` — delegate the check to a *different*
       agent and block on its verdict.
     - ``{"flow": true}`` — hand-off to the flow: no inline gate, verification
@@ -5783,7 +5832,7 @@ class TriggerScheduler:
                 until_code: int | None = None
                 if until_cmd:
                     until_code, last_until_output = await asyncio.to_thread(
-                        _run_pre_check, until_cmd, until_env)
+                        _run_loop_command, until_cmd, until_env)
                 outcome = _loop_stop_decision(
                     iterations, max_iterations, until_code,
                     tokens_spent, max_tokens)
@@ -6087,7 +6136,7 @@ class TriggerScheduler:
                                iteration: int) -> tuple[bool, str]:
         """Run one iteration's verifier gate (#933). Returns ``(passed, output)``.
 
-        - ``command`` → exit-code gate via ``_run_pre_check`` (0 == pass).
+        - ``command`` → exit-code gate via ``_run_loop_command`` (0 == pass).
         - ``agent``   → delegate to a different agent and block on its verdict.
         - ``flow``    → no inline gate; the downstream flow QS chain verifies
           each hand-off asynchronously.
@@ -6096,7 +6145,7 @@ class TriggerScheduler:
         mode = plan.get("mode")
         if mode == "command":
             code, out = await asyncio.to_thread(
-                _run_pre_check, plan["command"], plan.get("env") or {})
+                _run_loop_command, plan["command"], plan.get("env") or {})
             return code == 0, out
         if mode == "agent":
             return await self._run_agent_verify(plan["agentId"], trigger, iteration)

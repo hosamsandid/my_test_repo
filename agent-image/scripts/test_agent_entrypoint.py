@@ -2295,6 +2295,116 @@ class LoopTriggerValidation(unittest.TestCase):
             self.assertIn("maxTokens", reason)
 
 
+class RunLoopCommand(unittest.TestCase):
+    """#2745: loop `until.command` / `verify.command` are shell command lines —
+    they run through `/bin/sh -c` in the agent workspace, and a failure always
+    carries a readable reason."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.workdir = Path(self._tmpdir.name)
+        patcher = patch.object(entrypoint, "_agent_workdir", return_value=self.workdir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_command_with_arguments_and_operators_runs_through_a_shell(self):
+        code, out = entrypoint._run_loop_command("true && echo 'lints 0' | grep -q '^lints 0'", {})
+        self.assertEqual(code, 0, out)
+
+    def test_runs_in_the_agent_workspace(self):
+        (self.workdir / "STATE.md").write_text("Status: DONE\n", encoding="utf-8")
+        code, out = entrypoint._run_loop_command("grep -q '^Status: DONE' STATE.md && pwd", {})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(Path(out.strip()).resolve(), self.workdir.resolve())
+
+    def test_non_zero_exit_is_reported_with_stdout_and_stderr(self):
+        code, out = entrypoint._run_loop_command("echo 'lint error A'; echo boom >&2; exit 3", {})
+        self.assertEqual(code, 3)
+        self.assertIn("lint error A", out)
+        self.assertIn("boom", out)
+
+    def test_silent_failure_still_explains_itself(self):
+        code, out = entrypoint._run_loop_command("test -f does-not-exist", {})
+        self.assertEqual(code, 1)
+        self.assertIn("exited 1", out)
+
+    def test_env_is_passed_to_the_command(self):
+        code, out = entrypoint._run_loop_command('test "$LOOP_FLAG" = on', {"LOOP_FLAG": "on"})
+        self.assertEqual(code, 0, out)
+
+    def test_spawn_error_is_surfaced_as_output(self):
+        with patch.object(entrypoint.subprocess, "run",
+                          side_effect=FileNotFoundError("/bin/sh missing")):
+            code, out = entrypoint._run_loop_command("true", {})
+        self.assertNotEqual(code, 0)
+        self.assertIn("could not be started", out)
+        self.assertIn("/bin/sh missing", out)
+
+    def test_timeout_is_surfaced_as_output(self):
+        with patch.object(entrypoint.subprocess, "run",
+                          side_effect=subprocess.TimeoutExpired("sh", 600)):
+            code, out = entrypoint._run_loop_command("sleep 999", {})
+        self.assertNotEqual(code, 0)
+        self.assertIn("timed out", out)
+
+
+class LoopCommandsEndToEnd(unittest.IsolatedAsyncioTestCase):
+    """#2745: the loop runner gates and stops on real shell commands (no
+    `_run_loop_command` stub) — `&&` in `verify`, a file check in `until`."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.workdir = Path(self._tmpdir.name)
+        patcher = patch.object(entrypoint, "_agent_workdir", return_value=self.workdir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    async def test_verify_command_with_operators_passes(self):
+        scheduler = self._scheduler()
+        passed, out = await scheduler._run_loop_verify(
+            {"mode": "command", "command": "true && true", "env": {}}, {"id": "lp"}, 1)
+        self.assertTrue(passed, out)
+
+    async def test_failing_verify_command_feeds_its_output_back(self):
+        scheduler = self._scheduler()
+        passed, out = await scheduler._run_loop_verify(
+            {"mode": "command", "command": "echo 'lints 2' && false", "env": {}},
+            {"id": "lp"}, 1)
+        self.assertFalse(passed)
+        self.assertIn("lints 2", entrypoint._build_verify_feedback(out, mode="command"))
+
+    async def test_until_command_stops_the_loop_once_its_goal_is_met(self):
+        scheduler = self._scheduler()
+        trigger = {"id": "lp", "type": "loop", "enabled": True, "roomId": "!room:local",
+                   "maxIterations": 5, "prompt": "do it",
+                   "verify": {"command": "true && true"},
+                   "until": {"command": "test -f done && echo finished"}}
+        calls = []
+
+        async def fake_execute(_trig, ctx=None, loop_sink=None, **_kw):
+            calls.append(ctx)
+            if len(calls) == 2:
+                (self.workdir / "done").write_text("", encoding="utf-8")
+
+        with patch.object(scheduler, "_execute", fake_execute), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._loop_runner(trigger)
+
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("loopFeedback", calls[1])
+        body = scheduler._send_formatted.await_args.args[1]
+        self.assertIn("done", body)
+        self.assertIn("finished", body)
+
+
 class LoopStopDecision(unittest.TestCase):
     """#932: the pure done-vs-exhausted decision evaluated after each iteration."""
 
@@ -2415,7 +2525,7 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
         trigger = self._loop_trigger(
             until={"command": "npm test"}, maxIterations=10)
         precheck = patch.object(
-            entrypoint, "_run_pre_check",
+            entrypoint, "_run_loop_command",
             side_effect=[(1, ""), (1, ""), (0, "all green")])
         with patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
              patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
@@ -2478,7 +2588,7 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
              patch.object(scheduler, "_run_loop_verify", AsyncMock(return_value=(True, ""))), \
              patch.object(scheduler, "_post_loop_note", AsyncMock()), \
              patch.object(entrypoint.asyncio, "sleep", AsyncMock(return_value=None)), \
-             patch.object(entrypoint, "_run_pre_check", return_value=(1, "nope")):
+             patch.object(entrypoint, "_run_loop_command", return_value=(1, "nope")):
             await scheduler._loop_runner(trigger)
         rec = scheduler._send_formatted.await_args.kwargs["extra_content"]["io.aee.loop-record"]
         self.assertEqual(rec["outcome"], "exhausted")
@@ -2513,7 +2623,7 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
         trigger = self._loop_trigger(until={"command": "false"}, maxIterations=2)
         with patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
              patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
-             patch.object(entrypoint, "_run_pre_check", return_value=(1, "still failing")):
+             patch.object(entrypoint, "_run_loop_command", return_value=(1, "still failing")):
             await scheduler._loop_runner(trigger)
         self.assertEqual(execute_mock.await_count, 2)
         scheduler._send_formatted.assert_awaited_once()
@@ -2532,7 +2642,7 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
         with patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
              patch.object(scheduler, "_maintenance_active", fake_maintenance_active), \
              patch.object(entrypoint.asyncio, "sleep", AsyncMock(return_value=None)), \
-             patch.object(entrypoint, "_run_pre_check", return_value=(0, "ok")):
+             patch.object(entrypoint, "_run_loop_command", return_value=(0, "ok")):
             await scheduler._loop_runner(trigger)
         execute_mock.assert_awaited_once()  # one catch-up iteration, then done
         self.assertGreaterEqual(len(maintenance_calls), 2)
@@ -2581,7 +2691,7 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(scheduler, "_execute", side_effect=fake_execute) as execute_mock, \
              patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
-             patch.object(entrypoint, "_run_pre_check", return_value=(1, "nope")):
+             patch.object(entrypoint, "_run_loop_command", return_value=(1, "nope")):
             await scheduler._loop_runner(trigger)
         self.assertEqual(execute_mock.await_count, 3)  # 400*3 = 1200 >= 1000
         scheduler._send_formatted.assert_awaited_once()
@@ -2601,7 +2711,7 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
             if loop_sink is not None:
                 loop_sink["backstopTripped"] = True
 
-        precheck = patch.object(entrypoint, "_run_pre_check",
+        precheck = patch.object(entrypoint, "_run_loop_command",
                                 side_effect=AssertionError("until must not run"))
         with patch.object(scheduler, "_execute", side_effect=fake_execute) as execute_mock, \
              patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
@@ -2972,7 +3082,7 @@ class LoopVerifierGate(unittest.IsolatedAsyncioTestCase):
         with patch.object(scheduler, "_resolve_verify_plan", fake_verify_plan), \
              patch.object(scheduler, "_execute", fake_execute), \
              patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
-             patch.object(entrypoint, "_run_pre_check", side_effect=fake_pre_check):
+             patch.object(entrypoint, "_run_loop_command", side_effect=fake_pre_check):
             await scheduler._loop_runner(trigger)
 
         # 3 iterations: fail, fail, pass→until green→done.
@@ -2998,7 +3108,7 @@ class LoopVerifierGate(unittest.IsolatedAsyncioTestCase):
         with patch.object(scheduler, "_resolve_verify_plan", fake_verify_plan), \
              patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
              patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
-             patch.object(entrypoint, "_run_pre_check", return_value=(1, "still broken")):
+             patch.object(entrypoint, "_run_loop_command", return_value=(1, "still broken")):
             await scheduler._loop_runner(trigger)
 
         # maxIterations bounds the loop even when verify never passes (guardrail).
@@ -3026,7 +3136,7 @@ class LoopVerifierGate(unittest.IsolatedAsyncioTestCase):
              patch.object(scheduler, "_execute", AsyncMock()), \
              patch.object(scheduler, "_run_agent_verify", fake_agent_verify), \
              patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
-             patch.object(entrypoint, "_run_pre_check", return_value=(0, "green")):
+             patch.object(entrypoint, "_run_loop_command", return_value=(0, "green")):
             await scheduler._loop_runner(trigger)
 
         self.assertEqual(verify_calls, [("reviewer-1", 1), ("reviewer-1", 2)])

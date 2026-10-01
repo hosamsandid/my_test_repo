@@ -21018,7 +21018,10 @@ async function main() {
   // POST /hooks/:agentId/:hookId
   //   → looks up a trigger with type="http" and matching id in
   //     /workspace/agents/:agentId/triggers.json
-  //   → validates X-Hook-Secret against the trigger's `secret` field
+  //   → authenticates against the trigger's `secret` field: either a plain
+  //     X-Hook-Secret header, or GitHub's X-Hub-Signature-256 HMAC over the
+  //     raw body (#2680, hook-auth.js). A GitHub `ping` delivery is
+  //     acknowledged without firing the trigger.
   //   → appends to /workspace/agents/:agentId/pending-triggers.json
   //   → agent-runner picks it up within seconds and fires the prompt
   //
@@ -21029,16 +21032,9 @@ async function main() {
   // ============================================================
   const HOOK_PORT = parseInt(process.env.HOOK_PORT || '4003', 10);
 
-  function constantTimeEqual(a, b) {
-    try {
-      const ba = Buffer.from(a);
-      const bb = Buffer.from(b);
-      if (ba.length !== bb.length) return false;
-      return crypto.timingSafeEqual(ba, bb);
-    } catch {
-      return false;
-    }
-  }
+  // GitHub caps webhook payloads at 25 MB; nothing legitimate is larger.
+  const HOOK_MAX_BODY_BYTES = 25 * 1024 * 1024;
+  const { verifyHookRequest, isGithubPing } = require('./hook-auth');
 
   const hookServer = http.createServer((req, res) => {
     if (req.method !== 'POST') {
@@ -21094,18 +21090,44 @@ async function main() {
       res.end(JSON.stringify({ error: 'Trigger has no secret configured' }));
       return;
     }
-    const provided = req.headers['x-hook-secret'] || '';
-    if (!constantTimeEqual(provided, trigger.secret)) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Unauthorized' }));
-      return;
-    }
+    // The body is read only to verify a GitHub signature (it is otherwise
+    // ignored — the trigger's own prompt is what fires).
+    const chunks = [];
+    let size = 0;
+    let tooLarge = false;
+    req.on('data', (chunk) => {
+      if (tooLarge) return;
+      size += chunk.length;
+      if (size > HOOK_MAX_BODY_BYTES) { tooLarge = true; return; }
+      chunks.push(chunk);
+    });
+    req.on('error', () => { if (!res.headersSent) { res.writeHead(400); res.end(); } });
+    req.on('end', () => {
+      if (tooLarge) {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Payload too large' }));
+        return;
+      }
+      const auth = verifyHookRequest({ headers: req.headers, rawBody: Buffer.concat(chunks), secret: trigger.secret });
+      if (!auth.ok) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
 
-    enqueuePending(agentId, { triggerId: hookId });
+      if (auth.method === 'github-signature' && isGithubPing(req.headers)) {
+        console.log(`[HookServer] GitHub ping for '${hookId}' on '${agentId}' acknowledged (not fired)`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ pong: true, triggerId: hookId, agentId }));
+        return;
+      }
 
-    console.log(`[HookServer] Queued trigger '${hookId}' for agent '${agentId}'`);
-    res.writeHead(202, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ queued: true, triggerId: hookId, agentId }));
+      enqueuePending(agentId, { triggerId: hookId });
+
+      console.log(`[HookServer] Queued trigger '${hookId}' for agent '${agentId}' (${auth.method})`);
+      res.writeHead(202, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ queued: true, triggerId: hookId, agentId }));
+    });
   });
 
   hookServer.listen(HOOK_PORT, '0.0.0.0', () =>

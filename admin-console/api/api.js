@@ -40,7 +40,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, isTeamAdminOfAny
         visibleUser, describeAuthz,
         normalizeCredential, visibleCredential, canManageCredential, canDeleteCredential, canCreateCredential,
         canReassignCredential, credentialVisibleToTeam, personalLendToTeam, canViewUsageStatistics,
-        resolveAgentTenant } = require('./scope');
+        resolveAgentTenant, canChatAgent } = require('./scope');
 const { resolveAgentTeam } = require('./agent-team');
 const { ownerRespawnNeeded, markActivePersonal } = require('./personal-credential-active');
 const { createAgentManageGate } = require('./team-member-boundary');
@@ -83,6 +83,7 @@ const { resolveStampedIdentity } = require('./credential-identity');
 const { credentialName, isValidNewCredentialId, sshPrivateKeyError } = require('./credential-input');
 const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
         WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
+const { createChatWriteGates } = require('./chat-write-access');
 const { buildAssistModelOptions } = require('./assist-model-options');
 const llmHealth = require('./llm-health');
 const llmBudget = require('./llm-budget');
@@ -514,6 +515,25 @@ const workPlaneGates = createWorkPlaneGates({
 });
 for (const prefix of WORK_PLANE_AGENT_PREFIXES) app.use(prefix, workPlaneGates.agentGate);
 app.use(WORK_PLANE_ROOM_PREFIX, workPlaneGates.roomGate);
+
+// Read-only agent chat for a System Admin outside the team (#2713). Per-route,
+// not mounted: only the composer's two write routes (the message send and the
+// chat upload) are gated — reading, Stop, reset and the rest stay open. The
+// rule is scope.js `canChatAgent`; the gates live in chat-write-access.js.
+const chatWriteGates = createChatWriteGates({
+  getScope,
+  canChatAgent,
+  isValidAgentId: (id) => AGENT_ID_RE.test(id),
+  loadAgentMeta: (id) => {
+    const cfgPath = safeAgentPath(id, 'config.json');
+    const cfg = cfgPath ? readJsonFile(cfgPath, null) : null;
+    return cfg ? agentMetaForScope(cfg) : null;
+  },
+  loadRoomAgentMeta: (roomId) => {
+    const owner = findAgentByDmRoom(roomId);
+    return owner && owner.cfg ? agentMetaForScope(owner.cfg) : null;
+  },
+});
 
 // Helper Chat guided-tour manifest (#1737, Phase 2.2). Serves the pre-built
 // tour manifest (generated + vendored by #1736) behind the global /api gate
@@ -19259,6 +19279,11 @@ app.get('/api/matrix/agents', (req, res) => {
       // menu can disable what the server would reject (mirrors `canSwitch` on
       // GET /api/agents/:id/model).
       canManage: canManageAgent(scope, agentMetaForScope(cfg)),
+      // Whether THIS caller may WRITE in the agent's chat (#2713) — false only
+      // for a System Admin outside the agent's team (scope.js `canChatAgent`,
+      // the predicate the send and chat-upload routes enforce). The composer
+      // renders read-only on false instead of re-deriving the rule.
+      canChat: canChatAgent(scope, agentMetaForScope(cfg)),
       // Whether THIS caller may change the team's MEMBER LIST — the predicate
       // `POST`/`DELETE /api/admin/memberships` enforce, shipped so the Share
       // panel (#2082) can offer a read-only list instead of buttons that 403.
@@ -19440,7 +19465,7 @@ app.get('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
 // identity (#2173, #2721). Typed messages, quick-reply answers and slash
 // commands all come through here. No identity (even after an on-demand
 // provisioning attempt) → 503, never the shared admin account.
-app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
+app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, chatWriteGates.roomChatGate, async (req, res) => {
   if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
   const { roomId } = req.params;
   const { body, extraContent } = req.body || {};
@@ -21559,7 +21584,7 @@ app.post('/api/agents/:agentId/context/upload', heavyLimiter, requireAgentIdPara
 // generic pasted-image names to a UTC timestamp and de-dupes colliding names
 // with a `-<n>` suffix (chat-upload-name.js, #2568).
 const CHAT_UPLOADS_DIR = 'chat-uploads';
-app.post('/api/agents/:agentId/chat-upload', heavyLimiter, requireAgentIdParam, uploadFiles, (req, res) => {
+app.post('/api/agents/:agentId/chat-upload', heavyLimiter, requireAgentIdParam, chatWriteGates.agentChatGate, uploadFiles, (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
 

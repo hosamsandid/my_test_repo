@@ -45,7 +45,11 @@ test('isMacPlatform detects Mac via platform or userAgent', () => {
   assert.equal(isMacPlatform({ platform: '', userAgent: 'iPhone' }), true);
   assert.equal(isMacPlatform({ platform: 'Win32' }), false);
   assert.equal(isMacPlatform({ platform: 'Linux x86_64' }), false);
-  assert.equal(isMacPlatform(undefined), false);
+  // Explicit "no navigator" → false. (We pass null, not undefined: undefined
+  // trips the default parameter and falls back to the ambient navigator, which
+  // is a real Mac under Node on a developer's machine — a brittle, env-dependent
+  // assertion. null exercises the same early-return deterministically.)
+  assert.equal(isMacPlatform(null), false);
 });
 
 test('load/save round-trip through a store', () => {

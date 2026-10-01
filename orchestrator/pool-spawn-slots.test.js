@@ -36,13 +36,26 @@ test('release ignores a stale promise — a late-settling earlier attempt never 
   assert.equal(s.pending('r-i1'), fresh);
 });
 
-test('noteFailure counts per instance; clearFailures resets', () => {
+test('noteFailure counts per instance and per spawn attempt; clearFailures resets', () => {
   const s = slots.createSpawnSlots();
-  assert.equal(s.noteFailure('x'), 1);
-  assert.equal(s.noteFailure('x'), 2);
-  assert.equal(s.noteFailure('y'), 1);
+  const p1 = Promise.resolve();
+  const p2 = Promise.resolve();
+  assert.equal(s.noteFailure('x', p1), 1);
+  assert.equal(s.noteFailure('x', p1), 1, 'a joiner reporting the same failed spawn does not advance the count');
+  assert.equal(s.noteFailure('x', p2), 2);
+  assert.equal(s.noteFailure('y', p1), 1);
   s.clearFailures('x');
-  assert.equal(s.noteFailure('x'), 1);
+  assert.equal(s.noteFailure('x', p1), 1);
+});
+
+test('noteFailure: after the retries are exhausted, the next distinct failed spawn starts a new chain', () => {
+  const s = slots.createSpawnSlots();
+  const max = slots.SPAWN_RETRY_DELAYS_MS.length;
+  let last;
+  for (let i = 1; i <= max + 1; i++) { last = Promise.resolve(); assert.equal(s.noteFailure('x', last), i); }
+  assert.equal(slots.spawnRetryDelayMs(max + 1), null, 'exhausted');
+  assert.equal(s.noteFailure('x', last), max + 1, 'every joiner of the last attempt also gives up');
+  assert.equal(s.noteFailure('x', Promise.resolve()), 1);
 });
 
 test('spawnRetryDelayMs: a bounded backoff, null once exhausted or for nonsense', () => {

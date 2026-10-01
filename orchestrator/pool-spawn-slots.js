@@ -37,7 +37,7 @@ function countedInstanceIds(liveIds = [], provisioningIds = []) {
 
 function createSpawnSlots() {
   const byInstance = new Map(); // instanceId → { roleId, promise }
-  const failures = new Map();   // instanceId → consecutive failed spawns
+  const failures = new Map();   // instanceId → { n: consecutive failed spawns, last: the last failed spawn promise }
 
   return {
     /** Claim a slot for `instanceId` under `roleId`, tied to its spawn promise. */
@@ -63,10 +63,19 @@ function createSpawnSlots() {
       for (const [id, slot] of byInstance) if (slot.roleId === roleId) out.push(id);
       return out;
     },
-    /** Record one more failed spawn for `instanceId`; returns the running count. */
-    noteFailure(instanceId) {
-      const n = (failures.get(instanceId) || 0) + 1;
-      failures.set(instanceId, n);
+    /**
+     * Record the failure of `promise`, a spawn of `instanceId`; returns the
+     * running count. Counted once per spawn attempt, not per caller: every
+     * dispatch that joined the same in-flight spawn reports the same failure,
+     * and they all get the same attempt number back (#2760 review S3).
+     * After the retries are exhausted, the next distinct failed spawn starts
+     * a new chain at 1.
+     */
+    noteFailure(instanceId, promise) {
+      const prev = failures.get(instanceId);
+      if (prev && promise !== undefined && prev.last === promise) return prev.n;
+      const n = prev && spawnRetryDelayMs(prev.n) != null ? prev.n + 1 : 1;
+      failures.set(instanceId, { n, last: promise });
       return n;
     },
     clearFailures(instanceId) {

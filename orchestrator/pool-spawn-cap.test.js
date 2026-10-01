@@ -89,6 +89,7 @@ test('AC1/AC7: five dispatches for distinct items before any spawn completes sta
   await h.flush();
   const live = [...h.configs.values()].filter((c) => c.poolInstance).length;
   assert.equal(live, 3);
+  assert.deepEqual(h.ctx.poolSpawns.provisioningIds(ROLE), [], 'a completed spawn frees its provisioning slot');
 });
 
 test('AC1: provisioning instances and on-disk instances share one cap', () => {
@@ -138,6 +139,28 @@ test('edge case: a failed spawn is retried with backoff, re-checking the cap; re
     if (h.timers[i]) h.timers[i].fn();
   }
   assert.equal(h.timers.length, poolSpawnSlots.SPAWN_RETRY_DELAYS_MS.length, 'no retry beyond the last delay');
+});
+
+test('review S3: one failed spawn joined by other dispatches uses up one backoff step, not one per joiner', async () => {
+  const h = harness({ maxInstances: 1 });
+  h.dispatch(7);
+  h.dispatch(7);
+  h.dispatch(7);
+  assert.equal(h.spawns.length, 1, 'the two later dispatches join the spawn in flight');
+  h.spawns[0].reject();
+  await h.flush();
+  assert.deepEqual(h.timers.map((t) => t.ms), Array(3).fill(poolSpawnSlots.SPAWN_RETRY_DELAYS_MS[0]),
+    'every dispatch is re-routed, all after the FIRST backoff delay');
+  for (const t of h.timers.splice(0)) t.fn();
+  assert.equal(h.spawns.length, 2, 'the first re-routed dispatch spawns again; the others join it');
+  h.spawns[1].reject();
+  await h.flush();
+  assert.deepEqual(h.timers.map((t) => t.ms), Array(3).fill(poolSpawnSlots.SPAWN_RETRY_DELAYS_MS[1]),
+    'the second failure moves all three to the second delay');
+  for (const t of h.timers.splice(0)) t.fn();
+  h.spawns[2].resolve();
+  await h.flush();
+  assert.deepEqual(h.delivered.map(([id]) => id), Array(3).fill(`${ROLE}-i7`), 'no dispatch was dropped');
 });
 
 test('AC6: a cap lowered below the live count starts nothing new but still routes an existing item to its instance', () => {

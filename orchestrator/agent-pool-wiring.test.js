@@ -82,6 +82,12 @@ test("mutation-proved: the pre-fix single-item shape would fail the check above"
   assert.doesNotMatch(buggy, /_cappedInstanceIdsForRole\(agentId\)/);
 });
 
+test("#2760 review S2: pool-control's liveInstanceCount counts provisioning instances too, like the cap", () => {
+  const sites = SRC.match(/liveInstanceCount:[^\n]*/g) || [];
+  assert.equal(sites.length, 1, "exactly one liveInstanceCount site — re-point this guard if that changes");
+  assert.match(sites[0], /liveInstanceCount:\s*_cappedInstanceIdsForRole\(role\.id\)\.length/);
+});
+
 test("_liveInstanceIdsForRole scans by role prefix and poolOf, not by a single item key", () => {
   const src = fn("_liveInstanceIdsForRole");
   assert.match(src, /const prefix = `\$\{roleFullId\}-i`/);

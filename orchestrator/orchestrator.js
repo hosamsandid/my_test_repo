@@ -11676,7 +11676,7 @@ function routePooledDispatch(agentId, entry, out = null) {
     if (inFlight) {
       inFlight
         .then((r) => enqueuePending(r.id, entry, { admissionChecked: true }))
-        .catch(() => _retryPooledDispatch(agentId, entry, decision.instanceId));
+        .catch(() => _retryPooledDispatch(agentId, entry, decision.instanceId, inFlight));
       return { targetId: decision.instanceId, spawning: true };
     }
     return { targetId: decision.instanceId, spawning: false };
@@ -11687,11 +11687,12 @@ function routePooledDispatch(agentId, entry, out = null) {
   // provisioning takes. D3: the triggering event's own embedded PR (free, when
   // present) rides along so the async spawn need not re-derive it.
   const directReworkRef = agentPool.reworkRefFromPayload(entry?.github?.payload);
-  startPoolSpawn(teamId, cfg, decision.instanceId, itemKey, { repoFullName: ref?.repo || null, directReworkRef })
+  const spawn = startPoolSpawn(teamId, cfg, decision.instanceId, itemKey, { repoFullName: ref?.repo || null, directReworkRef });
+  spawn
     .then((r) => enqueuePending(r.id, entry, { admissionChecked: true }))
     .catch((err) => {
       console.error(`[AgentPool] spawn ${decision.instanceId} failed: ${err.message}`);
-      _retryPooledDispatch(agentId, entry, decision.instanceId);
+      _retryPooledDispatch(agentId, entry, decision.instanceId, spawn);
     });
   return { targetId: decision.instanceId, spawning: true };
 }
@@ -11702,11 +11703,14 @@ function routePooledDispatch(agentId, entry, out = null) {
 // passes the cap check afresh (a slot may have been taken meanwhile, in which
 // case it takes the ordinary `max-instances` path). Bounded: after the last
 // retry it is logged and left to the operator, as every failed spawn was before.
-function _retryPooledDispatch(agentId, entry, instanceId) {
-  const attempt = poolSpawns.noteFailure(instanceId);
+// `spawn` is the failed spawn promise: dispatches that joined it share one
+// failure count, so one failure uses up one backoff step, not one per joiner.
+// Each of them is re-routed after the same delay; the first starts the new
+// spawn and the rest join it.
+function _retryPooledDispatch(agentId, entry, instanceId, spawn) {
+  const attempt = poolSpawns.noteFailure(instanceId, spawn);
   const delay = poolSpawnSlots.spawnRetryDelayMs(attempt);
   if (delay == null) {
-    poolSpawns.clearFailures(instanceId);
     console.error(`[AgentPool] giving up on ${instanceId} after ${attempt - 1} spawn retries`);
     return;
   }

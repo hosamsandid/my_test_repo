@@ -16,6 +16,7 @@
 
 import { agentState } from '../agent-lifecycle/agent-lifecycle-menu.js';
 import { matchesSelection } from './list-selection.js';
+import { poolCapView } from '../process/pool-cap-view.js';
 
 /** Stable key for a group across the ordering / drag / collapse maps. */
 export function groupKey(g) {
@@ -58,9 +59,13 @@ export function isPoolInstance(agent) {
   return !!(agent && agent.poolInstance);
 }
 
-/** The collapsible sub-list label, mirrors `stubSectionLabel`'s role (AC1). */
-export function poolInstancesLabel(count) {
-  return `Instances (${count})`;
+/**
+ * The collapsible sub-list label, mirrors `stubSectionLabel`'s role (AC1).
+ * #2760: with the role's `maxInstances` cap the count reads against it
+ * ("Instances (5 / 3)"); without one it stays the bare count.
+ */
+export function poolInstancesLabel(count, cap = null) {
+  return `Instances (${poolCapView(count, cap).text})`;
 }
 
 /**

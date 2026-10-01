@@ -210,6 +210,9 @@ const admissionControl = require("./admission-control");
 const { buildTicketLedger } = require("./ticket-reconciler");
 const ticketReconcileSweep = require("./ticket-reconcile-sweep");
 const agentPool = require("./agent-pool");
+const poolSpawnSlots = require("./pool-spawn-slots");
+// #2760: in-flight pool spawns per role — counted against `maxInstances`.
+const poolSpawns = poolSpawnSlots.createSpawnSlots();
 const flowSupervisor = require("./flow-supervisor");
 const flowBoard = require("./flow-board");
 const flowClaimRelease = require("./flow-claim-release");
@@ -3005,6 +3008,19 @@ function _liveInstanceIdsForRole(roleFullId) {
   return ids;
 }
 
+// #2760: what the per-role `maxInstances` cap counts — every live instance
+// PLUS every instance still provisioning (decided, spawn not yet finished),
+// so dispatches for other items arriving inside the spawn window can no
+// longer slip past the cap. Used by both dispatch paths (SDLC
+// `routePooledDispatch` and the recurring `recurringPoolSweepTeam`) and by
+// the pool-control read the UI shows the count from.
+function _cappedInstanceIdsForRole(roleFullId) {
+  return poolSpawnSlots.countedInstanceIds(
+    _liveInstanceIdsForRole(roleFullId),
+    poolSpawns.provisioningIds(roleFullId),
+  );
+}
+
 // The lane-view's own read of "a live instance" (#2273): the same set
 // `_liveInstanceIdsForRole` walks, but carrying the fields
 // `pool-instance-lanes.js`'s pure core needs (`poolRepo`/`poolItem`/
@@ -3739,7 +3755,15 @@ async function recurringPoolSweepTeam(teamId, { now = Date.now() } = {}) {
     // role's in-flight items still get torn down as they finish.
     if (agentPool.poolControlState(poolControl, roleId) !== 'running') continue;
 
-    const stillLiveItemIds = _liveInstanceIdsForRole(role.id).map(itemOfInstance).filter((v) => v != null);
+    // #2760: an item still provisioning (no config yet) is already taken —
+    // its item key comes from the deterministic instance id, not the config.
+    const provisioningItemIds = poolSpawns.provisioningIds(role.id)
+      .map((id) => agentPool.itemKeyFromInstanceId(id, role.id))
+      .filter((v) => v != null);
+    const stillLiveItemIds = [...new Set([
+      ..._liveInstanceIdsForRole(role.id).map(itemOfInstance).filter((v) => v != null),
+      ...provisioningItemIds,
+    ])];
     const completedItemIds = workSource.items.filter((item) => _recurringItemComplete(workSource.outputDir, item));
 
     // D5: one team-wide concurrency limit governs unless the role's own
@@ -3760,7 +3784,7 @@ async function recurringPoolSweepTeam(teamId, { now = Date.now() } = {}) {
     for (const itemId of toDispatch) {
       const instanceId = agentPool.poolInstanceId(teamId, roleId, itemId);
       try {
-        await spawnPoolInstance(teamId, role.cfg, instanceId, itemId, { repoFullName: null, directReworkRef: null });
+        await startPoolSpawn(teamId, role.cfg, instanceId, itemId, { repoFullName: null, directReworkRef: null });
         dispatched.push(instanceId);
         console.log(`[AgentPool] ${teamId}: recurring-dispatched ${instanceId} (item=${itemId})`);
       } catch (err) {
@@ -11559,6 +11583,24 @@ async function spawnPoolInstance(teamId, templateCfg, instanceId, itemKey, { rep
   }
 }
 
+// #2760: the one entry point both dispatch paths spawn through. Claims a
+// provisioning slot for the instance SYNCHRONOUSLY — before the caller's
+// next cap check can run — and frees it once the spawn settles, whichever
+// way. A second call for the same instance while the first is still in
+// flight joins that spawn instead of starting another one. (`poolSpawns`, the
+// registry itself, is created next to its require at the top of the file.)
+function startPoolSpawn(teamId, templateCfg, instanceId, itemKey, opts) {
+  const inFlight = poolSpawns.pending(instanceId);
+  if (inFlight) return inFlight;
+  const spawn = spawnPoolInstance(teamId, templateCfg, instanceId, itemKey, opts);
+  poolSpawns.reserve(templateCfg.id, instanceId, spawn);
+  spawn.then(
+    () => { poolSpawns.release(instanceId, spawn); poolSpawns.clearFailures(instanceId); },
+    () => { poolSpawns.release(instanceId, spawn); },
+  );
+  return spawn;
+}
+
 // Does this dispatch belong to a pooled role, and if so where should it
 // actually land? Returns null for an unpooled agent (today's behaviour,
 // unchanged) or `{ targetId, spawning }` — `spawning: true` means the caller
@@ -11593,7 +11635,10 @@ function routePooledDispatch(agentId, entry, out = null) {
     // one case (length 1) that wasn't already 0. `maxInstances` caps the ROLE
     // across every item it is currently working, so it needs every live
     // instance of the role, not just this one item's.
-    existingInstanceIds: itemKey == null ? [] : _liveInstanceIdsForRole(agentId),
+    // #2760: …and every instance still PROVISIONING too — a spawn only
+    // reaches `_liveInstanceIdsForRole` once its config exists, seconds after
+    // this check, so concurrent dispatches for other items overshot the cap.
+    existingInstanceIds: itemKey == null ? [] : _cappedInstanceIdsForRole(agentId),
   });
   if (decision.action === 'unpooled') return null;
   if (decision.action === 'refuse') {
@@ -11624,6 +11669,16 @@ function routePooledDispatch(agentId, entry, out = null) {
   }
   if (out) out.instanceId = decision.instanceId;
   if (decision.action === 'reuse') {
+    // #2760 AC4: the item's instance is still provisioning — land on it once
+    // the spawn in flight finishes, instead of writing into a pending queue
+    // of an agent that does not exist yet (or starting a second spawn).
+    const inFlight = poolSpawns.pending(decision.instanceId);
+    if (inFlight) {
+      inFlight
+        .then((r) => enqueuePending(r.id, entry, { admissionChecked: true }))
+        .catch(() => _retryPooledDispatch(agentId, entry, decision.instanceId, inFlight));
+      return { targetId: decision.instanceId, spawning: true };
+    }
     return { targetId: decision.instanceId, spawning: false };
   }
   // action === 'spawn' — kick it off asynchronously and redeliver the entry
@@ -11632,10 +11687,36 @@ function routePooledDispatch(agentId, entry, out = null) {
   // provisioning takes. D3: the triggering event's own embedded PR (free, when
   // present) rides along so the async spawn need not re-derive it.
   const directReworkRef = agentPool.reworkRefFromPayload(entry?.github?.payload);
-  spawnPoolInstance(teamId, cfg, decision.instanceId, itemKey, { repoFullName: ref?.repo || null, directReworkRef })
+  const spawn = startPoolSpawn(teamId, cfg, decision.instanceId, itemKey, { repoFullName: ref?.repo || null, directReworkRef });
+  spawn
     .then((r) => enqueuePending(r.id, entry, { admissionChecked: true }))
-    .catch((err) => console.error(`[AgentPool] spawn ${decision.instanceId} failed: ${err.message}`));
+    .catch((err) => {
+      console.error(`[AgentPool] spawn ${decision.instanceId} failed: ${err.message}`);
+      _retryPooledDispatch(agentId, entry, decision.instanceId, spawn);
+    });
   return { targetId: decision.instanceId, spawning: true };
+}
+
+// #2760 edge case "spawn failure mid-provisioning": the slot is already free
+// again (`startPoolSpawn`), and the ticket stays admitted in the lane — so
+// re-route the SAME dispatch through `enqueuePending` after a backoff. It
+// passes the cap check afresh (a slot may have been taken meanwhile, in which
+// case it takes the ordinary `max-instances` path). Bounded: after the last
+// retry it is logged and left to the operator, as every failed spawn was before.
+// `spawn` is the failed spawn promise: dispatches that joined it share one
+// failure count, so one failure uses up one backoff step, not one per joiner.
+// Each of them is re-routed after the same delay; the first starts the new
+// spawn and the rest join it.
+function _retryPooledDispatch(agentId, entry, instanceId, spawn) {
+  const attempt = poolSpawns.noteFailure(instanceId, spawn);
+  const delay = poolSpawnSlots.spawnRetryDelayMs(attempt);
+  if (delay == null) {
+    console.error(`[AgentPool] giving up on ${instanceId} after ${attempt - 1} spawn retries`);
+    return;
+  }
+  console.warn(`[AgentPool] retrying dispatch for ${instanceId} in ${Math.round(delay / 1000)}s (attempt ${attempt})`);
+  const timer = setTimeout(() => enqueuePending(agentId, entry, { admissionChecked: true }), delay);
+  if (typeof timer.unref === 'function') timer.unref();
 }
 
 // ============================================================
@@ -20114,7 +20195,8 @@ async function main() {
             agentId: role.id,
             displayName: role.cfg.displayName || roleId,
             maxInstances: role.pool.maxInstances,
-            liveInstanceCount: _liveInstanceIdsForRole(role.id).length,
+            // #2760: provisioning instances count too, same as the cap does.
+            liveInstanceCount: _cappedInstanceIdsForRole(role.id).length,
             state: agentPool.poolControlState(control, roleId),
           };
         });

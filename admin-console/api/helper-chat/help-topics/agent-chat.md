@@ -277,7 +277,10 @@ is off.
 shows them nested directly under that role, in a collapsible **Instances (N)**
 sub-list — instead of scattering them through the team as flat, indistinguishable
 rows. It expands/collapses and remembers your choice the same way a team group
-does, and stays empty (no sub-list at all) while the role has nothing live. Each
+does, and stays empty (no sub-list at all) while the role has nothing live. When
+the role has a **Max parallel instances** cap, the count reads against it, e.g.
+**Instances (5 / 3)**; a warning icon marks a count over the cap (running
+instances are not stopped, no new one starts until the count is below it). Each
 instance row is an ordinary agent: its status dot follows the same activity poll,
 and clicking it opens its own chat/session log exactly like any other member —
 a row disappears once its instance is torn down. Its triggered runs and your chat

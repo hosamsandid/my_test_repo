@@ -314,6 +314,11 @@ test('buildFlowBoard: a stale claim alongside a re-applied wake label still need
   });
   assert.equal(b.rows[0].status, 'working');
   assert.equal(b.rows[0].needsHuman.reason, 'stuck — no progress, needs help');
+  // Re-adding a wake already present wakes nobody, so its release entry is
+  // marked for a remove-then-re-add (#2754 review).
+  assert.deepEqual(b.rows[0].needsHuman.release, [
+    { repo: 'o/r', number: 21, kind: 'issue', claim: 'ready:wip', wake: 'ready', wakePresent: true },
+  ]);
 });
 
 test('buildFlowBoard: a long claim with a running session or a live pool instance is not flagged (#2734)', () => {
@@ -374,6 +379,17 @@ test('buildFlowBoard: a needs-help row lists every orphaned claim it can release
   assert.equal(flagged.rows[0].needsHuman.reason, fb.REASONS.flagged);
   assert.equal(flagged.rows[0].needsHuman.release, undefined);
   assert.equal(flagged.needsHuman[0].release, undefined);
+});
+
+test('buildFlowBoard: a needs-help row offers only the claims a live consumer would pick up (#2754)', () => {
+  const offReviewer = SDLC.map((m) => (m.id === 't-reviewer' ? { ...m, enabled: false } : m));
+  const b = board({
+    members: offReviewer,
+    github: { issues: [issue(32, { labels: ['ready:wip', 'ready-for-review:wip'], updatedAt: iso(200) })] },
+    events: [delivered(32, 't-developer', 200)],
+  });
+  assert.equal(b.rows[0].needsHuman.reason, fb.REASONS.needsHelp);
+  assert.deepEqual(b.rows[0].needsHuman.release.map((r) => r.claim), ['ready:wip']);
 });
 
 test('buildFlowBoard: a wake whose only consumer is switched off reads as "nobody picks it up", not stuck or queued (#2754)', () => {

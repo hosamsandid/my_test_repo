@@ -29,6 +29,7 @@ import {
   removeDialogTitle,
   RELEASE_CONFIRM_TEXT,
   releaseDialogTitle,
+  releaseNotice,
   removedView,
   withoutRows,
   instanceOf,
@@ -528,4 +529,11 @@ test('release dialog copy says what changes on GitHub (#2754)', () => {
   assert.equal(releaseDialogTitle(''), 'Release this claim?');
   assert.match(RELEASE_CONFIRM_TEXT, /wake label/);
   assert.match(RELEASE_CONFIRM_TEXT, /next poll/);
+});
+
+test('a successful release leaves a notice saying what happens next (#2754)', () => {
+  assert.equal(releaseNotice({ released: 1 }, '#7'), 'Claim released on #7 — its agent picks it up on the next poll (within about a minute).');
+  assert.equal(releaseNotice({ released: 2 }, ''), '2 claims released — its agent picks it up on the next poll (within about a minute).');
+  assert.equal(releaseNotice({ released: 0 }, '#7'), null);
+  assert.equal(releaseNotice(null, '#7'), null);
 });

@@ -712,7 +712,14 @@ no longer stuck or has no claim (409) — `planClaimRelease` in the pure
 `orchestrator/flow-claim-release.js`. `swapClaimLabel` then removes the claim
 **first** and adds the wake label back (on a failed add it creates the label
 and retries once), with the token `resolveRepoGithubTokenId` picks for the
-repo. There is no in-process wake: the poller sees the re-applied wake label
+repo. When the wake label still hangs next to the claim (the #2713 shape: the
+wake was re-applied on top, so the board marks the entry `wakePresent`),
+adding it again would create no `labeled` event, so the swap also removes the
+wake before re-adding it (claim → wake → re-add). After a successful swap the
+route clears the poller's armed wake-edge key for that label on the item
+(`disarmWake`), because on a pull request the Events API reports no standalone
+`unlabeled` and the re-add would otherwise be dropped as `wake-already-armed`.
+There is no in-process wake: the poller sees the re-applied wake label
 and re-dispatches the item on its next poll, as if a person had re-applied it.
 A partial failure comes back as a warning that says what to do by hand. Every
 swap writes one GitHub Event Log line, `flow-control.claim-released` (UI:

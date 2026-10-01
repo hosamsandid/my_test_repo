@@ -60,3 +60,11 @@ test('POST /api/teams/:teamId/flow-board-release is gated on canManageTeam and s
   assert.match(body, /body: JSON\.stringify\(\{ rowId, actor \}\)/);
   assert.match(body, /\/flow-board-release`/);
 });
+
+test('both live graph endpoints pass a switched-off agent through as enabled: false (#2754)', () => {
+  // Without it the `wake-label-no-live-consumer` lint never fires on a live team.
+  for (const marker of ["app.get('/api/process/graph'", "app.get('/api/flows/graph'"]) {
+    const route = routeBody(marker, '\napp.');
+    assert.match(route, /\.\.\.\(cfg\.enabled === false \? \{ enabled: false \} : \{\}\),/, marker);
+  }
+});

@@ -20059,7 +20059,13 @@ async function main() {
               result = await flowClaimRelease.swapClaimLabel({
                 fetchImpl: fetch, base: githubApiBase(), token,
                 repo: claim.repo, number: claim.number, claim: claim.claim, wake: claim.wake,
+                wakePresent: claim.wakePresent === true,
               });
+              // The re-added wake must read as a rising edge to the poller's wake
+              // dedup, even where GitHub never reports its removal (PRs).
+              if (result.ok && githubPollerRef) {
+                githubPollerRef.disarmWake({ repo: claim.repo, number: claim.number, label: claim.wake });
+              }
             }
             try {
               githubEventLog.record(flowClaimRelease.buildClaimReleaseLogEntry({ teamId, rowId, actor, claim, result }));

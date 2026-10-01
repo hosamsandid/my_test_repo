@@ -812,7 +812,13 @@ function humanBlock({ keys, items, graph, position, live = new Set(), now }) {
         if (!l.endsWith(CLAIM_SUFFIX)) continue;
         const wake = wakeOf(l);
         if (!graph.consumersOf.has(wake) || wakeHasNoLiveConsumer(graph, wake)) continue;
-        release.push({ repo: it.repo, number: it.number, kind: it.kind, claim: l, wake });
+        // The #2713 shape: the wake was re-applied on top of the claim. Re-adding
+        // a label already present creates no `labeled` event, so the swap must
+        // take the wake off and put it back (#2754 review).
+        release.push({
+          repo: it.repo, number: it.number, kind: it.kind, claim: l, wake,
+          ...(it.labels.includes(wake) ? { wakePresent: true } : {}),
+        });
       }
     }
     return {

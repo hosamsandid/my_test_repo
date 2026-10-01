@@ -58,6 +58,26 @@ test('swapClaimLabel: removes the claim FIRST, then re-applies the wake', async 
   assert.equal(f.calls[0].auth, 'Bearer tok');
 });
 
+test('swapClaimLabel: a wake still present is taken off before it is re-added, so GitHub emits a fresh labeled event', async () => {
+  const f = fakeFetch([200, 200, 200]);
+  const r = await rel.swapClaimLabel({ fetchImpl: f, base: 'https://api', token: 'tok', ...CLAIM, wakePresent: true });
+  assert.deepEqual(r, { ok: true, removed: true, applied: true });
+  assert.deepEqual(f.calls.map((c) => [c.method, c.url]), [
+    ['DELETE', 'https://api/repos/o/r/issues/20/labels/ready%3Awip'],
+    ['DELETE', 'https://api/repos/o/r/issues/20/labels/ready'],
+    ['POST', 'https://api/repos/o/r/issues/20/labels'],
+  ]);
+  assert.deepEqual(f.calls[2].body, { labels: ['ready'] });
+  // The wake already gone (404) is fine; a failed removal stops and says what to do.
+  assert.equal((await rel.swapClaimLabel({ fetchImpl: fakeFetch([200, 404, 200]), base: 'https://api', token: 'tok', ...CLAIM, wakePresent: true })).ok, true);
+  const bad = fakeFetch([200, 403]);
+  const r2 = await rel.swapClaimLabel({ fetchImpl: bad, base: 'https://api', token: 'tok', ...CLAIM, wakePresent: true });
+  assert.equal(r2.ok, false);
+  assert.equal(r2.removed, true);
+  assert.equal(bad.calls.length, 2);
+  assert.match(r2.warning, /remove ready and add it again by hand/);
+});
+
 test('swapClaimLabel: a claim already gone (404) still re-applies the wake', async () => {
   const f = fakeFetch([404, 200]);
   assert.equal((await swap(f)).ok, true);

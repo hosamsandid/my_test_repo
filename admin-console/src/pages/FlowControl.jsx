@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
-  AlertTriangle, RefreshCw, ExternalLink, Info, Pause, Play, Waves, Zap, Power, Columns, UserRound, EyeOff, RotateCcw, LockOpen,
+  AlertTriangle, RefreshCw, ExternalLink, Info, Pause, Play, Waves, Zap, Power, Columns, UserRound, EyeOff, RotateCcw, LockOpen, CheckCircle2,
 } from 'lucide-react';
 import { Link as RouterLink } from 'react-router';
 import { useApi, apiCall } from '../hooks/useApi';
@@ -10,7 +10,7 @@ import Modal from '../components/Modal';
 import { usePageActions } from '../context/PageActionsContext';
 import {
   boardView, updatedAgo, AUTO_REFRESH_MS, readAutoRefresh, writeAutoRefresh, configFormRows, configFromForm,
-  withoutRows, REMOVE_CONFIRM_TEXT, removeDialogTitle, RELEASE_CONFIRM_TEXT, releaseDialogTitle, CHAT_LINK_CLASS, CHAT_LINK_CSS,
+  withoutRows, REMOVE_CONFIRM_TEXT, removeDialogTitle, RELEASE_CONFIRM_TEXT, releaseDialogTitle, releaseNotice, CHAT_LINK_CLASS, CHAT_LINK_CSS,
 } from './process/flow-control-view';
 import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections';
 
@@ -43,6 +43,7 @@ export default function FlowControl() {
   const [teamId, setTeamId] = useState('');
   const [state, setState] = useState({ loading: false, error: null, data: null });
   const [actionError, setActionError] = useState(null);
+  const [actionNotice, setActionNotice] = useState(null);
   const [busy, setBusy] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(() => readAutoRefresh(username));
   const [now, setNow] = useState(() => Date.now());
@@ -103,6 +104,7 @@ export default function FlowControl() {
 
   const mutate = useCallback(async (fn, failText) => {
     setActionError(null);
+    setActionNotice(null);
     setBusy(true);
     try {
       await fn();
@@ -131,6 +133,7 @@ export default function FlowControl() {
     async () => {
       const res = await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/flow-board-release`, { rowId: target.id });
       setReleaseTarget(null);
+      setActionNotice(releaseNotice(res, target.ref));
       if (res && Array.isArray(res.warnings) && res.warnings.length) setActionError(res.warnings.join(' · '));
     },
     'Failed to release the claim',
@@ -253,6 +256,7 @@ export default function FlowControl() {
               </Banner>
             )}
             {actionError && <Banner icon={AlertTriangle} tone="error">{actionError}</Banner>}
+            {actionNotice && <Banner icon={CheckCircle2}>{actionNotice}</Banner>}
 
             {state.loading && !state.data && (
               <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Loading…</p>

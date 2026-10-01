@@ -47,8 +47,11 @@ function planClaimRelease(board, rowId) {
 // claim is deleted — and the delete would then remove the NEW claim. A 404 on
 // the delete is fine (someone removed it already). The add mirrors
 // `stampMirrorLabel`: on a failed add, create the label and retry once.
-// Never throws; returns `{ ok, removed, applied, warning? }`.
-async function swapClaimLabel({ fetchImpl, base, token, repo, number, claim, wake }) {
+// `wakePresent` (the wake still hangs next to the claim): GitHub answers an add
+// of a label already there with 200 and NO `labeled` event, so nothing would
+// wake — the wake is removed too before it is re-added, giving the poller a
+// fresh rising edge. Never throws; returns `{ ok, removed, applied, warning? }`.
+async function swapClaimLabel({ fetchImpl, base, token, repo, number, claim, wake, wakePresent = false }) {
   const headers = {
     Authorization: `Bearer ${token}`,
     Accept: 'application/vnd.github+json',
@@ -65,6 +68,18 @@ async function swapClaimLabel({ fetchImpl, base, token, repo, number, claim, wak
     removed = true;
   } catch (err) {
     return { ok: false, removed, applied: false, warning: `could not remove ${claim} from ${repo}#${number}: ${err.message}` };
+  }
+  if (wakePresent) {
+    const stale = `${claim} was removed from ${repo}#${number} but ${wake} could not be taken off to re-add it`;
+    const byHand = `— remove ${wake} and add it again by hand to wake its agent`;
+    try {
+      const del = await fetchImpl(`${issueUrl}/labels/${encodeURIComponent(wake)}`, { method: 'DELETE', headers });
+      if (!del.ok && del.status !== 404) {
+        return { ok: false, removed, applied: false, warning: `${stale} (GitHub returned ${del.status}) ${byHand}` };
+      }
+    } catch (err) {
+      return { ok: false, removed, applied: false, warning: `${stale} (${err.message}) ${byHand}` };
+    }
   }
   const add = () => fetchImpl(`${issueUrl}/labels`, { method: 'POST', headers, body: JSON.stringify({ labels: [wake] }) });
   try {

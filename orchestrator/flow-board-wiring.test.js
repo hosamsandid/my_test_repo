@@ -86,6 +86,10 @@ test("the flow-board-release route (#2754) re-reads a fresh board, swaps via the
   assert.match(route, /resolveRepoGithubTokenId\(claim\.repo\)/);
   assert.match(route, /githubApiBase\(\)/);
   assert.doesNotMatch(route, /api\.github\.com|gh-as-agent|wakeGithubLabelListeners/);
+  // A wake still present is removed and re-added, and the poller's wake dedup
+  // is cleared so the re-add reads as a rising edge (#2754 review).
+  assert.match(route, /wakePresent: claim\.wakePresent === true,/);
+  assert.match(route, /if \(result\.ok && githubPollerRef\) \{\s*githubPollerRef\.disarmWake\(\{ repo: claim\.repo, number: claim\.number, label: claim\.wake \}\)/);
 });
 
 test("_flowTeamMembers carries each member's enabled flag for the board (#2754)", () => {

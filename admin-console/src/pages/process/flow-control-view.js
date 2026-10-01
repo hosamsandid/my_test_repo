@@ -283,6 +283,16 @@ export function releaseDialogTitle(ref) {
   return ref ? `Release the claim on ${ref}?` : 'Release this claim?';
 }
 
+// The notice after a release that swapped at least one claim — on success the
+// dialog just closes, so say what happens next (#2754 review). Null when
+// nothing was released (the error bar carries that).
+export function releaseNotice(res, ref) {
+  const n = res && Number.isFinite(res.released) ? res.released : 0;
+  if (n < 1) return null;
+  const what = n === 1 ? 'Claim released' : `${n} claims released`;
+  return `${what}${ref ? ` on ${ref}` : ''} — its agent picks it up on the next poll (within about a minute).`;
+}
+
 export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}) {
   const ref = entry.issue
     ? itemRef(entry.issue.repo, entry.issue.number, singleRepo)

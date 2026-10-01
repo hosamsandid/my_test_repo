@@ -21,6 +21,7 @@ import { deleteDialogCopy, cascadeResidueNotice } from '../agent-lifecycle/agent
 import RowContextMenu from '../../components/RowContextMenu.jsx';
 import {
   deleteTargetFor,
+  deleteRequestId,
   existingIds as existingIdsOf,
   importedAgentFilterNote,
   mergeAgentConfigs,
@@ -132,6 +133,11 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
 
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  // "Also delete the team" in the delete confirm of a team's last member
+  // (#2685). On by default — an empty team is what the user would otherwise
+  // have to find and delete separately — and reset each time the confirm opens.
+  const [deleteTeamToo, setDeleteTeamToo] = useState(true);
+  useEffect(() => { if (deleteTarget) setDeleteTeamToo(true); }, [deleteTarget]);
   const [deactivateTarget, setDeactivateTarget] = useState(null);
   const [deactivateWarning, setDeactivateWarning] = useState(null);
   const [disableWarning, setDisableWarning] = useState(null);
@@ -284,7 +290,7 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
       // See Agents.jsx: `cascadeWarnings` names the members a team delete could
       // not remove. Same helper on both surfaces so the two never word the same
       // residue differently (#1960 AC2).
-      const result = await apiCall('DELETE', `/api/agents/${encodeURIComponent(deleteTarget.id)}`);
+      const result = await apiCall('DELETE', `/api/agents/${encodeURIComponent(deleteRequestId(deleteTarget, deleteTeamToo))}`);
       setDeleteTarget(null);
       const residue = cascadeResidueNotice(result);
       if (residue) setActionError(residue);
@@ -651,11 +657,11 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
 
       <ConfirmDialog
         open={!!deleteTarget}
-        title={deleteDialogCopy(deleteTarget).title}
-        message={renderDeleteMessage(deleteTarget)}
+        title={deleteDialogCopy(deleteTarget, { deleteTeamToo }).title}
+        message={renderDeleteMessage(deleteTarget, { deleteTeamToo, onDeleteTeamTooChange: setDeleteTeamToo })}
         variant="danger"
-        confirmLabel={deleteDialogCopy(deleteTarget).confirmLabel}
-        maxWidth={deleteDialogCopy(deleteTarget).maxWidth}
+        confirmLabel={deleteDialogCopy(deleteTarget, { deleteTeamToo }).confirmLabel}
+        maxWidth={deleteDialogCopy(deleteTarget, { deleteTeamToo }).maxWidth}
         onConfirm={confirmDelete}
         onCancel={() => setDeleteTarget(null)}
         busy={deleteBusy}

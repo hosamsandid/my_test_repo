@@ -25,6 +25,7 @@
 import React from 'react';
 
 import ConfirmDialog from '../../components/ConfirmDialog';
+import { lastMemberDeleteNote } from './agent-lifecycle-menu.js';
 
 export function DisableWarningDialog({ open, agent, busy, activeTriggers, onDrain, onAbort, onCancel }) {
   if (!open) return null;
@@ -310,7 +311,7 @@ export function TeamActionResultDialog({ result, onClose }) {
   );
 }
 
-export function renderDeleteMessage(target) {
+export function renderDeleteMessage(target, { deleteTeamToo = false, onDeleteTeamTooChange } = {}) {
   if (!target) return '';
 
   // A team is the only cascading parent since #1964 — the orchestrator arm of
@@ -407,5 +408,34 @@ export function renderDeleteMessage(target) {
     );
   }
 
-  return `Delete agent "${target.displayName ?? target.id}"? This removes the workspace and all associated data.`;
+  const plain = `Delete agent "${target.displayName ?? target.id}"? This removes the workspace and all associated data.`;
+  const teamNote = lastMemberDeleteNote(target, deleteTeamToo);
+  if (!teamNote) return plain;
+
+  // The last member of its team (#2685): say what happens to the team, and —
+  // when the caller may delete it — offer to take it along.
+  const team = target.lastMemberOf;
+  return (
+    <>
+      <p style={{ margin: 0 }}>{plain}</p>
+      {team.canManage && onDeleteTeamTooChange && (
+        <label style={{
+          display: 'flex', alignItems: 'flex-start', gap: 8,
+          margin: 'var(--eb-space-3) 0 0',
+          fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', lineHeight: 1.5,
+        }}>
+          <input
+            type="checkbox"
+            checked={deleteTeamToo}
+            onChange={e => onDeleteTeamTooChange(e.target.checked)}
+            style={{ marginTop: 3 }}
+          />
+          <span>Also delete the team <strong>{team.displayName ?? team.id}</strong></span>
+        </label>
+      )}
+      <p style={{ margin: 'var(--eb-space-2) 0 0', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
+        {teamNote}
+      </p>
+    </>
+  );
 }

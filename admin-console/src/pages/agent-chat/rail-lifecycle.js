@@ -113,14 +113,44 @@ export function existingIds(agents) {
  * The shape `renderDeleteMessage` / the delete confirm expect: the agent plus
  * its `children` (a team's members), so deleting a team says how many members
  * go with it.
+ *
+ * A member that is the LAST one in its team (every agent is minted as a team
+ * of one since #2231) also carries `lastMemberOf` — `{ id, displayName,
+ * canManage }` of that team — so the confirm can say the team would be left
+ * empty and offer to delete it too (#2685). Stubs count as members: a team
+ * with a stub left is not empty.
  */
 export function deleteTargetFor(agent, agents) {
   if (!agent) return null;
-  const list = agents || [];
+  const list = (agents || []).filter(Boolean);
   const children = agent.role === 'team'
     ? list.filter(a => a.parentTeamId === agent.id)
     : [];
-  return { ...agent, children };
+  const target = { ...agent, children };
+  if (agent.role === 'team-member' && agent.parentTeamId) {
+    const team = list.find(a => a.id === agent.parentTeamId && a.role === 'team');
+    const others = list.filter(a => a.parentTeamId === agent.parentTeamId && a.id !== agent.id);
+    if (team && others.length === 0) {
+      target.lastMemberOf = {
+        id: team.id,
+        displayName: team.displayName || team.id,
+        canManage: team.canManage !== false,
+      };
+    }
+  }
+  return target;
+}
+
+/**
+ * Which id the delete confirm actually sends `DELETE /api/agents/:id` for
+ * (#2685). Deleting the last member together with its team is ONE team delete
+ * — the server's cascade removes the member with it — so nothing is left
+ * half-done if the second of two requests failed.
+ */
+export function deleteRequestId(target, deleteTeamToo) {
+  if (!target) return null;
+  if (deleteTeamToo && target.lastMemberOf && target.lastMemberOf.canManage) return target.lastMemberOf.id;
+  return target.id;
 }
 
 /**

@@ -220,7 +220,10 @@ on hover, a right-click, or the **Menu** / **Shift+F10** keys. It carries:
   so it can be started again from scratch.
 - **Delete** — removes the agent's configuration entirely. Deleting an **Agent
   Team** additionally removes that team's locally cached and curated knowledge
-  (knowledge shared through its repository is untouched).
+  (knowledge shared through its repository is untouched). When the agent is
+  the **last member of its team** (e.g. a team of one), the confirm says so and
+  offers **Also delete the team** (ticked by default); untick it to keep the
+  empty team.
 - **Clone**, **Export (ZIP)** and **Save as template** — copy this agent, take a
   copy away, or turn it into a reusable template.
 - A group header carries the team-wide equivalents: **Enable/Disable** for the

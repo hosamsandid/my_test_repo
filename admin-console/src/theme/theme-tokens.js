@@ -34,6 +34,20 @@ export function usedTokens(source) {
   return new Set([...source.matchAll(/var\(\s*(--eb-[\w-]+)/g)].map(m => m[1]));
 }
 
+// Line numbers of style blocks (a JS style object or a CSS rule, i.e. an
+// innermost {…}) that fill with --eb-accent-primary but hard-code white text.
+// White on the high-contrast accent is ~3:1; use --eb-text-inverted instead.
+export function whiteOnAccentLines(source) {
+  const lines = [];
+  for (const m of source.matchAll(/\{[^{}]*\}/g)) {
+    const block = m[0];
+    const accentFill = /background(?:-color|Color)?['"]?\s*:\s*['"]?var\(\s*--eb-accent-primary\s*\)/.test(block);
+    const whiteText = /(?:^|[\s,{;])color['"]?\s*:\s*['"]?(?:#fff(?:fff)?\b|white\b)/i.test(block);
+    if (accentFill && whiteText) lines.push(source.slice(0, m.index).split('\n').length);
+  }
+  return lines;
+}
+
 // Follows bare var(--x) references until a literal value is reached.
 export function resolveToken(vars, name, seen = new Set()) {
   if (seen.has(name)) throw new Error(`cyclic token ${name}`);

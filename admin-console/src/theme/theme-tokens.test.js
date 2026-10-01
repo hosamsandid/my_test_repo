@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  THEMES, themeTokens, usedTokens, resolveToken, contrastRatio,
+  THEMES, themeTokens, usedTokens, resolveToken, contrastRatio, whiteOnAccentLines,
 } from './theme-tokens.js';
 
 // Guard for #2701: every --eb-* token the console uses must be defined in
@@ -88,6 +88,26 @@ test('notice body text (text-secondary) reaches AA on the warning and error tint
 
 test('text on primary (accent) buttons reaches AA', () => {
   assertAA('--eb-text-inverted', ['--eb-accent-primary']);
+});
+
+// The token pair above was already AA on main; the real high-contrast button
+// defect was call sites hard-coding '#fff' on the accent fill. Guard those too.
+test('no style block puts literal white text on an --eb-accent-primary fill', () => {
+  const offenders = sourceFiles(SRC).flatMap((file) =>
+    whiteOnAccentLines(fs.readFileSync(file, 'utf8')).map((line) => `${path.relative(SRC, file)}:${line}`));
+  assert.deepEqual(offenders, []);
+});
+
+test('whiteOnAccentLines flags JS style objects and CSS rules, not other colours', () => {
+  const src = [
+    "a = { background: 'var(--eb-accent-primary)', color: '#fff' };",
+    "b = { background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)' };",
+    '.c { background-color: var(--eb-accent-primary); color: white; }',
+    "d = { background: 'var(--eb-bg-app)', color: '#fff' };",
+    "e = { backgroundColor: 'var(--eb-accent-primary)', borderColor: '#fff' };",
+    "f = { backgroundColor: 'var(--eb-accent-primary)',\n  color: '#FFFFFF' };",
+  ].join('\n');
+  assert.deepEqual(whiteOnAccentLines(src), [1, 3, 6]);
 });
 
 test('mutation: the pre-#2701 colours are rejected by the same thresholds', () => {

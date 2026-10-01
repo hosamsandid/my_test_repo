@@ -194,7 +194,7 @@ const {
   DEFAULT_AGENT_IMAGE: BUILTIN_AGENT_IMAGE,
 } = require('./toolchain-registry');
 const { resolveSpecKitCommand, hasUnresolvedPlaceholders } = require('./speckit-content');
-const { deriveScopeList, enforceUiRoute, signViewerHeaders, bodyWasParsed } = require('./plugin-ui-proxy');
+const { deriveScopeList, enforceUiRoute, signViewerHeaders, bodyWasParsed, labelTargetKindFromHeaders } = require('./plugin-ui-proxy');
 const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole, viewerTeamRoles } = require('./plugin-ui-viewer');
 const pluginCredView = require('./plugin-credential-view');
 const { PLUGIN_ID_RE, invalidPluginIdMessage, isRemovableRegistryDirName } = require('./plugin-registry-ids');
@@ -10635,7 +10635,8 @@ function pluginUiProxy(req, res) {
     // trigger buttons and manual labeling — both go through writeLabel — are
     // covered; the orchestrator is notified only once the upstream write
     // succeeds (2xx). Scoped to the github-issues plugin (the dominant human-
-    // labeling path); labels set in the GitHub web UI stay poller-only.
+    // labeling path); labels set in the GitHub web UI stay poller-only. The
+    // kind (issue | pr) comes from the broker's response header (#2746).
     const isLabelAdd = id === 'github-issues'
       && req.method === 'POST'
       && subPath === '/api/label'
@@ -10653,7 +10654,9 @@ function pluginUiProxy(req, res) {
             repo: req.body.repo,
             number: req.body.number,
             label: String(req.body.label).trim(),
-            kind: 'issue', // the GitHub Issues plugin lists issues
+            // #2746: the plugin labels issues AND pull requests; the broker
+            // reports which one, so a PR gate wakes `pull_request.labeled`.
+            kind: labelTargetKindFromHeaders(up.headers),
             actor: viewer.sub || null,
           });
         }

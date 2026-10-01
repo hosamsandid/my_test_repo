@@ -48,6 +48,14 @@
         <option value="all">All</option>
       </select>
     </label>
+    <label class="field">
+      <span>Show</span>
+      <select id="typeSelect">
+        <option value="issues">Issues</option>
+        <option value="prs">Pull requests</option>
+        <option value="all">Issues and pull requests</option>
+      </select>
+    </label>
     <button class="btn" id="refreshBtn" title="Reload issues">Refresh</button>
   </div>
 
@@ -57,7 +65,7 @@
     <div class="list-pane" id="listPane">
       <div class="list-search">
         <input id="searchInput" type="search" autocomplete="off"
-               placeholder="Filter by title…" aria-label="Filter issues by title" />
+               placeholder="Filter by title…" aria-label="Filter by title" />
       </div>
       <div class="skeleton hidden" id="listSkeleton" aria-busy="true"></div>
       <ul class="issue-list" id="issueList"></ul>
@@ -70,7 +78,7 @@
     </div>
 
     <div class="detail-pane" id="detailPane">
-      <div class="detail-empty" id="detailEmpty">Select an issue to see its details.</div>
+      <div class="detail-empty" id="detailEmpty">Select an item to see its details.</div>
       <div class="detail hidden" id="detail"></div>
     </div>
   </div>

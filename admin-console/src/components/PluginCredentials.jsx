@@ -36,10 +36,10 @@ import {
 //     to the one team being edited, so a Team Admin sees just their own account.
 
 const TONE = {
-  ok: 'var(--eb-success-fg, #0a7)',
-  warn: 'var(--eb-warn-fg, #8a6d00)',
+  ok: 'var(--eb-status-success-text)',
+  warn: 'var(--eb-status-warning-text)',
   muted: 'var(--eb-text-muted)',
-  danger: 'var(--eb-danger-fg, #a00)',
+  danger: 'var(--eb-status-error-text)',
 };
 
 function ScopeFields({ pluginId, pluginName, credentials, scope, onSaved }) {
@@ -193,14 +193,14 @@ function ScopeFields({ pluginId, pluginName, credentials, scope, onSaved }) {
                 style={{
                   padding: 'var(--eb-space-1) var(--eb-space-3)', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
                   borderRadius: 'var(--eb-radius-sm)', border: '1px solid var(--eb-border-default)',
-                  background: 'none', color: 'var(--eb-danger-fg, #a00)', cursor: busy ? 'not-allowed' : 'pointer',
+                  background: 'none', color: 'var(--eb-status-error-text)', cursor: busy ? 'not-allowed' : 'pointer',
                 }}
               >
                 {CREDENTIAL_ACTION_LABELS.clear}
               </button>
             )}
-            {okMsg && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-success-fg, #0a7)' }}>{okMsg}</span>}
-            {err && <span role="alert" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-danger-fg, #a00)' }}>{err}</span>}
+            {okMsg && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-success-text)' }}>{okMsg}</span>}
+            {err && <span role="alert" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error-text)' }}>{err}</span>}
           </div>
           {testLine && (
             <div role="status" style={{ marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: TONE[credentialTestTone(test.result)] }}>
@@ -274,7 +274,7 @@ export default function PluginCredentials({ row, onlyScopeId = null, label = nul
       {open && (
         <div style={{ marginTop: 'var(--eb-space-2)' }}>
           {loading && <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Loading…</div>}
-          {err && <div role="alert" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-danger-fg, #a00)' }}>{err}</div>}
+          {err && <div role="alert" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error-text)' }}>{err}</div>}
           {!loading && !err && scopes.length === 0 && (
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
               {onlyScopeId

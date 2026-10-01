@@ -569,7 +569,7 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
             {repoWarning.links.map((l) => (
               <React.Fragment key={l.to}>
                 {' · '}
-                <Link to={l.to} style={{ color: 'var(--eb-accent, var(--eb-status-info))' }}>{l.label}</Link>
+                <Link to={l.to} style={{ color: 'var(--eb-accent-primary)' }}>{l.label}</Link>
               </React.Fragment>
             ))}
           </span>

@@ -2014,20 +2014,20 @@ function UserStopSeparator({ ts }) {
       margin: 'var(--eb-space-2) 0',
       userSelect: 'none',
     }}>
-      <div style={{ flex: 1, height: 1, background: 'var(--eb-status-error-text, #dc2626)' }} />
+      <div style={{ flex: 1, height: 1, background: 'var(--eb-status-error-text)' }} />
       <span style={{
         fontSize: 'var(--eb-text-xs)',
-        color: 'var(--eb-status-error-text, #dc2626)',
+        color: 'var(--eb-status-error-text)',
         fontWeight: 'var(--eb-font-medium)',
         whiteSpace: 'nowrap',
         padding: '2px var(--eb-space-2)',
-        border: '1px solid var(--eb-status-error-text, #dc2626)',
+        border: '1px solid var(--eb-status-error-text)',
         borderRadius: 'var(--eb-radius-sm)',
         background: 'var(--eb-status-error-bg, #fef2f2)',
       }}>
         ⏹ Stopped by user{label ? ` · ${label}` : ''}
       </span>
-      <div style={{ flex: 1, height: 1, background: 'var(--eb-status-error-text, #dc2626)' }} />
+      <div style={{ flex: 1, height: 1, background: 'var(--eb-status-error-text)' }} />
     </div>
   );
 }

@@ -203,7 +203,7 @@ export function renderAppFallback(error, reset) {
               ...btnBase,
               background: 'var(--eb-accent-primary)',
               borderColor: 'var(--eb-accent-primary)',
-              color: '#fff',
+              color: 'var(--eb-text-inverted)',
             },
           },
           APP_FALLBACK_COPY.retry,

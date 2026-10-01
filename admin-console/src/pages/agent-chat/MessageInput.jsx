@@ -690,7 +690,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
           {voiceState === 'recording' && (
             <span style={{
               fontSize: 'var(--eb-text-xs)',
-              color: 'var(--eb-status-error-text, #dc2626)',
+              color: 'var(--eb-status-error-text)',
               whiteSpace: 'nowrap',
               fontVariantNumeric: 'tabular-nums',
             }}>
@@ -717,7 +717,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
                 width: 32, height: 32,
                 background: voiceState === 'recording' ? 'var(--eb-status-error-bg, #fef2f2)' : 'transparent',
                 color: voiceState === 'recording'
-                  ? 'var(--eb-status-error-text, #dc2626)'
+                  ? 'var(--eb-status-error-text)'
                   : (voiceState === 'transcribing' || meetingActive)
                     ? 'var(--eb-text-muted)'
                     : 'var(--eb-text-secondary)',
@@ -824,7 +824,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
                 ? 'var(--eb-status-error-bg, #fef2f2)'
                 : primary.enabled ? 'var(--eb-accent-primary)' : 'var(--eb-bg-active)',
               color: showStop
-                ? 'var(--eb-status-error-text, #dc2626)'
+                ? 'var(--eb-status-error-text)'
                 : primary.enabled ? 'var(--eb-text-inverted)' : 'var(--eb-text-muted)',
               border: 'none',
               borderRadius: 'var(--eb-radius-md)',
@@ -849,7 +849,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
         alignItems: 'center',
         gap: 'var(--eb-space-2)',
         fontSize: 'var(--eb-text-xs)',
-        color: voiceError ? 'var(--eb-status-error-text, #dc2626)' : 'var(--eb-text-muted)',
+        color: voiceError ? 'var(--eb-status-error-text)' : 'var(--eb-text-muted)',
         marginTop: 'var(--eb-space-1)',
         paddingLeft: 'var(--eb-space-1)',
         transition: 'color var(--eb-transition-fast)',

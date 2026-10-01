@@ -46,6 +46,11 @@ const fake = http.createServer((req, res) => {
     return send(200, { total_count: 1, incomplete_results: false, items: [issues[0]] });
   }
   if (p === '/repos/acme/widgets/issues/5') return send(200, issues[0]);
+  if (p === '/repos/acme/widgets/issues/6') return send(200, issues[1]);
+  if (p === '/repos/acme/widgets/issues/6/labels' && req.method === 'POST') {
+    if (!issues[1].labels.some((l) => l.name === 'spec-approved')) issues[1].labels.push({ name: 'spec-approved' });
+    return send(200, issues[1].labels);
+  }
   if (p === '/repos/acme/widgets/labels') return send(200, [{ name: 'ready', color: '84f5d0' }]);
   if (p === '/repos/acme/widgets/issues/5/labels' && req.method === 'POST') {
     if (!addedLabel) { issues[0].labels.push({ name: 'ready', color: '84f5d0' }); addedLabel = true; }
@@ -108,6 +113,36 @@ test('GET /ui/api/issues lists issues and drops pull requests', async () => {
   assert.equal(r.status, 200);
   assert.equal(body.issues.length, 1);
   assert.equal(body.issues[0].number, 5);
+});
+
+test('GET /ui/api/issues?type=prs lists pull requests, type=all lists both (#2746)', async () => {
+  const prs = await (await fetch(`${base}/ui/api/issues?team=team-a&repo=acme/widgets&type=prs`, { headers: viewer(['team-a']) })).json();
+  assert.deepEqual(prs.issues.map((i) => i.number), [6]);
+  assert.equal(prs.issues[0].isPullRequest, true);
+  const all = await (await fetch(`${base}/ui/api/issues?team=team-a&repo=acme/widgets&type=all`, { headers: viewer(['team-a']) })).json();
+  assert.deepEqual(all.issues.map((i) => i.number), [5, 6]);
+});
+
+test('GET /ui/api/search?type=prs searches pull requests (#2746)', async () => {
+  const r = await fetch(`${base}/ui/api/search?team=team-a&repo=acme/widgets&state=open&type=prs&q=x`, { headers: viewer(['team-a']) });
+  assert.equal(r.status, 200);
+  assert.match(lastSearchQ, /^x repo:acme\/widgets type:pr in:title state:open$/);
+});
+
+test('POST /ui/api/label reports the target kind for the #1858 fast path: pr for a PR, issue for an issue (#2746)', async () => {
+  const pr = await fetch(`${base}/ui/api/label`, {
+    method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, viewer(['team-a'])),
+    body: JSON.stringify({ team: 'team-a', repo: 'acme/widgets', number: 6, label: 'spec-approved', action: 'add' }),
+  });
+  assert.equal(pr.status, 200);
+  assert.equal(pr.headers.get('x-aee-label-target-kind'), 'pr');
+  assert.equal((await pr.json()).issue.labels.some((l) => l.name === 'spec-approved'), true);
+  const issue = await fetch(`${base}/ui/api/label`, {
+    method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, viewer(['team-a'])),
+    body: JSON.stringify({ team: 'team-a', repo: 'acme/widgets', number: 5, label: 'ready', action: 'add' }),
+  });
+  assert.equal(issue.status, 200);
+  assert.equal(issue.headers.get('x-aee-label-target-kind'), 'issue');
 });
 
 test('GET /ui/api/search runs a repo/title-scoped server-side search (#1658)', async () => {
@@ -260,17 +295,19 @@ test('GET /ui/api/context restores the most-recently-used team + each team\'s ow
   });
   // carol used team-a first, then team-b (later) with state 'all'
   server.store.savePref('team-a', 'carol', { repo: 'acme/widgets', state: 'closed', updatedAt: '2026-01-01T00:00:00Z' });
-  server.store.savePref('team-b', 'carol', { repo: 'acme/gadgets', state: 'all', updatedAt: '2026-07-01T00:00:00Z' });
+  server.store.savePref('team-b', 'carol', { repo: 'acme/gadgets', state: 'all', type: 'prs', updatedAt: '2026-07-01T00:00:00Z' });
 
   const headers = signViewerHeaders({ sub: 'carol', role: 'team-member', teamIds: ['team-a', 'team-b'] }, SECRET);
   const r = await fetch(`${base}/ui/api/context`, { headers });
   const body = await r.json();
   assert.equal(r.status, 200);
   // AC2: most-recently-used team wins (team-b), not first-in-list (team-a)
-  assert.deepEqual(body.lastUsed, { team: 'team-b', repo: 'acme/gadgets', state: 'all' });
+  assert.deepEqual(body.lastUsed, { team: 'team-b', repo: 'acme/gadgets', state: 'all', type: 'prs' });
   // per-team last view is exposed so switching back restores that project's own selection
   const a = body.teams.find((t) => t.teamId === 'team-a');
   const b = body.teams.find((t) => t.teamId === 'team-b');
   assert.deepEqual([a.lastRepo, a.lastState], ['acme/widgets', 'closed']);
   assert.deepEqual([b.lastRepo, b.lastState], ['acme/gadgets', 'all']);
+  // #2746: the item type is restored per team too (legacy prefs carry none)
+  assert.deepEqual([a.lastType, b.lastType], [null, 'prs']);
 });

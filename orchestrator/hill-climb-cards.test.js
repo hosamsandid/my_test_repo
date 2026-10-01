@@ -8,6 +8,8 @@ const {
   validateCard,
   normalizeCard,
   heuristicFindings,
+  describeTrigger,
+  supersedeVanishedTriggerCards,
   recurringAnomalyIdentities,
   mergeCards,
   buildAnalystDigest,
@@ -121,6 +123,62 @@ test('heuristicFindings emits deterministic cards with no provider', () => {
   }
   const classes = cards.map((c) => c.class).sort();
   assert.deepEqual(classes, ['flow-wiring', 'flow-wiring', 'trigger-hygiene', 'trigger-hygiene']);
+});
+
+test('heuristicFindings raises no zero-fire deletion card below the data floor (#2710)', () => {
+  const thin = { ...SNAPSHOT, totalRuns: 0, insufficientData: true };
+  const cards = heuristicFindings(thin, { now: 0 });
+  assert.equal(cards.filter((c) => c.class === 'trigger-hygiene').length, 0);
+  // The other dead-config findings are unaffected by the floor.
+  assert.ok(cards.some((c) => c.object.kind === 'label'));
+});
+
+test('heuristicFindings titles a zero-fire card by agent, event and label (#2710)', () => {
+  const snap = { ...SNAPSHOT, metrics: { ...SNAPSHOT.metrics, deadConfig: {
+    zeroFireTriggers: [{ agentId: 'acme-rev', triggerId: 't1790817163431', agentName: 'Reviewer',
+      type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready-for-review' }],
+    unconsumedEmits: [],
+  } } };
+  const card = heuristicFindings(snap, { now: 0 }).find((c) => c.class === 'trigger-hygiene');
+  assert.equal(card.title, "Reviewer's listener for 'ready-for-review' (issues.labeled) has not fired this window");
+  assert.doesNotMatch(card.title, /t1790817163431/);
+  assert.match(card.detail, /t1790817163431/); // the id stays available in the detail
+  assert.equal(card.object.id, 'acme-rev/t1790817163431');
+});
+
+test('describeTrigger falls back sensibly without a label', () => {
+  assert.equal(describeTrigger({ agentId: 'dev', triggerId: 't', events: ['pull_request.opened'] }), "dev's pull_request.opened trigger");
+  assert.equal(describeTrigger({ agentId: 'dev', agentName: 'Dev', triggerId: 't', type: 'cron' }), "Dev's scheduled trigger");
+  assert.equal(describeTrigger({ agentId: 'dev', triggerId: 't', type: 'http' }), "dev's http trigger");
+  assert.equal(describeTrigger({ agentId: 'dev', triggerId: 'nightly' }), "dev's trigger 'nightly'");
+});
+
+test('supersedeVanishedTriggerCards retires open cards whose trigger is gone (#2710)', () => {
+  const gone = normalizeCard(goodCard(), { teamId: 'acme', now: 1000 }).card;
+  const live = normalizeCard(goodCard({ object: { kind: 'trigger', id: 'dev/live' } }), { teamId: 'acme', now: 1000 }).card;
+  const applied = normalizeCard(goodCard({ object: { kind: 'trigger', id: 'dev/applied' } }), { teamId: 'acme', now: 1000 }).card;
+  applied.status = 'applied';
+  const label = normalizeCard(goodCard({ class: 'flow-wiring', object: { kind: 'label', id: 'x' } }), { teamId: 'acme', now: 1000 }).card;
+  const cards = [gone, live, applied, label];
+  const n = supersedeVanishedTriggerCards(cards, ['dev/live'], { now: 2000 });
+  assert.equal(n, 1);
+  assert.equal(gone.status, 'superseded');
+  assert.equal(gone.updatedAt, new Date(2000).toISOString());
+  assert.equal(live.status, 'open');
+  assert.equal(applied.status, 'applied'); // terminal history is untouched
+  assert.equal(label.status, 'open'); // only trigger objects are checked
+  // A superseded card no longer blocks a fresh card for the same object.
+  const again = normalizeCard(goodCard(), { teamId: 'acme', now: 3000 }).card;
+  const r = mergeCards(cards, [again], { now: 3000 });
+  assert.equal(r.added, 1);
+});
+
+test('mergeCards refreshes the title of a re-detected open card', () => {
+  const first = mergeCards([], [normalizeCard(goodCard({ title: "Trigger 'nightly' has not fired" }), { teamId: 'acme', now: 1000 }).card], { now: 1000 });
+  const again = normalizeCard(goodCard({ title: "Dev's scheduled trigger has not fired this window" }), { teamId: 'acme', now: 2000 }).card;
+  const second = mergeCards(first.cards, [again], { now: 2000 });
+  assert.equal(second.bumped, 1);
+  assert.equal(second.cards[0].title, "Dev's scheduled trigger has not fired this window");
 });
 
 test('heuristicFindings keys recurrence cards to the object when raw history is given', () => {

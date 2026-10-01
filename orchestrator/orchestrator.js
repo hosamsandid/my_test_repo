@@ -3954,7 +3954,7 @@ async function computeTeamHillClimbMetrics(teamId, { now = Date.now() } = {}) {
       const raw = JSON.parse(fs.readFileSync(agentStatePath(id, "triggers.json"), "utf8"));
       if (Array.isArray(raw)) triggers = raw;
     } catch { /* no triggers yet */ }
-    members.push({ id, emits: cfg.emits, outcomes: cfg.outcomes, triggers });
+    members.push({ id, displayName: cfg.displayName, emits: cfg.emits, outcomes: cfg.outcomes, triggers });
   }
   const reworkTriggers = hillClimbSweep.reworkTriggerIds(members);
 
@@ -3997,18 +3997,22 @@ async function computeTeamHillClimbMetrics(teamId, { now = Date.now() } = {}) {
   } catch { /* no event log */ }
   const waste = hillClimbSweep.wasteSignalsFromEventLog(eventLogEntries, fromMs, now, teamAgentIds);
 
+  const triggerDefs = hillClimbSweep.triggerDefsFromMembers(members);
   const snapshot = hillClimbMetrics.computeHillClimbMetrics({
     runs,
     anomalyHistory,
     configBoundaries,
-    triggerDefs: hillClimbSweep.triggerDefsFromMembers(members),
+    triggerDefs,
     emitLabels: hillClimbSweep.emitLabelsFromMembers(members),
     consumedLabels: hillClimbSweep.consumedLabelsFromMembers(members),
     throttleDrops: waste.throttleDrops,
     digestFolds: waste.digestFolds,
   }, { now, windowDays, minRunsPerWindow, excludeAgents });
 
-  return { teamId, generatedAt: new Date(now).toISOString(), ...snapshot };
+  // Every trigger the team declares right now, so the card pass can supersede
+  // open cards whose trigger has since been deleted (#2710).
+  const liveTriggerRefs = triggerDefs.map((t) => `${t.agentId}/${t.triggerId}`);
+  return { teamId, generatedAt: new Date(now).toISOString(), ...snapshot, liveTriggerRefs };
 }
 
 // Day-keyed snapshot path (same-day re-run overwrites). Traversal-guarded via
@@ -4084,9 +4088,14 @@ function hillClimbCardConfig(teamId) {
 // store under the budget/dedup/cooldown rules, re-validating every incoming card
 // through the schema (invalid ones are dropped — the store is the authority even
 // for analyst output). Persists and returns the merge summary. Never throws.
-function mergeAndPersistHillClimbCards(teamId, incoming, { now = Date.now(), source = "heuristic" } = {}) {
+function mergeAndPersistHillClimbCards(teamId, incoming, { now = Date.now(), source = "heuristic", liveTriggerRefs = null } = {}) {
   const { maxCardsPerPass, windowDays } = hillClimbCardConfig(teamId);
   const existing = readHillClimbCards(teamId);
+  // A pass that knows the team's live triggers retires open cards whose trigger
+  // is gone (#2710); the analyst merge passes none and leaves them alone.
+  const superseded = Array.isArray(liveTriggerRefs)
+    ? hillClimbCards.supersedeVanishedTriggerCards(existing, liveTriggerRefs, { now })
+    : 0;
   const passId = `pass-${new Date(now).toISOString()}`;
   const valid = [];
   let rejected = 0;
@@ -4101,7 +4110,7 @@ function mergeAndPersistHillClimbCards(teamId, incoming, { now = Date.now(), sou
   }
   const merged = hillClimbCards.mergeCards(existing, valid, { maxCardsPerPass, windowDays, now, passId });
   const savedPath = writeHillClimbCards(teamId, merged.cards);
-  return { ...merged, rejected, path: savedPath, cards: merged.cards };
+  return { ...merged, rejected, superseded, path: savedPath, cards: merged.cards };
 }
 
 // Dismiss a card (human action): flip its status to 'dismissed' so it is not
@@ -4223,7 +4232,7 @@ async function runHillClimbPass(teamId, { now = Date.now() } = {}) {
       // Deterministic findings → cards (the honest fallback shipped every pass).
       const anomalyHistory = _readTeamAnomalyHistory(teamId);
       const findings = hillClimbCards.heuristicFindings(snapshot, { now, anomalyHistory });
-      merge = mergeAndPersistHillClimbCards(teamId, findings, { now, source: "heuristic" });
+      merge = mergeAndPersistHillClimbCards(teamId, findings, { now, source: "heuristic", liveTriggerRefs: snapshot.liveTriggerRefs });
       // Secret-free digest for the console's server-side analyst (concept §3.2).
       digest = hillClimbCards.buildAnalystDigest(snapshot, { findings });
     }
@@ -4232,7 +4241,7 @@ async function runHillClimbPass(teamId, { now = Date.now() } = {}) {
       snapshot,
       path: savedPath,
       cards: merge ? merge.cards : [],
-      merge: merge ? { added: merge.added, bumped: merge.bumped, deferred: merge.deferred, rejected: merge.rejected } : null,
+      merge: merge ? { added: merge.added, bumped: merge.bumped, deferred: merge.deferred, rejected: merge.rejected, superseded: merge.superseded } : null,
       verdict: { transitioned: verdict.transitioned, verdicts: verdict.verdicts },
       digest,
       autonomy,

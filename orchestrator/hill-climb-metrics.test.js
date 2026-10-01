@@ -154,6 +154,23 @@ test('computeHillClimbMetrics folds the full §4 catalog on a healthy window', (
   assert.equal(out.ledger.length, 2);
 });
 
+test('zero-fire skips triggers activated inside the window (#2710)', () => {
+  const inputs = goldenInputs();
+  inputs.triggerDefs = [
+    { agentId: 'dev', triggerId: 't-dev' },
+    { agentId: 'rev', triggerId: 't-new', since: hAgo(0.05) }, // 3 minutes old
+    { agentId: 'rev', triggerId: 't-old', since: dAgo(30), agentName: 'Reviewer', type: 'github-event',
+      events: ['issues.labeled'], labelFilter: 'ready-for-review' },
+    { agentId: 'rev', triggerId: 't-legacy' }, // no stamp → treated as old
+  ];
+  const out = computeHillClimbMetrics(inputs, { now: NOW, windowDays: 7, minRunsPerWindow: 20 });
+  assert.deepEqual(out.metrics.deadConfig.zeroFireTriggers, [
+    { agentId: 'rev', triggerId: 't-old', agentName: 'Reviewer', type: 'github-event',
+      events: ['issues.labeled'], labelFilter: 'ready-for-review' },
+    { agentId: 'rev', triggerId: 't-legacy' },
+  ]);
+});
+
 test('insufficient-data below minRunsPerWindow nulls the ratio metrics but keeps counts', () => {
   const inputs = goldenInputs();
   const out = computeHillClimbMetrics(inputs, { now: NOW, windowDays: 7, minRunsPerWindow: 100 });

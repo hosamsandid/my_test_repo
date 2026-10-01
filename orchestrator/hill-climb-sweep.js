@@ -201,12 +201,27 @@ function consumedLabelsFromMembers(members) {
   return [...out];
 }
 
-// The flat `[{agentId, triggerId}]` list of declared triggers (zero-fire base).
+// The flat list of declared triggers (zero-fire base). Beyond `{agentId,
+// triggerId}` each entry carries what a human needs to recognise the trigger in
+// a card title (#2710) — the member's display name, the trigger type, its
+// events and labelFilter — plus `since`, the trigger's activation stamp (the
+// same `activatedAt → createdAt` precedence as the poller's history horizon), so
+// a trigger younger than the measurement window is not reported as dead.
 function triggerDefsFromMembers(members) {
   const out = [];
   for (const m of Array.isArray(members) ? members : []) {
     for (const t of Array.isArray(m && m.triggers) ? m.triggers : []) {
-      if (t && t.id) out.push({ agentId: m.id, triggerId: t.id });
+      if (!t || !t.id) continue;
+      const since = t.activatedAt || t.createdAt || null;
+      out.push({
+        agentId: m.id,
+        triggerId: t.id,
+        ...(m.displayName ? { agentName: m.displayName } : {}),
+        ...(t.type ? { type: t.type } : {}),
+        ...(Array.isArray(t.events) && t.events.length ? { events: t.events.filter((e) => typeof e === 'string') } : {}),
+        ...(t.labelFilter ? { labelFilter: t.labelFilter } : {}),
+        ...(since ? { since } : {}),
+      });
     }
   }
   return out;

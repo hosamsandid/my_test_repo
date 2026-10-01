@@ -149,11 +149,29 @@ test('emit/consumed/trigger derivations from member configs', () => {
   assert.deepEqual(emitLabelsFromMembers(members).sort(), ['ready-for-review', 'ready-to-merge']);
   assert.deepEqual(consumedLabelsFromMembers(members).sort(), ['ready', 'ready-for-review', 'revisions-required']);
   assert.deepEqual(triggerDefsFromMembers(members), [
-    { agentId: 'dev', triggerId: 't-dev' },
-    { agentId: 'rev', triggerId: 't-rev' },
-    { agentId: 'rev', triggerId: 't-rework' },
+    { agentId: 'dev', triggerId: 't-dev', labelFilter: 'ready' },
+    { agentId: 'rev', triggerId: 't-rev', labelFilter: 'ready-for-review' },
+    { agentId: 'rev', triggerId: 't-rework', labelFilter: 'revisions-required' },
   ]);
   assert.deepEqual([...reworkTriggerIds(members)], ['t-rework']);
+});
+
+test('triggerDefsFromMembers carries the display fields and the activation stamp (#2710)', () => {
+  const members = [{
+    id: 'acme-rev', displayName: 'Reviewer',
+    triggers: [
+      { id: 't1', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready-for-review',
+        createdAt: '2026-08-01T00:00:00Z', activatedAt: '2026-08-02T00:00:00Z' },
+      { id: 't2', type: 'cron', createdAt: '2026-07-01T00:00:00Z' },
+      { id: 't3' },
+    ],
+  }];
+  assert.deepEqual(triggerDefsFromMembers(members), [
+    { agentId: 'acme-rev', triggerId: 't1', agentName: 'Reviewer', type: 'github-event',
+      events: ['issues.labeled'], labelFilter: 'ready-for-review', since: '2026-08-02T00:00:00Z' },
+    { agentId: 'acme-rev', triggerId: 't2', agentName: 'Reviewer', type: 'cron', since: '2026-07-01T00:00:00Z' },
+    { agentId: 'acme-rev', triggerId: 't3', agentName: 'Reviewer' },
+  ]);
 });
 
 // ── waste signals from the event log ─────────────────────────────────────────

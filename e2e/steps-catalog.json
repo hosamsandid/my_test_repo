@@ -332,7 +332,7 @@
     {
       "name": "access.openShare",
       "module": "access",
-      "description": "Open the team's Share panel from the rail's group context menu. The kebab is a `<span role=\"button\">` labelled `Team actions for <label>`, where <label> is the team's DISPLAY NAME (rail-lifecycle.js: `displayName || id`), and the portaled menu carries the same accessible name. The acting identity sees only the one shared team in its rail here, so match the stable `Team actions for ` prefix rather than the display name. The menu closes on any scroll, so nothing scrolls in between. \"Share…\" now ROUTES to the team's Sharing configuration tab rather than opening a SidePanel, so this waits for that tab's list heading to appear (which only happens after the navigation and the panel's own fetch).",
+      "description": "Open the team's Share panel from the rail's group context menu. The kebab is a `<button>` labelled `Team actions for <label>`, where <label> is the team's DISPLAY NAME (rail-lifecycle.js: `displayName || id`), and the portaled menu carries the same accessible name. The acting identity sees only the one shared team in its rail here, so match the stable `Team actions for ` prefix rather than the display name. The menu closes on any scroll, so nothing scrolls in between. \"Share…\" now ROUTES to the team's Sharing configuration tab rather than opening a SidePanel, so this waits for that tab's list heading to appear (which only happens after the navigation and the panel's own fetch).",
       "params": [
         {
           "name": "teamId",

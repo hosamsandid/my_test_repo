@@ -20,6 +20,7 @@
 // this journey exists to catch.
 const { expect } = require('@playwright/test');
 const identity = require('./identity');
+const { agentRail } = require('./agent-rail');
 
 // Copy single-sourced from admin-console/src/pages/agent-chat/team-share-view.js.
 // Duplicated as literals rather than imported: the console is ESM browser code
@@ -31,7 +32,7 @@ const SUCCESSOR_NOTICE =
   'You are about to remove the last Team Admin. Choose who takes over as Team Admin in the same step.';
 const ROLE_LABELS = { 'team-admin': 'Team Admin', 'team-member': 'Team Member' };
 // `emptyStatePointer().lead` from admin-console/src/pages/agent-chat/empty-state.js —
-// what the rail shows instead of the agent listbox when the caller can see no
+// what the rail shows instead of the agent list when the caller can see no
 // agents at all, which is precisely this journey's "private by default" state.
 const EMPTY_RAIL_LEAD = 'No agents yet.';
 
@@ -184,7 +185,7 @@ async function expectTeamVisible(ctx, { teamId, teamName }) {
     })
     .toBe(true);
   await ctx.page.reload();
-  const rail = ctx.page.locator('[role="listbox"]').first();
+  const rail = agentRail(ctx.page);
   // The rail group header shows the team's display NAME (the team agent's
   // displayName), not the raw slug — assert on it when the caller gives one.
   await expect(rail.getByText(teamName || teamId, { exact: true }).first()).toBeVisible({ timeout: 30_000 });
@@ -216,12 +217,12 @@ async function expectTeamHidden(ctx, { teamId, teamName }) {
   // or this passes against a page that has simply not finished loading.
   //
   // It renders one of TWO things, which is the trap here: `AgentChat.jsx` mounts
-  // `AgentList` — and therefore `[role="listbox"]` — only when `agents.length > 0`,
+  // `AgentList` — and therefore the "Agents" list — only when `agents.length > 0`,
   // and hands someone with no agents at all the `emptyStatePointer()` text
   // instead. Both of this journey's "sees nothing" beats are exactly that case,
-  // so waiting for the listbox alone would fail on the very state being proven.
+  // so waiting for the list alone would fail on the very state being proven.
   await ctx.page.reload();
-  const rail = ctx.page.locator('[role="listbox"]').first();
+  const rail = agentRail(ctx.page);
   const noAgents = ctx.page.getByText(EMPTY_RAIL_LEAD, { exact: true });
   await expect(rail.or(noAgents).first()).toBeVisible({ timeout: 30_000 });
   // Page-wide rather than rail-scoped, so it holds in both renderings. The rail
@@ -233,7 +234,7 @@ async function expectTeamHidden(ctx, { teamId, teamName }) {
 /**
  * Open the team's Share panel from the rail's group context menu.
  *
- * The kebab is a `<span role="button">` labelled `Team actions for <label>`,
+ * The kebab is a `<button>` labelled `Team actions for <label>`,
  * where <label> is the team's DISPLAY NAME (rail-lifecycle.js: `displayName ||
  * id`), and the portaled menu carries the same accessible name. The acting
  * identity sees only the one shared team in its rail here, so match the stable

@@ -37,6 +37,7 @@ import {
   TRIGGER_TIME_ZONE, browserTimeZone, schedulerTimeZone, cronZoneNote, onceScheduleLabel, triggerTiming, pastOnceHint,
 } from './trigger-timing.js';
 import { triggerIssue, triggerRowKey } from './trigger-issues.js';
+import { webhookCurlExample, WEBHOOK_GITHUB_HINT, WEBHOOK_SECRET_WARNING } from './webhook-hint.js';
 import { triggerRepoOptions, environmentRepoOptions, triggerRepoWarning } from './trigger-repo-status.js';
 import {
   STOP_CONDITIONS,
@@ -1866,8 +1867,11 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
           </div>
 
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
-            Send <code style={{ fontFamily: 'var(--eb-font-mono)' }}>X-Hook-Secret</code> header with the value above.
-            Anyone with the secret can fire this trigger — copy it once, store it as a GitHub webhook secret, and rotate via the ↻ button.
+            Send the value above in the <code style={{ fontFamily: 'var(--eb-font-mono)' }}>X-Hook-Secret</code> header, e.g.
+            <code style={{ display: 'block', fontFamily: 'var(--eb-font-mono)', wordBreak: 'break-all', margin: 'var(--eb-space-1) 0' }}>
+              {webhookCurlExample(webhookPath)}
+            </code>
+            {WEBHOOK_GITHUB_HINT} {WEBHOOK_SECRET_WARNING}
           </div>
         </div>
       )}

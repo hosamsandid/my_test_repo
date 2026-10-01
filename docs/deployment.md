@@ -160,7 +160,7 @@ One rough edge behind a proxy:
 | Port | Service | Expose? |
 |---|---|---|
 | `4000` | Admin Console | **yes** — behind TLS + your identity provider's proxy if you have one |
-| `4003` | Orchestrator webhook (`http` triggers) | only if external systems must fire triggers; it authenticates per-trigger via `X-Hook-Secret` |
+| `4003` | Orchestrator webhook (`http` triggers) | only if external systems must fire triggers; it authenticates per-trigger via `X-Hook-Secret` or a GitHub `X-Hub-Signature-256` |
 | `8448` | Matrix homeserver | **no** — keep internal; nothing outside needs it |
 | `4002` | Orchestrator internal API | already unpublished; **leave it that way** — and arm the internal-auth gate below, because unpublished is not the same as unreachable |
 

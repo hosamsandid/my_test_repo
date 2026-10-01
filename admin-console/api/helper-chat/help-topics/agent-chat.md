@@ -211,7 +211,7 @@ on hover, a right-click, or the **Menu** / **Shift+F10** keys. It carries:
   it back. This is the reversible pause.
 - **Reset to stub** — stops the agent and **wipes** its workspace: session
   history, cloned repositories, anything it had written. The configuration stays,
-  so it can be started again from scratch.
+  so it can be started again from scratch; a notice confirms the reset.
 - **Delete** — removes the agent's configuration entirely. Deleting an **Agent
   Team** additionally removes that team's locally cached and curated knowledge
   (knowledge shared through its repository is untouched).
@@ -256,8 +256,9 @@ chat, because there is no chat account to open yet. Its menu offers
 **Materialize**, which is the operation the removed Agents page called *Activate*:
 it creates the chat account, seeds the workspace with the agent's skills, prompt
 and MCP configuration, clones the environment's repositories and starts the
-agent. Expect it to take a moment when repositories are involved — the row shows
-it working — and when it finishes the member moves up into the list above.
+agent. Expect it to take a moment when repositories are involved — the row and
+an open chat pane (*Materializing …*) show it working — and when it finishes the
+member moves up into the list above and a notice confirms it.
 
 A stub is *not* the same thing as a **paused** agent: paused means provisioned
 and switched off, stub means never provisioned at all. That is why the *show

@@ -66,7 +66,9 @@
   var IssueList = window.AEEIssueList || {
     normalizeQuery: function (t) { return String(t == null ? '' : t).trim(); },
     pagerState: function (p, m) { return { page: p, hasPrev: p > 1, hasNext: !!m, label: 'Page ' + p }; },
-    emptyMessage: function (q, s) { return q ? 'No issues match “' + q + '”.' : 'No ' + (s === 'all' ? '' : s + ' ') + 'issues in this repository.'; },
+    emptyMessage: function (q, s) { return q ? 'No items match “' + q + '”.' : 'No ' + (s === 'all' ? '' : s + ' ') + 'items in this repository.'; },
+    normType: function (t) { return t === 'prs' || t === 'all' ? t : 'issues'; },
+    isPullRequestItem: function (it) { return !!(it && it.isPullRequest); },
   };
 
   // ── state ───────────────────────────────────────────────────────────────────
@@ -74,6 +76,7 @@
   var team = null;         // selected teamId
   var repo = null;         // selected repo fullName
   var state = 'open';
+  var type = 'issues';     // Show: issues | prs | all (#2746)
   var page = 1;
   var issues = [];
   var hasMore = false;     // server's paging signal for the current view
@@ -83,7 +86,7 @@
   function currentTeam() { return teams.filter(function (t) { return t.teamId === team; })[0] || null; }
 
   function saveLocal() {
-    try { localStorage.setItem(LS_KEY, JSON.stringify({ team: team, repo: repo, state: state })); } catch (e) { /* ignore */ }
+    try { localStorage.setItem(LS_KEY, JSON.stringify({ team: team, repo: repo, state: state, type: type })); } catch (e) { /* ignore */ }
   }
   function readLocal() {
     try { return JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (e) { return null; }
@@ -142,7 +145,7 @@
     skeleton(true);
     $('listEmpty').classList.add('hidden');
     var q = IssueList.normalizeQuery(searchText);
-    var common = 'team=' + encodeURIComponent(team) + '&repo=' + encodeURIComponent(repo) + '&state=' + encodeURIComponent(state) + '&page=' + page;
+    var common = 'team=' + encodeURIComponent(team) + '&repo=' + encodeURIComponent(repo) + '&state=' + encodeURIComponent(state) + '&type=' + encodeURIComponent(type) + '&page=' + page;
     var path = q ? '/search?' + common + '&q=' + encodeURIComponent(q) : '/issues?' + common;
     req(path)
       .then(function (data) {
@@ -177,11 +180,13 @@
     var t = currentTeam();
     var e = $('listEmpty');
     if (!t || !t.repos || !t.repos.length || !t.hasToken) { e.classList.add('hidden'); return; }
-    if (!issues.length) { e.textContent = IssueList.emptyMessage(searchText, state); e.classList.remove('hidden'); }
+    if (!issues.length) { e.textContent = IssueList.emptyMessage(searchText, state, type); e.classList.remove('hidden'); }
     else e.classList.add('hidden');
   }
 
   function stateBadge(s) { return el('span', { class: 'state ' + (s === 'closed' ? 'closed' : 'open') }, [s]); }
+  // Marks a pull request in the list/detail (#2746) so it is never mistaken for an issue.
+  function kindBadge(it) { return IssueList.isPullRequestItem(it) ? el('span', { class: 'kind-pr', title: 'Pull request' }, ['PR']) : null; }
 
   function labelChips(labels, onRemove) {
     return (labels || []).map(function (l) {
@@ -217,6 +222,7 @@
       }, [
         el('div', { class: 'issue-row' }, [
           el('span', { class: 'issue-num' }, ['#' + it.number]),
+          kindBadge(it),
           el('span', { class: 'issue-title' }, [it.title]),
           stateBadge(it.state),
         ]),
@@ -254,6 +260,7 @@
     d.appendChild(el('h2', {}, [issue.title]));
     d.appendChild(el('div', { class: 'meta' }, [
       el('span', { class: 'issue-num' }, ['#' + issue.number]),
+      kindBadge(issue),
       stateBadge(issue.state),
       issue.user ? el('span', {}, ['opened by ' + issue.user]) : null,
       issue.htmlUrl ? el('a', { href: issue.htmlUrl, target: '_blank', rel: 'noopener' }, ['view on GitHub ↗']) : null,
@@ -454,8 +461,8 @@
     var last = ctx.lastUsed;
     var ids = teams.map(function (t) { return t.teamId; });
     // prefer server-remembered, then localStorage, then single team
-    if (last && ids.indexOf(last.team) >= 0) { team = last.team; repo = last.repo; state = last.state || 'open'; }
-    else if (local && ids.indexOf(local.team) >= 0) { team = local.team; repo = local.repo; state = local.state || 'open'; }
+    if (last && ids.indexOf(last.team) >= 0) { team = last.team; repo = last.repo; state = last.state || 'open'; type = IssueList.normType(last.type); }
+    else if (local && ids.indexOf(local.team) >= 0) { team = local.team; repo = local.repo; state = local.state || 'open'; type = IssueList.normType(local.type); }
     else if (teams.length) { team = teams[0].teamId; }
     // stale repo → fall back to the team's first repo (handled in renderRepoSelect)
   }
@@ -468,6 +475,7 @@
       renderTeamSelect();
       renderRepoSelect();
       $('stateSelect').value = state;
+      $('typeSelect').value = type;
       updateBanner();
       loadList();
     }).catch(function (err) { setErr(err.message); });
@@ -481,13 +489,16 @@
     var t = currentTeam();
     repo = (t && t.lastRepo) || null;
     state = (t && t.lastState) || 'open';
+    type = IssueList.normType(t && t.lastType);
     $('stateSelect').value = state;
+    $('typeSelect').value = type;
     renderRepoSelect(); updateBanner(); saveLocal(); persistPref(); resetAndLoad();
   });
   $('repoSelect').addEventListener('change', function (e) { repo = e.target.value; saveLocal(); persistPref(); resetAndLoad(); });
   // A state change re-runs the current view (listing OR search) at page 1, so a
   // search respects the selected state (AC8) and pagination resets (AC3/AC7).
   $('stateSelect').addEventListener('change', function (e) { state = e.target.value; saveLocal(); persistPref(); resetAndLoad(); });
+  $('typeSelect').addEventListener('change', function (e) { type = IssueList.normType(e.target.value); saveLocal(); persistPref(); resetAndLoad(); });
   $('refreshBtn').addEventListener('click', function () { loadList(); });
   $('prevBtn').addEventListener('click', function () { if (page > 1) { page -= 1; loadList(); } });
   $('nextBtn').addEventListener('click', function () { if (hasMore) { page += 1; loadList(); } });
@@ -517,7 +528,7 @@
     if (!team) return;
     // team travels in the body (like writeLabel) so a multi-team viewer's pref
     // resolves server-side — a POST carries no team query param (#1651).
-    req('/pref', { method: 'POST', body: JSON.stringify({ team: team, repo: repo, state: state }) }).catch(function () { /* best-effort */ });
+    req('/pref', { method: 'POST', body: JSON.stringify({ team: team, repo: repo, state: state, type: type }) }).catch(function () { /* best-effort */ });
   }
 
   boot();

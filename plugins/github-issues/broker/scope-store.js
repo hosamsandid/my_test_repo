@@ -137,6 +137,8 @@ class ScopeStore {
     const doc = {
       repo: pref && pref.repo ? String(pref.repo) : null,
       state: pref && pref.state ? String(pref.state) : null,
+      // issues | prs | all (#2746); absent on pre-#2746 prefs → the UI's default
+      type: pref && pref.type ? String(pref.type) : null,
       updatedAt: pref && pref.updatedAt ? pref.updatedAt : null,
     };
     const tmp = `${p}.tmp-${process.pid}`;
@@ -163,7 +165,7 @@ class ScopeStore {
       const ms = Date.parse(pref.updatedAt) || 0;
       if (ms > bestMs) {
         bestMs = ms;
-        best = { team: String(scopeId), repo: String(pref.repo), state: pref.state || 'open' };
+        best = { team: String(scopeId), repo: String(pref.repo), state: pref.state || 'open', type: pref.type || 'issues' };
       }
     }
     return best;

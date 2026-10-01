@@ -34,7 +34,7 @@ import {
   DOW_LABELS, parseCronState, buildCron, describeCron, switchCronMode, validateCronState, cronExpressionError, inCronTime,
 } from './cron-format.js';
 import {
-  TRIGGER_TIME_ZONE, browserTimeZone, schedulerTimeZone, cronZoneNote, onceScheduleLabel, triggerTiming,
+  TRIGGER_TIME_ZONE, browserTimeZone, schedulerTimeZone, cronZoneNote, onceScheduleLabel, triggerTiming, pastOnceHint,
 } from './trigger-timing.js';
 import { triggerIssue, triggerRowKey } from './trigger-issues.js';
 import { triggerRepoOptions, environmentRepoOptions, triggerRepoWarning } from './trigger-repo-status.js';
@@ -47,6 +47,7 @@ import {
   deriveGap,
   resolveTokenBudget,
   resolveGapSeconds,
+  loopVerifierCopy,
 } from './loop-form-options.js';
 
 // preCheckScript paths reference an installed binary inside the orchestrator
@@ -331,7 +332,10 @@ function toDatetimeLocal(iso) {
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 }
 
+// A past time is legal (the scheduler fires it at its next sync and removes
+// it) but never silent: an inline hint says so (#2682).
 function DateTimePicker({ value, onChange }) {
+  const pastHint = pastOnceHint(value);
   return (
     <div>
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
@@ -350,6 +354,11 @@ function DateTimePicker({ value, onChange }) {
           colorScheme: 'dark light',
         }}
       />
+      {pastHint && (
+        <div role="status" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning-text)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+          {pastHint}
+        </div>
+      )}
     </div>
   );
 }
@@ -1017,13 +1026,14 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
   // with no authored verifier gets a sibling pre-filled (not left empty). Runs
   // once per roster load; the author can still change the mode/target after.
   const isTeamLoopAgent = !!loopRoster?.isTeamAgent;
+  const verifierCopy = loopVerifierCopy(loopRoster);
   useEffect(() => {
     if (form.type !== 'loop' || !isTeamLoopAgent) return;
     const siblings = loopRoster?.siblings || [];
     setForm(f => {
       if (f.verifyMode !== 'none' || f.verifyAgentId) return f; // author already chose
       const pick = pickDefaultVerifier(siblings);
-      if (!pick) return f; // no sibling to assign — leave the notice to explain
+      if (!pick) return f; // no sibling to assign — loopVerifierCopy's notice says so (#2682)
       return { ...f, verifyMode: 'agent', verifyAgentId: pick };
     });
   }, [form.type, isTeamLoopAgent, loopRoster]);
@@ -1424,14 +1434,14 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               #1083) as it is already relatively accessible. */}
           <div>
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
-              Who checks the work? (optional{isTeamLoopAgent ? ', enforced for team agents' : ', recommended'})
+              Who checks the work? (optional{verifierCopy.enforced ? ', enforced for team agents' : ', recommended'})
             </div>
             <select
               value={form.verifyMode}
               onChange={e => set('verifyMode', e.target.value)}
               style={{ ...FIELD_STYLE, width: '100%' }}
             >
-              <option value="none">No one{isTeamLoopAgent ? ' (a teammate is assigned automatically)' : ' (the agent judges itself)'}</option>
+              <option value="none">{verifierCopy.noneLabel}</option>
               <option value="command">A command must pass each try</option>
               <option value="agent">Another agent reviews each try</option>
               <option value="flow">The flow checks the hand-off (downstream QS chain)</option>
@@ -1477,10 +1487,9 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               </div>
             )}
 
-            {isTeamLoopAgent && form.verifyMode !== 'flow' && (
-              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
-                Team agents must not grade their own work — a separate teammate is
-                assigned automatically and re-applied on save even if left blank.
+            {verifierCopy.notice && form.verifyMode !== 'flow' && (
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: verifierCopy.noticeTone === 'warning' ? 'var(--eb-status-warning)' : 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                {verifierCopy.notice}
               </div>
             )}
           </div>

@@ -1104,8 +1104,8 @@ const focusRing = { borderRadius: 'var(--eb-radius-md)', boxShadow: '0 0 0 2px v
 const check = { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' };
 const radio = { display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' };
 const banner = {
-  display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)',
-  background: 'var(--eb-accent-primary-soft, rgba(99,102,241,0.1))', border: '1px solid var(--eb-accent-primary)',
+  display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)',
+  background: 'var(--eb-accent-muted)', border: '1px solid var(--eb-accent-primary)',
   borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)',
 };
 const warn = {

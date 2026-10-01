@@ -53,7 +53,7 @@ function RepoStatusRow({ row, nowMs }) {
         <div>{text}</div>
         {links.length > 0 && (
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)', marginTop: 2 }}>
-            {links.map((l) => <Link key={l.to} to={l.to} style={{ color: 'var(--eb-accent, var(--eb-status-info))' }}>{l.label}</Link>)}
+            {links.map((l) => <Link key={l.to} to={l.to} style={{ color: 'var(--eb-accent-primary)' }}>{l.label}</Link>)}
           </div>
         )}
       </td>

@@ -2614,7 +2614,7 @@ function ColHeader({ label, hint, tip, trailing }) {
 function FlowArrow() {
   return (
     <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'center', paddingTop: 26 }}>
-      <ArrowRight size={14} style={{ color: 'var(--eb-border-strong, var(--eb-border-default))' }} />
+      <ArrowRight size={14} style={{ color: 'var(--eb-border-default)' }} />
     </div>
   );
 }
@@ -3202,7 +3202,7 @@ function SkillInspector({ open, onClose, skill, teamId, status, busy, installedC
                     borderRadius: 'var(--eb-radius-full)', fontSize: 'var(--eb-text-xs)', cursor: 'pointer',
                     border: `1px solid ${selectedFile === f.path ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
                     background: selectedFile === f.path ? 'var(--eb-accent-primary)' : 'var(--eb-bg-elevated)',
-                    color: selectedFile === f.path ? 'var(--eb-text-on-accent, #fff)' : 'var(--eb-text-secondary)',
+                    color: selectedFile === f.path ? 'var(--eb-text-inverted)' : 'var(--eb-text-secondary)',
                   }}>
                   <FileText size={11} />{f.path}
                 </button>
@@ -3268,7 +3268,7 @@ function SkillInspector({ open, onClose, skill, teamId, status, busy, installedC
           {members.map(m => {
             const chip = MEMBER_STATE_CHIPS[m.state] || { label: m.state, color: 'var(--eb-text-muted)', tip: '' };
             return (
-              <div key={m.agentId} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0', borderBottom: '1px solid var(--eb-border-subtle, var(--eb-border-default))' }}>
+              <div key={m.agentId} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0', borderBottom: '1px solid var(--eb-border-default)' }}>
                 <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {m.displayName || m.agentId}
                 </span>
@@ -3767,7 +3767,7 @@ function PrivateSkillsBlock({ teamId, skills, onLifted }) {
               <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
                 {sk.name}
                 {sk.granted && (
-                  <span style={{ marginLeft: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-regular, normal)' }}>
+                  <span style={{ marginLeft: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-normal)' }}>
                     (edited copy of a granted skill)
                   </span>
                 )}
@@ -5207,7 +5207,7 @@ const primaryBtn = {
   display: 'inline-flex', alignItems: 'center', gap: 6,
   padding: '4px var(--eb-space-3)', borderRadius: 'var(--eb-radius-md)',
   border: '1px solid var(--eb-accent-primary)', background: 'var(--eb-accent-primary)',
-  color: 'var(--eb-text-on-accent, #fff)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer',
+  color: 'var(--eb-text-inverted)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer',
 };
 
 // Inline keyboard-hint pill shown on review-mode action buttons (#776 §1).

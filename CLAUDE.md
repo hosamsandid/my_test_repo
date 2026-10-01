@@ -353,7 +353,7 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   **brakes** are config flags on the label registry, never a naming convention.
   Named **human roles** are `kind: 'human'` flow nodes (`humans[]`).
 - Graph endpoint `GET /api/process/graph` → `{nodes, edges, gates, labels,
-  humanTouchpoints, lints}`. Pure builders: `process-graph.js`, `unified-graph.js`;
+  unusedLabels, humanTouchpoints, lints}`. Pure builders: `process-graph.js`, `unified-graph.js`;
   layout `flow-layout.js`.
 - **Drafts** (`/api/process/drafts`, `/workspace/process-drafts/<id>.json`):
   private to creator, shared with equal rights (`admin-console/api/draft-access.js`).

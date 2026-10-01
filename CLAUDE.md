@@ -505,7 +505,8 @@ token (replaces webhooks for local stacks).
   undrained; the console locks every chat composer. Read via
   `GET /internal/maintenance-mode`.
 - **Webhook server** (`HOOK_PORT`): `POST /hooks/:agentId/:hookId` with matching
-  `X-Hook-Secret`; enqueues the trigger's `prompt` (body ignored). Only the
+  `X-Hook-Secret` or GitHub `X-Hub-Signature-256` (`hook-auth.js`); enqueues the
+  trigger's `prompt` (body only signature-checked). Only the
   Maintenance flag protects the queue — prefer `github-event` for must-not-drop.
 - **BP-event router** (`POST /internal/bp-events`): announces Briefing Pack
   changes; the orchestrator routes to affected bp-instances (`bp-event-router.js`).

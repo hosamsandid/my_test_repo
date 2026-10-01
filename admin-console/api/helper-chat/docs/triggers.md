@@ -8,7 +8,7 @@ Agents are driven by triggers defined in a per-agent `triggers.json` file. The s
 |---|---|
 | **cron** | Recurring execution on a 5-field cron expression. Skips if the previous run is still in progress. |
 | **once** | Fires once at a specific ISO timestamp, then removes itself automatically. |
-| **http** | Fired by an external `POST /hooks/:agentId/:triggerId` with an `X-Hook-Secret` header. Every trigger carries its own auto-generated secret — there is no global open mode. |
+| **http** | Fired by an external `POST /hooks/:agentId/:triggerId` with an `X-Hook-Secret` header — or a GitHub webhook signed with the trigger's secret (`X-Hub-Signature-256`, see below). Every trigger carries its own auto-generated secret — there is no global open mode. |
 | **github-event** | Fired by the built-in GitHub poller when the GitHub Events API reports a matching event (e.g. `pull_request.opened`, `push`). Requires a GitHub token on the environment. The full event payload is appended to the agent prompt as JSON. Supports an optional `claim` field (`{"remove": "<wakeLabel>", "add": "<wakeLabel>:wip"}`) — the runner swaps the labels before invoking the agent so "in progress" is visible on GitHub, and rolls the swap back automatically if the run fails both attempts (which re-fires the chain via the poller). The `add` value **must** follow the `<wakeLabel>:wip` convention (enforced by the bundle validator). For **channel-derived** label listeners (`expandGithubChannels`) the claim is stamped automatically; opt out per channel port with `autoClaim: false`. Push: optional `branchFilter` ([rules](push-branch-filter.md)); knowledge branches never wake. |
 | **loop** | Runs the agent's prompt repeatedly — each try starts fresh — stopping once the goal is met or the maximum number of tries is reached. See [Loop triggers](#loop-triggers) below. |
 
@@ -43,7 +43,7 @@ each other's git changes.
 The orchestrator exposes a second HTTP server on `HOOK_PORT` (default `4003`). External systems — CI pipelines, GitHub Actions, monitoring tools — can trigger agent prompts via an outbound POST to your LAN. No public ingress is required.
 
 **Endpoint:** `POST http://<host>:4003/hooks/<agentId>/<triggerId>`  
-**Header:** `X-Hook-Secret: <secret>`
+**Auth:** `X-Hook-Secret: <secret>` header, e.g. `curl -X POST -H "X-Hook-Secret: <secret>" http://<host>:4003/hooks/<agentId>/<triggerId>` — or, for a GitHub webhook (which cannot send custom headers), the secret as the webhook's **Secret**: the `X-Hub-Signature-256` HMAC over the body is verified instead (#2680). A signed GitHub `ping` returns 200 without firing. Bodies over 25 MB → 413.
 
 The webhook secret is generated automatically when the trigger is created. It is visible in the Admin Console trigger editor.
 

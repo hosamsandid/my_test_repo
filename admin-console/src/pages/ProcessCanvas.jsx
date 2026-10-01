@@ -24,7 +24,7 @@ import { roleIcon } from '../components/role-icons';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
 import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './process/connection-capabilities';
 import { toolbarTitle, STATUS_TITLES, draftStatusText, PROPOSAL_PENDING_REASON } from './process-toolbar-hints';
-import { CREATE_TEAM_LABEL, createdTeamNotice } from './process/create-team-copy.js';
+import { CREATE_TEAM_LABEL, createdTeamNotice, importedBlueprintCounts } from './process/create-team-copy.js';
 import {
   ADD_ROLE_MATERIALIZE_DEFAULT, ADD_ROLE_MATERIALIZE_HINT, ADD_ROLE_MATERIALIZE_LABEL,
   addRoleMaterializeBody, addRoleNotice, addRoleSubmitLabel,
@@ -175,13 +175,16 @@ function ModePill({ tone, icon: Icon, title, children }) {
 //   draftReloadToken  — bump to refetch the open draft's bundle when it changed
 //                       server-side without changing its id (#2053) — a rail
 //                       rename whose slug is unchanged.
+//   onTeamsChanged    — tell the parent the team list changed (#2737): a
+//                       successful Create team adds a team the Flows rail
+//                       must list without a page reload.
 //   autoOpenCopilot   — open the Flow Copilot panel on mount (#1069) — fed by
 //                        the `?copilot=1` query param ("Describe flow…" entry,
 //                        Edit-as-draft bridge). onNavigate accepts an optional
 //                        second arg `{ copilot: true }` so scope changes that
 //                        should keep the panel open (draft re-key on rename,
 //                        team → draft bridge) can carry the flag.
-export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingImport, onImportConsumed, onImportClosed, pendingFocus = null, onFocusConsumed, autoOpenCopilot = false, pendingIntent = null, onIntentConsumed, draftReloadToken = 0 }) {
+export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingImport, onImportConsumed, onImportClosed, pendingFocus = null, onFocusConsumed, autoOpenCopilot = false, pendingIntent = null, onIntentConsumed, draftReloadToken = 0, onTeamsChanged }) {
   const navigate = useCallback((s, opts) => { if (onNavigate) onNavigate(s, opts); }, [onNavigate]);
 
   const { data: agents, refetch: refetchAgents } = useApi('/api/agents');
@@ -910,7 +913,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         }}>
           <Boxes size={16} style={{ color: 'var(--eb-accent-primary)' }} />
           <span style={{ flex: 1, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-            Imported blueprint <strong>{imported.bundle?.name}</strong> ({imported.graph?.nodes?.length || 0} agents) — read-only preview.
+            Imported blueprint <strong>{imported.bundle?.name}</strong> ({importedBlueprintCounts(imported.bundle)}) — read-only preview.
           </span>
           <button onClick={continueImportAsDraft} style={{
             background: 'none', color: 'var(--eb-accent-primary)', border: '1px solid var(--eb-accent-primary)',
@@ -1333,7 +1336,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           // (#2053 AC12) and calls `onDone` when the user leaves it, so the
           // imported preview is cleared at the same moment as before.
           createdNotice={createdTeam ? createdTeamNotice(createdTeam, { fromImport: !!imported }) : ''}
-          onCreated={(result) => setCreatedTeam(result?.teamName || null)}
+          // #2737: refresh the rail's team list (the parent's /api/agents) and
+          // this panel's own, so the new team is listed straight away rather
+          // than after a page reload.
+          onCreated={(result) => { setCreatedTeam(result?.teamName || null); refetchAgents(); onTeamsChanged?.(); }}
           // Both close paths behave the same ONCE a team exists: the preview is
           // read-only and its `Create team…` would re-submit the identical
           // bundle straight into the collision card. Before #2053 this state

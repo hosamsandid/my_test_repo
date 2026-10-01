@@ -162,7 +162,9 @@ test('#2521 AC4 — onDone still runs, before navigating', () => {
 
 test('AC12 — the notice is derived from the created team, in the shared copy module', () => {
   assert.match(canvas, /createdTeamNotice\(createdTeam, \{ fromImport: !!imported \}\)/);
-  assert.match(canvas, /onCreated=\{\(result\) => setCreatedTeam\(result\?\.teamName \|\| null\)\}/);
+  // #2737 turned the body into a block (it also refreshes the rail); the
+  // notice still derives from the created team's name.
+  assert.match(canvas, /onCreated=\{\(result\) => \{ setCreatedTeam\(result\?\.teamName \|\| null\);/);
   assert.match(dialog, /completionNotice=\{createdNotice\}/);
 });
 
@@ -438,4 +440,41 @@ test('#2168 A2 — no dangling "create a working environment" affordance, and an
   assert.doesNotMatch(launch, /onCreateEnvironment/);
   assert.doesNotMatch(dialog, /onCreateEnvironment/);
   assert.doesNotMatch(dialog, /navigate\('\/environments'\)/);
+});
+
+// ─── #2737: import → Create team ─────────────────────────────────────────────
+
+test('#2737 — no environment is pre-selected without a source team', () => {
+  // The old `|| list[0]` fallback pre-picked whichever environment sorted
+  // first (on a real stack, the product repository) for every import.
+  assert.doesNotMatch(dialog, /\|\|\s*list\[0\]/);
+  assert.match(dialog, /const preferred = sourceTeamId \? list\.find\(e => e\.id === sourceTeamId\) : null;/);
+  // …and Create team stays blocked until the user makes an explicit choice.
+  assert.match(dialog, /<LaunchStep[\s\S]*?\brequireEnvironmentChoice\b[\s\S]*?\/>/);
+});
+
+test('#2737 — LaunchStep wires the explicit choice into the picker AND the gate', () => {
+  assert.match(launch, /<option value=\{NEW_REPO_LESS_ENV\}>\{NEW_REPO_LESS_ENV_LABEL\}<\/option>/);
+  // Both the disabled-state reason and submit's own validation see it, so the
+  // button and the submit path cannot disagree.
+  assert.match(launch, /launchBlockReason\(\{ \.\.\.values, requireEnvironment, environmentsPending, hasProvider \}\)/);
+  assert.match(launch, /validateLaunch\(\{ \.\.\.settled, requireEnvironment, environmentsPending, hasProvider \}\)/);
+  // The gate is the pure helper (lifted only on a confirmed-empty platform,
+  // #2168 A2; held while loading / after a failed fetch — review B1), fed the
+  // raw load state rather than a pre-filtered `envsLoaded && !noEnvs`.
+  assert.match(launch, /const requireEnvironment = environmentChoiceRequired\(\{\s*requireEnvironmentChoice, hasEnvironmentField: has\('environment'\), envsLoaded, envCount: envList\.length,\s*\}\);/);
+  assert.match(launch, /const environmentsPending = !envsLoaded;/);
+  // Opt-in — the Team-Setup wizard keeps its behaviour.
+  assert.match(launch, /requireEnvironmentChoice = false,/);
+});
+
+test('#2737 — the import banner counts agents from the bundle, not graph nodes', () => {
+  assert.doesNotMatch(canvas, /imported\.graph\?\.nodes\?\.length/);
+  assert.match(canvas, /\(\{importedBlueprintCounts\(imported\.bundle\)\}\) — read-only preview\./);
+});
+
+test('#2737 — a created team refreshes the Flows rail', () => {
+  assert.match(canvas, /onCreated=\{\(result\) => \{[^}]*refetchAgents\(\);[^}]*onTeamsChanged\?\.\(\);/);
+  assert.match(briefings, /const \{ data: agents, refetch: refetchAgents \} = useApi\('\/api\/agents'\);/);
+  assert.match(briefings, /<ProcessGraphPanel[\s\S]*?onTeamsChanged=\{refetchAgents\}[\s\S]*?\/>/);
 });

@@ -70,8 +70,14 @@ export default function MaterializeDialog({ bundle, onClose, onDone, onCreated, 
         const list = Array.isArray(envs) ? envs : (envs?.environments || []);
         setEnvironments(list);
         setEnvsLoaded(true);
-        // Prefer the env named after the source team, else the first one.
-        const preferred = (sourceTeamId && list.find(e => e.id === sourceTeamId)) || list[0];
+        // Prefer the env named after the source team. There is deliberately no
+        // `list[0]` fallback any more (#2737): for an import or a scratch draft
+        // that silently pre-selected whichever environment sorted first — on a
+        // real stack, the product repository — so one click on Create team
+        // wired a whole new team's label triggers to it. Without a source team
+        // the picker starts on "— select —" and LaunchStep (requireEnvironmentChoice)
+        // keeps Create team blocked until the user chooses.
+        const preferred = sourceTeamId ? list.find(e => e.id === sourceTeamId) : null;
         if (preferred) setValues(v => ({ ...v, environmentId: preferred.id }));
       } catch (e) {
         if (alive) {
@@ -136,6 +142,7 @@ export default function MaterializeDialog({ bundle, onClose, onDone, onCreated, 
         // navigation is an explicit click.
         onComplete={(result) => { setCreatedResult(result); onCreated?.(result); }}
         hasUsableProvider={hasUsableProvider}
+        requireEnvironmentChoice
         completionNotice={createdNotice}
         // #2521: the way onward is Agent Chat on the team's first agent —
         // talking to the new agents is what comes next — not the team's canvas

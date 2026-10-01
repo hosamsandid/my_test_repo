@@ -280,6 +280,79 @@ test('buildFlowBoard: a dead end past the stall window says no agent is schedule
   assert.equal(fresh.rows[0].needsHuman, null);
 });
 
+test('NEEDS_HELP_MS: one exported threshold, default 1 h, longer than the idle stall window (#2734)', () => {
+  assert.equal(fb.NEEDS_HELP_MS, 60 * 60 * 1000);
+  assert.ok(fb.NEEDS_HELP_MS > fb.STALL_MS);
+  assert.equal(fb.REASONS.needsHelp, 'stuck — no progress, needs help');
+});
+
+test('buildFlowBoard: a claim past the threshold with no live worker needs help, with its waiting time (#2734)', () => {
+  const stuck = (minsAgo, extra = {}) => board({
+    github: { issues: [issue(20, { labels: ['ready:wip'], updatedAt: iso(minsAgo) })] },
+    events: [delivered(20, 't-developer', minsAgo)],
+    ...extra,
+  });
+  const b = stuck(75);
+  assert.equal(b.rows[0].status, 'working');
+  assert.equal(b.rows[0].stageId, 't-developer');
+  assert.deepEqual(b.rows[0].needsHuman, { reason: 'stuck — no progress, needs help', since: iso(75) });
+  assert.deepEqual(b.needsHuman.map((n) => [n.id, n.reason, n.since]), [['o/r#20', 'stuck — no progress, needs help', iso(75)]]);
+  // Inside the threshold it is still ordinary in-progress work.
+  assert.equal(stuck(59).rows[0].needsHuman, null);
+  assert.deepEqual(stuck(59).needsHuman, []);
+  // Exactly at the threshold is not yet past it.
+  assert.equal(stuck(60).rows[0].needsHuman, null);
+});
+
+test('buildFlowBoard: a stale claim alongside a re-applied wake label still needs help (#2734)', () => {
+  // The #2713 shape: claimed, then the wake label re-applied on top.
+  const b = board({
+    github: { issues: [issue(21, { labels: ['ready', 'ready:wip'], updatedAt: iso(190) })] },
+    events: [delivered(21, 't-developer', 195)],
+  });
+  assert.equal(b.rows[0].status, 'working');
+  assert.equal(b.rows[0].needsHuman.reason, 'stuck — no progress, needs help');
+});
+
+test('buildFlowBoard: a long claim with a running session or a live pool instance is not flagged (#2734)', () => {
+  const claimed = issue(12, { labels: ['ready:wip'], updatedAt: iso(180) });
+  const withSession = board({
+    github: { issues: [claimed] },
+    events: [delivered(12, 't-developer-i12', 180)],
+    sessions: [{ agentId: 't-developer-i12', session: { id: 's', startedAt: iso(90), workItem: { repo: 'o/r', kind: 'issue', number: 12 } } }],
+  });
+  assert.equal(withSession.rows[0].status, 'working');
+  assert.equal(withSession.rows[0].needsHuman, null);
+  // A live pool instance for the item (between runs, no session) is live work too.
+  const withInstance = board({
+    github: { issues: [claimed] },
+    events: [delivered(12, 't-developer-i12', 180)],
+    pools: [{ agentId: 't-developer', roleId: 'developer', maxInstances: 3, instances: [{ instanceId: 't-developer-i12' }] }],
+  });
+  assert.equal(withInstance.rows[0].needsHuman, null);
+  // An instance alive for another item does not vouch for this one.
+  const otherInstance = board({
+    github: { issues: [claimed] },
+    events: [delivered(12, 't-developer-i12', 180)],
+    pools: [{ agentId: 't-developer', roleId: 'developer', maxInstances: 3, instances: [{ instanceId: 't-developer-i13' }] }],
+  });
+  assert.equal(otherInstance.rows[0].needsHuman.reason, 'stuck — no progress, needs help');
+});
+
+test('buildFlowBoard: the needs-help flag is report-only — the claim, status and stage stay as they are (#2734)', () => {
+  const labels = ['ready:wip'];
+  const github = { issues: [issue(22, { labels, updatedAt: iso(120) })] };
+  const b = board({ github, events: [delivered(22, 't-developer', 120)] });
+  assert.equal(b.rows[0].needsHuman.reason, 'stuck — no progress, needs help');
+  assert.deepEqual(github.issues[0].labels, ['ready:wip']);
+  assert.equal(b.rows[0].status, 'working');
+  assert.equal(b.rows[0].stageId, 't-developer');
+  // A queued wake is not a claim — the needs-help branch never fires for it.
+  const q = board({ github: { issues: [issue(23, { labels: ['ready-for-review'], updatedAt: iso(300) })] }, events: [delivered(23, 't-reviewer', 300)] });
+  assert.equal(q.rows[0].status, 'queued');
+  assert.equal(q.rows[0].needsHuman, null);
+});
+
 test('buildFlowBoard: a label handed to a person reads as waiting for approval', () => {
   const members = [...KITCHEN, { id: 'k-host', displayName: 'Host', emits: ['guest-sign-off'], triggers: [trig('dish-approved')] }];
   const b = fb.buildFlowBoard({

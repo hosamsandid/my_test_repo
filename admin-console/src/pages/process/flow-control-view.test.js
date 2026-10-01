@@ -363,6 +363,18 @@ test('needsYouView: plain reason and waiting time', () => {
   assert.deepEqual({ ref: v.ref, reason: v.reason, waiting: v.waiting }, { ref: 'PR #61', reason: 'conflict with base', waiting: '2h 10m' });
 });
 
+test('boardView: an orphaned claim flagged needs-help shows amber on its working row and in Needs you with its waiting time (#2734)', () => {
+  const needsHuman = { reason: 'stuck — no progress, needs help', since: ago(75) };
+  const stuck = row({ stageId: 't-dev', stageIndex: 1, agentId: null, needsHuman });
+  const v = boardView({
+    stages: STAGES, rows: [stuck], sessions: [], pools: [], repos: ['o/r'], generatedAt: ago(0),
+    needsHuman: [{ id: stuck.id, title: stuck.title, url: stuck.url, issue: stuck.issue, prs: stuck.prs, ...needsHuman }],
+  }, NOW);
+  assert.equal(v.activeRows[0].status, 'working');
+  assert.equal(v.activeRows[0].blocked, true);
+  assert.deepEqual(v.needsYou.map((n) => [n.ref, n.reason, n.waiting]), [['#7', 'stuck — no progress, needs help', '1h 15m']]);
+});
+
 // ── the whole board (AC8, AC10, empty/degraded states) ─────────────────────
 
 test('boardView: area ② is null when nothing needs a person; empty board reads "Nothing in progress"', () => {

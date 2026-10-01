@@ -5703,7 +5703,13 @@ app.get('/api/agents/:id/model-options', (req, res) => {
     baseUrl:        endpoint?.baseUrl || null,
     // Persisted health of the effective bound endpoint (#1843); 'unknown' when
     // never probed / no endpoint bound.
-    endpointHealth: endpoint ? llmHealthViewFor(endpoint.id) : llmHealth.healthView(null),
+    // #2732 AC12: a caller who cannot see the provider row (another member's
+    // personal-provider lend) gets the budget % and source only — no amounts.
+    endpointHealth: endpoint
+      ? (providerReadVisible(scope, endpoint)
+        ? llmHealthViewFor(endpoint.id)
+        : llmBudget.redactHealthBudget(llmHealthViewFor(endpoint.id)))
+      : llmHealth.healthView(null),
     // The provider is bound at the env level unless the agent carries an override.
     endpointOverride: cfg.llmEndpointOverride || null,
     envEndpointId:  env?.llmEndpointId || null,

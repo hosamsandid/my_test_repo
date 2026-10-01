@@ -157,6 +157,24 @@ function budgetReason(budget) {
   return `Budget ${formatPct(pct)} used (${formatAmount(budget.spend)} / ${formatAmount(budget.maxBudget)}, ${budget.source})`;
 }
 
+// AC12: a health view (llm-health.js healthView) for a caller who may NOT see
+// the provider row — e.g. GET model-options when the agent runs on another
+// member's personal-provider lend. Keeps what the Agent Chat banners need
+// (status, pct, source) and drops every amount: spend, max, duration, reset
+// date, and the dollar figures in a budget-driven reason line
+// ("Budget 92 % used (key)"). A non-budget reason (probe failure) is kept.
+function redactHealthBudget(view) {
+  if (!view || !view.budget) return view;
+  const b = view.budget;
+  if (b.status !== 'ok') return view;
+  const fullReason = budgetReason({ spend: b.spend, maxBudget: b.maxBudget, source: b.source });
+  return {
+    ...view,
+    reason: view.reason === fullReason ? `Budget ${formatPct(b.pct)} used (${b.source})` : view.reason,
+    budget: { status: 'ok', source: b.source, pct: b.pct },
+  };
+}
+
 // The client-facing budget view (AC3–AC5). Persisted lookup → what the Budget
 // column renders. `null` when the provider was never looked up.
 function budgetView(lookup) {
@@ -194,4 +212,5 @@ module.exports = {
   formatPct,
   budgetReason,
   budgetView,
+  redactHealthBudget,
 };

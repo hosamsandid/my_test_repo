@@ -99,12 +99,12 @@ team(s) only.
 | Usage & budget view | R† | R† | R† | R + export |
 | Maintenance mode / platform envelopes / regulations store | – | – | – | W |
 | Audit log | – | – | R† (team view) | R |
+| Users & memberships | – | – | W† (own team) | W |
 
 ‡ A System Admin reads every chat but writes only in a team they are a member of (or a
 standalone agent they own); elsewhere the composer is read-only and the send/upload routes
 answer 403 (#2713, `canChatAgent` in `admin-console/api/scope.js`). Auth disabled and the
 first-boot bootstrap login are unaffected.
-| Users & memberships | – | – | W† (own team) | W |
 
 Deliberate calls: **Members keep building power** (T0/T1 agents, chat, workspace) — the
 junior tier is Viewer, and promotion is the Team Admin's everyday act. Team creation,

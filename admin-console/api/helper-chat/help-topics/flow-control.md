@@ -61,6 +61,8 @@ Each line is a run in progress: the **role**, the **instance** number for a
 pooled role, the **issue or pull request** it works on, and **how long it has
 been running**. Agents that are idle are not listed. A run whose item has just
 closed keeps its line until it ends, but never adds a row to the board.
+Click a line to open that agent's chat — for a pooled role, the chat of that
+exact instance.
 
 A **pooled** role (one that starts a separate instance per work item) shows
 how busy it is — for example **2 of 3 busy** — and its controls.
@@ -115,6 +117,11 @@ Each row shows its **current stage**, whether an agent is **working** on it or
 it is **up next**, and the **time in that stage** — not the item's total age.
 For a finished item it shows the **time since completion** (hover it for the
 exact date and time).
+
+On a row an agent is **working** on, the stage cell links to the chat of the
+agent running it — for a pooled role, the item's own instance (e.g.
+*Developer #2716*). A row that is working only by a claim label, with no run
+going, has no link.
 
 **Draft** holds items a team agent created or took part in that no person has
 released yet and no agent is working on or queued for — for example a concept

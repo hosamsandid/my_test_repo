@@ -71,6 +71,7 @@ const hillClimbSweep = require("./hill-climb-sweep");
 const hillClimbCards = require("./hill-climb-cards");
 const hillClimbApply = require("./hill-climb-apply");
 const hillClimbVerdict = require("./hill-climb-verdict");
+const { createHillClimbCardRoutes } = require("./hill-climb-card-routes");
 const knowledgeFeed = require("./knowledge-feed");
 const { buildKnowledgeDigest, foldVisibleEntries, DIGEST_FILENAME: KNOWLEDGE_DIGEST_FILENAME } = require("./knowledge-digest");
 const memoryMigration = require("./memory-migration");
@@ -4196,6 +4197,18 @@ function rollbackHillClimbCard(teamId, cardId, { now = Date.now(), rolledBackBy 
   writeHillClimbCards(teamId, cards);
   return { ok: true, card };
 }
+
+// The card-store write routes (merge/apply/rollback), deps injected (#2709).
+const hillClimbCardRoutes = createHillClimbCardRoutes({
+  loadAgentConfig,
+  hillClimbCardConfig,
+  readHillClimbCards,
+  mergeAndPersistHillClimbCards,
+  applyHillClimbCard,
+  rollbackHillClimbCard,
+  readBody,
+  sendJson,
+});
 
 // Run one hill-climb pass for a team behind the per-team single-flight lock —
 // the SAME code path for the scheduled timer and the manual POST endpoint (AC:
@@ -20116,36 +20129,11 @@ async function main() {
       }
     }
 
-    // POST /internal/teams/:teamId/hill-climb/cards/merge — hand-back path for
-    // the console's server-side analyst (#1224). Body: { cards: [...] } (raw
-    // analyst JSON). Every card is re-validated through the schema here (the
-    // store is the authority — the analyst is untrusted) and merged under the
-    // budget/dedup/cooldown rules. Proposals only; nothing mutates agent config.
-    const hillClimbMergeMatch = req.method === 'POST' &&
-      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/cards\/merge$/);
-    if (hillClimbMergeMatch) {
-      const teamId = decodeURIComponent(hillClimbMergeMatch[1]);
-      (async () => {
-        try {
-          const cfg = loadAgentConfig(teamId);
-          if (!cfg || cfg.role !== 'team') return sendJson(res, 404, { error: 'agent team not found' });
-          const { autonomy } = hillClimbCardConfig(teamId);
-          if (autonomy < 1) return sendJson(res, 200, { teamId, autonomy, merge: null, cards: readHillClimbCards(teamId) });
-          const body = JSON.parse((await readBody(req)) || '{}');
-          const incoming = Array.isArray(body.cards) ? body.cards : [];
-          const merge = mergeAndPersistHillClimbCards(teamId, incoming, { source: 'analyst' });
-          return sendJson(res, 200, {
-            teamId,
-            merge: { added: merge.added, bumped: merge.bumped, deferred: merge.deferred, rejected: merge.rejected },
-            cards: merge.cards,
-          });
-        } catch (err) {
-          console.error(`[Orchestrator] hill-climb cards merge error for ${teamId}: ${err.message}`);
-          return sendJson(res, 500, { error: err.message });
-        }
-      })();
-      return;
-    }
+    // POST /internal/teams/:teamId/hill-climb/cards/{merge,:cardId/apply,
+    // :cardId/rollback} — the card-store writes the console relays (analyst
+    // hand-back #1224, applied #1225, rolled-back #1226). Handlers live in
+    // hill-climb-card-routes.js so they are executed by a test (#2709).
+    if (hillClimbCardRoutes.handle(req, res)) return;
 
     // POST /internal/teams/:teamId/hill-climb/cards/:cardId/dismiss — flip a card
     // to 'dismissed' so it is not re-raised (#1224). Human action; card-state
@@ -20165,79 +20153,6 @@ async function main() {
         console.error(`[Orchestrator] hill-climb card dismiss error for ${teamId}: ${err.message}`);
         return sendJson(res, 500, { error: err.message });
       }
-    }
-
-    // POST /internal/teams/:teamId/hill-climb/cards/:cardId/apply — record an
-    // APPLIED card (hill-climbing loop Phase 2b, #1225). The console has already
-    // run the card's declared apply path through the existing audited choke-point
-    // (as the acting human); this only stamps the outcome onto the card so #1226
-    // can measure it. Autonomy < 2 refuses (apply is a level-2 action even via a
-    // direct call), and only an open card can be applied. Body: { appliedBy?,
-    // undo?, configVersionRef? } gathered console-side before the mutation.
-    const hillClimbApplyMatch = req.method === 'POST' &&
-      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/cards\/([^/]+)\/apply$/);
-    if (hillClimbApplyMatch) {
-      const teamId = decodeURIComponent(hillClimbApplyMatch[1]);
-      const cardId = decodeURIComponent(hillClimbApplyMatch[2]);
-      (async () => {
-        try {
-          const cfg = loadAgentConfig(teamId);
-          if (!cfg || cfg.role !== 'team') return sendJson(res, 404, { error: 'agent team not found' });
-          const body = JSON.parse((await readBody(req)) || '{}');
-          const result = applyHillClimbCard(teamId, cardId, {
-            appliedBy: body.appliedBy || null,
-            undo: body.undo || null,
-            configVersionRef: body.configVersionRef || null,
-          });
-          if (!result.ok) {
-            const status = result.code === 'card-not-found' ? 404
-              : result.code === 'autonomy-locked' ? 403
-              : 409;
-            return sendJson(res, status, { error: result.code, autonomy: result.autonomy, status: result.status });
-          }
-          return sendJson(res, 200, { teamId, card: result.card });
-        } catch (err) {
-          console.error(`[Orchestrator] hill-climb card apply error for ${teamId}: ${err.message}`);
-          return sendJson(res, 500, { error: err.message });
-        }
-      })();
-      return;
-    }
-
-    // POST /internal/teams/:teamId/hill-climb/cards/:cardId/rollback — record a
-    // ROLLED-BACK card (hill-climbing loop Phase 3, #1226). The console has
-    // already executed the card's rollback plan through the existing audited
-    // choke-point (as the acting human); this only stamps the outcome + a fresh
-    // cooldown so the object re-enters detection after a full window. Autonomy
-    // < 2 refuses, and only a `regressed` card (one that carries a rollback
-    // offer) can be rolled back. Body: { rolledBackBy?, undoResult? }.
-    const hillClimbRollbackMatch = req.method === 'POST' &&
-      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/cards\/([^/]+)\/rollback$/);
-    if (hillClimbRollbackMatch) {
-      const teamId = decodeURIComponent(hillClimbRollbackMatch[1]);
-      const cardId = decodeURIComponent(hillClimbRollbackMatch[2]);
-      (async () => {
-        try {
-          const cfg = loadAgentConfig(teamId);
-          if (!cfg || cfg.role !== 'team') return sendJson(res, 404, { error: 'agent team not found' });
-          const body = JSON.parse((await readBody(req)) || '{}');
-          const result = rollbackHillClimbCard(teamId, cardId, {
-            rolledBackBy: body.rolledBackBy || null,
-            undoResult: body.undoResult || null,
-          });
-          if (!result.ok) {
-            const status = result.code === 'card-not-found' ? 404
-              : result.code === 'autonomy-locked' ? 403
-              : 409;
-            return sendJson(res, status, { error: result.code, autonomy: result.autonomy, status: result.status });
-          }
-          return sendJson(res, 200, { teamId, card: result.card });
-        } catch (err) {
-          console.error(`[Orchestrator] hill-climb card rollback error for ${teamId}: ${err.message}`);
-          return sendJson(res, 500, { error: err.message });
-        }
-      })();
-      return;
     }
 
     // POST /internal/teams/:teamId/skills/{activate,deactivate} — team-owned

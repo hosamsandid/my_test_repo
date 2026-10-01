@@ -35,18 +35,23 @@ export function usedTokens(source) {
 }
 
 // Line numbers of style blocks (a JS style object or a CSS rule, i.e. an
-// innermost {…}) that fill with --eb-accent-primary but hard-code white text.
-// White on the high-contrast accent is ~3:1; use --eb-text-inverted instead.
-export function whiteOnAccentLines(source) {
+// innermost {…}) that fill with `fillToken` but hard-code white text. A value
+// may be a ternary (`a ? 'var(--fill)' : …`), so either branch counts.
+// White on the high-contrast accent is ~3:1 and on the warning fill ~1.9:1;
+// use --eb-text-inverted / --eb-text-on-warning instead.
+export function whiteTextOnFillLines(source, fillToken) {
+  const fill = new RegExp(
+    `background(?:-color|Color)?['"]?\\s*:[^,;\\n]*var\\(\\s*${fillToken}\\s*[,)]`);
+  const white = /(?:^|[\s,{;])color['"]?\s*:(?:[^,;\n]*?['"\s])?(?:#fff(?:fff)?\b|white\b)/i;
   const lines = [];
   for (const m of source.matchAll(/\{[^{}]*\}/g)) {
-    const block = m[0];
-    const accentFill = /background(?:-color|Color)?['"]?\s*:\s*['"]?var\(\s*--eb-accent-primary\s*\)/.test(block);
-    const whiteText = /(?:^|[\s,{;])color['"]?\s*:\s*['"]?(?:#fff(?:fff)?\b|white\b)/i.test(block);
-    if (accentFill && whiteText) lines.push(source.slice(0, m.index).split('\n').length);
+    if (fill.test(m[0]) && white.test(m[0])) lines.push(source.slice(0, m.index).split('\n').length);
   }
   return lines;
 }
+
+export const whiteOnAccentLines = (source) => whiteTextOnFillLines(source, '--eb-accent-primary');
+export const whiteOnWarningLines = (source) => whiteTextOnFillLines(source, '--eb-status-warning');
 
 // Follows bare var(--x) references until a literal value is reached.
 export function resolveToken(vars, name, seen = new Set()) {

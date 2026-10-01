@@ -57,13 +57,18 @@
   /* Accent (Accenture Purple — #A100FF) */
   --eb-accent-primary:    oklch(0.65 0.28 293);
   --eb-accent-hover:      oklch(0.58 0.26 293);
-  --eb-accent-muted:      oklch(0.26 0.08 293);
+  /* Badge fill: accent-primary text on it must stay ≥ 4.5:1 (#2752). */
+  --eb-accent-muted:      oklch(0.20 0.10 293);
 
   /* Status Colors */
   --eb-status-success:    oklch(0.72 0.18 155);
   --eb-status-warning:    oklch(0.80 0.16 85);
   --eb-status-error:      oklch(0.63 0.22 25);
   --eb-status-info:       oklch(0.72 0.15 230);
+  /* Text on a solid status-warning fill (warning buttons, count badges).
+     The yellow fill is light in every theme, so white only reaches ~1.9:1;
+     the light and high-contrast themes inherit this dark text (#2752). */
+  --eb-text-on-warning:   oklch(0.13 0.006 293);
 
   /* Status backgrounds (15% opacity tints) */
   --eb-status-success-bg: oklch(0.25 0.04 155);

@@ -274,6 +274,18 @@ function roleForTeam(viewer, teamId) {
   return VIEWER_ROLES.includes(r) ? r : 'team-member';
 }
 
+// Whether a body parser upstream already consumed this request's body, so the
+// proxy must re-serialise `req.body` instead of streaming `req` (which would
+// forward an empty body). Express 4 (body-parser 1) flags it with `req._body`;
+// Express 5 (body-parser 2) dropped the flag and only leaves the stream read
+// to its end. `req.body` alone is not enough: body-parser 1 sets it to `{}`
+// even for a body it did not parse (and left unread).
+function bodyWasParsed(req) {
+  if (!req) return false;
+  if (req._body === true) return true;
+  return req.body !== undefined && req.readableEnded === true;
+}
+
 module.exports = {
   ROLE_RANK,
   roleRank,
@@ -282,6 +294,7 @@ module.exports = {
   enforceUiRoute,
   signViewerHeaders,
   roleForTeam,
+  bodyWasParsed,
   verifyViewerHeaders,
   HEADER_NAMES: HDR,
 };

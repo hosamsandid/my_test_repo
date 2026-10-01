@@ -10,7 +10,7 @@ import { apiCall } from '../../hooks/useApi';
 import {
   hasSnapshot, isMaintenance, snapshotMeta, metricTiles,
   cardClassLabel, cardStatusBadge, cardsFromResponse, splitCards,
-  cardAction, cardObjectLabel, verdictLine, evidenceLines,
+  cardAction, cardObjectLabel, verdictLine, evidenceLines, cardActionNotice,
 } from './hill-climb-view';
 
 // Improvements panel (hill-climbing loop, #1223) — sibling of the Anomalies
@@ -86,12 +86,9 @@ export default function ImprovementsPanel({ teamId, onClose }) {
     setNotice(null);
     try {
       await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/hill-climb/cards/${encodeURIComponent(card.id)}/${action}`);
-      const done = action === 'apply' ? 'applied — its effect is measured over the next window'
-        : action === 'rollback' ? 'rolled back — the change was reverted'
-        : 'dismissed — it will not be raised again';
-      setNotice({ tone: 'info', text: `Card ${done}.` });
+      setNotice(cardActionNotice(action, null));
     } catch (err) {
-      setNotice({ tone: 'error', text: `Could not ${action} the card: ${err.message}` });
+      setNotice(cardActionNotice(action, err));
     } finally {
       setBusyCardId(null);
       await loadCards();

@@ -57,3 +57,38 @@ export function removeChannelFrom(list, { artifact, from, label }) {
   return (Array.isArray(list) ? list : []).filter(c =>
     !(c.artifact === art && c.from === from && (!hasLabel || chLabelKey(c.label) === lbl)));
 }
+
+// Edit an existing channel (#2717). `prevLabel` is the label the channel had
+// when the editor opened, so a routing-label change RENAMES that port instead of
+// upserting a sibling under the new key (which left the old port behind). The
+// port is rebuilt from the known fields, like upsertChannel; `label` and `gate`
+// come from the edit, while `autoClaim` (#958) and `wakePrompt` (#868) are kept
+// from the existing port unless the spec carries the key — the channel editor
+// does not edit the claim opt-out, so a Save must not reset it. Renaming onto a
+// label another channel of the same (artifact, from) already uses throws and
+// leaves the list unchanged. A missing original port falls back to an upsert.
+export function editChannel(list, prevLabel, spec) {
+  const { artifact, from } = spec;
+  const art = artifact === 'issue' ? 'issue' : 'pr';
+  const oldLbl = chLabelKey(prevLabel);
+  const newLbl = chLabelKey(spec.label);
+  const src = Array.isArray(list) ? list : [];
+  const keyIs = (lbl) => (c) => c && c.artifact === art && c.from === from && chLabelKey(c.label) === lbl;
+  const i = src.findIndex(keyIs(oldLbl));
+  if (i < 0) return upsertChannel(src, spec);
+  if (newLbl !== oldLbl && src.some(keyIs(newLbl))) {
+    const noun = art === 'pr' ? 'pull request' : 'issue';
+    throw new Error(newLbl
+      ? `A ${noun} channel from ${from} with routing label "${newLbl}" already exists. Edit or remove that channel instead.`
+      : `A ${noun} channel from ${from} without a routing label already exists. Edit or remove that channel instead.`);
+  }
+  const old = src[i];
+  const [next] = upsertChannel([], {
+    artifact: art, from, label: newLbl, gate: spec.gate,
+    wakePrompt: 'wakePrompt' in spec ? spec.wakePrompt : old.wakePrompt,
+    autoClaim: 'autoClaim' in spec ? spec.autoClaim : old.autoClaim,
+  });
+  const out = src.slice();
+  out[i] = next;
+  return out;
+}

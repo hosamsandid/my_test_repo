@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 
 import {
   hasSnapshot,
@@ -19,6 +20,7 @@ import {
   formatMetricValue,
   verdictLine,
   evidenceLines,
+  cardActionNotice,
 } from './hill-climb-view.js';
 
 // A representative snapshot with a sufficient sample — mirrors the shape
@@ -224,4 +226,54 @@ test('verdictLine summarizes a recorded before/after, trimming numbers', () => {
   assert.equal(verdictLine(withVerdict), 'waste.wasteRuns 6 → 2.333');
   assert.equal(formatMetricValue(null), '—');
   assert.equal(formatMetricValue(0.874999), '0.875');
+});
+
+// #2709 — a 502 applied-not-recorded (applied:true) means the trigger IS gone;
+// the notice must say so instead of "Could not apply".
+const apiError = (message, extra = {}) => Object.assign(new Error(message), extra);
+
+test('cardActionNotice: success notices per action', () => {
+  assert.deepEqual(cardActionNotice('apply', null),
+    { tone: 'info', text: 'Card applied — its effect is measured over the next window.' });
+  assert.deepEqual(cardActionNotice('rollback', null),
+    { tone: 'info', text: 'Card rolled back — the change was reverted.' });
+  assert.deepEqual(cardActionNotice('dismiss', null),
+    { tone: 'info', text: 'Card dismissed — it will not be raised again.' });
+});
+
+test('cardActionNotice: applied-not-recorded with applied:true reads "applied, but not recorded"', () => {
+  const n = cardActionNotice('apply', apiError('applied-not-recorded', { status: 502, code: 'applied-not-recorded', applied: true }));
+  assert.equal(n.tone, 'error');
+  assert.match(n.text, /^Card applied, but not recorded/);
+  assert.match(n.text, /WAS made \(the trigger is deleted\)/);
+  assert.match(n.text, /Do not apply it again/);
+  assert.doesNotMatch(n.text, /Could not/);
+});
+
+test('cardActionNotice: rolled-back-not-recorded with rolledBack:true reads "rolled back, but not recorded"', () => {
+  const n = cardActionNotice('rollback', apiError('rolled-back-not-recorded', { status: 502, code: 'rolled-back-not-recorded', rolledBack: true }));
+  assert.match(n.text, /^Card rolled back, but not recorded/);
+  assert.doesNotMatch(n.text, /Could not/);
+});
+
+test('cardActionNotice: every other failure (or the code without the flag) stays "Could not …"', () => {
+  assert.deepEqual(cardActionNotice('apply', apiError('stale-card', { status: 409, code: 'stale-card' })),
+    { tone: 'error', text: 'Could not apply the card: stale-card' });
+  // The flag is the contract, not the code alone.
+  assert.match(cardActionNotice('apply', apiError('applied-not-recorded', { code: 'applied-not-recorded' })).text, /^Could not apply/);
+  // A flag on the other action's code does not leak across.
+  assert.match(cardActionNotice('rollback', apiError('x', { code: 'applied-not-recorded', applied: true })).text, /^Could not rollback/);
+  assert.equal(cardActionNotice('dismiss', apiError('card not found', { status: 404 })).text, 'Could not dismiss the card: card not found');
+});
+
+// #651 source guards (JSX is not executed here): the panel routes BOTH outcomes
+// of a card action through cardActionNotice, and apiCall carries the flags.
+test('ImprovementsPanel renders card-action outcomes via cardActionNotice; apiCall carries applied/rolledBack', () => {
+  const panel = fs.readFileSync(new URL('./ImprovementsPanel.jsx', import.meta.url), 'utf8');
+  assert.match(panel, /setNotice\(cardActionNotice\(action, null\)\);/);
+  assert.match(panel, /\} catch \(err\) \{\s*setNotice\(cardActionNotice\(action, err\)\);/);
+  assert.doesNotMatch(panel, /Could not \$\{action\} the card/);
+  const useApi = fs.readFileSync(new URL('../../hooks/useApi.js', import.meta.url), 'utf8');
+  assert.match(useApi, /if \(err && err\.applied === true\) e\.applied = true;/);
+  assert.match(useApi, /if \(err && err\.rolledBack === true\) e\.rolledBack = true;/);
 });

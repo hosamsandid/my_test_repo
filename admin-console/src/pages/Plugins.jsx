@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Puzzle, ShieldAlert, Download, Trash2, RefreshCw, BookOpen, AlertTriangle } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -8,7 +8,7 @@ import PluginTeamAssign from '../components/PluginTeamAssign';
 import PluginCredentials from '../components/PluginCredentials';
 import { useHelpSubject } from '../context/HelperChatContext';
 import { OVERLAY_PLUGIN_INSTALL, OVERLAY_PLUGIN_UNINSTALL } from '../context/page-help-view.js';
-import { pluginRegistryRow } from './plugin-registry-view.js';
+import { pluginRegistryRow, needsBrokerPoll, settledStartIds, uninstallDialog, BROKER_POLL_MS } from './plugin-registry-view.js';
 import { PLUGINS_HELP_SECTIONS } from './plugins-help-sections.js';
 import { notifyPluginsChanged } from '../components/plugin-nav';
 import { grantableTeams } from './plugin-team-assign-view.js';
@@ -35,6 +35,7 @@ const RISK_TONE = {
 const STATUS_TONE = {
   ok: 'var(--eb-success-fg, #0a7)',
   warn: 'var(--eb-warn-fg, #8a6d00)',
+  danger: 'var(--eb-danger-fg, #a00)',
   muted: 'var(--eb-text-muted)',
 };
 
@@ -126,12 +127,14 @@ function InstallDialogBody({ row }) {
 // activate/uninstall chapter — the one that says what the broker stopping
 // actually costs a running agent — rather than on the grant model, because the
 // dialog's own sentence already states the grant half.
-function UninstallDialogBody() {
+function UninstallDialogBody({ row }) {
   useHelpSubject({ overlay: OVERLAY_PLUGIN_UNINSTALL });
+  // A broken registry entry gets its own wording — it has no broker (#2649).
+  const { body } = uninstallDialog(row);
   return (
     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)' }}>
       <p style={{ fontSize: 'var(--eb-text-sm)', marginTop: 0, marginBottom: 0, flex: 1 }}>
-        The broker stops. Existing grants stay in place and seed nothing until you reinstall.
+        {body || 'The broker stops. Existing grants stay in place and seed nothing until you reinstall.'}
       </p>
       <PageHelpButton
         label="What uninstalling undoes"
@@ -213,9 +216,16 @@ function PluginCard({ row, onInstall, onUninstall, busy, teams, stackRuntime, on
 
           <div style={{ display: 'flex', gap: 'var(--eb-space-4)', flexWrap: 'wrap', marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
             {row.cliName && <span>CLI: <code style={{ fontFamily: 'var(--eb-font-mono)' }}>{row.cliName}</code></span>}
-            <span>Scopes: {row.scopes.join(', ')}</span>
-            <span>{row.quota}</span>
+            {row.scopes.length > 0 && <span>Scopes: {row.scopes.join(', ')}</span>}
+            {row.quota && <span>{row.quota}</span>}
           </div>
+
+          {/* Why the broker is not running, when we can tell (#2649). */}
+          {row.status.reason && (
+            <div style={{ marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: STATUS_TONE[row.status.tone] }}>
+              {row.status.reason}
+            </div>
+          )}
 
           <BuildIdentity build={row.build} />
 
@@ -262,7 +272,7 @@ function PluginCard({ row, onInstall, onUninstall, busy, teams, stackRuntime, on
 
       {/* Team assignment (#1691) — installed cards only, so it disappears with
           the card on uninstall (AC9). Reuses the existing activation path. */}
-      {row.installed && (
+      {row.installed && !row.invalid && (
         <PluginTeamAssign
           row={row}
           teams={teams}
@@ -274,7 +284,7 @@ function PluginCard({ row, onInstall, onUninstall, busy, teams, stackRuntime, on
       {/* Per-team credentials (Jira plan §5) — installed cards that declare
           `credentials[]`. A Team Admin of a granted team fills the fields; the
           value is stored 0600 server-side and pushed to the broker on save. */}
-      {row.installed && row.credentialKeys.length > 0 && (
+      {row.installed && !row.invalid && row.credentialKeys.length > 0 && (
         <PluginCredentials row={row} />
       )}
     </div>
@@ -292,17 +302,44 @@ export default function Plugins() {
   const [removing, setRemoving] = useState(null); // row awaiting uninstall confirm
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState('');
+  // { [pluginId]: ms } for installs made on this page, so a broker that is
+  // still coming up reads "starting" rather than "not running" (#2649).
+  const [startingSince, setStartingSince] = useState({});
+  const [now, setNow] = useState(() => Date.now());
 
-  // The stack runtime the plugin's `platforms` is checked against. The console
-  // is served by the same compose stack the orchestrator runs in, so podman is
-  // the honest default; a hosted deployment sets it explicitly.
+  // The stack runtime the plugin's `platforms` is checked against. GET
+  // /api/plugins reports it from AEE_CONTAINER_RUNTIME (#2649); podman is only
+  // the fallback while the first response is loading.
   const stackRuntime = (data && data.stackRuntime) || 'podman';
   const canManage = !!(data && data.canManage);
 
   const installed = useMemo(
-    () => ((data && data.installed) || []).map((e) => pluginRegistryRow(e, { canManage, stackRuntime })),
-    [data, canManage, stackRuntime],
+    () => ((data && data.installed) || []).map((e) => pluginRegistryRow(e, {
+      canManage, stackRuntime, startingSince: startingSince[e.id] ?? null, now,
+    })),
+    [data, canManage, stackRuntime, startingSince, now],
   );
+
+  // While a broker is starting, re-read the registry on a short interval so the
+  // chip flips to running (or to "did not start") on its own (#2649). Stops as
+  // soon as nothing is starting.
+  const polling = needsBrokerPoll(installed);
+  useEffect(() => {
+    if (!polling) return undefined;
+    const t = setInterval(() => { setNow(Date.now()); refetch(); }, BROKER_POLL_MS);
+    return () => clearInterval(t);
+  }, [polling, refetch]);
+  // Once a broker is up its install timestamp has done its job. Keeping it
+  // would make a later crash read "did not start" instead of "not running".
+  useEffect(() => {
+    const settled = settledStartIds(installed, startingSince);
+    if (settled.length === 0) return;
+    setStartingSince((prev) => {
+      const next = { ...prev };
+      for (const id of settled) delete next[id];
+      return next;
+    });
+  }, [installed, startingSince]);
   const available = useMemo(
     () => ((data && data.available) || []).map((e) => pluginRegistryRow(e, { canManage, stackRuntime })),
     [data, canManage, stackRuntime],
@@ -328,6 +365,10 @@ export default function Plugins() {
           `${row.name} was installed, but the orchestrator could not be reached to start its `
           + `broker (${result.reconcile.error}). It will start at the next orchestrator boot.`,
         );
+      } else {
+        const t = Date.now();
+        setNow(t);
+        setStartingSince((prev) => ({ ...prev, [row.id]: t }));
       }
       await refetch();
       // The installed set changed — let the sidebar re-discover its plugin nav
@@ -343,6 +384,11 @@ export default function Plugins() {
     try {
       await apiCall('DELETE', `/api/plugins/${encodeURIComponent(row.id)}`);
       setRemoving(null);
+      setStartingSince((prev) => {
+        const next = { ...prev };
+        delete next[row.id];
+        return next;
+      });
       await refetch();
       // The installed set changed — refresh the sidebar plugin nav (#1679).
       notifyPluginsChanged();
@@ -466,13 +512,13 @@ export default function Plugins() {
 
       <ConfirmDialog
         open={!!removing}
-        title={removing ? `Uninstall ${removing.name}?` : ''}
-        confirmLabel="Uninstall"
+        title={uninstallDialog(removing).title}
+        confirmLabel={uninstallDialog(removing).confirmLabel}
         variant="danger"
         busy={busy}
         onConfirm={() => removing && doUninstall(removing)}
         onCancel={() => setRemoving(null)}
-        message={removing ? <UninstallDialogBody /> : ''}
+        message={removing ? <UninstallDialogBody row={removing} /> : ''}
       />
     </div>
     </>

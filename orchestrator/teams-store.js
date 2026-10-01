@@ -34,6 +34,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const succession = require('./team-admin-succession');
+const { isHumanMatrixUserId } = require('./human-matrix-identity');
 
 const DEFAULT_TEAM_ID = 'default';
 const DEFAULT_TEAM_NAME = 'Default Team';
@@ -513,10 +514,35 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
     const users = listUsers();
     const idx = users.findIndex(u => u.id === id);
     if (idx === -1) throw notFound(`User '${id}' not found`);
+    // Only a personal identity may be a person's pointer (#2721 AC7). The
+    // shared admin account and agent accounts are service identities; stamping
+    // one on a record would make that user the "author" of every message the
+    // service account sends — their credentials and cost centre included.
+    if (!isHumanMatrixUserId(matrixUserId.trim())) {
+      throw badRequest('matrixUserId must be a personal Matrix identity (@u-<hash>:<server>)');
+    }
     users[idx].matrixUserId = matrixUserId.trim();
     users[idx].updatedAt = nowIso();
     writeArray(USERS_INDEX, users);
     return sanitizeUser(users[idx]);
+  }
+
+  // Startup repair for AC7 (#2721): drop any `matrixUserId` that is not a
+  // personal identity — e.g. a bootstrap admin that was pointed at the shared
+  // admin account. The record then reads as "no identity yet" and the
+  // provisioning backfill gives it a personal one. Returns the cleared ids.
+  function clearNonPersonalMatrixIdentities() {
+    const users = listUsers();
+    const cleared = [];
+    for (const u of users) {
+      if (u && u.matrixUserId !== undefined && !isHumanMatrixUserId(u.matrixUserId)) {
+        delete u.matrixUserId;
+        u.updatedAt = nowIso();
+        cleared.push(u.id);
+      }
+    }
+    if (cleared.length > 0) writeArray(USERS_INDEX, users);
+    return cleared;
   }
 
   // Verify a login: match by subject, then check the scrypt hash. Returns the
@@ -678,6 +704,7 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
     listUsers, getUser, getUserBySubject, createUser, updateUser, deleteUser,
     setUserPassword, clearUserPassword, verifyUserCredentials, sanitizeUser,
     setUserMatrixIdentity,
+    clearNonPersonalMatrixIdentities,
     listMemberships, setMembership, removeMembership, removeTeamMemberships, appendMemberships,
     ensureDefaultTeam, ensureSystemAdmin, seedInitialSystemAdmin,
   };

@@ -56,7 +56,14 @@ function parseTriggerRef(card) {
 // the team's label names flagged `humanGate: true` — a listener for one of those
 // is a human-approval gate and is off-limits like the derived wiring. Enforced
 // here, not just in the UI, so a raw API call can't bypass it.
-function triggerApplyGuardError(trigger, { humanGateLabels } = {}) {
+//
+// `handoffLabels` is the set (or array) of labels a team member emits through
+// its outcomes/emits port (see `emittedLabelSet`). A Flow-editor label hand-off
+// (#2710) wires a plain `github-event` listener with `labelFilter` (+ `claim`)
+// on the target and a `setLabel` outcome on the source — no derived flag marks
+// it. Deleting that listener while the source still emits the label silently
+// breaks the hand-off, so it is protected like the other derived wiring.
+function triggerApplyGuardError(trigger, { humanGateLabels, handoffLabels } = {}) {
   if (!trigger || typeof trigger !== 'object') return 'trigger not found';
   if (trigger.intrinsic === true) {
     return "intrinsic triggers are part of the agent's role and cannot be deleted by the applier";
@@ -85,6 +92,12 @@ function triggerApplyGuardError(trigger, { humanGateLabels } = {}) {
   const labelFilter = typeof trigger.labelFilter === 'string' ? trigger.labelFilter.trim() : '';
   if (labelFilter && gate.has(labelFilter)) {
     return `listener for human-gate label '${labelFilter}' cannot be deleted by the applier`;
+  }
+  const handoff = handoffLabels instanceof Set
+    ? handoffLabels
+    : new Set(Array.isArray(handoffLabels) ? handoffLabels : []);
+  if (labelFilter && handoff.has(labelFilter)) {
+    return `listener for hand-off label '${labelFilter}' is wired from a teammate's outcomes; remove the hand-off in the Flow editor instead of deleting the trigger`;
   }
   return null;
 }
@@ -116,6 +129,26 @@ function humanGateLabelSet(teamCfg) {
   return out;
 }
 
+// The set of labels the team's members emit — each member's `outcomes` port
+// `setLabel` actions plus the legacy `emits` list (the same derivation as the
+// orchestrator's `emitLabelsFromMembers`). Passed to `triggerApplyGuardError`
+// so a label hand-off listener is protected while its producer still emits.
+function emittedLabelSet(members) {
+  const out = new Set();
+  for (const m of Array.isArray(members) ? members : []) {
+    for (const l of Array.isArray(m && m.emits) ? m.emits : []) {
+      if (typeof l === 'string' && l.trim()) out.add(l.trim());
+    }
+    const opts = m && m.outcomes && Array.isArray(m.outcomes.options) ? m.outcomes.options : [];
+    for (const opt of opts) {
+      for (const a of Array.isArray(opt && opt.actions) ? opt.actions : []) {
+        if (a && a.type === 'setLabel' && typeof a.label === 'string' && a.label.trim()) out.add(a.label.trim());
+      }
+    }
+  }
+  return out;
+}
+
 module.exports = {
   EXECUTABLE_CARD_CLASSES,
   isExecutableClass,
@@ -123,4 +156,5 @@ module.exports = {
   triggerApplyGuardError,
   staleTriggerReason,
   humanGateLabelSet,
+  emittedLabelSet,
 };

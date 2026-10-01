@@ -108,15 +108,16 @@ identity":
    human their own reserved Matrix account `@u-<16 hex of sha256(subject)>:local`
    (`orchestrator/human-matrix-identity.js`); interactive chat then sends under *their* token,
    not the shared console token. This happens at user-record creation — there is no flag to
-   toggle it on.
+   toggle it on — and users still without one (older records, the seeded first administrator,
+   a failed attempt) are backfilled at startup and retried every two minutes (#2721).
 2. **Set `AUTH_ENABLED=true`.** The default is single-user compatibility mode, in which
    whoever signs in is the implicit System Admin and every scoping/authorization check is a
    no-op. With it on, list endpoints are filtered by team membership, per-mutation
    management gates apply, and the work-plane gate isolates each agent's chat/workspace/git.
 
-> **These two go together.** With `AUTH_ENABLED` off, the single operator has no user record,
-> so per-user Matrix identity never provisions and chat falls back to the shared
-> `MATRIX_ACCESS_TOKEN`. Turn it on **before** you invite a second person, or they inherit
+> **These two go together.** With `AUTH_ENABLED` off, the single operator has no user record;
+> it still gets its own `@u-…` chat identity keyed by its login subject, and chat never falls
+> back to the shared `MATRIX_ACCESS_TOKEN` (#2721). Turn it on **before** you invite a second person, or they inherit
 > the operator's view. Flipping it back off on a stack that already has named users grants
 > every one of them full visibility — the console logs a boot warning when that is the case.
 

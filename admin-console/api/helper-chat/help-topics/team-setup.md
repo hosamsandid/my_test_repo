@@ -88,8 +88,9 @@ each other's agents with the same label. The optional **Label suffix** (up to ei
 lowercase letters, digits and single inner dashes — so `team-1` or `pre-prod` reads
 as well as `k3f9`; a leading, trailing or doubled dash is refused, because it would
 produce `ready-x-` or `ready--x`) is stamped onto every label the team uses: trigger
-filters, channel labels, the label registry and the wake instructions the agents
-read. The suggest button still proposes a random four-character one — an
+filters and claims, channel labels, the label registry, the human roles' labels and
+the wake instructions the agents read. Labels you add to the live team later get
+the same suffix. The suggest button still proposes a random four-character one — an
 auto-generated token has no words to separate.
 
 Leave it blank unless another Agent Team already uses that repository.

@@ -1364,11 +1364,15 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onD
     if (human && !label.trim()) { setError('A human-approval gate needs the label a human applies.'); return; }
     setSaving(true); setError(null);
     try {
-      await engineUpdateChannel({ ops }, { to, spec: {
+      // #2717: keyed on the label the channel had when the dialog opened, so a
+      // changed label renames this channel (no sibling left behind) and fields
+      // the dialog does not edit (the claim opt-out) survive the Save. A label
+      // another channel from the same producer already uses is refused.
+      await engineUpdateChannel({ ops }, { to, prevLabel: edge.label || '', spec: {
         artifact, from,
         ...(label.trim() ? { label: label.trim() } : {}),
         ...(human ? { gate: 'human' } : {}),
-        ...(wakePrompt.trim() ? { wakePrompt: wakePrompt.trim() } : {}),
+        wakePrompt: wakePrompt.trim(),
       } });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
@@ -1379,7 +1383,9 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onD
       // The engine drops the port. The producer's "opens PR/issue" outcome
       // stays (#1003 — the badge is a projection of the outcome, edited in
       // the Outcomes editor, not implied by who consumes it).
-      await unwireChannel({ ops }, { from, to, artifact });
+      // Full (artifact, from, label) key (#2717) — switch fan-in siblings from
+      // the same producer with other labels stay.
+      await unwireChannel({ ops }, { from, to, artifact, label: edge.label || '' });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
   }
@@ -1625,9 +1631,11 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
           {confirmDelete && (
             <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
               <strong style={{ fontSize: 'var(--eb-text-sm)' }}>Remove this hand-off?</strong>
-              <label style={check}>
+              {/* #2708: describe the trigger by what it does; the auto-generated
+                  ID only as a tooltip (as #1818 did for the chat notice). */}
+              <label style={check} title={`Trigger ID: ${triggerId}`}>
                 <input type="checkbox" checked={delListener} onChange={e => setDelListener(e.target.checked)} />
-                Delete listener trigger <code>{triggerId}</code> on {toName || to}
+                Delete the trigger that wakes {toName || to} on label <code>{label}</code>
               </label>
               {!humanSource && (
                 <label style={check}>

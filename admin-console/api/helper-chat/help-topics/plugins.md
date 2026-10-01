@@ -45,6 +45,20 @@ status, the name of the CLI command its agents would get (if it has
 one), the scope granularities it offers, its per-scope quota, and the privileges
 its broker would receive.
 
+Right after you install a plugin its broker needs a few seconds to come up. The
+card shows **Broker starting…** meanwhile and checks again on its own; once the
+broker runs it switches to **Broker running**. If the broker is still not running
+two minutes after the install, the card says **Broker did not start** and
+suggests where to look — usually a missing broker image (`make plugin-images`) or
+the orchestrator log. A plugin that does not support this stack's runtime says so
+on its card.
+
+A directory in the plugin registry that is not a valid plugin — for example a
+backup copy such as `jira.bak-…`, whose name is not a valid plugin id (lowercase
+letters, digits and hyphens only) — is shown as **Invalid entry** with the
+problem listed. It has no broker, scopes or team settings. A System Admin can
+delete it with **Remove**.
+
 ### Typical use cases
 
 Plugins are the right tool whenever an agent needs a capability that shouldn't be

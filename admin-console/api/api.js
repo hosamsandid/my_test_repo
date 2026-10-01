@@ -84,6 +84,7 @@ const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
         WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
 const { buildAssistModelOptions } = require('./assist-model-options');
 const llmHealth = require('./llm-health');
+const llmBudget = require('./llm-budget');
 const { normalizeDiscoveredModels } = require('./model-discovery');
 const {
   PROBE_PLACEHOLDER_MODEL,
@@ -102,6 +103,8 @@ const { CHAT_AUTHOR_FIELD, chatAuthorStamp } = require('./chat-author');
 // so a human's own token can be used on the send path (#2173) without a
 // second internal-API hop.
 const { createHumanMatrixStore } = require('./human-matrix-store');
+const { resolveChatSendIdentity, CHAT_IDENTITY_NOT_READY,
+        CHAT_IDENTITY_NOT_READY_MESSAGE } = require('./chat-send-identity');
 const { parseAssistSelection, resolveAssistSelection } = require('./assist-target');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { locateCorrelationId } = require('./session-locate');
@@ -165,7 +168,7 @@ const skillImport = require('./skill-import');
 const skillGrantValidate = require('./skill-grant-validate');
 const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archives');
 const { createTranscribeRoute } = require('./transcribe.js');
-const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
+const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix, stampLiveLabels } = require('./label-suffix');
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
 const { reposFromEnv, repoVars } = require('./team-repo-resolve');
 const { planCreatorMembership, creatorEnvironmentOwnership } = require('./creator-membership');
@@ -193,6 +196,7 @@ const { resolveSpecKitCommand, hasUnresolvedPlaceholders } = require('./speckit-
 const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
 const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole, viewerTeamRoles } = require('./plugin-ui-viewer');
 const pluginCredView = require('./plugin-credential-view');
+const { PLUGIN_ID_RE, invalidPluginIdMessage, isRemovableRegistryDirName } = require('./plugin-registry-ids');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -1271,19 +1275,6 @@ function chatAuthorFor(req) {
   });
 }
 
-// The acting human's own Matrix credential for this request (#2173), or
-// `null` when there is none to send as — no user record behind the session
-// (the env single-admin), or a record whose Matrix identity has not finished
-// provisioning yet (#1458 provisioning is best-effort/backgrounded). Either
-// way the caller falls back to the shared admin token rather than failing
-// the send.
-function humanMatrixIdentityFor(req) {
-  const userId = getScope(req).userId;
-  if (!userId) return null;
-  const identity = humanMatrixStore.readIdentity(userId);
-  return identity && identity.accessToken && identity.matrixUserId ? identity : null;
-}
-
 // Make sure the acting human is actually a member of the room before they
 // send as themselves — the DM room is created with the shared admin invited
 // (see ensureAgentDmRoom), not with any individual human's account, so a
@@ -1359,6 +1350,31 @@ function syncSharedMemberRooms(teamId, userId, action) {
 function ownerFor(req) {
   const userId = getScope(req).userId;
   return userId ? { ownerId: String(userId), ownerSource: 'creator' } : {};
+}
+
+// The acting human's own Matrix credential for a chat send (#2173, #2721), or
+// `null` — and the caller then REFUSES the send (#2721 AC5); there is no
+// shared-admin fallback. A missing identity is provisioned on demand through
+// the orchestrator first, so a failed background attempt is completed at the
+// latest before the user's next send (AC3). The single operator (env admin,
+// no user record) gets its own identity keyed by its login subject (AC9).
+// Who is acting comes from the authenticated session, never the body.
+async function chatSendIdentityFor(req) {
+  const scope = getScope(req);
+  return resolveChatSendIdentity({
+    userId: scope.userId,
+    username: req && req.user && req.user.username,
+    operator: scope.all === true,
+    store: humanMatrixStore,
+    provisionUser: (userId) => callAdmin('POST', `users/${encodeURIComponent(userId)}/matrix-identity`, {}),
+    provisionOperator: (subject) => callAdmin('POST', 'operator/matrix-identity', { subject }),
+  });
+}
+
+// The fail-closed answer to a send with no identity (#2721 AC5). 503 + a stable
+// code, so the composer keeps the typed text and tells the user to retry.
+function refuseChatSendWithoutIdentity(res) {
+  return res.status(503).json({ error: CHAT_IDENTITY_NOT_READY_MESSAGE, code: CHAT_IDENTITY_NOT_READY });
 }
 
 function listAgentDirs() {
@@ -1689,13 +1705,55 @@ function llmHealthConfig() {
     baseMs: llmHealth.coerceMs(process.env.AEE_LLM_HEALTH_BACKOFF_BASE_MS, llmHealth.DEFAULT_BACKOFF_BASE_MS),
     maxMs: llmHealth.coerceMs(process.env.AEE_LLM_HEALTH_BACKOFF_MAX_MS, llmHealth.DEFAULT_BACKOFF_MAX_MS),
     staleMs: llmHealth.coerceMs(process.env.AEE_LLM_HEALTH_STALE_MS, llmHealth.DEFAULT_STALE_MS),
+    // #2732: budget usage % at which Health turns orange (Warning).
+    budgetWarnPct: llmBudget.coercePct(process.env.AEE_LLM_HEALTH_BUDGET_WARN_PCT, llmBudget.DEFAULT_WARN_PCT),
   };
+}
+
+// The client-facing view of one health record (AC3/AC6), with the configured
+// budget Warning threshold applied (#2732).
+function llmHealthView(record) {
+  return llmHealth.healthView(record, { warnPct: llmHealthConfig().budgetWarnPct });
 }
 
 // The client-facing health view for one endpoint id (AC3/AC6). No record →
 // { status: 'unknown' }.
 function llmHealthViewFor(id, map = loadLlmHealthMap()) {
-  return llmHealth.healthView(map[id]);
+  return llmHealthView(map[id]);
+}
+
+// #2732: the provider's spending budget, read alongside every health probe via
+// LiteLLM's free /key/info + /team/info management reads (llm-budget.js). Never
+// throws; a failed read is recorded as 'unavailable' and never fails the probe.
+// Skipped when the probe could not reach the endpoint at all — the budget read
+// would only time out a second time.
+async function lookupLlmBudget(baseUrl, token, authType, probe) {
+  if (probe && probe.status === 0) return { status: 'unavailable', reason: 'provider unreachable' };
+  try {
+    return await llmBudget.lookupBudget({ baseUrl, token, authType: normalizeAuthType(authType) }, httpGetJson);
+  } catch (err) {
+    return { status: 'unavailable', reason: 'request failed' };
+  }
+}
+
+// The read-only "Inherited from .env" row (#2732 edge case) is a LiteLLM
+// endpoint too: its budget is refreshed on the poller's cadence and kept in the
+// health map under this reserved key. It has no health probe of its own.
+const ENV_FALLBACK_HEALTH_KEY = '__env__';
+
+async function refreshEnvFallbackBudget() {
+  const baseUrl = (process.env.ANTHROPIC_BASE_URL || '').trim();
+  const token = (process.env.ANTHROPIC_AUTH_TOKEN || '').trim();
+  const map = loadLlmHealthMap();
+  if (!baseUrl) {
+    if (map[ENV_FALLBACK_HEALTH_KEY]) { delete map[ENV_FALLBACK_HEALTH_KEY]; saveLlmHealthMap(map); }
+    return;
+  }
+  if (!llmHealth.isDue(map[ENV_FALLBACK_HEALTH_KEY], Date.now(), llmHealthConfig())) return;
+  const budget = await lookupLlmBudget(baseUrl, token, 'api-key', null);
+  const fresh = loadLlmHealthMap();
+  fresh[ENV_FALLBACK_HEALTH_KEY] = { checkedAt: new Date().toISOString(), budget };
+  saveLlmHealthMap(fresh);
 }
 
 // Guard against two overlapping probes of the same endpoint (the poller and an
@@ -1706,14 +1764,18 @@ const llmHealthInFlight = new Set();
 // throws (probeLlmEndpointTest always resolves within its 8s timeout). Re-reads
 // the health map immediately before writing so a concurrent probe's result is
 // not clobbered.
-async function probeAndRecordHealth(ep) {
+//
+// `knownProbe` lets the Test-connection route record the probe it already ran
+// (plus a fresh budget read, #2732 AC1) instead of probing twice.
+async function probeAndRecordHealth(ep, knownProbe = null) {
   if (!ep || !ep.id || llmHealthInFlight.has(ep.id)) return null;
   llmHealthInFlight.add(ep.id);
   try {
     const token = readLlmEndpointToken(ep.authTokenId);
-    const probe = await probeLlmEndpointTest(ep.baseUrl, token, ep.authType);
+    const probe = knownProbe || await probeLlmEndpointTest(ep.baseUrl, token, ep.authType);
+    const budget = await lookupLlmBudget(ep.baseUrl, token, ep.authType, probe);
     const map = loadLlmHealthMap();
-    map[ep.id] = llmHealth.applyProbeResult(map[ep.id], probe);
+    map[ep.id] = llmHealth.applyProbeResult(map[ep.id], probe, Date.now(), budget);
     saveLlmHealthMap(map);
     return map[ep.id];
   } catch (err) {
@@ -1745,12 +1807,12 @@ async function runLlmHealthPass() {
   llmHealthPassBusy = true;
   try {
     const endpoints = listLlmEndpoints();
-    if (!endpoints.length) return;
     const cfg = llmHealthConfig();
     const dueIds = new Set(llmHealth.selectDueEndpointIds(endpoints, loadLlmHealthMap(), Date.now(), cfg));
     for (const ep of endpoints) {
       if (dueIds.has(ep.id)) await probeAndRecordHealth(ep);
     }
+    await refreshEnvFallbackBudget();
   } catch (err) {
     console.error(`[LLM-Health] Poll pass error: ${err.message}`);
   } finally {
@@ -2867,6 +2929,12 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(agentDir, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  // Label suffix on live edits (#2718): a label this write introduces on a
+  // suffixed team (registry entry, human emit/consume, outcome setLabel,
+  // channel label, legacy emits) gets the team's stored suffix — before any
+  // validation below, so the gate check sees the name that is persisted.
+  const liveSuffix = teamLabelSuffixFor(cfg);
+  if (liveSuffix) req.body = stampLiveLabels(req.body || {}, liveSuffix);
   const { displayName, role, enabled, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, wipLimit, autoDispatch, pool, github, channels, assistLlmEndpointId } = req.body;
 
   // ── Label registry (#928/#981) ────────────────────────────────────────────
@@ -3338,6 +3406,10 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
         artifact: c.artifact, from: c.from,
         ...(typeof c.label === 'string' && c.label.trim() ? { label: c.label.trim() } : {}),
         ...(c.gate === 'human' ? { gate: 'human' } : {}),
+        // Authored wake-instruction override (#868) — dropping it here lost it
+        // on every live channel write (#2717); the reconciler feeds it into the
+        // derived listener's prompt.
+        ...(typeof c.wakePrompt === 'string' && c.wakePrompt.trim() ? { wakePrompt: c.wakePrompt.trim() } : {}),
         // Claim opt-out (#958) — must survive the live port write, otherwise
         // reconcileTeamGithubChannels re-stamps the claim the author just turned
         // off. Only the non-default is persisted.
@@ -4015,10 +4087,10 @@ app.get('/api/environments/:id/repo-divergence', apiLimiter, async (req, res) =>
 });
 
 // Post a canned "please commit" / "please push" prompt into the source
-// agent's own DM. We send it as the admin user (same path as a manually
-// typed message) so the agent picks it up via its normal DM heuristic and
-// the entire exchange — including the resulting commits — stays visible in
-// the chat history. Used by the pre-flight buttons.
+// agent's own DM. It is sent as the acting human's own Matrix account (same
+// path as a manually typed message, #2721 AC6) so the agent picks it up via
+// its normal DM heuristic and the entire exchange — including the resulting
+// commits — stays visible in the chat history. Used by the pre-flight buttons.
 app.post('/api/agents/:id/handover/nudge', handoverLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
@@ -4063,8 +4135,12 @@ app.post('/api/agents/:id/handover/nudge', handoverLimiter, async (req, res) => 
   const preHandoffContent = { msgtype: 'm.text', body };
   const preHandoffAuthor = chatAuthorFor(req);
   if (preHandoffAuthor) preHandoffContent[CHAT_AUTHOR_FIELD] = preHandoffAuthor;
+  // Never as the shared admin (#2721 AC6): no personal identity → refused.
+  const humanIdentity = await chatSendIdentityFor(req);
+  if (!humanIdentity) return refuseChatSendWithoutIdentity(res);
+  await ensureHumanJoinedToRoom(humanIdentity, roomId);
   try {
-    const sendResp = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
+    const sendResp = await matrix.matrixFetch(humanIdentity.accessToken,
       `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`,
       { method: 'PUT', body: preHandoffContent });
     if (sendResp.status >= 400) {
@@ -4374,6 +4450,12 @@ app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
       code: 'process-template-role-removed',
     });
   }
+  // Label suffix on live edits (#2718): a member added to a suffixed team —
+  // free-form (Flow Copilot live apply) or from a role template — gets the
+  // team's suffix on its triggers and label ports, like a role created with
+  // the team.
+  const liveSuffix = teamLabelSuffixFor(teamCfg);
+  if (liveSuffix) outBody = stampLiveLabels(outBody, liveSuffix);
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamId)}/members`, {
@@ -6332,7 +6414,11 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   if (denyUnlessCanManageAgent(req, res, agentDir)) return;
   const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
   const triggers = Array.isArray(cur) ? cur : [];
-  const newTrigger = stripTriggerAnnotations({ id: `t${Date.now()}`, ...req.body });
+  // Label suffix on live edits (#2718): labelFilter, claim and the label
+  // mentions in the trigger's prompt get the team's stored suffix.
+  const liveSuffix = teamLabelSuffixFor(readJsonFile(path.join(agentDir, 'config.json'), null));
+  const reqTrigger = liveSuffix ? stampLiveLabels(req.body || {}, liveSuffix, { trigger: true }) : req.body;
+  const newTrigger = stripTriggerAnnotations({ id: `t${Date.now()}`, ...reqTrigger });
   // Trigger ids (#2626): URL-safe shape (400), unique per agent (409) — a
   // shared id makes DELETE/PUT ambiguous and the agent runs only one of them.
   const ide = newTriggerIdError(triggers, newTrigger.id);
@@ -6363,11 +6449,12 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   if (launchedLoopConflict(triggers, newTrigger)) {
     return res.status(409).json({ error: 'A loop is already running for this agent. Stop it before starting another.' });
   }
-  if (newTrigger.type === 'github-event') {
-    const now = new Date().toISOString();
-    if (!newTrigger.createdAt) newTrigger.createdAt = now;
-    if (!newTrigger.activatedAt) newTrigger.activatedAt = now;
-  }
+  // `createdAt` on every type gives the hill-climb pass an age signal, so a
+  // brand-new schedule is not proposed for deletion (#2710). `activatedAt` stays
+  // the github-event poller's history horizon.
+  const now = new Date().toISOString();
+  if (!newTrigger.createdAt) newTrigger.createdAt = now;
+  if (newTrigger.type === 'github-event' && !newTrigger.activatedAt) newTrigger.activatedAt = now;
   triggers.push(newTrigger);
   try {
     await putTriggers(id, triggers);
@@ -6402,7 +6489,11 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   if (at.error) return res.status(at.status).json({ error: at.error });
   const idx = at.index;
   const prev = triggers[idx];
-  const merged = stripTriggerAnnotations({ ...prev, ...req.body, id: triggerId });
+  // Label suffix on live edits (#2718) — see the POST handler. Only the edit's
+  // own fields are stamped; the stored trigger is merged in as it is.
+  const liveSuffix = teamLabelSuffixFor(readJsonFile(path.join(agentDir, 'config.json'), null));
+  const reqTrigger = liveSuffix ? stampLiveLabels(req.body || {}, liveSuffix, { trigger: true }) : req.body;
+  const merged = stripTriggerAnnotations({ ...prev, ...reqTrigger, id: triggerId });
   // Trigger-level `emits` was removed (#783): the agent/role level is canonical.
   // Ignore any supplied `emits` and drop a legacy field so an edit never
   // re-persists it (a persisted-but-ignored value can't create a phantom edge).
@@ -6426,15 +6517,17 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
     delete merged.pushedBy;
     Object.assign(merged, pbf.trigger);
   }
+  const now = new Date().toISOString();
+  // Backfill `createdAt` on any edit of a legacy unstamped trigger, of every
+  // type — the hill-climb age signal (#2710), as on POST.
+  if (!merged.createdAt) merged.createdAt = now;
   if (merged.type === 'github-event') {
-    const now = new Date().toISOString();
     // Refresh the activation horizon on a disable→enable flip so a
     // re-enabled trigger drops the backlog that accrued while it was off.
     if (prev.enabled === false && merged.enabled !== false) merged.activatedAt = now;
-    // Backfill the stamps on any edit of a legacy unstamped trigger. Its
+    // Backfill the stamp on any edit of a legacy unstamped trigger. Its
     // horizon was already drifting with the triggers.json mtime; stamping it
     // now makes it stable for all subsequent edits (#320 review follow-up).
-    if (!merged.createdAt) merged.createdAt = now;
     if (!merged.activatedAt) merged.activatedAt = now;
   }
   triggers[idx] = merged;
@@ -6573,6 +6666,20 @@ function truthyParam(v) { return v === '1' || v === 'true' || v === ''; }
 // bundle to read `labels[]` from, and gate-ness is no longer inferable from the
 // label's name. Unknown team / no registry → [] (every label is a plain agent
 // label; channel `gate: 'human'` ports still classify on their own).
+// The label suffix a live write to this agent must apply (#2718): the team
+// agent's own stored `labelSuffix`, or a member's parent team's. '' when the
+// team was created without one, so an unsuffixed team's writes stay untouched.
+function teamLabelSuffixFor(cfg) {
+  if (!cfg || typeof cfg !== 'object') return '';
+  let teamCfg = null;
+  if (cfg.role === 'team') teamCfg = cfg;
+  else if (typeof cfg.parentTeamId === 'string' && AGENT_ID_RE.test(cfg.parentTeamId)) {
+    teamCfg = readJsonFile(path.join(AGENTS_DIR, cfg.parentTeamId, 'config.json'), null);
+  }
+  const suffix = teamCfg && typeof teamCfg.labelSuffix === 'string' ? teamCfg.labelSuffix.trim() : '';
+  return suffix && validateSuffix(suffix).ok ? suffix : '';
+}
+
 function teamLabelRegistry(teamId) {
   if (!teamId || !AGENT_ID_RE.test(teamId)) return [];
   const cfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), {});
@@ -9372,8 +9479,16 @@ app.post('/api/teams/:teamId/hill-climb/cards/:cardId/apply', apiLimiter, async 
   }
   // Guard: never delete an intrinsic/derived/human-gate trigger (AC).
   const teamCfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
+  // Labels the team's members emit — a listener for one is a Flow label
+  // hand-off and is protected while its producer still emits it (#2710).
+  const teamMembers = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (cfg && cfg.parentTeamId === teamId) teamMembers.push({ emits: cfg.emits, outcomes: cfg.outcomes });
+  }
   const guardReason = hillClimbApplyGuard.triggerApplyGuardError(liveTrigger, {
     humanGateLabels: hillClimbApplyGuard.humanGateLabelSet(teamCfg),
+    handoffLabels: hillClimbApplyGuard.emittedLabelSet(teamMembers),
   });
   if (guardReason) {
     return res.status(403).json({ error: 'protected-trigger', code: 'protected-trigger', reason: guardReason });
@@ -9935,13 +10050,13 @@ app.get('/api/process-templates/:id', (req, res) => {
  * NOTHING to any agent — that is the separate grant step (§4.4). */
 const POOL_PLUGINS_DIR = path.join(POOL_DIR, 'plugins');
 const REGISTRY_PLUGINS_DIR = path.join(WORKSPACE, 'plugins');
-const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+// PLUGIN_ID_RE and the removable-directory rule live in plugin-registry-ids.js (#2649).
 
 // Read + validate one plugin.json under a base dir. Never throws; an invalid
 // plugin is reported WITH its errors rather than hidden, so an operator can see
 // why something they dropped in isn't installable.
 function readPluginDir(baseDir, id) {
-  if (!PLUGIN_ID_RE.test(id)) return { id, ok: false, errors: ['invalid plugin id'], manifest: null };
+  if (!PLUGIN_ID_RE.test(id)) return { id, ok: false, errors: [invalidPluginIdMessage(id)], manifest: null };
   const file = path.join(baseDir, id, 'plugin.json');
   // Containment: id is regex-bounded above (no dots, no slashes), so the join
   // cannot escape — re-checked here because this path is attacker-adjacent.
@@ -10136,6 +10251,11 @@ app.get('/api/plugins', apiLimiter, async (req, res) => {
       imageBuild: null,
     })),
     canManage: !!getScope(req).all,
+    // The runtime a plugin's `platforms` is checked against (#2649) — the same
+    // AEE_CONTAINER_RUNTIME signal the orchestrator spawns on; the k8s overlay
+    // sets it on the console too. Without it the page assumed podman, so a
+    // podman-only plugin on Kubernetes read "starting" instead of its mismatch.
+    stackRuntime: normalizeToolchainRuntime(process.env.AEE_CONTAINER_RUNTIME),
   });
 });
 
@@ -10186,7 +10306,10 @@ app.post('/api/plugins/:id/install', heavyLimiter, async (req, res) => {
 app.delete('/api/plugins/:id', heavyLimiter, async (req, res) => {
   if (!getScope(req).all) return res.status(403).json({ error: 'System Admin required' });
   const id = req.params.id;
-  if (!PLUGIN_ID_RE.test(id)) return res.status(400).json({ error: 'invalid plugin id' });
+  // A broken registry entry whose directory name is not a valid id (e.g. an
+  // operator's `jira.bak-…` copy) is still listed on the Plugins page, so it
+  // must be removable from there too (#2649) — see plugin-registry-ids.js.
+  if (!isRemovableRegistryDirName(id)) return res.status(400).json({ error: invalidPluginIdMessage(id) });
   const dest = path.join(REGISTRY_PLUGINS_DIR, id);
   if (!path.resolve(dest).startsWith(path.resolve(REGISTRY_PLUGINS_DIR) + path.sep)) {
     return res.status(400).json({ error: 'invalid plugin id' });
@@ -10202,13 +10325,16 @@ app.delete('/api/plugins/:id', heavyLimiter, async (req, res) => {
   // reinstall does not silently resurrect a team's old vendor token.
   // PLUGIN_ID_RE already excludes every path separator; the resolve-guard
   // mirrors the one on `dest` above (defense in depth, CodeQL js/path-injection).
-  try {
-    const credRoot = path.resolve(REGISTRY_PLUGINS_DIR, '_credentials');
-    const credDest = path.resolve(credRoot, id);
-    if (credDest.startsWith(credRoot + path.sep)) {
-      fs.rmSync(credDest, { recursive: true, force: true });
-    }
-  } catch { /* best effort */ }
+  // Only a valid id can own credentials, so a removed broken entry reaps none.
+  if (PLUGIN_ID_RE.test(id)) {
+    try {
+      const credRoot = path.resolve(REGISTRY_PLUGINS_DIR, '_credentials');
+      const credDest = path.resolve(credRoot, id);
+      if (credDest.startsWith(credRoot + path.sep)) {
+        fs.rmSync(credDest, { recursive: true, force: true });
+      }
+    } catch { /* best effort */ }
+  }
   // Existing grants are deliberately LEFT ALONE: uninstalling is an operator
   // action on the registry, not a mass revoke. The orchestrator's reconcile
   // stops the orphaned sidecar, and a grant with no installed manifest seeds
@@ -13103,7 +13229,7 @@ app.get('/api/llm-endpoints', (req, res) => {
     // renders it on page load with no click (AC3). No record → 'unknown' (AC6).
     // maskLlmEndpointForCaller drops the token tail/fingerprint for a global-only
     // view (#2136 finding 3a) — an ordinary-reach caller is unchanged.
-    .map(ep => ({ ...maskLlmEndpointForCaller(scope, ep), health: llmHealth.healthView(healthMap[ep.id]) })));
+    .map(ep => ({ ...maskLlmEndpointForCaller(scope, ep), health: llmHealthView(healthMap[ep.id]) })));
 });
 
 // Selection options for the global assist model selector (#1210). Distinct from
@@ -13125,7 +13251,11 @@ app.get('/api/assist/model-options', (req, res) => {
 // provider-shaped record so the Model Providers page can show the operator
 // what "inherit from .env" resolves to. Never selectable as an llmEndpointId.
 app.get('/api/llm-env-fallback', (req, res) => {
-  res.json(buildEnvFallbackProvider());
+  const provider = buildEnvFallbackProvider();
+  // #2732: the .env row's budget (refreshed by the health poller); health
+  // itself is never evaluated for this row.
+  if (provider) provider.budget = llmBudget.budgetView(loadLlmHealthMap()[ENV_FALLBACK_HEALTH_KEY]?.budget);
+  res.json(provider);
 });
 
 app.get('/api/llm-endpoints/:id', (req, res) => {
@@ -13271,7 +13401,7 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
   // immediately. Best-effort (never throws; ~8s worst case only on an actually
   // unreachable endpoint — exactly when the signal is worth waiting for).
   const health = await probeAndRecordHealth(entry);
-  res.status(201).json({ ...maskLlmEndpoint(entry), health: llmHealth.healthView(health) });
+  res.status(201).json({ ...maskLlmEndpoint(entry), health: llmHealthView(health) });
 });
 
 app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
@@ -13466,7 +13596,7 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   // AC4: re-probe on save so an edit (e.g. a repointed base URL or a rotated
   // token) reflects its new reachability immediately. Best-effort.
   const health = await probeAndRecordHealth(next);
-  res.json({ ...maskLlmEndpoint(next), health: llmHealth.healthView(health) });
+  res.json({ ...maskLlmEndpoint(next), health: llmHealthView(health) });
 });
 
 app.put('/api/llm-endpoints/:id/models', apiLimiter, (req, res) => {
@@ -13885,7 +14015,11 @@ app.post('/api/llm-endpoints/:id/test', heavyLimiter, async (req, res) => {
   // otherwise (#800). The raw token is never returned, only a pass/fail probe.
   if (!ep || !providerVisible(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
   const token = readLlmEndpointToken(ep.authTokenId);
-  res.json(await probeLlmEndpointTest(ep.baseUrl, token, ep.authType));
+  const probe = await probeLlmEndpointTest(ep.baseUrl, token, ep.authType);
+  // #2732 AC1: a test also refreshes the persisted health + budget, so the
+  // table reflects it without waiting for the next poll.
+  await probeAndRecordHealth(ep, probe);
+  res.json(probe);
 });
 
 app.post('/api/llm-endpoints/:id/discover-models', heavyLimiter, async (req, res) => {
@@ -16922,7 +17056,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   // expansion (#987). Without it the stored humans registry keeps role keys while
   // the live graph's producer nodes are member ids, so the producer → human
   // reviewer touchpoint edge is orphaned on the newly materialised team.
-  const bundleHumans = remapHumanConsumesFrom(
+  let bundleHumans = remapHumanConsumesFrom(
     normalizeHumans(body.processTemplate?.humans),
     (f) => `${teamId}-${f}`,
   );
@@ -16944,9 +17078,12 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   let suffixWarnings = [];
   let suffixTokenSet = null;
   if (labelSuffix) {
-    const stamped = applyLabelSuffix(customRolesRaw, bundleLabels, labelSuffix);
+    const stamped = applyLabelSuffix(customRolesRaw, bundleLabels, labelSuffix, bundleHumans);
     customRolesRaw = stamped.members;
     bundleLabels = stamped.bundleLabels;
+    // The humans registry carries label names too (#2718) — stamped in the same
+    // pass so the live graph's human touchpoints meet their agent counterparts.
+    bundleHumans = stamped.humans;
     suffixWarnings = stamped.warnings;
     suffixTokenSet = stamped.tokenSet;
   }
@@ -17647,7 +17784,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // expansion (#987). Without it the stored humans registry keeps role keys while
   // the live graph's producer nodes are member ids, so the producer → human
   // reviewer touchpoint edge is orphaned on the newly materialised team.
-  const bundleHumans = remapHumanConsumesFrom(
+  let bundleHumans = remapHumanConsumesFrom(
     normalizeHumans(body.processTemplate?.humans),
     (f) => `${teamId}-${f}`,
   );
@@ -17667,9 +17804,12 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   let suffixWarnings = [];
   let suffixTokenSet = null;
   if (labelSuffix) {
-    const stamped = applyLabelSuffix(customRolesRaw, bundleLabels, labelSuffix);
+    const stamped = applyLabelSuffix(customRolesRaw, bundleLabels, labelSuffix, bundleHumans);
     customRolesRaw = stamped.members;
     bundleLabels = stamped.bundleLabels;
+    // The humans registry carries label names too (#2718) — stamped in the same
+    // pass so the live graph's human touchpoints meet their agent counterparts.
+    bundleHumans = stamped.humans;
     suffixWarnings = stamped.warnings;
     suffixTokenSet = stamped.tokenSet;
   }
@@ -19257,9 +19397,10 @@ app.get('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   }
 });
 
-// 4. Send a text message to a room — as the acting human's own Matrix
-// identity when one is provisioned (#2173), else the shared admin account
-// (env single-admin, or a human whose identity hasn't finished provisioning).
+// 4. Send a text message to a room — always as the acting human's own Matrix
+// identity (#2173, #2721). Typed messages, quick-reply answers and slash
+// commands all come through here. No identity (even after an on-demand
+// provisioning attempt) → 503, never the shared admin account.
 app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
   const { roomId } = req.params;
@@ -19282,20 +19423,18 @@ app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
     }
   }
   // Who wrote this (#2065). Kept alongside the real Matrix sender below —
-  // it is what resolves the display name/initials in the transcript, and it
-  // still fires for the shared-admin fallback (an unprovisioned identity, or
-  // the env single-admin, has no Matrix account of its own to be "true"
-  // about).
+  // it is what resolves the display name/initials in the transcript.
   const authorStamp = chatAuthorFor(req);
   if (authorStamp) content[CHAT_AUTHOR_FIELD] = authorStamp;
 
-  // #2173: send as the acting human's own Matrix account when one exists, so
+  // #2173/#2721: send as the acting human's own Matrix account, so
   // `event.sender` in every downstream consumer (the agent runtime's DM
-  // gate included) is the real person rather than the one shared admin
-  // identity every console user used to share.
-  const humanIdentity = humanMatrixIdentityFor(req);
-  const sendToken = humanIdentity ? humanIdentity.accessToken : matrix.ADMIN_TOKEN;
-  if (humanIdentity) await ensureHumanJoinedToRoom(humanIdentity, roomId);
+  // gate, credential and usage attribution) is the real person. Fail closed:
+  // without one the message is not sent under any other account (AC5).
+  const humanIdentity = await chatSendIdentityFor(req);
+  if (!humanIdentity) return refuseChatSendWithoutIdentity(res);
+  await ensureHumanJoinedToRoom(humanIdentity, roomId);
+  const sendToken = humanIdentity.accessToken;
 
   const txnId = crypto.randomUUID();
   try {

@@ -9,7 +9,7 @@
 import { apiCall } from '../../hooks/useApi';
 import { PROMPT_MODES } from '../prompt-mode-view.js';
 import { wouldCreateCycle } from './hierarchy-utils';
-import { upsertChannel, removeChannelFrom } from './channel-ops';
+import { upsertChannel, removeChannelFrom, editChannel } from './channel-ops';
 import {
   stagesAfterAdd, stagesAfterRename, stagesAfterRemove, stagesAfterReorder, membersToCascade,
 } from './stage-list-ops';
@@ -328,7 +328,16 @@ export const liveOps = {
     const channels = upsertChannel(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label, gate, wakePrompt, autoClaim });
     await apiCall('PUT', `/api/agents/${roleId}`, { channels });
   },
-  updateChannel: async (roleId, spec) => liveOps.addChannel(roleId, spec),
+  // Edit an existing channel (#2717): `prevLabel` is its label when the editor
+  // opened, so a label change renames that port instead of adding a sibling.
+  // Omitted = edit in place on the spec's own key (e.g. the claim toggle).
+  updateChannel: async (roleId, spec, { prevLabel } = {}) => {
+    if (!spec.from || spec.from === roleId) return;
+    const a = await apiCall('GET', `/api/agents/${roleId}`);
+    const channels = editChannel(Array.isArray(a?.channels) ? a.channels : [],
+      prevLabel !== undefined ? prevLabel : spec.label, spec);
+    await apiCall('PUT', `/api/agents/${roleId}`, { channels });
+  },
   removeChannel: async (roleId, { artifact, from, label }) => {
     const a = await apiCall('GET', `/api/agents/${roleId}`);
     const channels = removeChannelFrom(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label });
@@ -756,9 +765,16 @@ export function makeDraftOps(getBundle, persist) {
       r.channels = upsertChannel(r.channels, spec);
       await persist(b);
     },
-    // Upsert keyed on (artifact, from, label) (#828), so editing a channel's
-    // gate reuses it while a new label adds a switch fan-in sibling.
-    updateChannel: async (roleId, spec) => makeDraftOps(getBundle, persist).addChannel(roleId, spec),
+    // Edit keyed on the channel's ORIGINAL (artifact, from, label) (#2717), so a
+    // label change renames the port rather than adding a switch fan-in sibling.
+    updateChannel: async (roleId, spec, { prevLabel } = {}) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (!r) throw new Error(`role ${roleId} not found`);
+      if (!spec.from || spec.from === roleId) return;
+      r.channels = editChannel(r.channels, prevLabel !== undefined ? prevLabel : spec.label, spec);
+      await persist(b);
+    },
     removeChannel: async (roleId, { artifact, from, label }) => {
       const b = clone(getBundle());
       const r = role(b, roleId);

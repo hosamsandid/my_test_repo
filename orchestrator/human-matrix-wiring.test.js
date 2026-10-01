@@ -62,8 +62,9 @@ test("ensureMatrixUser is the only place the reservation could be bypassed, and 
     `exactly one caller may opt out of the reservation, found ${optOuts.length}`,
   );
 
-  // …and that one caller is the human-provisioning function.
-  const humanBody = functionBody("ensureHumanMatrixIdentity");
+  // …and that one caller is the human-provisioning function, shared by the
+  // user-record and single-operator paths (#2721).
+  const humanBody = functionBody("provisionHumanMatrixAccount");
   assert.match(humanBody, /allowHumanLocalpart:\s*true/);
 });
 
@@ -86,7 +87,7 @@ test("creating a user record provisions that human's Matrix identity", () => {
   // survived review: the guard read the wrong name back and agreed with itself.
   assert.match(
     SRC,
-    /const created = teamsStore\.createUser\(body\);[\s\S]{0,2000}?provisionHumanMatrixIdentityInBackground\(\s*orchestratorSingleton \? orchestratorSingleton\.adminClient : null, created\)/,
+    /const created = teamsStore\.createUser\(body\);[\s\S]{0,2000}?provisionHumanMatrixIdentityInBackground\(created\)/,
     "POST /internal/admin/users must provision the new human's Matrix identity",
   );
 });
@@ -169,7 +170,7 @@ test("the human's Matrix password is full-entropy, not the derivable agent patte
   // who knows the id and roughly when it was created. That is tolerable for a
   // service account whose token the stack holds anyway; for a human account it
   // would be a login as that person.
-  const body = functionBody("ensureHumanMatrixIdentity");
+  const body = functionBody("provisionHumanMatrixAccount");
   assert.match(body, /const password = randomHex\(/);
   assert.ok(!/`agent-\$\{/.test(body), "must not reuse the agent password pattern");
 });
@@ -180,7 +181,7 @@ test("provisioning treats the login, not the fire-and-forget admin command, as t
   // The admin-room commands' replies are never parsed, so only the subsequent
   // login proves the account exists — and it must go through the retrying
   // wrapper that absorbs the cold-stack race (#719/#1386).
-  const body = functionBody("ensureHumanMatrixIdentity");
+  const body = functionBody("provisionHumanMatrixAccount");
   assert.match(body, /await loginMatrixUser\(localpart, password, adminClient\)/);
   assert.ok(
     !/attemptLoginMatrixUser/.test(body),
@@ -191,8 +192,53 @@ test("provisioning treats the login, not the fire-and-forget admin command, as t
 test("provisioning is idempotent — an existing credential short-circuits it", () => {
   const body = functionBody("ensureHumanMatrixIdentity");
   const readAt = body.indexOf("humanMatrixStore.readIdentity(user.id)");
-  const createAt = body.indexOf("ensureMatrixUser(");
+  const createAt = body.indexOf("provisionHumanMatrixAccount(");
   assert.notEqual(readAt, -1, "must check for an existing credential first");
+  assert.notEqual(createAt, -1, "must still create the account when none is stored");
   assert.ok(readAt < createAt, "the existing-credential check must precede account creation");
-  assert.match(body, /if \(existing && existing\.accessToken\) return existing;/);
+  assert.match(body, /if \(isUsableHumanCredential\(existing\)\) \{[\s\S]{0,200}?return existing;/);
+});
+
+// ---- #2721: backfill, retry, no deleted-user resurrection --------------------
+
+test("the operator path shares the single account-creating function", () => {
+  const body = functionBody("ensureOperatorMatrixIdentity");
+  assert.match(body, /humanMatrixStore\.readOperatorIdentity\(subject\)/);
+  assert.match(body, /await provisionHumanMatrixAccount\(adminClient, \{ subject, displayName \}\)/);
+  assert.match(body, /humanMatrixStore\.writeOperatorIdentity\(subject, \{ matrixUserId, accessToken \}\)/);
+});
+
+test("ensureHumanMatrixIdentity re-reads the record so a deleted user is never provisioned", () => {
+  const body = functionBody("ensureHumanMatrixIdentity");
+  const reread = body.indexOf("const current = teamsStore.getUser(user.id);");
+  assert.notEqual(reread, -1);
+  assert.match(body, /if \(!current\) return null;/);
+  assert.ok(reread < body.indexOf("provisionHumanMatrixAccount("), "the existence check precedes account creation");
+  // …and a delete that lands mid-provisioning retires the fresh account again.
+  assert.match(body, /if \(!teamsStore\.getUser\(user\.id\)\) \{\s*await deprovisionHumanMatrixIdentity\(adminClient, user\.id\);/);
+});
+
+test("a stored credential is only usable if it names a personal identity (AC7)", () => {
+  const src = SRC.slice(SRC.indexOf("function isUsableHumanCredential("));
+  assert.match(src.slice(0, 300), /humanMatrixIdentity\.isHumanMatrixUserId\(identity\.matrixUserId\)/);
+});
+
+test("every provisioning goes through the one deduping provisioner", () => {
+  const bg = SRC.slice(SRC.indexOf("function provisionHumanMatrixIdentityInBackground("));
+  assert.match(bg.slice(0, 300), /humanMatrixProvisioner\.ensure\(user\)/);
+  const callers = (SRC.match(/await ensureHumanMatrixIdentity\(/g) || []).length;
+  assert.equal(callers, 1, "only the provisioner may call ensureHumanMatrixIdentity directly");
+});
+
+test("startup repairs shared-admin pointers, backfills, and keeps retrying on a timer", () => {
+  const main = SRC.slice(SRC.indexOf("teamsStore.clearNonPersonalMatrixIdentities()"));
+  assert.ok(main.length > 1000, "expected the startup repair call");
+  const head = main.slice(0, 2500);
+  assert.match(head, /runHumanMatrixBackfill = \(\) => humanMatrixProvisioner\.backfill\(\)/);
+  assert.match(head, /\n  runHumanMatrixBackfill\(\);/, "an immediate first pass at startup");
+  assert.match(head, /setInterval\(runHumanMatrixBackfill, HUMAN_MATRIX_RETRY_INTERVAL_MS\)/, "a periodic retry");
+  // …and main() actually starts it, after init(), without awaiting it.
+  const initAt = SRC.indexOf("await orchestrator.init();");
+  const startAt = SRC.indexOf("\n  startHumanMatrixIdentityMaintenance();", initAt);
+  assert.ok(initAt !== -1 && startAt > initAt, "main() must start the maintenance after init()");
 });

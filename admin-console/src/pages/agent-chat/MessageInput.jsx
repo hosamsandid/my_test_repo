@@ -12,7 +12,7 @@ import {
   placeholderSendHint,
   SEND_KEYBINDING_CHANGED_EVENT,
 } from './message-send-keybinding.js';
-import { loadDraft, saveDraft, clearDraft } from './message-draft.js';
+import { loadDraft, saveDraft, clearDraft, restoreUnsentText } from './message-draft.js';
 import { decideComposerAction } from './composer-action.js';
 import { commandQuery, filterCommands, commandInsertion, nextIndex } from './command-palette.js';
 import { apiCall } from '../../hooks/useApi.js';
@@ -67,7 +67,7 @@ const IS_MAC = isMacPlatform();
  * per agent under `agentChat.draft.<agentId>` (see message-draft.js) — restored
  * on mount, cleared on a successful send.
  *
- * @param {(text:string)=>void} onSend
+ * @param {(text:string)=>(void|boolean|Promise<void|boolean>)} onSend  resolves false when the text was not sent
  * @param {boolean} [disabled]
  * @param {?string} [agentId]            persists the composer draft per agent
  * @param {string}  [agentDisplayName]   used in placeholder
@@ -256,7 +256,11 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
   function submit() {
     const text = value.trim();
     if (!text || disabled || attachmentsUploading) return;
-    onSend(text);
+    // A refused send (onSend resolves false — e.g. the chat identity is not
+    // ready yet, #2721 AC5) gives the typed text back instead of losing it.
+    Promise.resolve(onSend(text)).then((sent) => {
+      if (sent === false) setValue(v => restoreUnsentText(v, text));
+    }, () => {});
     setValue('');
     // The sent draft's attachment previews go with it (AC9).
     for (const a of attachments) releaseAttachment(a.id);

@@ -61,6 +61,32 @@ test('matrix identity: setUserMatrixIdentity validates its inputs', () => {
   assert.throws(() => store.setUserMatrixIdentity(u.id, '   '), /matrixUserId is required/);
 });
 
+test('matrix identity: a service account can never be stamped as a person (#2721 AC7)', () => {
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'jane@corp.com' });
+  for (const service of ['@k-zyskowski_accent:local', '@admin:local', '@my-assistant:local', '@u-payments:local']) {
+    assert.throws(() => store.setUserMatrixIdentity(u.id, service), /personal Matrix identity/);
+  }
+  assert.equal(store.getUser(u.id).matrixUserId, undefined);
+});
+
+test('matrix identity: clearNonPersonalMatrixIdentities drops shared-admin pointers only (#2721 AC7)', () => {
+  const { store, root } = freshStore();
+  const a = store.createUser({ subject: 'admin@corp.com', systemAdmin: true });
+  const b = store.createUser({ subject: 'jane@corp.com' });
+  store.setUserMatrixIdentity(b.id, '@u-0123456789abcdef:local');
+  // Simulate a record pointed at the shared admin account by an older build.
+  const indexPath = path.join(root, 'users', 'index.json');
+  const raw = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+  raw.find(r => r.id === a.id).matrixUserId = '@k-zyskowski_accent:local';
+  fs.writeFileSync(indexPath, JSON.stringify(raw));
+
+  assert.deepEqual(store.clearNonPersonalMatrixIdentities(), [a.id]);
+  assert.equal(store.getUser(a.id).matrixUserId, undefined);
+  assert.equal(store.getUser(b.id).matrixUserId, '@u-0123456789abcdef:local');
+  assert.deepEqual(store.clearNonPersonalMatrixIdentities(), [], 'idempotent');
+});
+
 test('matrix identity: deleting a user drops the pointer with the record', () => {
   const { store } = freshStore();
   const u = store.createUser({ subject: 'jane@corp.com' });

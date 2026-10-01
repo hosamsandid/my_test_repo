@@ -35,7 +35,7 @@ import { computeContextNudge, nudgeDismissStorageKey, isNudgeDismissed } from '.
 import SessionInfoPopover from './SessionInfoPopover.jsx';
 import { maintenanceBannerText } from './maintenance-banner';
 import { agentRemovedNoticeText } from './agent-removed-notice.js';
-import { providerWarningText, personalProviderNoticeText } from '../provider-health-view.js';
+import { providerWarningText, providerBudgetWarningText, personalProviderNoticeText } from '../provider-health-view.js';
 import { RESUME_MESSAGE } from './resume-session';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
 import { AUTHOR_FIELD, authorStampFor, buildAuthorDirectory } from './message-author.js';
@@ -1047,10 +1047,13 @@ export default function ChatPanel({
     }
   }
 
+  // Resolves false when the message was NOT sent (e.g. the #2721 refusal while
+  // the user's chat identity is not ready), so the composer can give the typed
+  // text back instead of losing it.
   async function handleSend(text, extraContent = null) {
-    if (!roomId) return;
+    if (!roomId) return false;
     const body = text.trim();
-    if (!body) return;
+    if (!body) return false;
     // Mark this agent as one the current user manually messaged, so a completion
     // of the turn we just kicked off can notify us if we tab away (#2397).
     if (agent?.id) markManuallyMessaged(agent.id);
@@ -1096,10 +1099,12 @@ export default function ChatPanel({
           );
         });
       }
+      return true;
     } catch (err) {
       setError(`Send failed: ${err.message}`);
       // Roll back the optimistic message so the user can retry.
       setMessages(prev => prev.filter(m => m.event_id !== optimisticId));
+      return false;
     } finally {
       setSending(false);
     }
@@ -1244,6 +1249,9 @@ export default function ChatPanel({
   // currently red. The GET /model-options fetch (fired on agent selection) also
   // triggers a fresh probe server-side when the status is stale.
   const providerWarning = providerWarningText(modelOptions?.endpointHealth, modelOptions?.endpointName);
+  // #2732 AC9: the orange early warning when that provider has used ≥ the warn
+  // threshold of its budget. Non-blocking, on the same model-options snapshot.
+  const providerBudgetWarning = providerBudgetWarningText(modelOptions?.endpointHealth, modelOptions?.endpointName);
   // §14 / E10: a non-blocking advisory when this team runs on a member's personal
   // provider (a lend). { text, tone } or null; carried on the same model-options
   // snapshot. Only present for a multi-human squad.
@@ -1523,6 +1531,19 @@ export default function ChatPanel({
           flexShrink: 0,
         }}>
           {providerWarning}
+        </div>
+      )}
+
+      {providerBudgetWarning && (
+        <div role="status" style={{
+          padding: 'var(--eb-space-3) var(--eb-space-4)',
+          background: 'var(--eb-status-warning-bg)',
+          borderBottom: '1px solid var(--eb-status-warning)',
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-primary)',
+          flexShrink: 0,
+        }}>
+          {providerBudgetWarning}
         </div>
       )}
 

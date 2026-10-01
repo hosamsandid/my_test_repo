@@ -32,6 +32,15 @@
 //   <root>/users/matrix/<userId>.json   0600, dir 0700
 //   { userId, matrixUserId, accessToken, provisionedAt }
 //
+//   <root>/users/matrix/_operator.json  0600 (#2721)
+//   { subject, matrixUserId, accessToken, provisionedAt }
+//
+// The `_operator` slot is the single-operator principal's own identity: the
+// env admin signs in with no user record (no UUID to key a file on), yet must
+// still chat under a personal account rather than the shared admin one. Its
+// name cannot collide with a user file — `listProvisionedUserIds` only returns
+// names of the UUID shape.
+//
 // Same pure-factory shape as `teams-store.js` (`createHumanMatrixStore({root})`,
 // no module state) so it unit-tests against a temp directory.
 
@@ -54,6 +63,7 @@ function createHumanMatrixStore({ root } = {}) {
   }
 
   const MATRIX_DIR = path.join(root, 'users', 'matrix');
+  const OPERATOR_PATH = path.join(MATRIX_DIR, '_operator.json');
 
   function credentialPath(userId) {
     if (!USER_ID_RE.test(String(userId))) {
@@ -78,28 +88,69 @@ function createHumanMatrixStore({ root } = {}) {
     }
   }
 
-  // Persist a credential atomically. The temp file is created with the final
+  // Write `record` to `p` atomically. The temp file is created with the final
   // restrictive mode *before* it holds the token, so the secret is never
   // world-readable even for the moment between write and rename.
-  function writeIdentity(userId, { matrixUserId, accessToken, provisionedAt } = {}) {
-    const p = credentialPath(userId);
-    if (typeof matrixUserId !== 'string' || !matrixUserId) {
-      throw new Error('writeIdentity: matrixUserId is required');
-    }
-    if (typeof accessToken !== 'string' || !accessToken) {
-      throw new Error('writeIdentity: accessToken is required');
-    }
-    const record = {
-      userId,
-      matrixUserId,
-      accessToken,
-      provisionedAt: provisionedAt || new Date().toISOString(),
-    };
+  function writeAtomic(p, record) {
     fs.mkdirSync(MATRIX_DIR, { recursive: true, mode: DIR_MODE });
     const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(record, null, 2), { mode: FILE_MODE });
     fs.renameSync(tmp, p);
     return record;
+  }
+
+  function requireCredential(fn, matrixUserId, accessToken) {
+    if (typeof matrixUserId !== 'string' || !matrixUserId) {
+      throw new Error(`${fn}: matrixUserId is required`);
+    }
+    if (typeof accessToken !== 'string' || !accessToken) {
+      throw new Error(`${fn}: accessToken is required`);
+    }
+  }
+
+  // Persist a user's credential atomically.
+  function writeIdentity(userId, { matrixUserId, accessToken, provisionedAt } = {}) {
+    const p = credentialPath(userId);
+    requireCredential('writeIdentity', matrixUserId, accessToken);
+    return writeAtomic(p, {
+      userId,
+      matrixUserId,
+      accessToken,
+      provisionedAt: provisionedAt || new Date().toISOString(),
+    });
+  }
+
+  // Subjects compare the way the user store compares them (trim + lowercase).
+  function normalizeSubject(subject) {
+    return typeof subject === 'string' ? subject.trim().toLowerCase() : '';
+  }
+
+  // The single-operator principal's credential (#2721), or null when none is
+  // stored for THIS subject. A stored record for a different subject (the env
+  // admin username was changed) reads as "none", so the new principal gets
+  // its own account instead of inheriting the previous one's.
+  function readOperatorIdentity(subject) {
+    const want = normalizeSubject(subject);
+    if (!want) return null;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(OPERATOR_PATH, 'utf8'));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      return parsed.subject === want ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeOperatorIdentity(subject, { matrixUserId, accessToken, provisionedAt } = {}) {
+    const normalized = normalizeSubject(subject);
+    if (!normalized) throw new Error('writeOperatorIdentity: subject is required');
+    requireCredential('writeOperatorIdentity', matrixUserId, accessToken);
+    return writeAtomic(OPERATOR_PATH, {
+      subject: normalized,
+      matrixUserId,
+      accessToken,
+      provisionedAt: provisionedAt || new Date().toISOString(),
+    });
   }
 
   // Remove a user's credential. Idempotent — deleting a credential that is not
@@ -134,6 +185,8 @@ function createHumanMatrixStore({ root } = {}) {
     readIdentity,
     writeIdentity,
     deleteIdentity,
+    readOperatorIdentity,
+    writeOperatorIdentity,
     listProvisionedUserIds,
     MATRIX_DIR,
   };

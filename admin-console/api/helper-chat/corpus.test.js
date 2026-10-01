@@ -25,7 +25,9 @@ const REPO_DOCS = path.join(__dirname, '..', '..', '..', 'docs');
 const VENDORED_DOCS = path.join(__dirname, 'docs');
 
 test('every corpus file is vendored byte-identical to its docs/ source', () => {
-  for (const f of CORPUS_FILES) {
+  for (const entry of CORPUS_FILES) {
+    // A CORPUS_FILES entry is a filename string, or a route-scoped `{ file, routes }`.
+    const f = typeof entry === 'string' ? entry : entry.file;
     const source = fs.readFileSync(path.join(REPO_DOCS, f), 'utf8');
     const vendored = fs.readFileSync(path.join(VENDORED_DOCS, f), 'utf8');
     assert.equal(vendored, source, `vendored copy of ${f} drifted from docs/${f}`);
@@ -130,6 +132,22 @@ test('a route with a topic grounds on that topic and its seeAlso neighbours only
   assert.ok(included.length < registry.all.length, 'the fold must be narrower than the whole set');
 });
 
+test('a route-scoped corpus doc is folded in only on the routes it names', () => {
+  // admin-console.md is scoped to the console-management surfaces so it stops
+  // being ~40k of always-on weight against the char limit. It must appear there
+  // (and on their child paths), and be absent from the no-route fallback and a
+  // content page that carries its own topic — that scoping is what reclaimed the
+  // budget. An always-on doc (glossary.md) is unaffected and stays everywhere.
+  const H = '### admin-console.md';
+  assert.ok(buildSystemPrompt('Administration', '/users').includes(H), 'present on /users');
+  assert.ok(buildSystemPrompt('Environment Templates', '/environment-templates').includes(H), 'present on /environment-templates');
+  assert.ok(buildSystemPrompt('Administration', '/users/42').includes(H), 'a child path is covered too');
+  assert.ok(!buildSystemPrompt('Agent Chat', '/chats').includes(H), 'absent on a content page');
+  assert.ok(!buildSystemPrompt(null).includes(H), 'absent on the no-route fallback');
+  assert.ok(buildSystemPrompt('Agent Chat', '/chats').includes('### glossary.md'), 'always-on doc stays everywhere');
+  assert.ok(buildSystemPrompt(null).includes('### glossary.md'), 'always-on doc stays on the fallback');
+});
+
 test('no resolvable route still gets grounding: the Overview topic and its neighbours', () => {
   // AC2 — the Ask face opened outside a topic-bearing route, and any caller that
   // passes no route at all.
@@ -139,7 +157,7 @@ test('no resolvable route still gets grounding: the Overview topic and its neigh
   assert.ok(fallback.length > 1, 'the fallback carries the Overview neighbours too');
   const prompt = buildSystemPrompt(null);
   assert.ok(prompt.includes('### page-help topics'), 'a grounding block must still be present');
-  assert.ok(prompt.includes('### glossary.md'), 'the docs corpus is always present in full');
+  assert.ok(prompt.includes('### glossary.md'), 'the always-on docs corpus is present on the fallback');
   // An unknown pathname resolves to nothing and takes the same fallback (it adds
   // no route pointer either, so the prompt is byte-identical to the no-route one).
   assert.equal(

@@ -64,6 +64,25 @@ test('a trailing slash resolves like the bare path (#2650)', () => {
   assert.equal(pageNameForPath('/'), 'Agent Chat');
 });
 
+test('static routes and the /chats/ prefix resolve case-insensitively, like React Router (#2697)', () => {
+  assert.equal(pageNameForPath('/Chats'), 'Agent Chat');
+  assert.equal(documentTitleForPath('/Chats'), 'Agent Chat · Agent Studio');
+  assert.equal(pageNameForPath('/CHATS/agent-1'), 'Agent Chat');
+  assert.equal(pageNameForPath('/USERS/'), 'Administration');
+  assert.equal(pageNameForPath('/Token-Usage'), 'Token Usage');
+  assert.equal(pageNameForPath('/Wizard/Team'), 'Agent Team Wizard');
+});
+
+test('a case-variant plugin viewer path keeps the plugin id case for the name lookup (#2697)', () => {
+  assert.equal(pageNameForPath('/Plugins/x/view'), 'Plugins / x');
+  assert.equal(pageNameForPath('/PLUGINS/MyPlugin/VIEW/'), 'Plugins / MyPlugin');
+  const titles = { 'patterns-catalog': 'Patterns Catalog', MyPlugin: 'My Plugin' };
+  assert.equal(documentTitleForPath('/Plugins/patterns-catalog/View', titles), 'Plugins / Patterns Catalog · Agent Studio');
+  assert.equal(pageNameForPath('/plugins/MyPlugin/view', titles), 'Plugins / My Plugin');
+  // the id is not lowercased, so a differently-cased id is not mistaken for a known one
+  assert.equal(pageNameForPath('/plugins/myplugin/view', titles), 'Plugins / myplugin');
+});
+
 test('unknown / unauthenticated routes fall back to the bare app name, never a raw path', () => {
   assert.equal(pageNameForPath('/login'), null);
   assert.equal(documentTitleForPath('/login'), APP_NAME);

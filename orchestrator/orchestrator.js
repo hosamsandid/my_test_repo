@@ -215,6 +215,7 @@ const poolSpawnSlots = require("./pool-spawn-slots");
 const poolSpawns = poolSpawnSlots.createSpawnSlots();
 const flowSupervisor = require("./flow-supervisor");
 const flowBoard = require("./flow-board");
+const flowClaimRelease = require("./flow-claim-release");
 const recurringPoolSource = require("./recurring-pool-source");
 const predictedPaths = require("./predicted-paths");
 const poolInstanceLanes = require("./pool-instance-lanes");
@@ -2135,6 +2136,9 @@ function _flowTeamMembers(teamId) {
       poolOf: cfg.poolOf || null,
       poolItem: cfg.poolItem != null ? cfg.poolItem : null,
       poolRepo: cfg.poolRepo || null,
+      // #2754: a wake whose only consumer is switched off never runs — the
+      // board names that instead of reading it as queued or stuck.
+      enabled: cfg.enabled !== false,
     });
     if (cfg.environmentId) envIds.add(cfg.environmentId);
   }
@@ -20093,6 +20097,77 @@ async function main() {
       return;
     }
 
+    // POST /internal/teams/:teamId/flow-board-release — "Release claim" on a
+    // row flagged needs-help (#2754). Body `{ rowId, actor }`. Re-reads a FRESH
+    // board and refuses unless the row is still stuck on an orphaned claim;
+    // then swaps each `<wake>:wip` back to `<wake>` on GitHub so the poller
+    // re-dispatches it on its next poll. Every swap is one Event Log line.
+    const flowBoardReleaseMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/?]+)\/flow-board-release(?:\?.*)?$/);
+    if (flowBoardReleaseMatch) {
+      const teamId = decodeURIComponent(flowBoardReleaseMatch[1]);
+      const cfg = loadAgentConfig(teamId);
+      if (!cfg || cfg.role !== 'team') {
+        return sendJson(res, 404, { error: 'agent team not found' });
+      }
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 10_000) req.destroy(); });
+      req.on('end', async () => {
+        try {
+          const parsed = JSON.parse(body || '{}');
+          const rowId = typeof parsed.rowId === 'string' ? parsed.rowId.trim() : '';
+          if (!rowId) return sendJson(res, 400, { error: 'rowId is required' });
+          const actor = typeof parsed.actor === 'string' && parsed.actor.trim() ? parsed.actor.trim().slice(0, 200) : null;
+          const plan = flowClaimRelease.planClaimRelease(await getTeamFlowBoard(teamId, { refresh: true }), rowId);
+          if (!plan.ok) return sendJson(res, plan.status, { error: plan.error });
+          const { githubApiBase } = require("./github-api-base");
+          const results = [];
+          const warnings = [];
+          for (const claim of plan.claims) {
+            let result;
+            const tokenId = resolveRepoGithubTokenId(claim.repo);
+            let token = null;
+            try {
+              token = tokenId ? fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), "utf8").trim() : null;
+            } catch { token = null; }
+            if (!token) {
+              result = { ok: false, removed: false, applied: false, warning: `no readable GitHub token covers ${claim.repo} — ${claim.claim} left in place` };
+            } else {
+              result = await flowClaimRelease.swapClaimLabel({
+                fetchImpl: fetch, base: githubApiBase(), token,
+                repo: claim.repo, number: claim.number, claim: claim.claim, wake: claim.wake,
+                wakePresent: claim.wakePresent === true,
+              });
+              // The re-added wake must read as a rising edge to the poller's wake
+              // dedup, even where GitHub never reports its removal (PRs).
+              if (result.ok && githubPollerRef) {
+                githubPollerRef.disarmWake({ repo: claim.repo, number: claim.number, label: claim.wake });
+              }
+            }
+            try {
+              githubEventLog.record(flowClaimRelease.buildClaimReleaseLogEntry({ teamId, rowId, actor, claim, result }));
+            } catch (err) {
+              console.error(`[Orchestrator] could not log the claim release for ${claim.repo}#${claim.number}: ${err.message}`);
+            }
+            console.log(
+              `[Orchestrator] flow-board-release: ${claim.repo}#${claim.number} ${claim.claim} → ${claim.wake} ` +
+              `by ${actor || 'console'} ${result.ok ? 'ok' : `failed: ${result.warning}`}`);
+            if (result.warning) warnings.push(result.warning);
+            results.push({ repo: claim.repo, number: claim.number, claim: claim.claim, wake: claim.wake, ok: result.ok });
+          }
+          _flowBoardCache.delete(teamId);
+          const released = results.filter((r) => r.ok).length;
+          return sendJson(res, released ? 200 : 502, {
+            teamId, rowId, released, results, warnings,
+            ...(released ? {} : { error: warnings[0] || 'The claim could not be released' }),
+          });
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
+      });
+      return;
+    }
+
     // GET /internal/teams/:teamId/pool-control — board data for #2250 Phase 5:
     // every pooled role's live pause/drain state + instance count, plus the
     // team's admission-lane `held` entries (each carrying an `id` — the same
@@ -21021,7 +21096,10 @@ async function main() {
   // POST /hooks/:agentId/:hookId
   //   → looks up a trigger with type="http" and matching id in
   //     /workspace/agents/:agentId/triggers.json
-  //   → validates X-Hook-Secret against the trigger's `secret` field
+  //   → authenticates against the trigger's `secret` field: either a plain
+  //     X-Hook-Secret header, or GitHub's X-Hub-Signature-256 HMAC over the
+  //     raw body (#2680, hook-auth.js). A GitHub `ping` delivery is
+  //     acknowledged without firing the trigger.
   //   → appends to /workspace/agents/:agentId/pending-triggers.json
   //   → agent-runner picks it up within seconds and fires the prompt
   //
@@ -21032,16 +21110,9 @@ async function main() {
   // ============================================================
   const HOOK_PORT = parseInt(process.env.HOOK_PORT || '4003', 10);
 
-  function constantTimeEqual(a, b) {
-    try {
-      const ba = Buffer.from(a);
-      const bb = Buffer.from(b);
-      if (ba.length !== bb.length) return false;
-      return crypto.timingSafeEqual(ba, bb);
-    } catch {
-      return false;
-    }
-  }
+  // GitHub caps webhook payloads at 25 MB; nothing legitimate is larger.
+  const HOOK_MAX_BODY_BYTES = 25 * 1024 * 1024;
+  const { verifyHookRequest, isGithubPing } = require('./hook-auth');
 
   const hookServer = http.createServer((req, res) => {
     if (req.method !== 'POST') {
@@ -21097,18 +21168,44 @@ async function main() {
       res.end(JSON.stringify({ error: 'Trigger has no secret configured' }));
       return;
     }
-    const provided = req.headers['x-hook-secret'] || '';
-    if (!constantTimeEqual(provided, trigger.secret)) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Unauthorized' }));
-      return;
-    }
+    // The body is read only to verify a GitHub signature (it is otherwise
+    // ignored — the trigger's own prompt is what fires).
+    const chunks = [];
+    let size = 0;
+    let tooLarge = false;
+    req.on('data', (chunk) => {
+      if (tooLarge) return;
+      size += chunk.length;
+      if (size > HOOK_MAX_BODY_BYTES) { tooLarge = true; return; }
+      chunks.push(chunk);
+    });
+    req.on('error', () => { if (!res.headersSent) { res.writeHead(400); res.end(); } });
+    req.on('end', () => {
+      if (tooLarge) {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Payload too large' }));
+        return;
+      }
+      const auth = verifyHookRequest({ headers: req.headers, rawBody: Buffer.concat(chunks), secret: trigger.secret });
+      if (!auth.ok) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
 
-    enqueuePending(agentId, { triggerId: hookId });
+      if (auth.method === 'github-signature' && isGithubPing(req.headers)) {
+        console.log(`[HookServer] GitHub ping for '${hookId}' on '${agentId}' acknowledged (not fired)`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ pong: true, triggerId: hookId, agentId }));
+        return;
+      }
 
-    console.log(`[HookServer] Queued trigger '${hookId}' for agent '${agentId}'`);
-    res.writeHead(202, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ queued: true, triggerId: hookId, agentId }));
+      enqueuePending(agentId, { triggerId: hookId });
+
+      console.log(`[HookServer] Queued trigger '${hookId}' for agent '${agentId}' (${auth.method})`);
+      res.writeHead(202, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ queued: true, triggerId: hookId, agentId }));
+    });
   });
 
   hookServer.listen(HOOK_PORT, '0.0.0.0', () =>

@@ -24,6 +24,7 @@
 import { deriveClaim, defaultGateKind, buildGateListener } from './human-gate-ops.js';
 import { isGateLabel, isBrakeLabel } from './label-flags.js';
 import { defaultListenerPrompt, handoffVerb, handoffTargetNoun } from './handoff-prompt.js';
+import { labelNameError } from './handoff-validation.js';
 
 export { deriveClaim, defaultGateKind };
 
@@ -415,6 +416,11 @@ export async function wireHumanGate({ ops, humanOps }, { human, to, label, kind 
  * engine ops, so it converges with wiring the legs individually (§4.5).
  */
 export async function wireReviewGate(ctx, { from, human, to, artifact, gateLabel, rejectLabel }) {
+  // #2706: refuse an unusable label before the first write, so a bad name
+  // never lands half-wired in emits / labelFilter / claim.
+  const invalid = labelNameError(gateLabel)
+    || (String(rejectLabel || '').trim() ? labelNameError(rejectLabel) : null);
+  if (invalid) throw new Error(invalid);
   const art = artifact === 'issue' ? 'issue' : 'pr';
   const kind = art === 'pr' ? 'pull_request' : 'issues';
   await ensureArtifactOutcome(ctx.ops, from, art);

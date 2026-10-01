@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   THEMES, themeTokens, usedTokens, resolveToken, contrastRatio, whiteOnAccentLines,
+  whiteOnWarningLines,
 } from './theme-tokens.js';
 
 // Guard for #2701: every --eb-* token the console uses must be defined in
@@ -88,6 +89,41 @@ test('notice body text (text-secondary) reaches AA on the warning and error tint
 
 test('text on primary (accent) buttons reaches AA', () => {
   assertAA('--eb-text-inverted', ['--eb-accent-primary']);
+});
+
+// #2752: text on a solid warning fill (SkillsRegistry acknowledge button,
+// ProcessCanvas count badges) and accent text on accent-muted badges.
+test('text on the solid warning fill reaches AA', () => {
+  assertAA('--eb-text-on-warning', ['--eb-status-warning']);
+});
+
+test('accent text on accent-muted badges reaches AA', () => {
+  assertAA('--eb-accent-primary', ['--eb-accent-muted']);
+});
+
+test('no style block puts literal white text on an --eb-status-warning fill', () => {
+  const offenders = sourceFiles(SRC).flatMap((file) =>
+    whiteOnWarningLines(fs.readFileSync(file, 'utf8')).map((line) => `${path.relative(SRC, file)}:${line}`));
+  assert.deepEqual(offenders, []);
+});
+
+test('whiteOnWarningLines flags ternary and fallback fills, not the warning tint', () => {
+  const src = [
+    "a = { background: ack ? 'var(--eb-status-warning)' : 'var(--eb-accent-primary)', color: ack ? '#fff' : 'x' };",
+    "b = { background: 'var(--eb-status-warning, #d97706)', color: 'var(--eb-text-on-warning)' };",
+    "c = { background: 'var(--eb-status-warning-bg)', color: '#fff' };",
+    '.d { background:var(--eb-status-warning,#d97706);color:#fff; }',
+  ].join('\n');
+  assert.deepEqual(whiteOnWarningLines(src), [1, 4]);
+});
+
+test('mutation: the pre-#2752 colours are rejected by the same thresholds', () => {
+  for (const theme of THEMES) {
+    const warning = resolveToken(TOKENS[theme], '--eb-status-warning');
+    assert.ok(contrastRatio('#ffffff', warning) < AA, `${theme}: white on the warning fill`);
+  }
+  const darkAccent = resolveToken(TOKENS['admin-dark'], '--eb-accent-primary');
+  assert.ok(contrastRatio(darkAccent, 'oklch(0.26 0.08 293)') < AA, 'old dark accent-muted');
 });
 
 // The token pair above was already AA on main; the real high-contrast button

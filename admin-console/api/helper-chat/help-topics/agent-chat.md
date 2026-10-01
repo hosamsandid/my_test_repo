@@ -527,7 +527,7 @@ same question, "what wakes this agent", and every one of them delivers a
 |---|---|
 | **Cron (recurring)** | a 5-field schedule (`Minute Hour Day Month Weekday`) comes due. If the previous run of *this* trigger is still going, the tick is skipped rather than queued. |
 | **Once (one-shot)** | a specific date and time is reached. It then deletes itself — a reminder, not a schedule. |
-| **HTTP webhook** | something outside the platform sends `POST /hooks/<agentId>/<triggerId>` with the trigger's own `X-Hook-Secret`. Each trigger carries its own generated secret; there is no open mode. Used by CI pipelines, monitoring, GitHub webhooks. |
+| **HTTP webhook** | something outside the platform sends `POST /hooks/<agentId>/<triggerId>` with the trigger's own `X-Hook-Secret` — a GitHub webhook instead takes the secret as its **Secret** (verified via `X-Hub-Signature-256`). Each trigger carries its own generated secret; there is no open mode. Used by CI pipelines, monitoring, GitHub webhooks. |
 | **GitHub event** | the built-in poller sees a matching event on a repository of the agent's environment (about every 30 seconds). The full event payload is appended to the prompt as JSON. Needs a GitHub token on that environment. |
 | **Data flow (agent dependency)** | a teammate pushes to the team repository — the committed work *is* the hand-off. Under the hood this is a GitHub `push` subscription with a marker. |
 | **Plugin event** | a granted plugin's broker reports something (a Jira status change, say). Two filters narrow it — see *Which event vs. Only when* below. |
@@ -536,7 +536,8 @@ same question, "what wakes this agent", and every one of them delivers a
 ### Cron and once: time zone and status
 
 Cron runs in **Europe/Berlin** (your time is shown if it differs); a once time
-is your local time. Rows show next/last run, or a red warning if the agent
+is your local time; a past one is flagged and runs at the next sync (about a
+minute), then is removed. Rows show next/last run, or a red warning if the agent
 cannot schedule the trigger. The container clock can drift on a Podman VM; a
 forward correction fires whatever it skips.
 
@@ -608,7 +609,7 @@ A loop re-runs the same prompt until the goal is reached:
   that must pass, another agent that reviews each try, or the flow's downstream
   reviewers. A failed check is fed back into the next try's prompt. Team agents
   must not grade their own work — leave it blank and a sibling reviewer is
-  re-applied server-side. Pick *the flow checks the hand-off* when each try ends
+  re-applied server-side (with no teammate in the team, the agent checks itself). Pick *the flow checks the hand-off* when each try ends
   in a PR or a label that a wired QS chain already reviews, so the same reviewer
   does not check the work twice.
 

@@ -117,7 +117,7 @@ function previewConfirmBtnStyle(requiresAck, canConfirm) {
   return {
     padding: 'var(--eb-space-2) var(--eb-space-4)',
     background: requiresAck ? 'var(--eb-status-warning)' : 'var(--eb-accent-primary)',
-    color: requiresAck ? '#fff' : 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)',
+    color: requiresAck ? 'var(--eb-text-on-warning)' : 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)',
     fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', fontFamily: 'inherit',
     cursor: canConfirm ? 'pointer' : 'not-allowed', opacity: canConfirm ? 1 : 0.5,
   };

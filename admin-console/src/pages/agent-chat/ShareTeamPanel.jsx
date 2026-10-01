@@ -376,7 +376,7 @@ const listCard = {
 // actually defined in the token sheet, so they resolve to nothing (an
 // invisible divider, a bg-less input). Give them concrete fallbacks here so
 // this surface renders the same in every theme.
-const SUBTLE_BORDER = 'var(--eb-border-subtle, var(--eb-border-default))';
+const SUBTLE_BORDER = 'var(--eb-border-default)';
 const ROW_DIVIDER = `1px solid ${SUBTLE_BORDER}`;
 
 const memberRowStyle = {
@@ -479,7 +479,7 @@ const errorText = {
 
 const selectStyle = {
   padding: '7px 10px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
-  background: 'var(--eb-bg-input, var(--eb-bg-app))', color: 'var(--eb-text-primary)',
+  background: 'var(--eb-bg-app)', color: 'var(--eb-text-primary)',
   border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
   cursor: 'pointer',
 };

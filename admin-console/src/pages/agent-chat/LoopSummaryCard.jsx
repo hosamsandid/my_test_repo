@@ -54,7 +54,7 @@ export default function LoopSummaryCard({ trigger, progress = null }) {
           background: 'transparent',
           border: 'none',
           cursor: 'pointer',
-          color: 'var(--eb-status-warning-text, #92400e)',
+          color: 'var(--eb-status-warning-text)',
           textAlign: 'left',
           font: 'inherit',
         }}

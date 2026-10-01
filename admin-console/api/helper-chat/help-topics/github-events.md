@@ -112,7 +112,7 @@ Three other things write rows here, which is why this stays one honest timeline 
 every wake rather than a log of one delivery mechanism:
 
 - **Labels applied in the console.** A label a human applies through the GitHub
-  Issues plugin is delivered immediately on an internal fast path, and the poller's
+  Issues plugin (to an issue or a pull request) is delivered immediately on an internal fast path, and the poller's
   later sighting of the same `*.labeled` event is dropped as a duplicate.
 - **Direct agent-to-agent hand-offs.** A `wakeAgent` hand-off wakes a teammate
   straight through the platform — no issue, PR or label — so this log is its

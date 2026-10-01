@@ -35,3 +35,20 @@ test('emptyMessage: a matchless search is DISTINCT from an empty listing (AC10)'
   assert.equal(il.emptyMessage('', 'all'), 'No issues in this repository.');
   assert.equal(il.emptyMessage('   ', 'open'), 'No open issues in this repository.');
 });
+
+test('emptyMessage is worded for the selected item type (#2746)', () => {
+  assert.equal(il.emptyMessage('', 'open', 'prs'), 'No open pull requests in this repository.');
+  assert.equal(il.emptyMessage('', 'all', 'all'), 'No issues or pull requests in this repository.');
+  assert.equal(il.emptyMessage('spec', 'open', 'prs'), 'No pull requests match “spec”.');
+  assert.equal(il.emptyMessage('', 'open', 'issues'), 'No open issues in this repository.');
+});
+
+test('normType defaults to issues; isPullRequestItem reads the broker flag (#2746)', () => {
+  assert.equal(il.normType(), 'issues');
+  assert.equal(il.normType('prs'), 'prs');
+  assert.equal(il.normType('all'), 'all');
+  assert.equal(il.normType('bogus'), 'issues');
+  assert.equal(il.isPullRequestItem({ isPullRequest: true }), true);
+  assert.equal(il.isPullRequestItem({ isPullRequest: false }), false);
+  assert.equal(il.isPullRequestItem(null), false);
+});

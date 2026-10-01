@@ -384,7 +384,7 @@ export function renderDeleteMessage(target) {
             <li key={c.id} style={{
               padding: '4px 0',
               display: 'flex', flexDirection: 'column', gap: 1,
-              borderBottom: '1px solid var(--eb-border-subtle, transparent)',
+              borderBottom: '1px solid var(--eb-border-default)',
             }}>
               <span style={{ color: 'var(--eb-text-primary)', wordBreak: 'break-all' }}>
                 {c.id}

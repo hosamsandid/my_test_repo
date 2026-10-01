@@ -436,7 +436,7 @@ export default function McpServers() {
       ? (
         <span title="Available to every user and agent — no team required" style={{
           display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)', fontSize: 'var(--eb-text-xs)',
-          background: 'var(--eb-accent-subtle, var(--eb-bg-elevated))', color: 'var(--eb-accent, var(--eb-text-secondary))',
+          background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
           fontWeight: 'var(--eb-font-medium)',
         }}>Global</span>
       )

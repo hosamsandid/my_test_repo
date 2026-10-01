@@ -573,7 +573,7 @@ export default function HelperChatPanel() {
             {voiceState === 'recording' && (
               <span style={{
                 fontSize: 'var(--eb-text-xs)',
-                color: 'var(--eb-status-error-text, #dc2626)',
+                color: 'var(--eb-status-error-text)',
                 whiteSpace: 'nowrap',
                 fontVariantNumeric: 'tabular-nums',
               }}>
@@ -589,7 +589,7 @@ export default function HelperChatPanel() {
                 width: 34, height: 34,
                 background: voiceState === 'recording' ? 'var(--eb-status-error-bg, #fef2f2)' : 'transparent',
                 color: voiceState === 'recording'
-                  ? 'var(--eb-status-error-text, #dc2626)'
+                  ? 'var(--eb-status-error-text)'
                   : voiceState === 'transcribing'
                     ? 'var(--eb-text-muted)'
                     : 'var(--eb-text-secondary)',
@@ -636,7 +636,7 @@ export default function HelperChatPanel() {
         {(voiceError || voiceState === 'transcribing') && (
           <div style={{
             fontSize: 'var(--eb-text-xs)',
-            color: voiceError ? 'var(--eb-status-error-text, #dc2626)' : 'var(--eb-text-muted)',
+            color: voiceError ? 'var(--eb-status-error-text)' : 'var(--eb-text-muted)',
             marginTop: 'var(--eb-space-1)',
             paddingLeft: 'var(--eb-space-1)',
           }}>

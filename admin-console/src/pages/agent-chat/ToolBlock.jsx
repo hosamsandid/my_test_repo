@@ -433,7 +433,7 @@ export function TodoList({ todos }) {
               minWidth: 0,
               color: isDone ? 'var(--eb-text-muted)' : 'var(--eb-text-primary)',
               textDecoration: isDone ? 'line-through' : 'none',
-              fontWeight: isActive ? 'var(--eb-font-semibold)' : 'var(--eb-font-regular, 400)',
+              fontWeight: isActive ? 'var(--eb-font-semibold)' : 'var(--eb-font-normal)',
               wordBreak: 'break-word',
               lineHeight: 1.4,
             }}>

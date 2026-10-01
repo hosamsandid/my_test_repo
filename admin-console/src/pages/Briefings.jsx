@@ -68,7 +68,7 @@ const FIELD_LABEL = {
 const FIELD_CONTROL = {
   width: '100%', boxSizing: 'border-box',
   padding: '6px 8px',
-  background: 'var(--eb-bg-input, var(--eb-bg-surface))', color: 'var(--eb-text-primary)',
+  background: 'var(--eb-bg-surface)', color: 'var(--eb-text-primary)',
   border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
   fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
 };
@@ -325,7 +325,7 @@ function ShareDraftPanel({ draft, viewerId, onChanged, onGone }) {
           return (
             <div key={r.id} style={{
               display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
-              padding: 'var(--eb-space-2) 0', borderBottom: '1px solid var(--eb-border-subtle)',
+              padding: 'var(--eb-space-2) 0', borderBottom: '1px solid var(--eb-border-default)',
             }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
@@ -365,7 +365,7 @@ function ShareDraftPanel({ draft, viewerId, onChanged, onGone }) {
             disabled={busy || candidates.length === 0}
             style={{
               flex: 1, minWidth: 0, padding: '6px 8px', fontFamily: 'inherit',
-              fontSize: 'var(--eb-text-sm)', background: 'var(--eb-bg-input)',
+              fontSize: 'var(--eb-text-sm)', background: 'var(--eb-bg-surface)',
               color: 'var(--eb-text-primary)', border: '1px solid var(--eb-border-default)',
               borderRadius: 'var(--eb-radius-sm)',
             }}

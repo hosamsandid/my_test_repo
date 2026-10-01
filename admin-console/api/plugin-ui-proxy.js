@@ -286,6 +286,19 @@ function bodyWasParsed(req) {
   return req.body !== undefined && req.readableEnded === true;
 }
 
+// The #1858 label fast-path kind for a label-add through the GitHub Issues
+// plugin (#2746). The broker reports whether it labelled an issue or a pull
+// request (from GitHub's own refetched item) in this response header; the
+// proxy reads it from the upstream response, never from the browser's request.
+// Anything else — a missing header from an older broker image included —
+// degrades to 'issue', the pre-#2746 behaviour.
+const LABEL_TARGET_KIND_HEADER = 'x-aee-label-target-kind';
+function labelTargetKindFromHeaders(headers) {
+  const raw = headers && headers[LABEL_TARGET_KIND_HEADER];
+  const v = String(Array.isArray(raw) ? raw[0] : (raw || '')).trim().toLowerCase();
+  return v === 'pr' ? 'pr' : 'issue';
+}
+
 module.exports = {
   ROLE_RANK,
   roleRank,
@@ -295,6 +308,8 @@ module.exports = {
   signViewerHeaders,
   roleForTeam,
   bodyWasParsed,
+  LABEL_TARGET_KIND_HEADER,
+  labelTargetKindFromHeaders,
   verifyViewerHeaders,
   HEADER_NAMES: HDR,
 };

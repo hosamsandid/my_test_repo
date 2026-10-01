@@ -33,6 +33,15 @@ function normState(state) {
   return s === 'closed' || s === 'all' ? s : 'open';
 }
 
+// Normalise the requested item type (#2746). The /issues endpoint returns
+// issues AND pull requests; the UI shows issues by default and can switch to
+// pull requests (so a PR-level human gate label can be applied here too) or both.
+const ITEM_TYPES = ['issues', 'prs', 'all'];
+function normType(type) {
+  const t = String(type || 'issues').toLowerCase();
+  return ITEM_TYPES.includes(t) ? t : 'issues';
+}
+
 function clampPerPage(n) {
   const v = Number(n);
   if (!Number.isInteger(v) || v < 1) return DEFAULT_PER_PAGE;
@@ -72,7 +81,7 @@ function buildRequest(op, args = {}) {
       const per = clampPerPage(args.perPage);
       const page = clampPage(args.page);
       const state = normState(args.state);
-      const q = buildSearchQuery({ owner, name, text: args.text, state });
+      const q = buildSearchQuery({ owner, name, text: args.text, state, type: args.type });
       return {
         method: 'GET',
         path: `/search/issues?q=${encodeURIComponent(q)}&per_page=${per}&page=${page}`,
@@ -111,9 +120,13 @@ function sanitizeSearchTerms(text) {
 // Build the GitHub Search API `q` for a repo-scoped, title-only issue search. The
 // broker owns every qualifier; the user contributes only sanitised terms, which
 // lead so an empty query still returns the repo's issues (title unconstrained).
-function buildSearchQuery({ owner, name, text, state } = {}) {
+// The item type (#2746) maps to `type:issue` / `type:pr` / no type qualifier.
+function buildSearchQuery({ owner, name, text, state, type } = {}) {
   const terms = sanitizeSearchTerms(text);
-  const qualifiers = [`repo:${owner}/${name}`, 'type:issue', 'in:title'];
+  const t = normType(type);
+  const qualifiers = [`repo:${owner}/${name}`];
+  if (t !== 'all') qualifiers.push(t === 'prs' ? 'type:pr' : 'type:issue');
+  qualifiers.push('in:title');
   const s = normState(state);
   if (s !== 'all') qualifiers.push(`state:${s}`);
   return (terms ? terms + ' ' : '') + qualifiers.join(' ');
@@ -132,9 +145,26 @@ function requireLabel(label) {
 }
 
 // A GitHub /issues response entry that carries `pull_request` IS a pull request
-// (the /issues endpoint returns both; MVP is issues-only, PRs deferred).
+// (the /issues endpoint returns both).
 function isPullRequest(raw) {
   return !!(raw && raw.pull_request);
+}
+
+// Does a raw /issues or search entry belong to the requested item type?
+function matchesType(raw, type) {
+  const t = normType(type);
+  if (t === 'all') return true;
+  return t === 'prs' ? isPullRequest(raw) : !isPullRequest(raw);
+}
+
+// The label fast path (#1858) must wake `pull_request.labeled` listeners for a
+// PR and `issues.labeled` listeners for an issue (#2746). The broker knows which
+// one it labelled (from GitHub's own refetched item) and reports it to the
+// console proxy in this response header, so the proxy never trusts the browser
+// for the kind. Values are the orchestrator's TARGET_KINDS: 'issue' | 'pr'.
+const LABEL_TARGET_KIND_HEADER = 'x-aee-label-target-kind';
+function labelTargetKind(shaped) {
+  return shaped && shaped.isPullRequest ? 'pr' : 'issue';
 }
 
 function shapeLabel(raw) {
@@ -166,20 +196,22 @@ function shapeIssue(raw) {
   };
 }
 
-// Shape + filter a raw /issues list: drop pull requests (MVP is issues-only).
-function shapeIssueList(rawArr) {
+// Shape + filter a raw /issues list to the requested item type (default:
+// issues only, dropping pull requests).
+function shapeIssueList(rawArr, type) {
   if (!Array.isArray(rawArr)) return [];
-  return rawArr.filter((r) => !isPullRequest(r)).map(shapeIssue).filter(Boolean);
+  return rawArr.filter((r) => matchesType(r, type)).map(shapeIssue).filter(Boolean);
 }
 
 // Shape a GitHub Search API result (`{ total_count, incomplete_results, items }`)
-// into the same narrow issue objects the list uses. `type:issue` already excludes
-// PRs, but drop any defensively so the UI is issues-only regardless. `totalCount`
+// into the same narrow issue objects the list uses. The `type:` qualifier already
+// narrows the items, but filter defensively so the result matches the requested
+// item type regardless. `totalCount`
 // drives the pager; `incompleteResults` surfaces GitHub's own "index lagged /
 // timed out" signal so the UI can degrade gracefully (#1658 edge case).
-function shapeSearchResult(raw) {
+function shapeSearchResult(raw, type) {
   const items = raw && Array.isArray(raw.items) ? raw.items : [];
-  const issues = items.filter((r) => !isPullRequest(r)).map(shapeIssue).filter(Boolean);
+  const issues = items.filter((r) => matchesType(r, type)).map(shapeIssue).filter(Boolean);
   const totalCount = raw && Number.isFinite(raw.total_count) ? raw.total_count : issues.length;
   return { issues, totalCount, incompleteResults: !!(raw && raw.incomplete_results) };
 }
@@ -253,10 +285,15 @@ module.exports = {
   MAX_PER_PAGE,
   parseRepoFullName,
   normState,
+  ITEM_TYPES,
+  normType,
   sanitizeSearchTerms,
   buildSearchQuery,
   buildRequest,
   isPullRequest,
+  matchesType,
+  LABEL_TARGET_KIND_HEADER,
+  labelTargetKind,
   shapeLabel,
   shapeIssue,
   shapeIssueList,

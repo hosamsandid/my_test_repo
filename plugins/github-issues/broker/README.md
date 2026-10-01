@@ -43,12 +43,16 @@ container (AC10): the broker makes every GitHub call server-side.
   Data routes: `GET /api/context` (authorized teams + repos + each team's own
   last view + the globally most-recently-used selection to restore on reopen),
   `GET /api/issues` (one page + `hasMore`), `GET /api/search` (server-side
-  title-only search over the whole repo via GitHub's Search API — issues-only,
-  state-scoped, own paginated set; ephemeral, never persisted as a pref — #1658),
+  title-only search over the whole repo via GitHub's Search API — state-scoped,
+  own paginated set; ephemeral, never persisted as a pref — #1658). Both take
+  `type=issues|prs|all` (default `issues`, #2746) so pull requests can be listed
+  and labelled too; each item carries `isPullRequest`.
   `GET /api/issue`, `GET /api/labels` (returns `{ flowLabels, repoLabels,
   labelAgents, labelUsage }` — flow labels suggested first, each previewing which
   agents it wakes and how it is normally set), `POST /api/label` (add/remove,
-  re-fetches the issue), `POST /api/pref`
+  re-fetches the item and answers with an `X-AEE-Label-Target-Kind: issue|pr`
+  header that the console proxy passes to the #1858 label fast path, so a PR
+  gate label wakes `pull_request.labeled` listeners — #2746), `POST /api/pref`
   (persist last-used).
 - **`/cli/*`** — the dependency-free agent CLI (`aee-issues`), scope-token authed
   and **read-only** in the MVP (`/repos`, `/list`, `/show`): agents browse

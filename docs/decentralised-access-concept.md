@@ -138,6 +138,16 @@ This is the honest wording, not the stronger claim. **Nothing in this document s
 
 *A note on #2041's wording of this guarantee is raised, not resolved, in §12.2.*
 
+> **Visibility is not a voice (#2713).** Full visibility does not include speaking in a
+> team's chat. A System Admin still sees every chat, its history and live updates, but
+> can post, attach, answer a quick-reply or launch a loop only in a team they are a
+> member (or Team Admin) of, or a standalone agent they own. Elsewhere the composer is
+> read-only, with a hint that links to the team's Sharing tab, and
+> `POST /api/matrix/rooms/:roomId/messages` / `POST /api/agents/:agentId/chat-upload`
+> answer 403. One predicate decides it — `canChatAgent` (`scope.js`), shipped to the
+> client as `canChat` on `GET /api/matrix/agents`. Stop, reset and the other chat
+> controls are unchanged, as is every other `scope.all` grant in §4.1.
+
 ### 2.3 — The last-admin rule (D4)
 
 Removing or demoting the last `team-admin` of a team is refused unless a successor is named in the same operation. The rule has two enforcement points, both server-side:

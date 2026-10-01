@@ -81,7 +81,8 @@ team(s) only.
 |---|---|---|---|---|
 | Agents / flows / metrics / knowledge (read) | R† | R† | R† | R |
 | Chat: read transcripts & session logs | R† | R† | R† | R |
-| Chat: send, stop, reset, ticket bind | – | W† | W† | W |
+| Chat: send (message, attachment, quick-reply answer, loop launch) | – | W† | W† | W† ‡ |
+| Chat: stop, reset, ticket bind | – | W† | W† | W |
 | Workspace / context browse | R† | R† | R† | R |
 | Workspace write, git-action | – | W† | W† | W |
 | Create/edit agents up to tier T1 (§3.3) + own triggers | – | W† | W† | W |
@@ -98,6 +99,11 @@ team(s) only.
 | Usage & budget view | R† | R† | R† | R + export |
 | Maintenance mode / platform envelopes / regulations store | – | – | – | W |
 | Audit log | – | – | R† (team view) | R |
+
+‡ A System Admin reads every chat but writes only in a team they are a member of (or a
+standalone agent they own); elsewhere the composer is read-only and the send/upload routes
+answer 403 (#2713, `canChatAgent` in `admin-console/api/scope.js`). Auth disabled and the
+first-boot bootstrap login are unaffected.
 | Users & memberships | – | – | W† (own team) | W |
 
 Deliberate calls: **Members keep building power** (T0/T1 agents, chat, workspace) — the

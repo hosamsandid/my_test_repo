@@ -212,6 +212,7 @@ const ticketReconcileSweep = require("./ticket-reconcile-sweep");
 const agentPool = require("./agent-pool");
 const flowSupervisor = require("./flow-supervisor");
 const flowBoard = require("./flow-board");
+const flowClaimRelease = require("./flow-claim-release");
 const recurringPoolSource = require("./recurring-pool-source");
 const predictedPaths = require("./predicted-paths");
 const poolInstanceLanes = require("./pool-instance-lanes");
@@ -2132,6 +2133,9 @@ function _flowTeamMembers(teamId) {
       poolOf: cfg.poolOf || null,
       poolItem: cfg.poolItem != null ? cfg.poolItem : null,
       poolRepo: cfg.poolRepo || null,
+      // #2754: a wake whose only consumer is switched off never runs — the
+      // board names that instead of reading it as queued or stuck.
+      enabled: cfg.enabled !== false,
     });
     if (cfg.environmentId) envIds.add(cfg.environmentId);
   }
@@ -20009,6 +20013,71 @@ async function main() {
           saveFlowBoardRemoved(teamId, removed);
           _flowBoardCache.delete(teamId);
           return sendJson(res, 200, { teamId, rowId, action: parsed.action });
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
+      });
+      return;
+    }
+
+    // POST /internal/teams/:teamId/flow-board-release — "Release claim" on a
+    // row flagged needs-help (#2754). Body `{ rowId, actor }`. Re-reads a FRESH
+    // board and refuses unless the row is still stuck on an orphaned claim;
+    // then swaps each `<wake>:wip` back to `<wake>` on GitHub so the poller
+    // re-dispatches it on its next poll. Every swap is one Event Log line.
+    const flowBoardReleaseMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/?]+)\/flow-board-release(?:\?.*)?$/);
+    if (flowBoardReleaseMatch) {
+      const teamId = decodeURIComponent(flowBoardReleaseMatch[1]);
+      const cfg = loadAgentConfig(teamId);
+      if (!cfg || cfg.role !== 'team') {
+        return sendJson(res, 404, { error: 'agent team not found' });
+      }
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 10_000) req.destroy(); });
+      req.on('end', async () => {
+        try {
+          const parsed = JSON.parse(body || '{}');
+          const rowId = typeof parsed.rowId === 'string' ? parsed.rowId.trim() : '';
+          if (!rowId) return sendJson(res, 400, { error: 'rowId is required' });
+          const actor = typeof parsed.actor === 'string' && parsed.actor.trim() ? parsed.actor.trim().slice(0, 200) : null;
+          const plan = flowClaimRelease.planClaimRelease(await getTeamFlowBoard(teamId, { refresh: true }), rowId);
+          if (!plan.ok) return sendJson(res, plan.status, { error: plan.error });
+          const { githubApiBase } = require("./github-api-base");
+          const results = [];
+          const warnings = [];
+          for (const claim of plan.claims) {
+            let result;
+            const tokenId = resolveRepoGithubTokenId(claim.repo);
+            let token = null;
+            try {
+              token = tokenId ? fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), "utf8").trim() : null;
+            } catch { token = null; }
+            if (!token) {
+              result = { ok: false, removed: false, applied: false, warning: `no readable GitHub token covers ${claim.repo} — ${claim.claim} left in place` };
+            } else {
+              result = await flowClaimRelease.swapClaimLabel({
+                fetchImpl: fetch, base: githubApiBase(), token,
+                repo: claim.repo, number: claim.number, claim: claim.claim, wake: claim.wake,
+              });
+            }
+            try {
+              githubEventLog.record(flowClaimRelease.buildClaimReleaseLogEntry({ teamId, rowId, actor, claim, result }));
+            } catch (err) {
+              console.error(`[Orchestrator] could not log the claim release for ${claim.repo}#${claim.number}: ${err.message}`);
+            }
+            console.log(
+              `[Orchestrator] flow-board-release: ${claim.repo}#${claim.number} ${claim.claim} → ${claim.wake} ` +
+              `by ${actor || 'console'} ${result.ok ? 'ok' : `failed: ${result.warning}`}`);
+            if (result.warning) warnings.push(result.warning);
+            results.push({ repo: claim.repo, number: claim.number, claim: claim.claim, wake: claim.wake, ok: result.ok });
+          }
+          _flowBoardCache.delete(teamId);
+          const released = results.filter((r) => r.ok).length;
+          return sendJson(res, released ? 200 : 502, {
+            teamId, rowId, released, results, warnings,
+            ...(released ? {} : { error: warnings[0] || 'The claim could not be released' }),
+          });
         } catch (err) {
           return sendJson(res, 400, { error: err.message });
         }

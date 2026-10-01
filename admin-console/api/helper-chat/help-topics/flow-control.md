@@ -99,7 +99,8 @@ spelled out, together with how long it has been waiting:
 | **approved — waiting for merge** | Merge it. |
 | **checks failing** | Look at the failing checks. |
 | **no agent is scheduled to continue** | The last agent finished and nothing picks it up — check the flow on the Flows page. |
-| **stuck — no progress, needs help** | The row has read *working* for more than an hour, but only because of a claim label (e.g. `ready:wip`) — no agent run or pool instance is alive for it, so the run that claimed it died or was stopped. The board only reports this; it never removes the label. Replace the stale `…:wip` label with the wake label (e.g. `ready`) so the step runs again. |
+| **stuck — no progress, needs help** | The row has read *working* for more than an hour, but only because of a claim label (e.g. `ready:wip`) — no agent run or pool instance is alive for it, so the run that claimed it died or was stopped. Team Admins see a **Release claim** button: after you confirm, it swaps the stale `…:wip` label back to the wake label (e.g. `ready`) on GitHub, the step runs again on the next poll, and the release is recorded in the GitHub Event Log. The board never does this on its own. You can also swap the label by hand. |
+| **nobody picks it up — its agent is switched off** | The item carries a wake label (or its claim), but every agent listening for it is switched off — the agent, or its trigger on that label. Releasing would wake nobody. Switch the agent back on, or route the label elsewhere; the Flows page shows the same as a lint. |
 
 ## The stages
 

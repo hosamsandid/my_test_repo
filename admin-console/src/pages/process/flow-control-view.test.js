@@ -27,6 +27,8 @@ import {
   configFromForm,
   REMOVE_CONFIRM_TEXT,
   removeDialogTitle,
+  RELEASE_CONFIRM_TEXT,
+  releaseDialogTitle,
   removedView,
   withoutRows,
   instanceOf,
@@ -502,4 +504,28 @@ test('configFormRows / configFromForm: round-trip rename, merge, hide and retent
   });
   assert.equal(configFromForm([], 'x').doneRetentionHours, 24);
   assert.deepEqual(configFromForm([{ id: 'a', mergeInto: 'a' }], 24).stages, {}, 'merging into itself is no merge');
+});
+
+test('needsYouView: a stuck row carries its releasable claims; other rows carry none (#2754)', () => {
+  const v = needsYouView({
+    id: 'o/r#7', title: 'Fix', issue: { repo: 'o/r', number: 7 }, prs: [], reason: 'stuck — no progress, needs help', since: ago(75),
+    release: [
+      { repo: 'o/r', number: 7, kind: 'issue', claim: 'ready:wip', wake: 'ready' },
+      { repo: 'o/r', number: 61, kind: 'pr', claim: 'ready-to-merge:wip', wake: 'ready-to-merge' },
+      { repo: 'o/r', number: 8, kind: 'issue' },
+    ],
+  }, { now: NOW });
+  assert.deepEqual(v.release, [
+    { ref: '#7', claim: 'ready:wip', wake: 'ready', text: 'ready:wip → ready' },
+    { ref: 'PR #61', claim: 'ready-to-merge:wip', wake: 'ready-to-merge', text: 'ready-to-merge:wip → ready-to-merge' },
+  ]);
+  const plain = needsYouView({ id: 'o/r#61', title: 'Fix', issue: null, prs: [{ repo: 'o/r', number: 61 }], reason: 'conflict with base', since: ago(130) }, { now: NOW });
+  assert.deepEqual(plain.release, []);
+});
+
+test('release dialog copy says what changes on GitHub (#2754)', () => {
+  assert.equal(releaseDialogTitle('#7'), 'Release the claim on #7?');
+  assert.equal(releaseDialogTitle(''), 'Release this claim?');
+  assert.match(RELEASE_CONFIRM_TEXT, /wake label/);
+  assert.match(RELEASE_CONFIRM_TEXT, /next poll/);
 });

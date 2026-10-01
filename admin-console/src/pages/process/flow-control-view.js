@@ -275,12 +275,28 @@ export function poolView(p) {
 // Area ② — where a person is needed
 // ---------------------------------------------------------------------------
 
+// "Release claim" (#2754): what the confirm dialog says before a stuck row's
+// orphaned `<wake>:wip` claim is swapped back to its wake label on GitHub.
+export const RELEASE_CONFIRM_TEXT = 'The stale claim label is removed and the wake label put back on the GitHub item, so the flow picks it up again on its next poll (within about a minute). Only do this when nobody is still working on it.';
+
+export function releaseDialogTitle(ref) {
+  return ref ? `Release the claim on ${ref}?` : 'Release this claim?';
+}
+
 export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}) {
   const ref = entry.issue
     ? itemRef(entry.issue.repo, entry.issue.number, singleRepo)
     : Array.isArray(entry.prs) && entry.prs[0]
       ? `PR ${itemRef(entry.prs[0].repo, entry.prs[0].number, singleRepo)}`
       : '';
+  const release = (Array.isArray(entry.release) ? entry.release : [])
+    .filter((c) => c && typeof c.claim === 'string' && typeof c.wake === 'string')
+    .map((c) => ({
+      ref: `${c.kind === 'pr' ? 'PR ' : ''}${itemRef(c.repo, c.number, singleRepo)}`,
+      claim: c.claim,
+      wake: c.wake,
+      text: `${c.claim} → ${c.wake}`,
+    }));
   return {
     id: entry.id,
     ref,
@@ -288,6 +304,7 @@ export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}
     url: entry.url || null,
     reason: entry.reason || (entry.needsHuman && entry.needsHuman.reason) || '',
     waiting: since(entry.since || (entry.needsHuman && entry.needsHuman.since), now),
+    release,
   };
 }
 

@@ -9,6 +9,7 @@ const {
   triggerApplyGuardError,
   staleTriggerReason,
   humanGateLabelSet,
+  emittedLabelSet,
 } = require('./hill-climb-apply-guard');
 
 const triggerCard = (over = {}) => ({
@@ -97,4 +98,34 @@ test('humanGateLabelSet: extracts only humanGate-flagged label names', () => {
   assert.equal(s.size, 2);
   assert.deepEqual([...humanGateLabelSet({})], []);
   assert.deepEqual([...humanGateLabelSet(null)], []);
+});
+
+test('triggerApplyGuardError: protects a Flow label hand-off listener (#2710)', () => {
+  // What wireLabelHandoff writes: a plain github-event listener with no derived flag.
+  const listener = {
+    id: 't1790817163431', type: 'github-event', events: ['issues.labeled'],
+    labelFilter: 'ready-for-review', claim: { remove: 'ready-for-review', add: 'in-review' },
+    description: 'Wake when `ready-for-review` is added to an issue (from Dev)',
+  };
+  const handoffLabels = emittedLabelSet([
+    { outcomes: { options: [{ actions: [{ type: 'setLabel', label: 'ready-for-review' }] }] } },
+  ]);
+  assert.match(triggerApplyGuardError(listener, { handoffLabels }), /hand-off label 'ready-for-review'/);
+  assert.match(triggerApplyGuardError(listener, { handoffLabels: ['ready-for-review'] }), /hand-off label/);
+  // Nobody emits the label any more → a genuinely dead listener stays deletable.
+  assert.equal(triggerApplyGuardError(listener, { handoffLabels: new Set(['other']) }), null);
+  assert.equal(triggerApplyGuardError(listener), null);
+});
+
+test('emittedLabelSet: outcomes setLabel actions plus legacy emits', () => {
+  const s = emittedLabelSet([
+    { emits: ['ready-for-qa', ' ', null] },
+    { outcomes: { options: [
+      { actions: [{ type: 'setLabel', label: 'ready-for-review' }, { type: 'openPr' }] },
+      { actions: [{ type: 'setLabel', label: '' }] },
+    ] } },
+    null,
+  ]);
+  assert.deepEqual([...s].sort(), ['ready-for-qa', 'ready-for-review']);
+  assert.deepEqual([...emittedLabelSet(null)], []);
 });

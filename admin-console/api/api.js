@@ -9376,8 +9376,16 @@ app.post('/api/teams/:teamId/hill-climb/cards/:cardId/apply', apiLimiter, async 
   }
   // Guard: never delete an intrinsic/derived/human-gate trigger (AC).
   const teamCfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
+  // Labels the team's members emit — a listener for one is a Flow label
+  // hand-off and is protected while its producer still emits it (#2710).
+  const teamMembers = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (cfg && cfg.parentTeamId === teamId) teamMembers.push({ emits: cfg.emits, outcomes: cfg.outcomes });
+  }
   const guardReason = hillClimbApplyGuard.triggerApplyGuardError(liveTrigger, {
     humanGateLabels: hillClimbApplyGuard.humanGateLabelSet(teamCfg),
+    handoffLabels: hillClimbApplyGuard.emittedLabelSet(teamMembers),
   });
   if (guardReason) {
     return res.status(403).json({ error: 'protected-trigger', code: 'protected-trigger', reason: guardReason });

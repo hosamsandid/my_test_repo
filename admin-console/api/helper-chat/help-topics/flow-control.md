@@ -99,6 +99,7 @@ spelled out, together with how long it has been waiting:
 | **approved — waiting for merge** | Merge it. |
 | **checks failing** | Look at the failing checks. |
 | **no agent is scheduled to continue** | The last agent finished and nothing picks it up — check the flow on the Flows page. |
+| **stuck — no progress, needs help** | The row has read *working* for more than an hour, but only because of a claim label (e.g. `ready:wip`) — no agent run or pool instance is alive for it, so the run that claimed it died or was stopped. The board only reports this; it never removes the label. Replace the stale `…:wip` label with the wake label (e.g. `ready`) so the step runs again. |
 
 ## The stages
 

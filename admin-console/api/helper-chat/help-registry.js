@@ -246,6 +246,21 @@ function foldTopics(topics) {
 // listed twice) appears once.
 function contextTopics(registry, context) {
   const hit = registry.resolveHelpContext(context);
+  const pluginTopics = pluginTopicsForContext(registry.pluginTopics, context);
+  // A route that NO built-in topic claims but a plugin DOES — a plugin's own UI
+  // page, e.g. /plugins/jira/view — must not inherit the Overview fallback's
+  // seeAlso expansion. The Overview topic links to ~every page, so that fold is
+  // the whole console help (~141k chars); hanging it behind one plugin page buys
+  // nothing and is pure weight against SYSTEM_PROMPT_CHAR_LIMIT. Such a page
+  // grounds on the plugin's own topic(s) plus the Overview topic itself (general
+  // orientation), and stops there. (A route WITH a built-in topic keeps the full
+  // page + seeAlso + plugin fold below.)
+  if (!hit && pluginTopics.length) {
+    const picked = [];
+    if (registry.overview) picked.push(registry.overview);
+    for (const t of pluginTopics) if (!picked.includes(t)) picked.push(t);
+    return picked;
+  }
   const primary = (hit && hit.topic) || registry.overview || null;
   if (!primary) return [];
   const picked = [primary];
@@ -255,7 +270,7 @@ function contextTopics(registry, context) {
     const neighbour = registry.topicForRoute(to);
     if (neighbour && !picked.includes(neighbour)) picked.push(neighbour);
   }
-  for (const t of pluginTopicsForContext(registry.pluginTopics, context)) {
+  for (const t of pluginTopics) {
     if (!picked.includes(t)) picked.push(t);
   }
   return picked;

@@ -45,8 +45,8 @@ are actually given access to. They only share a word.
 Only **global-pool** skills can be granted in the Knowledge step, and they land on
 the *team* agent so every member inherits them. The reason is timing: the team's
 own skill pool does not exist until the team does. Once it is created you can grant
-from the team tier on the team's card on the Agents page. MCP knowledge sources are
-read-only here on purpose — they come from the environment, so the server would
+from the team tier in the team's Agent Chat **Settings** tab. MCP knowledge
+sources are read-only here on purpose — they come from the environment, so the server would
 ignore a selection made here; change them by editing the environment.
 
 ## What "Create team" provisions
@@ -63,7 +63,7 @@ One transaction, in this order:
 
 Members omit a skills override, so they inherit the team's skills. You can later
 switch any member to *Additional input* or *Exclusive overriding input* for its
-prompt, and to its own skills or MCP set, on the Agents page.
+prompt, and to its own skills or MCP set, in its Agent Chat **Settings** tab.
 
 ## The agents go live immediately
 
@@ -77,7 +77,7 @@ unticked the members are written as stubs and nothing goes live until you enable
 them; a repo-less team watches no repository at all, and if its process hands work
 over on GitHub the notice warns that those hand-offs cannot work without one.
 
-If you want to stage the rollout, disable individual agents on the **Agents** page
+If you want to stage the rollout, disable individual agents in Agent Chat
 right after creation; a disabled agent keeps its configuration and picks up work
 again when you enable it.
 

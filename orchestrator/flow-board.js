@@ -37,6 +37,12 @@ const DEFAULT_DONE_RETENTION_HOURS = 24;
 // "no agent is scheduled to continue" — long enough to cover the poller's
 // cadence and a hand-off in flight, short enough to catch a dead end today.
 const STALL_MS = 30 * 60 * 1000;
+// How long a claimed row may read as "working" with no running session and no
+// live pool instance behind it before the board says it needs help (#2734).
+// A run almost never takes past ~30 min, so a claim label still on the item
+// an hour later with nobody alive to finish it is orphaned (the claiming run
+// died, was disabled or reaped) — not healthy in-progress work.
+const NEEDS_HELP_MS = 60 * 60 * 1000;
 
 const REASONS = Object.freeze({
   flagged: 'flagged for a human',
@@ -45,6 +51,7 @@ const REASONS = Object.freeze({
   approved: 'approved — waiting for merge',
   checks: 'checks failing',
   stalled: 'no agent is scheduled to continue',
+  needsHelp: 'stuck — no progress, needs help',
 });
 
 function str(v) {
@@ -479,6 +486,18 @@ function buildFlowBoard(args = {}) {
     }
     sessionRows.push({ roleId, agentId: s.agentId, key, session: sess });
   }
+  // Items with live work behind them: a running session, or a pool instance
+  // still alive for the item (booting, or between runs). A claim on any other
+  // item is only a label — `humanBlock` flags it once it outlives NEEDS_HELP_MS.
+  const live = new Set(working.keys());
+  for (const p of Array.isArray(args.pools) ? args.pools : []) {
+    for (const inst of Array.isArray(p && p.instances) ? p.instances : []) {
+      const member = members.find((m) => m && inst && m.id === inst.instanceId);
+      if (member && member.poolInstance && str(member.poolRepo) && member.poolItem != null) {
+        live.add(itemKey(member.poolRepo, member.poolItem));
+      }
+    }
+  }
 
   // --- rows: an issue plus every PR the flow opened for it -----------------
   const rowOf = new Map(); // item key -> row key
@@ -548,7 +567,7 @@ function buildFlowBoard(args = {}) {
       }
     }
 
-    const needsHuman = isDone ? null : humanBlock({ keys, items, graph, position, now });
+    const needsHuman = isDone ? null : humanBlock({ keys, items, graph, position, live, now });
     out.push({
       id: row.key,
       title: (issue && issue.title) || (prs[0] && prs[0].title) || row.key,
@@ -745,12 +764,20 @@ function lastWakeTs(wakes, key, roleId) {
 
 // Why nothing will move this row without a person, or null. Only when no
 // agent is working on it or woken for it — a Conflict Solver already queued
-// on a conflict is not a human's problem.
-function humanBlock({ keys, items, graph, position, now }) {
+// on a conflict is not a human's problem — except a claim nobody alive holds:
+// past NEEDS_HELP_MS it is an orphaned `:wip` label, not work (#2734). The
+// flag only reports; it never releases the claim or touches a run.
+function humanBlock({ keys, items, graph, position, live = new Set(), now }) {
   const open = keys.map((k) => items.get(k)).filter((it) => it && it.state !== 'closed');
   const since = (it) => toMs(it.updatedAt) || position.since || now;
   const flagged = open.find((it) => it.labels.includes('needs-human'));
   if (flagged) return { reason: REASONS.flagged, since: new Date(since(flagged)).toISOString() };
+  if (
+    position.status === 'working' && position.since != null && now - position.since > NEEDS_HELP_MS &&
+    !keys.some((k) => live.has(k))
+  ) {
+    return { reason: REASONS.needsHelp, since: new Date(position.since).toISOString() };
+  }
   if (position.status === 'working' || position.status === 'queued') return null;
   const prs = open.filter((it) => it.kind === 'pr');
   const conflict = prs.find((p) => p.mergeable === 'CONFLICTING');
@@ -784,6 +811,7 @@ function checksState(rollupState) {
 module.exports = {
   DEFAULT_DONE_RETENTION_HOURS,
   STALL_MS,
+  NEEDS_HELP_MS,
   REASONS,
   buildRoleGraph,
   orderRoles,

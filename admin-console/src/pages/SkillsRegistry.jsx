@@ -19,7 +19,7 @@ import { useAuth } from '../auth/AuthContext';
 import { adminTeamIdsOf, teamsById } from './credential-scope-view.js';
 import { writableSkillTargets, defaultSkillTarget } from './skill-target-view.js';
 import { planLineageResync, copyResyncKind, summarizeResyncResults } from './skill-lineage-resync.js';
-import { warningRows, transferPreviewRequiresAck, warningsSummaryLabel } from './skill-transfer-preview-view.js';
+import { warningRows, transferPreviewRequiresAck, warningsSummaryLabel, transferActivationNotice } from './skill-transfer-preview-view.js';
 
 /* ─── Skill name validation (mirrors SKILL_NAME_RE in api.js) ─────────── */
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
@@ -933,7 +933,10 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       setConfirmOverwrite(false);
       setPendingTransfer(null);
       setTransferPreview(null);
-      onPromoted?.({ name: data.name, source: data.to?.tier === 'team' ? 'team' : 'pool', teamId: data.to?.teamId });
+      onPromoted?.({
+        name: data.name, source: data.to?.tier === 'team' ? 'team' : 'pool', teamId: data.to?.teamId,
+        activationNotice: transferActivationNotice(data),
+      });
     } catch (e) {
       setPromoteError(e.message);
     } finally {
@@ -2088,6 +2091,8 @@ export default function SkillsRegistry() {
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState(null);
   const [importSuccess, setImportSuccess] = useState(null);
+  // #2689: the activation outcome of the last adopt / move into a team pool.
+  const [transferNotice, setTransferNotice] = useState(null);
   const [importTarget, setImportTarget] = useState(() => defaultSkillTarget(caller, teams)); // 'global' or 'team:<id>'
   // #2307 AC11: re-pin the selection if the writable set changes under us
   // (auth/teams load async) and the current value is no longer offered.
@@ -2176,6 +2181,7 @@ export default function SkillsRegistry() {
   }
 
   function handlePromoted(skill) {
+    setTransferNotice(skill?.activationNotice || null);
     refetch?.();
     openSkill({ name: skill.name, source: 'pool' });
   }
@@ -2354,6 +2360,13 @@ export default function SkillsRegistry() {
       {importSuccess && (
         <div role="status" style={{ color: 'var(--eb-status-success)', fontSize: 'var(--eb-text-sm)' }}>
           {importSuccess}
+        </div>
+      )}
+      {transferNotice && (
+        <div role={transferNotice.ok ? 'status' : 'alert'} style={{ color: transferNotice.ok ? 'var(--eb-status-success)' : 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)' }}>
+          {!transferNotice.ok && <span aria-hidden="true" style={{ color: 'var(--eb-status-warning)' }}>⚠ </span>}
+          {transferNotice.text}
+          <button type="button" onClick={() => setTransferNotice(null)} style={{ marginLeft: 'var(--eb-space-3)', background: 'none', border: 'none', color: 'var(--eb-text-secondary)', cursor: 'pointer' }}>Dismiss</button>
         </div>
       )}
 

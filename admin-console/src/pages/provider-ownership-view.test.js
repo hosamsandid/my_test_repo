@@ -8,6 +8,7 @@ import {
   providerOwnershipReady,
   providerScopeLabel,
   providerScopeShowsDetail,
+  providerTeamName,
 } from './provider-ownership-view.js';
 
 const byValue = (opts) => Object.fromEntries(opts.map(o => [o.value, o]));
@@ -109,4 +110,21 @@ test('providerScopeShowsDetail: Ownership cell renders detail only for Team scop
   assert.equal(providerScopeShowsDetail('personal'), false);
   // Global renders its own single pill upstream, no detail.
   assert.equal(providerScopeShowsDetail('global'), false);
+});
+
+// #2691: an id that names no current Agent Team reads "deleted team", not "legacy".
+test('providerTeamName: known name → name; server-flagged deleted → "(deleted team)"; else raw id', () => {
+  const names = { default: 'Default Team', alpha: 'Alpha' };
+  assert.equal(providerTeamName('alpha', names, ['gone']), 'Alpha');
+  assert.equal(providerTeamName('default', names, ['default']), 'Default Team', 'a known legacy human team keeps its name');
+  assert.equal(providerTeamName('gone', names, ['gone']), 'gone (deleted team)');
+  assert.equal(providerTeamName('hidden', names, ['gone']), 'hidden', 'an existing team the caller cannot see stays raw');
+  assert.equal(providerTeamName('x'), 'x');
+});
+
+test('providerScopeLabel: a deleted team in the set is labelled "deleted team" from the record', () => {
+  const names = { default: 'Default Team' };
+  const rec = { scope: 'team', teamId: 'default', teamIds: ['default', 'uitest-q05-t'], deletedTeamIds: ['uitest-q05-t'] };
+  assert.deepEqual(providerScopeLabel(rec, names),
+    { scope: 'team', label: 'Teams', detail: 'Default Team, uitest-q05-t (deleted team)' });
 });

@@ -40,6 +40,18 @@ export const SUFFIX_ERROR = `Label suffix: ${SUFFIX_HINT}`;
 // the same.
 export const NO_PROVIDER_ERROR = 'No model provider is set up yet — ask a Team or System Administrator to add one before creating a team.';
 
+// #2737: the environment picker's explicit "no environment" choice. An empty
+// `environmentId` still means repo-less auto-create on the server (#2168 A2),
+// but a caller that requires an explicit choice (`requireEnvironment`) can no
+// longer treat "— select —" as that choice — it was too easy to launch onto
+// whatever environment happened to be pre-selected, including the production
+// repository. This value is that choice made on purpose; `buildLaunchBody`
+// strips it, so the server sees exactly the #2168 A2 body.
+export const NEW_REPO_LESS_ENV = '__new-repo-less__';
+export const NEW_REPO_LESS_ENV_LABEL = 'New repo-less environment (no repository)';
+export const PICK_ENVIRONMENT_ERROR =
+  `Pick a working environment — or “${NEW_REPO_LESS_ENV_LABEL}” for a team without a repository.`;
+
 // Slug rules shared by both entry points (was duplicated in MaterializeDialog,
 // TeamSetup and LaunchStep's own `slugifyLocal`, all collapsed onto this one —
 // #1934): lowercase, dashes for runs of non-[a-z0-9], no leading/trailing
@@ -136,10 +148,16 @@ export function isRepoLessEnv(env) {
 // yet know the provider-registry state — or an older test fixture — is
 // unaffected; only an explicit `false` (the platform-has-zero-providers case)
 // blocks the launch (#2179).
-export function validateLaunch({ teamId, teamName, labelSuffix, hasProvider = true } = {}) {
+//
+// `requireEnvironment` (#2737) is opt-in per caller: when true, an empty
+// `environmentId` blocks until the user picks an environment or
+// `NEW_REPO_LESS_ENV` explicitly. Callers only set it while there IS a list to
+// pick from, so an empty platform still launches repo-less (#2168 A2).
+export function validateLaunch({ teamId, teamName, labelSuffix, environmentId, requireEnvironment = false, hasProvider = true } = {}) {
   if (!TEAM_ID_RE.test(String(teamId || ''))) return TEAM_ID_ERROR;
   if (!String(teamName || '').trim()) return 'Team name required.';
   if (labelSuffix && !SUFFIX_RE.test(labelSuffix)) return SUFFIX_ERROR;
+  if (requireEnvironment && !environmentId) return PICK_ENVIRONMENT_ERROR;
   if (!hasProvider) return NO_PROVIDER_ERROR;
   return null;
 }
@@ -188,7 +206,8 @@ export function buildLaunchBody({
   body.teamName = name;
   body.mode = mode;
   body.materializeMembers = materializeNow !== false;
-  if (environmentId) body.environmentId = environmentId;
+  // The explicit repo-less choice (#2737) is the same body as no choice.
+  if (environmentId && environmentId !== NEW_REPO_LESS_ENV) body.environmentId = environmentId;
   if (labelSuffix) body.labelSuffix = labelSuffix;
   else delete body.labelSuffix;
   // #2323: only ever set by the reference-only opt-out re-submit (strict true),

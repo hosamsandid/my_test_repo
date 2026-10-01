@@ -24,6 +24,9 @@ import {
   TEAM_ID_HINT,
   SUFFIX_HINT,
   NO_PROVIDER_ERROR,
+  NEW_REPO_LESS_ENV,
+  NEW_REPO_LESS_ENV_LABEL,
+  PICK_ENVIRONMENT_ERROR,
 } from './launch-team.js';
 
 test('slugify: lowercase, dash runs, trim dashes, 40-char cap', () => {
@@ -509,4 +512,33 @@ test('launchFailure: the extend-missing-team API refusal is translated into UI t
   assert.equal(f.message, 'There is no team \'acme\' to add agents to yet — untick “Add to an existing team” to create it instead.');
   assert.doesNotMatch(f.message, /mode:/);
   assert.equal(launchFailure({}).message, '');
+});
+
+// #2737 — the Create-team dialog must not launch onto an environment the user
+// never chose. `requireEnvironment` blocks an empty pick; the explicit
+// "New repo-less environment" choice keeps the #2168 A2 path reachable.
+test('validateLaunch: requireEnvironment blocks an empty pick, accepts any explicit one', () => {
+  const base = { teamId: 'team', teamName: 'Team' };
+  assert.equal(validateLaunch({ ...base, environmentId: '', requireEnvironment: true }), PICK_ENVIRONMENT_ERROR);
+  assert.equal(validateLaunch({ ...base, requireEnvironment: true }), PICK_ENVIRONMENT_ERROR);
+  assert.equal(validateLaunch({ ...base, environmentId: 'env', requireEnvironment: true }), null);
+  assert.equal(validateLaunch({ ...base, environmentId: NEW_REPO_LESS_ENV, requireEnvironment: true }), null);
+  // Opt-in: every other caller keeps the #2168 A2 behaviour.
+  assert.equal(validateLaunch({ ...base, environmentId: '' }), null);
+  // The reason names the way out, so a blocked button is never a dead end.
+  assert.ok(PICK_ENVIRONMENT_ERROR.includes(NEW_REPO_LESS_ENV_LABEL));
+});
+
+test('launchBlockReason: carries requireEnvironment through to the shown reason', () => {
+  const values = { teamId: 'team', teamName: 'Team', environmentId: '' };
+  assert.equal(launchBlockReason({ ...values, requireEnvironment: true }), PICK_ENVIRONMENT_ERROR);
+  assert.equal(launchBlockReason(values), null);
+});
+
+test('buildLaunchBody: the explicit repo-less choice sends the same body as no environment', () => {
+  const chosen = buildLaunchBody({ teamId: 't', teamName: 'T', environmentId: NEW_REPO_LESS_ENV });
+  const none = buildLaunchBody({ teamId: 't', teamName: 'T', environmentId: '' });
+  assert.equal('environmentId' in chosen, false);
+  assert.deepEqual(chosen, none);
+  assert.equal(buildLaunchBody({ teamId: 't', teamName: 'T', environmentId: 'env' }).environmentId, 'env');
 });

@@ -48,9 +48,22 @@ function registryFor(pluginsDir) {
 }
 
 // List of files in the order they are concatenated (importance-ordered)
+// A CORPUS_FILES entry is either a filename string (always folded into the docs
+// corpus) or `{ file, routes }` — a route-scoped doc folded in ONLY when the
+// current route is one it names (exact, or a child path). A route-scoped doc is
+// deliberately NOT part of the no-route fallback: that context already folds the
+// Overview topic plus every one of its neighbours, which covers the same
+// orientation. Route-scoping a CORPUS_FILES doc is the sanctioned next step the
+// budget note (near SYSTEM_PROMPT_CHAR_LIMIT) calls for when the always-on docs
+// crowd the ceiling.
 const CORPUS_FILES = [
   'glossary.md',               // concept disambiguation first
-  'admin-console.md',          // page reference
+  // admin-console.md is the whole-console page index + navigation reference
+  // (~40k). On a content page the page's own help topic already orients the
+  // reader, so as an always-on doc it was just dead weight against the limit —
+  // and it was the single largest. Scope it to the System-Admin
+  // console-management surfaces where a cross-page index is the actual subject.
+  { file: 'admin-console.md', routes: ['/users', '/environment-templates'] }, // page reference
   'agent-roles.md',
   'working-environments.md',
   'triggers.md',
@@ -73,11 +86,27 @@ const CORPUS_FILES = [
 // forbids inventing UI, this tells it when it is short of material).
 const HELP_FOLD_NOTE = ' (the current page and the pages it links to — other pages\' topics are not included; say so rather than guessing)';
 
+// Whether a CORPUS_FILES entry is folded in for this route. A plain string (or an
+// object without `routes`) is always-on; a `{ file, routes }` entry is folded in
+// only when `currentRoute` matches one of its routes exactly or as a parent path
+// (`/users` also covers `/users/42`). The no-route fallback (null) gets no
+// route-scoped doc — its Overview-plus-neighbours fold already orients the reader.
+function corpusEntryApplies(entry, currentRoute) {
+  if (typeof entry === 'string' || !entry.routes) return true;
+  const route = typeof currentRoute === 'string'
+    ? currentRoute
+    : (currentRoute && typeof currentRoute.route === 'string' ? currentRoute.route : null);
+  if (!route) return false;
+  return entry.routes.some(r => route === r || route.startsWith(`${r}/`));
+}
+
 function buildSystemPrompt(currentRouteLabel, currentRoute, { pluginsDir = PLUGINS_DIR } = {}) {
   const promptTemplate = fs.readFileSync(PROMPT_FILE, 'utf8');
   const registry = registryFor(pluginsDir);
   const docsCorpus = CORPUS_FILES
-    .map(f => {
+    .filter(entry => corpusEntryApplies(entry, currentRoute))
+    .map(entry => {
+      const f = typeof entry === 'string' ? entry : entry.file;
       const full = path.join(DOCS_DIR, f);
       const content = fs.readFileSync(full, 'utf8');
       return `### ${f}\n\n${content}`;

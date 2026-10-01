@@ -78,7 +78,8 @@ The left list is how you choose what the canvas shows. It has two sections:
   in each, and whether each one is **private** or **shared** (see *Sharing a
   draft* below). You see your own drafts and the ones colleagues have shared
   with you — not everyone's. A draft can be deleted from its row; a team cannot
-  (a team is deleted from the Agents page, because that removes running agents).
+  (it removes running agents): use **Delete team…** on its group header menu in
+  Agent Chat, or **Administration → All Teams**.
 
 The list can be collapsed to give the canvas the full width, and the divider
 between it and the canvas can be dragged; both are remembered.

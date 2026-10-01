@@ -1760,3 +1760,43 @@ test('#2716 a registry human gate set by an outcome setLabel is in use (not unus
   // The gate stays out of the emit projection — the lint still reports it.
   assert.ok(g.lints.some(l => l.code === 'human-label-as-outcome'));
 });
+
+// #2754: a wake label whose every listener is switched off.
+function labelHandoffGraph({ dev = {}, rev = {}, revTrigger = {} } = {}) {
+  return buildProcessGraph([
+    { id: 'dev', displayName: 'Developer', emits: ['ready-for-review'],
+      triggers: [{ id: 'd', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' }], ...dev },
+    { id: 'rev', displayName: 'Reviewer',
+      triggers: [{ id: 'r', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review', ...revTrigger }], ...rev },
+  ]);
+}
+
+test('#2754: wake-label-no-live-consumer fires when the only consumer agent is switched off', () => {
+  const g = labelHandoffGraph({ rev: { enabled: false } });
+  const l = g.lints.filter(x => x.code === 'wake-label-no-live-consumer');
+  assert.equal(l.length, 1);
+  assert.equal(l[0].severity, 'warning');
+  assert.equal(l[0].label, 'ready-for-review');
+  assert.equal(l[0].nodeId, 'rev');
+  assert.match(l[0].message, /switched off/);
+  // Distinct from the "no consumer at all" lints — those are not raised here.
+  assert.ok(!lintCodes(g).includes('dead-end-emitter'));
+  // The node carries the flag; an enabled node does not carry the key at all.
+  assert.equal(g.nodes.find(n => n.id === 'rev').enabled, false);
+  assert.ok(!('enabled' in g.nodes.find(n => n.id === 'dev')));
+});
+
+test('#2754: wake-label-no-live-consumer fires when the consumer\'s trigger on that label is switched off', () => {
+  const g = labelHandoffGraph({ revTrigger: { enabled: false } });
+  assert.deepEqual(g.lints.filter(x => x.code === 'wake-label-no-live-consumer').map(x => x.label), ['ready-for-review']);
+});
+
+test('#2754: one live listener clears wake-label-no-live-consumer; enabled flows raise none', () => {
+  assert.ok(!lintCodes(labelHandoffGraph()).includes('wake-label-no-live-consumer'));
+  const g = buildProcessGraph([
+    { id: 'dev', emits: ['ready-for-review'], triggers: [] },
+    { id: 'rev', enabled: false, triggers: [{ id: 'r', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review' }] },
+    { id: 'rev2', triggers: [{ id: 'r', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review' }] },
+  ]);
+  assert.ok(!lintCodes(g).includes('wake-label-no-live-consumer'));
+});

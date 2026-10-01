@@ -1704,6 +1704,23 @@ class GitHubPoller {
     return true;
   }
 
+  // #2754: clear every armed key for one wake on one object from OUTSIDE a
+  // poll — the Flow Control "Release claim" re-applies a wake on GitHub, and on
+  // a PR the Events API delivers no standalone `unlabeled(<wake>)`, so the
+  // presence-based disarm never sees the removal (the re-add's snapshot names
+  // the wake again). Without this the re-add reads as `wake-already-armed` and
+  // nothing wakes. Same per-repo `armed` object a tick holds, like `armWake`.
+  // Both kinds: issues and PRs share one number space per repo, and a PR's
+  // label events may be keyed either way.
+  disarmWake({ repo, number, label }) {
+    if (!this._wakeEdgeDedup || !repo || !label || number == null) return false;
+    const repoState = this.state[repo];
+    if (!repoState || !repoState.armed || typeof repoState.armed !== 'object') return false;
+    for (const kind of ['issue', 'pr']) wakeArmory.disarmLabel(repoState.armed, { kind, number, label });
+    this._saveState();
+    return true;
+  }
+
   _loadState() {
     try {
       if (fs.existsSync(STATE_FILE)) return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) || {};

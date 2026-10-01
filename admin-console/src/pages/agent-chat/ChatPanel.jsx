@@ -15,9 +15,8 @@ import ChatModelSelector from './ChatModelSelector.jsx';
 import HeaderOverflowMenu from './HeaderOverflowMenu.jsx';
 import { chatResetAction } from './chat-model-selector.js';
 import { TriggerForm } from './TriggersPanel';
-import { isLaunchedLoop } from './trigger-summary.js';
 import { isAtBottom, isNearTop } from './chat-scroll.js';
-import { latestLoopProgress } from './loop-run-view.js';
+import { latestLoopProgress, liveLoopSignal, runningLaunchedLoop } from './loop-run-view.js';
 import { useSessionsActive } from './SessionsActiveContext';
 import { hasActiveTriggerSessionForRoom } from './sessions-active';
 import {
@@ -185,6 +184,12 @@ export default function ChatPanel({
   // or null (neutral running state), derived from the numbered `trigger.fired`
   // session-log rows at the same cadence as the trigger poll.
   const [loopProgress, setLoopProgress] = useState(null);
+  // Live loop signals (#2683): ids of launched loops whose finished-loop record
+  // arrived over the live timeline (a lagging trigger list must not revive
+  // their banner), and the handler the SSE callback hands loop signals to —
+  // a ref, because the handler is defined below `handleEvent`.
+  const finishedLoopIdsRef = useRef(new Set());
+  const onLoopSignalRef = useRef(null);
   const [loopBusy, setLoopBusy] = useState(false);
   const [showStopLoopConfirm, setShowStopLoopConfirm] = useState(false);
   // A chat-turn stop request is in flight (#1427). Distinct from `loopBusy`
@@ -561,6 +566,11 @@ export default function ChatPanel({
     // this room — close any stale To-Do window from the previous run (#273).
     if (triggerMeta) onTodoBoundary?.();
 
+    // A loop iteration notice or the loop's terminal record (#2683): update the
+    // composer's loop banner now instead of on the next 15-s poll.
+    const loopSignal = liveLoopSignal(ev.content);
+    if (loopSignal) onLoopSignalRef.current?.(loopSignal);
+
     setMessages(prev => {
       // Already have the canonical event — skip.
       if (prev.some(m => m.event_id === incoming.event_id)) return prev;
@@ -922,7 +932,7 @@ export default function ChatPanel({
     if (!agent?.id) { setActiveLoop(null); setLoopProgress(null); return; }
     try {
       const list = await apiCall('GET', `/api/agents/${encodeURIComponent(agent.id)}/triggers`);
-      const running = Array.isArray(list) ? list.find(isLaunchedLoop) : null;
+      const running = runningLaunchedLoop(list, finishedLoopIdsRef.current);
       setActiveLoop(running || null);
       // Live progress (#1155 AC5/AC6): read the tail of THIS room's session log
       // and take the newest numbered loop firing for the running trigger. The
@@ -952,6 +962,19 @@ export default function ChatPanel({
     const timer = setInterval(refreshActiveLoop, 15000);
     return () => clearInterval(timer);
   }, [agent?.id, refreshActiveLoop]);
+
+  // Live loop signals (#2683). The runtime removes a launched loop from its
+  // triggers BEFORE posting the finished-loop record, so the record's arrival
+  // means the loop is over: drop its banner and Stop at once, then re-read the
+  // trigger list. An iteration notice just re-reads so the count stays current.
+  // Re-bound every render, so it always sees the current `activeLoop`.
+  onLoopSignalRef.current = (signal) => {
+    if (signal.kind === 'finished' && signal.triggerId) {
+      finishedLoopIdsRef.current.add(signal.triggerId);
+      if (activeLoop?.id === signal.triggerId) { setActiveLoop(null); setLoopProgress(null); }
+    }
+    refreshActiveLoop();
+  };
 
   function handleLoopClick() {
     if (readOnly) return;

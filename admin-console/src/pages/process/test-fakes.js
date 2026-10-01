@@ -7,7 +7,7 @@
 // persisted. Not a *.test.js file — node --test does not execute it.
 
 import assert from 'node:assert/strict';
-import { upsertChannel, removeChannelFrom } from './channel-ops.js';
+import { upsertChannel, removeChannelFrom, editChannel } from './channel-ops.js';
 import {
   humansAfterUpsert, humanAfterConsumeAdd, humanAfterConsumeRemove,
   humanAfterEmitAdd, humanAfterEmitRemove,
@@ -63,7 +63,11 @@ export function makeDraftLike(bundle) {
       const r = role(id);
       r.channels = upsertChannel(r.channels || [], spec);
     },
-    updateChannel: async (id, spec) => ops.addChannel(id, spec),
+    updateChannel: async (id, spec, { prevLabel } = {}) => {
+      if (!spec.from || spec.from === id) return;
+      const r = role(id);
+      r.channels = editChannel(r.channels || [], prevLabel !== undefined ? prevLabel : spec.label, spec);
+    },
     removeChannel: async (id, spec) => {
       const r = role(id);
       r.channels = removeChannelFrom(r.channels || [], spec);

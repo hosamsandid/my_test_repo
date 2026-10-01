@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   matchesListener,
   wireLabelHandoff, updateLabelHandoff, unwireLabelHandoff,
-  wireChannel, unwireChannel,
+  wireChannel, unwireChannel, updateChannel,
   wireHumanDelivery, unwireHumanDelivery, moveHumanDelivery,
   wireHumanGate, wireReviewGate, unwireReviewGate,
   wireEscalation, unwireEscalation,
@@ -149,6 +149,46 @@ test('unwireChannel removes the port; the producer outcome (and its badge) stays
   assert.deepEqual(state.roles.dev.channels, []);
   assert.ok(state.roles.ba.outcomes.options.some(o => o.actions.some(a => a.type === 'openIssue')),
     'what a role opens is authored on the role, not implied by consumers');
+});
+
+test('#2717 updateChannel: a label rename leaves one channel on both adapters (AC1/AC2)', async () => {
+  for (const [a, b] of [['before', 'after'], ['before', ''], ['', 'after']]) {
+    const state = await onBoth(async (ctx) => {
+      await wireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr', label: a });
+      await updateChannel(ctx, { to: 'dev', prevLabel: a, spec: { artifact: 'pr', from: 'ba', ...(b ? { label: b } : {}) } });
+    });
+    assert.deepEqual(state.roles.dev.channels, [{ artifact: 'pr', from: 'ba', ...(b ? { label: b } : {}) }],
+      `${JSON.stringify(a)} → ${JSON.stringify(b)}`);
+  }
+});
+
+test('#2717 updateChannel: renaming onto a sibling label is refused on both adapters (AC4)', async () => {
+  const state = await onBoth(async (ctx) => {
+    await wireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr', label: 'ready-to-merge' });
+    await wireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr', label: 'revisions-required' });
+    await assert.rejects(updateChannel(ctx, { to: 'dev', prevLabel: 'ready-to-merge',
+      spec: { artifact: 'pr', from: 'ba', label: 'revisions-required' } }), /already exists/);
+  });
+  assert.deepEqual(state.roles.dev.channels.map(c => c.label), ['ready-to-merge', 'revisions-required']);
+});
+
+test('#2717 unwireChannel with the edited label keeps fan-in siblings on both adapters (AC6)', async () => {
+  const state = await onBoth(async (ctx) => {
+    await wireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr', label: 'ready-to-merge' });
+    await wireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr', label: 'revisions-required' });
+    await unwireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr', label: 'ready-to-merge' });
+  });
+  assert.deepEqual(state.roles.dev.channels, [{ artifact: 'pr', from: 'ba', label: 'revisions-required' }]);
+});
+
+test('#2717 updateChannel keeps the claim opt-out and wake instruction on both adapters (AC7/AC8)', async () => {
+  const state = await onBoth(async (ctx) => {
+    await wireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr', label: 'go', autoClaim: false, wakePrompt: 'Custom.' });
+    // The dialog's Save: label + gate, no autoClaim, unchanged wake instruction.
+    await updateChannel(ctx, { to: 'dev', prevLabel: 'go', spec: { artifact: 'pr', from: 'ba', label: 'went', gate: 'human', wakePrompt: 'Custom.' } });
+  });
+  assert.deepEqual(state.roles.dev.channels,
+    [{ artifact: 'pr', from: 'ba', label: 'went', gate: 'human', wakePrompt: 'Custom.', autoClaim: false }]);
 });
 
 // ── human delivery ──────────────────────────────────────────────────────────

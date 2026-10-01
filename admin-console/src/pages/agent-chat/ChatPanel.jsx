@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { useNavigate } from 'react-router';
 import { Loader2, RefreshCw, RotateCcw, Gauge, Trash2, X, AlertTriangle } from 'lucide-react';
 import { apiCall, useApi } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
@@ -35,6 +36,7 @@ import { computeContextNudge, nudgeDismissStorageKey, isNudgeDismissed } from '.
 import SessionInfoPopover from './SessionInfoPopover.jsx';
 import { maintenanceBannerText } from './maintenance-banner';
 import { agentRemovedNoticeText } from './agent-removed-notice.js';
+import { chatReadOnlyHint } from './chat-read-only.js';
 import { providerWarningText, providerBudgetWarningText, personalProviderNoticeText } from '../provider-health-view.js';
 import { RESUME_MESSAGE } from './resume-session';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
@@ -188,6 +190,15 @@ export default function ChatPanel({
   // A chat-turn stop request is in flight (#1427). Distinct from `loopBusy`
   // (loop lifecycle) so the unified Stop button reflects either abort path.
   const [stopping, setStopping] = useState(false);
+
+  // #2713: a System Admin outside the agent's team reads this chat but may not
+  // write in it — the server's `canChat` flag on the roster row decides, and the
+  // send/upload routes refuse with 403 either way. Every write entry point
+  // (send, quick-reply, upload, dictation, meeting, loop launch) is gated on
+  // this; Stop, reset, Clear History and the rest are not.
+  const readOnlyHint = chatReadOnlyHint(agent);
+  const readOnly = !!readOnlyHint;
+  const navigate = useNavigate();
 
   // Per-agent model selection. `modelOptions` is the resolved snapshot from
   // /api/agents/:id/model-options: which endpoint the agent is bound to,
@@ -943,6 +954,7 @@ export default function ChatPanel({
   }, [agent?.id, refreshActiveLoop]);
 
   function handleLoopClick() {
+    if (readOnly) return;
     if (activeLoop) setShowStopLoopConfirm(true);
     else { setRelaunchValues(null); setLoopDialogOpen(true); }
   }
@@ -955,13 +967,17 @@ export default function ChatPanel({
   // Stable identity (#1676) so the memoized transcript rows don't re-render
   // when this component re-renders for an unrelated reason (e.g. a hover).
   const handleRelaunchLoop = useCallback((values) => {
+    if (readOnly) {
+      setError(readOnlyHint.text);
+      return;
+    }
     if (activeLoop) {
       setError('A loop is already running for this agent — stop it before starting another.');
       return;
     }
     setRelaunchValues(values || null);
     setLoopDialogOpen(true);
-  }, [activeLoop]);
+  }, [activeLoop, readOnly, readOnlyHint]);
 
   function closeLoopDialog() {
     setLoopDialogOpen(false);
@@ -969,7 +985,7 @@ export default function ChatPanel({
   }
 
   async function handleLaunchLoop(body) {
-    if (!agent?.id) return;
+    if (!agent?.id || readOnly) return;
     setLoopBusy(true);
     setError(null);
     try {
@@ -1051,7 +1067,7 @@ export default function ChatPanel({
   // the user's chat identity is not ready), so the composer can give the typed
   // text back instead of losing it.
   async function handleSend(text, extraContent = null) {
-    if (!roomId) return false;
+    if (!roomId || readOnly) return false;
     const body = text.trim();
     if (!body) return false;
     // Mark this agent as one the current user manually messaged, so a completion
@@ -1164,7 +1180,7 @@ export default function ChatPanel({
    */
   async function handleUpload(files) {
     const list = Array.from(files || []);
-    if (list.length === 0 || !agent?.id) return [];
+    if (list.length === 0 || !agent?.id || readOnly) return [];
     setUploading(true);
     setError(null);
     try {
@@ -1245,6 +1261,8 @@ export default function ChatPanel({
   const removedNotice = removedFromRoster ? agentRemovedNoticeText(agent.displayName || agent.id) : null;
   const maintenance = useMaintenanceMode();
   const maintenanceBanner = maintenanceBannerText(maintenance);
+  // The composer's write controls and the quick-reply buttons share one gate.
+  const composerDisabled = disabled || readOnly || !roomId || sending || maintenance.active;
   // AC5 (#1843): non-blocking warning when the agent's bound Model Provider is
   // currently red. The GET /model-options fetch (fired on agent selection) also
   // triggers a fresh probe server-side when the status is stale.
@@ -1302,7 +1320,7 @@ export default function ChatPanel({
           index: i,
           messageCount: messages.length,
           answer: askAnswersByQuestion.get(msg.event_id),
-          disabled: disabled || !roomId || sending || maintenance.active,
+          disabled: composerDisabled,
         })
       : null;
     // `?msg=` deep-link flash (#2310 AC2): a plain data attribute, matched by
@@ -1851,10 +1869,51 @@ export default function ChatPanel({
         </button>
       )}
 
+      {/* #2713: read-only hint for a System Admin outside the team, with the
+          way in — the team's Sharing tab (text only for a standalone agent). */}
+      {readOnlyHint && (
+        <div
+          role="note"
+          data-testid="chat-read-only-hint"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+            flexWrap: 'wrap',
+            padding: 'var(--eb-space-2) var(--eb-space-4)',
+            borderTop: '1px solid var(--eb-border-default)',
+            background: 'var(--eb-bg-elevated)',
+            color: 'var(--eb-text-secondary)',
+            fontSize: 'var(--eb-text-sm)',
+            flexShrink: 0,
+          }}
+        >
+          <span style={{ flex: 1, minWidth: 0 }}>{readOnlyHint.text}</span>
+          {readOnlyHint.shareHref && (
+            <button
+              type="button"
+              onClick={() => navigate(readOnlyHint.shareHref)}
+              style={{
+                background: 'transparent',
+                border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-md)',
+                padding: 'var(--eb-space-1) var(--eb-space-3)',
+                color: 'var(--eb-text-primary)',
+                fontFamily: 'inherit',
+                fontSize: 'var(--eb-text-sm)',
+                cursor: 'pointer',
+                flexShrink: 0,
+              }}
+            >
+              Open team sharing
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Input */}
       <MessageInput
         onSend={handleSend}
-        disabled={disabled || !roomId || sending || maintenance.active}
+        disabled={composerDisabled}
+        readOnly={readOnly}
         agentId={agent.id}
         agentDisplayName={agent.displayName || agent.id}
         onUpload={handleUpload}

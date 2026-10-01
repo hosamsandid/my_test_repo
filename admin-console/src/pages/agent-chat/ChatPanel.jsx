@@ -1047,10 +1047,13 @@ export default function ChatPanel({
     }
   }
 
+  // Resolves false when the message was NOT sent (e.g. the #2721 refusal while
+  // the user's chat identity is not ready), so the composer can give the typed
+  // text back instead of losing it.
   async function handleSend(text, extraContent = null) {
-    if (!roomId) return;
+    if (!roomId) return false;
     const body = text.trim();
-    if (!body) return;
+    if (!body) return false;
     // Mark this agent as one the current user manually messaged, so a completion
     // of the turn we just kicked off can notify us if we tab away (#2397).
     if (agent?.id) markManuallyMessaged(agent.id);
@@ -1096,10 +1099,12 @@ export default function ChatPanel({
           );
         });
       }
+      return true;
     } catch (err) {
       setError(`Send failed: ${err.message}`);
       // Roll back the optimistic message so the user can retry.
       setMessages(prev => prev.filter(m => m.event_id !== optimisticId));
+      return false;
     } finally {
       setSending(false);
     }

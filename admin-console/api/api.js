@@ -102,6 +102,8 @@ const { CHAT_AUTHOR_FIELD, chatAuthorStamp } = require('./chat-author');
 // so a human's own token can be used on the send path (#2173) without a
 // second internal-API hop.
 const { createHumanMatrixStore } = require('./human-matrix-store');
+const { resolveChatSendIdentity, CHAT_IDENTITY_NOT_READY,
+        CHAT_IDENTITY_NOT_READY_MESSAGE } = require('./chat-send-identity');
 const { parseAssistSelection, resolveAssistSelection } = require('./assist-target');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { locateCorrelationId } = require('./session-locate');
@@ -1271,19 +1273,6 @@ function chatAuthorFor(req) {
   });
 }
 
-// The acting human's own Matrix credential for this request (#2173), or
-// `null` when there is none to send as — no user record behind the session
-// (the env single-admin), or a record whose Matrix identity has not finished
-// provisioning yet (#1458 provisioning is best-effort/backgrounded). Either
-// way the caller falls back to the shared admin token rather than failing
-// the send.
-function humanMatrixIdentityFor(req) {
-  const userId = getScope(req).userId;
-  if (!userId) return null;
-  const identity = humanMatrixStore.readIdentity(userId);
-  return identity && identity.accessToken && identity.matrixUserId ? identity : null;
-}
-
 // Make sure the acting human is actually a member of the room before they
 // send as themselves — the DM room is created with the shared admin invited
 // (see ensureAgentDmRoom), not with any individual human's account, so a
@@ -1359,6 +1348,31 @@ function syncSharedMemberRooms(teamId, userId, action) {
 function ownerFor(req) {
   const userId = getScope(req).userId;
   return userId ? { ownerId: String(userId), ownerSource: 'creator' } : {};
+}
+
+// The acting human's own Matrix credential for a chat send (#2173, #2721), or
+// `null` — and the caller then REFUSES the send (#2721 AC5); there is no
+// shared-admin fallback. A missing identity is provisioned on demand through
+// the orchestrator first, so a failed background attempt is completed at the
+// latest before the user's next send (AC3). The single operator (env admin,
+// no user record) gets its own identity keyed by its login subject (AC9).
+// Who is acting comes from the authenticated session, never the body.
+async function chatSendIdentityFor(req) {
+  const scope = getScope(req);
+  return resolveChatSendIdentity({
+    userId: scope.userId,
+    username: req && req.user && req.user.username,
+    operator: scope.all === true,
+    store: humanMatrixStore,
+    provisionUser: (userId) => callAdmin('POST', `users/${encodeURIComponent(userId)}/matrix-identity`, {}),
+    provisionOperator: (subject) => callAdmin('POST', 'operator/matrix-identity', { subject }),
+  });
+}
+
+// The fail-closed answer to a send with no identity (#2721 AC5). 503 + a stable
+// code, so the composer keeps the typed text and tells the user to retry.
+function refuseChatSendWithoutIdentity(res) {
+  return res.status(503).json({ error: CHAT_IDENTITY_NOT_READY_MESSAGE, code: CHAT_IDENTITY_NOT_READY });
 }
 
 function listAgentDirs() {
@@ -4019,10 +4033,10 @@ app.get('/api/environments/:id/repo-divergence', apiLimiter, async (req, res) =>
 });
 
 // Post a canned "please commit" / "please push" prompt into the source
-// agent's own DM. We send it as the admin user (same path as a manually
-// typed message) so the agent picks it up via its normal DM heuristic and
-// the entire exchange — including the resulting commits — stays visible in
-// the chat history. Used by the pre-flight buttons.
+// agent's own DM. It is sent as the acting human's own Matrix account (same
+// path as a manually typed message, #2721 AC6) so the agent picks it up via
+// its normal DM heuristic and the entire exchange — including the resulting
+// commits — stays visible in the chat history. Used by the pre-flight buttons.
 app.post('/api/agents/:id/handover/nudge', handoverLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
@@ -4067,8 +4081,12 @@ app.post('/api/agents/:id/handover/nudge', handoverLimiter, async (req, res) => 
   const preHandoffContent = { msgtype: 'm.text', body };
   const preHandoffAuthor = chatAuthorFor(req);
   if (preHandoffAuthor) preHandoffContent[CHAT_AUTHOR_FIELD] = preHandoffAuthor;
+  // Never as the shared admin (#2721 AC6): no personal identity → refused.
+  const humanIdentity = await chatSendIdentityFor(req);
+  if (!humanIdentity) return refuseChatSendWithoutIdentity(res);
+  await ensureHumanJoinedToRoom(humanIdentity, roomId);
   try {
-    const sendResp = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
+    const sendResp = await matrix.matrixFetch(humanIdentity.accessToken,
       `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`,
       { method: 'PUT', body: preHandoffContent });
     if (sendResp.status >= 400) {
@@ -19261,9 +19279,10 @@ app.get('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   }
 });
 
-// 4. Send a text message to a room — as the acting human's own Matrix
-// identity when one is provisioned (#2173), else the shared admin account
-// (env single-admin, or a human whose identity hasn't finished provisioning).
+// 4. Send a text message to a room — always as the acting human's own Matrix
+// identity (#2173, #2721). Typed messages, quick-reply answers and slash
+// commands all come through here. No identity (even after an on-demand
+// provisioning attempt) → 503, never the shared admin account.
 app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
   const { roomId } = req.params;
@@ -19286,20 +19305,18 @@ app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
     }
   }
   // Who wrote this (#2065). Kept alongside the real Matrix sender below —
-  // it is what resolves the display name/initials in the transcript, and it
-  // still fires for the shared-admin fallback (an unprovisioned identity, or
-  // the env single-admin, has no Matrix account of its own to be "true"
-  // about).
+  // it is what resolves the display name/initials in the transcript.
   const authorStamp = chatAuthorFor(req);
   if (authorStamp) content[CHAT_AUTHOR_FIELD] = authorStamp;
 
-  // #2173: send as the acting human's own Matrix account when one exists, so
+  // #2173/#2721: send as the acting human's own Matrix account, so
   // `event.sender` in every downstream consumer (the agent runtime's DM
-  // gate included) is the real person rather than the one shared admin
-  // identity every console user used to share.
-  const humanIdentity = humanMatrixIdentityFor(req);
-  const sendToken = humanIdentity ? humanIdentity.accessToken : matrix.ADMIN_TOKEN;
-  if (humanIdentity) await ensureHumanJoinedToRoom(humanIdentity, roomId);
+  // gate, credential and usage attribution) is the real person. Fail closed:
+  // without one the message is not sent under any other account (AC5).
+  const humanIdentity = await chatSendIdentityFor(req);
+  if (!humanIdentity) return refuseChatSendWithoutIdentity(res);
+  await ensureHumanJoinedToRoom(humanIdentity, roomId);
+  const sendToken = humanIdentity.accessToken;
 
   const txnId = crypto.randomUUID();
   try {

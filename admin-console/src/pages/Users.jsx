@@ -15,7 +15,7 @@ import FormInput from '../components/FormInput';
 import PasswordField from '../components/PasswordField';
 import IconButton from '../components/IconButton';
 import {
-  usersToRows, isSelf, selfActionWarning, validateUserForm, lastSystemAdminGuard,
+  usersToRows, chatIdentityDetail, isSelf, selfActionWarning, validateUserForm, lastSystemAdminGuard,
 } from './users-view';
 import {
   ADMIN_TABS, resolveAdminTab,
@@ -398,6 +398,16 @@ function UsersTab({ me, creating, onCreatingChange }) {
         : <span style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>Member</span>,
     },
     { key: 'passwordLabel', label: 'Password', render: v => <span style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
+    {
+      // #2721 AC8: whether this person can chat under their own identity yet.
+      key: 'chatIdentityLabel', label: 'Chat identity',
+      render: (v, row) => (
+        <span
+          title={chatIdentityDetail(row) || undefined}
+          style={{ color: v === 'Failed' ? 'var(--eb-status-error)' : 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}
+        >{v}</span>
+      ),
+    },
     {
       key: '_actions', label: '', sortable: false,
       render: (_, row) => (

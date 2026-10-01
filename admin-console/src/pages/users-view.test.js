@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 import {
-  systemAdminLabel, passwordLabel, usersToRows, isSelf, selfActionWarning, validateUserForm,
+  systemAdminLabel, passwordLabel, chatIdentityLabel, chatIdentityDetail, usersToRows, isSelf, selfActionWarning, validateUserForm,
   isLastSystemAdmin, lastSystemAdminGuard,
 } from './users-view.js';
 
@@ -156,4 +156,22 @@ test('the mirrored refusal sentences match the store exactly', () => {
       `client and store disagree about ${target.id} among ${users.length} users`,
     );
   }
+});
+
+test('chatIdentityLabel shows present / pending / failed per user (#2721 AC8)', () => {
+  assert.equal(chatIdentityLabel({ matrixIdentity: { status: 'ready' } }), 'Ready');
+  assert.equal(chatIdentityLabel({ matrixIdentity: { status: 'pending' } }), 'Pending');
+  assert.equal(chatIdentityLabel({ matrixIdentity: { status: 'failed', error: 'x' } }), 'Failed');
+  assert.equal(chatIdentityLabel({}), 'Pending', 'an undecorated record is never shown as ready');
+  assert.equal(chatIdentityLabel({ matrixIdentity: { status: 'bogus' } }), 'Pending');
+  assert.equal(usersToRows([{ id: 'u', matrixIdentity: { status: 'ready' } }])[0].chatIdentityLabel, 'Ready');
+});
+
+test('chatIdentityDetail explains a failure and is empty otherwise', () => {
+  const detail = chatIdentityDetail({ matrixIdentity: { status: 'failed', error: 'homeserver unavailable', lastAttemptAt: '2026-10-01T10:00:00.000Z' } });
+  assert.match(detail, /homeserver unavailable/);
+  assert.match(detail, /2026-10-01T10:00:00.000Z/);
+  assert.match(detail, /retried automatically/);
+  assert.equal(chatIdentityDetail({ matrixIdentity: { status: 'ready' } }), '');
+  assert.equal(chatIdentityDetail({}), '');
 });

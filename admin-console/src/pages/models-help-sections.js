@@ -31,6 +31,9 @@ export const MODELS_HELP_SECTIONS = {
   probes: 'test-connection-and-discover-models',
   // 5 — the background poller and the Health column
   health: 'health-the-poller-and-the-health-column',
+  // 5a — the Budget column and the orange Warning state (#2732), a `###`
+  // inside the Health chapter: budget usage is one more input to Health.
+  budget: 'budget-and-the-warning-state',
   // 6 — rotating a credential, the restart-agents dialog, the delete refusal.
   // Carries NO "?" on purpose: the restart dialog and the delete refusal state
   // their own rules at the point of decision, and the panel renders the whole

@@ -1631,9 +1631,11 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
           {confirmDelete && (
             <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
               <strong style={{ fontSize: 'var(--eb-text-sm)' }}>Remove this hand-off?</strong>
-              <label style={check}>
+              {/* #2708: describe the trigger by what it does; the auto-generated
+                  ID only as a tooltip (as #1818 did for the chat notice). */}
+              <label style={check} title={`Trigger ID: ${triggerId}`}>
                 <input type="checkbox" checked={delListener} onChange={e => setDelListener(e.target.checked)} />
-                Delete listener trigger <code>{triggerId}</code> on {toName || to}
+                Delete the trigger that wakes {toName || to} on label <code>{label}</code>
               </label>
               {!humanSource && (
                 <label style={check}>

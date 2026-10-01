@@ -7,6 +7,7 @@ import {
   loadDraft,
   saveDraft,
   clearDraft,
+  restoreUnsentText,
 } from './message-draft.js';
 
 // A minimal localStorage stand-in.
@@ -104,4 +105,14 @@ test('does not touch the sendKeybinding key (AC5)', () => {
   saveDraft('a', 'hello', store);
   clearDraft('a', store);
   assert.equal(store._map.get('agentChat.sendKeybinding'), 'chat');
+});
+
+test('a refused send gives the typed text back to an empty composer (#2721 AC5)', () => {
+  assert.equal(restoreUnsentText('', 'hello agent'), 'hello agent');
+  assert.equal(restoreUnsentText('   ', 'hello agent'), 'hello agent');
+});
+
+test('a refused send never overwrites text typed since', () => {
+  assert.equal(restoreUnsentText('new thought', 'hello agent'), 'new thought');
+  assert.equal(restoreUnsentText('', ''), '');
 });

@@ -114,6 +114,11 @@ const STUB_NAMES = [
   // module-level helper rather than an inline `githubEventLog.record(…)`
   // precisely so it can be stubbed here and asserted on.
   "recordOffboardingDegradation",
+  // #2721 — the deduping provisioner behind the send-time and operator
+  // matrix-identity routes, and the Users-page status decoration.
+  "humanMatrixProvisioner",
+  "withMatrixIdentityStatus",
+  "OPERATOR_PROVISION_KEY_PREFIX",
 ];
 
 function handlerSource() {
@@ -129,7 +134,7 @@ function handlerSource() {
 
 // Build a fresh sandbox per test so calls are never shared between them.
 function loadHandler(overrides = {}) {
-  const calls = { provisioned: [], deprovisioned: [], offboarded: [], logs: [], degradations: [] };
+  const calls = { provisioned: [], deprovisioned: [], offboarded: [], logs: [], degradations: [], ensured: [] };
 
   const sandbox = {
     URL,
@@ -150,8 +155,8 @@ function loadHandler(overrides = {}) {
     sendJson: (res, status, payload) => { res.sent = { status, payload }; },
     teamAdminSuccession: { planUserDeletion: () => ({ ok: true }) },
     teamHasOwnedResources: () => false,
-    provisionHumanMatrixIdentityInBackground: (adminClient, user) => {
-      calls.provisioned.push({ adminClient, user });
+    provisionHumanMatrixIdentityInBackground: (user) => {
+      calls.provisioned.push({ user });
     },
     deprovisionHumanMatrixIdentity: async (adminClient, userId) => {
       calls.deprovisioned.push({ adminClient, userId });
@@ -165,6 +170,15 @@ function loadHandler(overrides = {}) {
       },
     },
     recordOffboardingDegradation: (userId, detail) => { calls.degradations.push({ userId, detail }); },
+    humanMatrixProvisioner: {
+      ensure: async (user) => {
+        calls.ensured.push(user);
+        return { matrixUserId: "@u-0123456789abcdef:local", accessToken: "SECRET-TOKEN" };
+      },
+      statusFor: () => ({ status: "ready" }),
+    },
+    withMatrixIdentityStatus: (u) => ({ ...u, matrixIdentity: { status: "ready" } }),
+    OPERATOR_PROVISION_KEY_PREFIX: "operator:",
     ...overrides,
   };
 
@@ -196,22 +210,10 @@ test("POST /internal/admin/users returns 201 with the created record", async () 
   assert.equal(res.sent.payload.id, "u-1");
   assert.equal(res.sent.payload.passwordHash, undefined, "the response must still be sanitized");
   assert.deepEqual(
-    calls.provisioned.map(c => c.adminClient),
-    ["ADMIN"],
-    "provisioning must be handed the singleton's adminClient",
+    calls.provisioned.map(c => c.user.id),
+    ["u-1"],
+    "provisioning must be started for the created record",
   );
-});
-
-test("a missing orchestrator singleton degrades the create — it does not throw", async () => {
-  // The boot window: `internalApi` is listening before main() assigns the
-  // singleton. `ensureHumanMatrixIdentity` tolerates a null adminClient, so the
-  // create must still succeed with the identity left for the next call to repair.
-  const { fn, calls } = loadHandler({ orchestratorSingleton: null });
-
-  const { res } = await call(fn, "POST", "/internal/admin/users");
-
-  assert.equal(res.sent.status, 201);
-  assert.deepEqual(calls.provisioned.map(c => c.adminClient), [null]);
 });
 
 test("post-persist work cannot fail a write that already landed", async () => {
@@ -458,4 +460,82 @@ test("AC9 companion: readBody tags a malformed body 400, so the catch-all answer
     assert.equal(err.statusHint, 400, "a malformed body must be tagged 400, not left to answer 500");
     return true;
   });
+});
+
+// ---------------------------------------------------------------------------
+// #2721 — the send-time and single-operator identity routes, EXECUTED.
+// ---------------------------------------------------------------------------
+
+const failingProvisioner = (calls) => ({
+  ensure: async (user) => { calls.push(user); throw new Error("homeserver unavailable"); },
+  statusFor: () => ({ status: "failed" }),
+});
+
+test("POST /internal/admin/users/:id/matrix-identity provisions now and never returns the token", async () => {
+  const { fn, calls } = loadHandler({
+    teamsStore: { getUser: (id) => (id === "u-7" ? { id: "u-7", subject: "jane@corp.com" } : null), sanitizeUser: (u) => u },
+  });
+  const { handled, res } = await call(fn, "POST", "/internal/admin/users/u-7/matrix-identity");
+  assert.equal(handled, true);
+  assert.equal(res.sent.status, 200);
+  // JSON round-trip: the payload is built inside the vm realm.
+  assert.deepEqual(JSON.parse(JSON.stringify(res.sent.payload)), { matrixUserId: "@u-0123456789abcdef:local", status: "ready" });
+  assert.ok(!JSON.stringify(res.sent.payload).includes("SECRET-TOKEN"), "the token must never leave the orchestrator");
+  assert.deepEqual(calls.ensured.map((u) => u.id), ["u-7"]);
+});
+
+test("a failed send-time provisioning is a 503 with the chat-identity-not-ready code", async () => {
+  const attempts = [];
+  const { fn } = loadHandler({
+    teamsStore: { getUser: () => ({ id: "u-7", subject: "jane@corp.com" }), sanitizeUser: (u) => u },
+    humanMatrixProvisioner: failingProvisioner(attempts),
+  });
+  const { res } = await call(fn, "POST", "/internal/admin/users/u-7/matrix-identity");
+  assert.equal(res.sent.status, 503);
+  assert.equal(res.sent.payload.code, "chat-identity-not-ready");
+  assert.equal(attempts.length, 1);
+});
+
+test("an unknown (or deleted) user is a 404 and is never provisioned", async () => {
+  const { fn, calls } = loadHandler({
+    teamsStore: { getUser: () => null, sanitizeUser: (u) => u },
+  });
+  const { res } = await call(fn, "POST", "/internal/admin/users/gone/matrix-identity");
+  assert.equal(res.sent.status, 404);
+  assert.deepEqual(calls.ensured, []);
+});
+
+test("POST /internal/admin/operator/matrix-identity provisions the single operator under its own key", async () => {
+  const { fn, calls } = loadHandler({ readBody: async () => ({ subject: " Admin " }) });
+  const { handled, res } = await call(fn, "POST", "/internal/admin/operator/matrix-identity");
+  assert.equal(handled, true);
+  assert.equal(res.sent.status, 200);
+  assert.equal(res.sent.payload.matrixUserId, "@u-0123456789abcdef:local");
+  assert.ok(!JSON.stringify(res.sent.payload).includes("SECRET-TOKEN"));
+  assert.equal(calls.ensured.length, 1);
+  assert.equal(calls.ensured[0].id, "operator:admin", "keyed apart from every user id, so no record collides");
+  assert.equal(calls.ensured[0].operator, true);
+  assert.equal(calls.ensured[0].subject, "Admin");
+});
+
+test("the operator route refuses a missing subject and fails closed on a provisioning error", async () => {
+  const missing = loadHandler({ readBody: async () => ({}) });
+  const r1 = await call(missing.fn, "POST", "/internal/admin/operator/matrix-identity");
+  assert.equal(r1.res.sent.status, 400);
+  assert.deepEqual(missing.calls.ensured, []);
+
+  const attempts = [];
+  const down = loadHandler({ readBody: async () => ({ subject: "admin" }), humanMatrixProvisioner: failingProvisioner(attempts) });
+  const r2 = await call(down.fn, "POST", "/internal/admin/operator/matrix-identity");
+  assert.equal(r2.res.sent.status, 503);
+  assert.equal(r2.res.sent.payload.code, "chat-identity-not-ready");
+});
+
+test("GET /internal/admin/users decorates every record with its identity status (AC8)", async () => {
+  const { fn } = loadHandler({
+    teamsStore: { listUsers: () => [{ id: "u-1", passwordHash: "x" }], sanitizeUser: (u) => { const { passwordHash, ...r } = u; return r; } },
+  });
+  const { res } = await call(fn, "GET", "/internal/admin/users");
+  assert.equal(res.sent.status, 200);
+  assert.deepEqual(JSON.parse(JSON.stringify(res.sent.payload)), [{ id: "u-1", matrixIdentity: { status: "ready" } }]);
 });

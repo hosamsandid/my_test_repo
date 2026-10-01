@@ -90,7 +90,9 @@ an **Agent Team** (a squad of agents working a repo). They only share a word.
   account `@u-<16 hex of sha256(subject)>:local` (`human-matrix-identity.js`,
   token stored out-of-record in `human-matrix-store.js`). Interactive chat sends
   as the acting human's own account, invited into the agent's shared room on
-  first use. Detail: `docs/multi-user-concept.md`.
+  first use; missing identities are backfilled/retried
+  (`human-matrix-provisioner.js`) and a send without one is refused — never
+  the shared admin. Detail: `docs/multi-user-concept.md`.
 - **Ownership**: `role: 'team'` and standalone `role: 'agent'` configs carry an
   **`ownerId`** + `ownerSource`. Access is answered per **Agent Team**
   (`resolveAgentTeam` — a `team` is its own boundary; a `team-member` is bounded

@@ -100,6 +100,7 @@ test('each Model Providers surface mounts a "?" pointed at its own chapter', () 
     ['the OAuth single-user box', 'oauthSingleUser'],
     ['the Test / Discover row', 'probes'],
     ['the Health column header', 'health'],
+    ['the Budget column header', 'budget'],
   ];
   assert.ok(
     /import PageHelpButton from '\.\.\/components\/PageHelpButton'/.test(page),

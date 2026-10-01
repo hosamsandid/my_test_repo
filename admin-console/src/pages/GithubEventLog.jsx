@@ -519,7 +519,7 @@ function ProcessedEventsView() {
         />
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
-        <select value={rangeKey} onChange={e => setRangeKey(e.target.value)} style={controlStyle}>
+        <select value={rangeKey} onChange={e => setRangeKey(e.target.value)} style={controlStyle} aria-label="Time range">
           {RANGE_PRESETS.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
         </select>
         <button onClick={refreshAll} style={{ ...controlStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>

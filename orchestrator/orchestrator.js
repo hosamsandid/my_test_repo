@@ -187,6 +187,7 @@ const { buildEnsureUserCommands, buildReactivateCommands } = require("./matrix-a
 const matrixLoginRetry = require("./matrix-login-retry");
 const humanMatrixIdentity = require("./human-matrix-identity");
 const { createHumanMatrixStore } = require("./human-matrix-store");
+const { createHumanMatrixProvisioner } = require("./human-matrix-provisioner");
 const skillManifest = require("./skill-manifest");
 const skillDelivery = require("./skill-delivery");
 const skillCommands = require("./skill-commands");
@@ -6246,21 +6247,13 @@ async function deactivateMatrixUserId(adminClient, matrixUserId) {
   }
 }
 
-// Idempotent: make sure `user` has a Matrix account and a stored access token.
-// Returns the credential record, or null when it could not be provisioned.
-//
-// Idempotency matters because the callers are best-effort: a create that failed
-// (admin bot down, homeserver restarting) must be repairable by simply calling
-// this again, and a call for an already-provisioned user must be a cheap no-op
-// rather than a second round of admin-room traffic.
-async function ensureHumanMatrixIdentity(adminClient, user) {
-  if (!user || !user.id || !user.subject) return null;
-
-  const existing = humanMatrixStore.readIdentity(user.id);
-  if (existing && existing.accessToken) return existing;
-
-  const localpart = humanMatrixIdentity.humanMatrixLocalpart(user.subject);
-  const matrixUserId = humanMatrixIdentity.humanMatrixUserId(user.subject);
+// Create (or re-activate) the personal Matrix account for `subject` and log in
+// to it. Returns `{ matrixUserId, accessToken }`; throws when the login does
+// not succeed. Shared by the user-record path and the single-operator path
+// (#2721 AC9) so the one `allowHumanLocalpart` opt-out stays in one place.
+async function provisionHumanMatrixAccount(adminClient, { subject, displayName }) {
+  const localpart = humanMatrixIdentity.humanMatrixLocalpart(subject);
+  const matrixUserId = humanMatrixIdentity.humanMatrixUserId(subject);
 
   // A human's Matrix password is never typed by anyone — the access token from
   // the login below is what we keep — so it is a full-entropy random value
@@ -6274,7 +6267,55 @@ async function ensureHumanMatrixIdentity(adminClient, user) {
 
   // Display name = the corporate display name (concept §4 step 2). This is the
   // only human-readable thing room members see, since the localpart is a hash.
-  await setDisplayName(accessToken, matrixUserId, user.displayName || user.subject);
+  await setDisplayName(accessToken, matrixUserId, displayName || subject);
+  return { matrixUserId, accessToken };
+}
+
+// A stored credential is usable only if it names a PERSONAL identity (#2721
+// AC7) — never the shared admin account or an agent account.
+function isUsableHumanCredential(identity) {
+  return !!(identity && identity.accessToken
+    && humanMatrixIdentity.isHumanMatrixUserId(identity.matrixUserId));
+}
+
+// Does this user record have a working personal identity: a usable stored
+// credential AND the matching pointer on the record? A credential whose
+// pointer was never stamped (or was cleared by the AC7 repair) counts as
+// missing, so the backfill re-stamps it.
+function userHasPersonalMatrixIdentity(user) {
+  if (!user || !user.id) return false;
+  const identity = humanMatrixStore.readIdentity(user.id);
+  return isUsableHumanCredential(identity) && user.matrixUserId === identity.matrixUserId;
+}
+
+// Idempotent: make sure `user` has a Matrix account and a stored access token.
+// Returns the credential record, or null when it could not be provisioned.
+//
+// Idempotency matters because the callers are best-effort: a create that failed
+// (admin bot down, homeserver restarting) must be repairable by simply calling
+// this again, and a call for an already-provisioned user must be a cheap no-op
+// rather than a second round of admin-room traffic. Callers go through
+// `humanMatrixProvisioner` (#2721), which serialises concurrent calls per user.
+async function ensureHumanMatrixIdentity(adminClient, user) {
+  if (!user || !user.id || !user.subject) return null;
+
+  // A deleted user is never (re-)provisioned (#2721 edge case): the record is
+  // re-read rather than trusted from the caller, which may hold a stale list.
+  const current = teamsStore.getUser(user.id);
+  if (!current) return null;
+
+  const existing = humanMatrixStore.readIdentity(user.id);
+  if (isUsableHumanCredential(existing)) {
+    if (current.matrixUserId !== existing.matrixUserId) {
+      teamsStore.setUserMatrixIdentity(user.id, existing.matrixUserId);
+    }
+    return existing;
+  }
+
+  const { matrixUserId, accessToken } = await provisionHumanMatrixAccount(adminClient, {
+    subject: current.subject,
+    displayName: current.displayName,
+  });
 
   const record = humanMatrixStore.writeIdentity(user.id, { matrixUserId, accessToken });
   // The pointer — not the token — goes on the user record so other components
@@ -6285,20 +6326,100 @@ async function ensureHumanMatrixIdentity(adminClient, user) {
   } catch (err) {
     console.warn(`[Orchestrator] could not stamp matrixUserId on user ${user.id}: ${err.message}`);
   }
+  // Deleted while the account was being created: retire it again rather than
+  // leave a live credential behind a record that no longer exists.
+  if (!teamsStore.getUser(user.id)) {
+    await deprovisionHumanMatrixIdentity(adminClient, user.id);
+    return null;
+  }
   console.log(`[Orchestrator] Provisioned Matrix identity ${matrixUserId} for user ${user.id}`);
   return record;
 }
 
+// The single-operator principal's personal identity (#2721 AC9): the env admin
+// signs in with no user record, and must still never chat as the shared admin
+// account. Derived from its login subject like any human's, stored in the
+// credential store's `_operator` slot.
+async function ensureOperatorMatrixIdentity(adminClient, { subject, displayName } = {}) {
+  if (!humanMatrixIdentity.normalizeSubject(subject)) return null;
+  const existing = humanMatrixStore.readOperatorIdentity(subject);
+  if (isUsableHumanCredential(existing)) return existing;
+  const { matrixUserId, accessToken } = await provisionHumanMatrixAccount(adminClient, { subject, displayName });
+  const record = humanMatrixStore.writeOperatorIdentity(subject, { matrixUserId, accessToken });
+  console.log(`[Orchestrator] Provisioned the operator's personal Matrix identity ${matrixUserId}`);
+  return record;
+}
+
+// Every provisioning — user create, startup backfill, the periodic retry and the
+// console's send-time request — goes through this one instance (#2721), so
+// concurrent attempts for the same person share one in-flight call and the
+// Users page can report failures. The operator rides the same dedupe under a
+// key that cannot collide with a user UUID.
+const OPERATOR_PROVISION_KEY_PREFIX = "operator:";
+const humanMatrixProvisioner = createHumanMatrixProvisioner({
+  provision: async (user) => {
+    const adminClient = orchestratorSingleton ? orchestratorSingleton.adminClient : null;
+    const record = user.operator
+      ? await ensureOperatorMatrixIdentity(adminClient, user)
+      : await ensureHumanMatrixIdentity(adminClient, user);
+    if (!record) throw new Error("Matrix identity could not be provisioned");
+    return record;
+  },
+  hasIdentity: userHasPersonalMatrixIdentity,
+  listUsers: () => teamsStore.listUsers(),
+  log: (msg) => console.warn(`[Orchestrator] ${msg}`),
+});
+
 // Fire-and-forget wrapper for the create path: provisioning costs several
 // seconds of admin-bot settle delays, and a homeserver hiccup must not fail the
 // user creation the caller actually asked for. A user left without an identity
-// is repaired by the next `ensureHumanMatrixIdentity` call.
-function provisionHumanMatrixIdentityInBackground(adminClient, user) {
-  ensureHumanMatrixIdentity(adminClient, user).catch((err) => {
+// is repaired by the periodic backfill or, at the latest, by their first send.
+function provisionHumanMatrixIdentityInBackground(user) {
+  humanMatrixProvisioner.ensure(user).catch((err) => {
     console.warn(
       `[Orchestrator] Matrix identity provisioning deferred for user ${user && user.id}: ${err.message}`,
     );
   });
+}
+
+// The Users page's per-user identity status (#2721 AC8). Non-secret: the
+// status and the last failure message, never the token.
+function withMatrixIdentityStatus(user) {
+  return user ? { ...user, matrixIdentity: humanMatrixProvisioner.statusFor(user) } : user;
+}
+
+// Personal chat identities for every human (#2721), started once at boot.
+// First the AC7 repair — a record pointing at the shared admin (or any service)
+// account is cleared so it can never stand in for a person — then the backfill
+// gives every user without an identity one (the bootstrap System Admin, users
+// created before #2173, failed attempts), and a timer keeps retrying until it
+// succeeds. Idempotent and non-blocking: the boot never waits on the homeserver.
+function startHumanMatrixIdentityMaintenance() {
+  try {
+    const cleared = teamsStore.clearNonPersonalMatrixIdentities();
+    if (cleared.length > 0) {
+      console.warn(`[Orchestrator] Cleared a non-personal matrixUserId from ${cleared.length} user record(s): ${cleared.join(', ')}`);
+    }
+  } catch (err) {
+    console.warn(`[Orchestrator] matrixUserId repair pass failed: ${err.message}`);
+  }
+  const HUMAN_MATRIX_RETRY_INTERVAL_MS = Math.max(
+    30_000,
+    Number(process.env.HUMAN_MATRIX_RETRY_INTERVAL_MS) || 2 * 60 * 1000,
+  );
+  const runHumanMatrixBackfill = () => humanMatrixProvisioner.backfill()
+    .then((summary) => {
+      if (summary.attempted > 0) {
+        console.log(
+          `[Orchestrator] Matrix identity backfill: ${summary.provisioned} provisioned, `
+          + `${summary.failed} pending retry`,
+        );
+      }
+    })
+    .catch((err) => console.warn(`[Orchestrator] Matrix identity backfill failed: ${err.message}`));
+  runHumanMatrixBackfill();
+  const humanMatrixTimer = setInterval(runHumanMatrixBackfill, HUMAN_MATRIX_RETRY_INTERVAL_MS);
+  if (typeof humanMatrixTimer.unref === "function") humanMatrixTimer.unref();
 }
 
 // Off-boarding counterpart: deactivate the account and drop the stored token so
@@ -15046,6 +15167,27 @@ async function handleTeamsAdminApi(req, res) {
       }
     }
 
+    // The single-operator principal's personal chat identity (#2721 AC9): the
+    // env admin has no user record, so the console names it by its login
+    // subject. Same dedupe, same refusal shape as the per-user route below.
+    if (collection === 'operator' && resourceId === 'matrix-identity' && req.method === 'POST') {
+      const body = await readBody(req);
+      const subject = typeof body.subject === 'string' ? body.subject.trim() : '';
+      if (!subject) return sendJson(res, 400, { error: 'subject is required' }), true;
+      try {
+        const record = await humanMatrixProvisioner.ensure({
+          id: `${OPERATOR_PROVISION_KEY_PREFIX}${subject.toLowerCase()}`,
+          subject,
+          displayName: subject,
+          operator: true,
+        });
+        return sendJson(res, 200, { matrixUserId: record.matrixUserId, status: 'ready' }), true;
+      } catch (err) {
+        console.warn(`[Orchestrator] operator Matrix identity provisioning failed: ${err.message}`);
+        return sendJson(res, 503, { error: 'chat identity not ready', code: 'chat-identity-not-ready' }), true;
+      }
+    }
+
     if (collection === 'users') {
       const subAction = segs[4] || null; // e.g. /internal/admin/users/<id>/password
       const clean = teamsStore.sanitizeUser; // strip passwordHash from every response
@@ -15076,35 +15218,39 @@ async function handleTeamsAdminApi(req, res) {
           const u = teamsStore.getUserBySubject(subject);
           return sendJson(res, 200, u ? [clean(u)] : []), true;
         }
-        return sendJson(res, 200, teamsStore.listUsers().map(clean)), true;
+        return sendJson(res, 200, teamsStore.listUsers().map(clean).map(withMatrixIdentityStatus)), true;
+      }
+      // Send-time "provision now" (#2721 AC3/AC5): the console calls this when
+      // a human's chat identity is missing at the moment they send, and refuses
+      // the send if it still cannot be established. Joins any attempt already
+      // running for the same user. Never returns the token.
+      if (req.method === 'POST' && resourceId && subAction === 'matrix-identity') {
+        const target = teamsStore.getUser(resourceId);
+        if (!target) return sendJson(res, 404, { error: `User '${resourceId}' not found` }), true;
+        try {
+          const record = await humanMatrixProvisioner.ensure(target);
+          return sendJson(res, 200, { matrixUserId: record.matrixUserId, status: 'ready' }), true;
+        } catch (err) {
+          console.warn(`[Orchestrator] send-time Matrix identity provisioning failed for user ${resourceId}: ${err.message}`);
+          return sendJson(res, 503, { error: 'chat identity not ready', code: 'chat-identity-not-ready' }), true;
+        }
       }
       if (req.method === 'POST' && !resourceId) {
         const body = await readBody(req);
         const created = teamsStore.createUser(body);
-        // Give the new human their own Matrix account (#1458). Deliberately
-        // wired HERE and not inside teamsStore.createUser: the startup
-        // `ensureSystemAdmin` bootstrap also goes through createUser, and the
-        // bootstrap admin must ADOPT the existing shared-admin identity
-        // (`@admin:local`) and its rooms rather than be handed a fresh empty
-        // account — that adoption is the migration slice's job.
-        //
-        // A single-operator stack creates no user records at all (the env
-        // admin of #276 has none), so nothing here fires and its behaviour is
-        // unchanged end to end.
-        //
-        // `orchestratorSingleton` (not `orchestrator`, #2135): this is a
-        // module-level free function, so the `const orchestrator` of main() is
-        // not in scope here — reading it threw a ReferenceError *while
-        // evaluating the argument*, i.e. before the background helper's own
-        // .catch() could ever see it. A missing singleton degrades to a null
-        // adminClient, which `ensureHumanMatrixIdentity` already tolerates.
+        // Give the new human their own Matrix account (#1458). The bootstrap
+        // System Admin is seeded through teamsStore directly and never reaches
+        // this line; it — like every user created before #2173 and every user
+        // whose attempt here fails — is covered by the startup backfill and
+        // its periodic retry (#2721), never by adopting the shared admin
+        // account. The provisioner reads `orchestratorSingleton` (#2135) at
+        // call time and tolerates a null adminClient during the boot window.
         //
         // Wrapped because the record is ALREADY on disk by this line: no
         // failure after the persisting write may turn a completed create into
         // a 500 the operator reads as "nothing happened".
         try {
-          provisionHumanMatrixIdentityInBackground(
-            orchestratorSingleton ? orchestratorSingleton.adminClient : null, created);
+          provisionHumanMatrixIdentityInBackground(created);
         } catch (err) {
           console.error(
             `[Orchestrator] Matrix identity provisioning could not be started for user ${created && created.id}: ${err.message}`);
@@ -15114,7 +15260,7 @@ async function handleTeamsAdminApi(req, res) {
       if (req.method === 'GET' && resourceId) {
         const u = teamsStore.getUser(resourceId);
         if (!u) return sendJson(res, 404, { error: `User '${resourceId}' not found` }), true;
-        return sendJson(res, 200, clean(u)), true;
+        return sendJson(res, 200, withMatrixIdentityStatus(clean(u))), true;
       }
       if (req.method === 'PUT' && resourceId) {
         const body = await readBody(req);
@@ -15331,6 +15477,9 @@ async function main() {
   // runs after init and must never block or break the boot.
   try { migrateUnifiedAgentsMemory(); }
   catch (err) { console.warn(`[Orchestrator] legacy-memory migration pass failed: ${err.message}`); }
+
+  // Personal chat identities for every human (#2721): repair, backfill, retry.
+  startHumanMatrixIdentityMaintenance();
 
   // Offboarding reconciliation (#2138 AC2). Replays the offboarding every user
   // deleted between 2026-08-11 and the #2135 fix never got. Runs after init()

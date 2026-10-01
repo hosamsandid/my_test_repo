@@ -241,11 +241,25 @@ function computeHillClimbMetrics(inputs = {}, opts = {}) {
   };
 
   // ── dead config ───────────────────────────────────────────────────────────
+  // A trigger activated inside the window has not been observed for a whole
+  // window yet, so "zero fires this window" is no evidence it is dead (#2710).
+  // Unstamped (legacy) triggers count as old.
   const firedTriggers = new Set(runs.filter((r) => r.triggerId).map((r) => `${r.agentId}\u0000${r.triggerId}`));
   const zeroFireTriggers = (Array.isArray(inputs.triggerDefs) ? inputs.triggerDefs : [])
     .filter((t) => t && t.triggerId && !exclude.has(t.agentId))
     .filter((t) => !firedTriggers.has(`${t.agentId}\u0000${t.triggerId}`))
-    .map((t) => ({ agentId: t.agentId, triggerId: t.triggerId }));
+    .filter((t) => {
+      const since = t.since ? Date.parse(t.since) : NaN;
+      return !(Number.isFinite(since) && since > fromMs);
+    })
+    .map((t) => ({
+      agentId: t.agentId,
+      triggerId: t.triggerId,
+      ...(t.agentName ? { agentName: t.agentName } : {}),
+      ...(t.type ? { type: t.type } : {}),
+      ...(Array.isArray(t.events) && t.events.length ? { events: t.events } : {}),
+      ...(t.labelFilter ? { labelFilter: t.labelFilter } : {}),
+    }));
   const consumed = new Set((Array.isArray(inputs.consumedLabels) ? inputs.consumedLabels : []).filter(Boolean));
   const unconsumedEmits = [...new Set((Array.isArray(inputs.emitLabels) ? inputs.emitLabels : []).filter(Boolean))]
     .filter((l) => !consumed.has(l))

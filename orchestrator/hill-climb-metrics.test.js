@@ -154,6 +154,39 @@ test('computeHillClimbMetrics folds the full §4 catalog on a healthy window', (
   assert.equal(out.ledger.length, 2);
 });
 
+test('zero-fire skips triggers activated inside the window (#2710)', () => {
+  const inputs = goldenInputs();
+  inputs.triggerDefs = [
+    { agentId: 'dev', triggerId: 't-dev' },
+    { agentId: 'rev', triggerId: 't-new', since: hAgo(0.05) }, // 3 minutes old
+    { agentId: 'rev', triggerId: 't-old', since: dAgo(30), agentName: 'Reviewer', type: 'github-event',
+      events: ['issues.labeled'], labelFilter: 'ready-for-review' },
+    { agentId: 'rev', triggerId: 't-legacy' }, // no stamp → treated as old
+  ];
+  const out = computeHillClimbMetrics(inputs, { now: NOW, windowDays: 7, minRunsPerWindow: 20 });
+  assert.deepEqual(out.metrics.deadConfig.zeroFireTriggers, [
+    { agentId: 'rev', triggerId: 't-old', agentName: 'Reviewer', type: 'github-event',
+      events: ['issues.labeled'], labelFilter: 'ready-for-review' },
+    { agentId: 'rev', triggerId: 't-legacy' },
+  ]);
+});
+
+test('a freshly created cron trigger is left out of zeroFireTriggers (#2710 review B1)', () => {
+  const { triggerDefsFromMembers } = require('./hill-climb-sweep');
+  const created = NOW - 3 * 60000; // 3 minutes old
+  const inputs = goldenInputs();
+  inputs.triggerDefs = triggerDefsFromMembers([{
+    id: 'dev',
+    triggers: [
+      { id: `t${created}`, type: 'cron', cron: '0 9 * * *', createdAt: new Date(created).toISOString() }, // console POST
+      { id: `t${created + 1}`, type: 'cron', cron: '0 9 * * *' },  // unstamped, console-generated id
+      { id: `t${NOW - 30 * 24 * 3600000}`, type: 'cron', cron: '0 9 * * *' }, // id from 30 days ago
+    ],
+  }]);
+  const out = computeHillClimbMetrics(inputs, { now: NOW, windowDays: 7, minRunsPerWindow: 20 });
+  assert.deepEqual(out.metrics.deadConfig.zeroFireTriggers.map((t) => t.triggerId), [`t${NOW - 30 * 24 * 3600000}`]);
+});
+
 test('insufficient-data below minRunsPerWindow nulls the ratio metrics but keeps counts', () => {
   const inputs = goldenInputs();
   const out = computeHillClimbMetrics(inputs, { now: NOW, windowDays: 7, minRunsPerWindow: 100 });

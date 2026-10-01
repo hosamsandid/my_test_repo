@@ -34,6 +34,34 @@ export function hasOwnSkills(role) {
 }
 
 /**
+ * The team skill pool an agent's grants resolve against (#2689) — the same key
+ * seeding uses (orchestrator `agentKnowledgeTeamId`): a member's parent Agent
+ * Team, a `team` agent's own id, else the legacy human `teamId`. Every team
+ * agent still carries the legacy `teamId: "default"`, so keying the picker by
+ * it listed the wrong pool (no team rows, team copies labelled Global).
+ *
+ * @param {object} agent  the agent config
+ * @returns {string|null} pool team id, or null for no team pool
+ */
+export function skillPoolTeamId(agent) {
+  if (!agent) return null;
+  if (typeof agent.parentTeamId === 'string' && agent.parentTeamId.trim()) return agent.parentTeamId;
+  if (agent.role === 'team' && typeof agent.id === 'string' && agent.id.trim()) return agent.id;
+  return agent.teamId || null;
+}
+
+/**
+ * The grant picker's skill list URL: global pool plus the agent's team pool.
+ *
+ * @param {object} agent  the agent config
+ * @returns {string}
+ */
+export function skillsListUrl(agent) {
+  const poolTeamId = skillPoolTeamId(agent);
+  return poolTeamId ? `/api/skills?teamId=${encodeURIComponent(poolTeamId)}` : '/api/skills';
+}
+
+/**
  * Initial form state for an agent config.
  *
  * `agent.systemPrompt` / `agent.skillsOverride` / `agent.mcpServersOverride`

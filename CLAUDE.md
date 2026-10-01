@@ -429,7 +429,9 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   sub-grouping** (#2297): the same live instances, nested under their role as a
   collapsible **Instances (N)** sub-list in the left rail instead of scattered
   flat among the team's members — `poolInstance`/`poolOf`/`poolItem` surfaced on
-  `GET /api/matrix/agents`, nested by `agent-list-model.js` `buildGroups`. **The
+  `GET /api/matrix/agents`, nested by `agent-list-model.js` `buildGroups`; the
+  label reads against the role's cap (*Instances (5 / 3)*, `poolMaxInstances`,
+  #2760 — `pool-cap-view.js`, shared with the Scaling section). **The
   rail live-refreshes** (#2311): `AgentRosterContext` polls the same endpoint on
   its own ~5s beat (a shared singleton poll, mirroring `AgentStatusesContext`'s
   #1677 pattern; paused while the tab is hidden), diffed by `roster-diff.js` so

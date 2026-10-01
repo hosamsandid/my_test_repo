@@ -90,6 +90,36 @@ export function doneTitle(row) {
   return when ? `Finished ${when}` : '';
 }
 
+// ---------------------------------------------------------------------------
+// Jump to the working agent's chat (#2723)
+// ---------------------------------------------------------------------------
+
+// The pool item a `<template>-i<item>` instance id encodes, or null — the same
+// shape `orchestrator/flow-board.js` reads.
+export function instanceOf(agentId) {
+  const m = /-i(\d+)$/.exec(typeof agentId === 'string' ? agentId : '');
+  return m ? Number(m[1]) : null;
+}
+
+// The in-console link to the chat of the agent running right now, or null.
+// `agentId` is the exact runner — for a pooled role its instance, never the
+// template — so a row that is `working` only by a claim label (no session,
+// `agentId` null) gets no link. `name` is the role's display name.
+export function chatLink(agentId, name, instance = instanceOf(agentId)) {
+  if (typeof agentId !== 'string' || !agentId) return null;
+  const who = `${name || agentId}${instance != null ? ` #${instance}` : ''}`;
+  return { to: `/chats/${encodeURIComponent(agentId)}`, label: `Open chat with ${who}` };
+}
+
+// Hover and keyboard-focus affordance for those links; inline styles cannot
+// express `:hover`/`:focus-visible`, so `FlowControl.jsx` mounts this once.
+export const CHAT_LINK_CLASS = 'flow-control-chat-link';
+export const CHAT_LINK_CSS = `
+.${CHAT_LINK_CLASS} { color: inherit; text-decoration: none; border-radius: var(--eb-radius-sm, 4px); }
+.${CHAT_LINK_CLASS}:hover { text-decoration: underline; color: var(--eb-accent-primary); }
+.${CHAT_LINK_CLASS}:focus-visible { outline: 2px solid var(--eb-accent-primary); outline-offset: 2px; }
+`.trim();
+
 // One board row: title, links, the progress steps and the current stage with
 // its time in stage. For a done row `since` is the completion time, so "in
 // stage" reads "in Done since" (#2643). `stages` is the board's own stage list, so the step count
@@ -115,6 +145,7 @@ export function rowView(row, stages, { now = Date.now(), singleRepo = true } = {
     status: row.status,
     statusText: STATUS_TEXT[row.status] || '',
     agentId: row.agentId || null,
+    chat: row.status === 'working' ? chatLink(row.agentId, row.roleLabel || (stage && stage.label)) : null,
     inStage: since(row.since, now),
     inStageTitle: doneTitle(row),
     done: !!row.done,
@@ -173,11 +204,13 @@ export function sessionView(s, { now = Date.now(), singleRepo = true } = {}) {
     : Array.isArray(s.prs) && s.prs[0]
       ? `PR ${itemRef(s.prs[0].repo, s.prs[0].number, singleRepo)}`
       : '';
+  const role = s.roleLabel || s.roleId || s.agentId;
   return {
     id: s.id || s.agentId,
-    role: s.roleLabel || s.roleId || s.agentId,
+    role,
     instance: s.instance != null ? `#${s.instance}` : null,
     agentId: s.agentId,
+    chat: chatLink(s.agentId, role, s.instance != null ? s.instance : null),
     item,
     title: s.title || null,
     running: since(s.startedAt, now),

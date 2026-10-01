@@ -100,6 +100,10 @@ export async function apiCall(method, url, body) {
     // the way the clone/import forms already do over their own raw fetch.
     if (err && err.agentId) e.agentId = err.agentId;
     if (err && err.suggestedId) e.suggestedId = err.suggestedId;
+    // A 502 `applied-not-recorded` / `rolled-back-not-recorded` (#2709) means
+    // the mutation DID happen; the caller must not report it as a failure.
+    if (err && err.applied === true) e.applied = true;
+    if (err && err.rolledBack === true) e.rolledBack = true;
     throw e;
   }
   return res.status === 204 ? null : res.json();

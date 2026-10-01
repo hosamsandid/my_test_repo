@@ -6819,6 +6819,8 @@ app.get('/api/process/graph', (req, res) => {
       emits: liftAgentEmits(cfg.emits, triggers),
       outcomes: cfg.outcomes || null, // structured OUTCOMES port (#827), supersedes emits
       github: cfg.github || null, channels: Array.isArray(cfg.channels) ? cfg.channels : [],
+      // A switched-off agent drives the `wake-label-no-live-consumer` lint (#2754).
+      ...(cfg.enabled === false ? { enabled: false } : {}),
     });
   }
   const teamHumans = teamHumansRegistry(team);
@@ -9133,6 +9135,8 @@ app.get('/api/flows/graph', async (req, res) => {
       // GitHub artifact ports (#380): produce flags + consumed channels.
       github: cfg.github || null,
       channels: Array.isArray(cfg.channels) ? cfg.channels : [],
+      // A switched-off agent drives the `wake-label-no-live-consumer` lint (#2754).
+      ...(cfg.enabled === false ? { enabled: false } : {}),
     });
   }
   // Ordered stage names persisted on the team agent (#stage-order) drive the
@@ -9246,6 +9250,33 @@ app.post('/api/teams/:teamId/flow-board-removed', apiLimiter, async (req, res) =
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, rowId }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/flow-board-release — "Release claim" on a row the
+// board flags as stuck on an orphaned `:wip` claim (#2754). Body `{ rowId }`.
+// Unlike Remove, this DOES change the GitHub item (swaps `<wake>:wip` back to
+// `<wake>` so the poller re-dispatches it), so it is gated like every other
+// board write and the actor — always the session user, never the body — is
+// stamped onto the Event Log line the orchestrator writes.
+app.post('/api/teams/:teamId/flow-board-release', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!canManageTeam(scope, teamId)) return denyAdmin(res, 'You may not manage this team');
+  const rowId = req.body && typeof req.body.rowId === 'string' ? req.body.rowId.trim() : '';
+  if (!rowId || rowId.length > 300) return res.status(400).json({ error: 'rowId is required' });
+  const actor = (req.user && (req.user.username || req.user.email || req.user.sub)) || null;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/flow-board-release`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rowId, actor }),
     });
     const data = await resp.json().catch(() => ({}));
     return res.status(resp.status).json(data);

@@ -682,6 +682,12 @@ test('ui /admin: team-admin only; PUT replaces the watch config', async () => {
     assert.equal(put.status, 200);
     assert.deepEqual(put.body.watches.map((w) => w.projectKey), ['KAN']); // blank dropped by normalizeWatch
 
+    // a body without a watches array (lost in a proxy) is refused, never read as "clear"
+    for (const bad of ['', '{}', 'not json']) {
+      const r = await ui('/ui/api/admin/watch?team=team-1', { method: 'PUT', headers: { ...admin, 'Content-Type': 'application/json' }, body: bad });
+      assert.equal(r.status, 400, `body ${JSON.stringify(bad)}`);
+    }
+
     const get = await ui('/ui/api/admin/watch?team=team-1', { headers: admin });
     assert.deepEqual(get.body.watches[0].statusFilters, ['Ready for Dev', 'In Review']);
     assert.deepEqual(get.body.watches[0].events, ['status_changed']); // migrated default

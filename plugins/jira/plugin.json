@@ -52,7 +52,7 @@
     },
     {
       "name": "field_changed",
-      "description": "Any other field of a watched issue changed — assignee, priority, labels, sprint, fix version, a custom field, an attachment… (not status, description or rank)",
+      "description": "Another field of a watched issue changed (assignee, sprint, …)",
       "payload": [
         { "key": "field", "description": "the field's name as Jira reports it", "example": "assignee" },
         { "key": "fieldId", "description": "the field's stable id — use it for custom fields, whose names vary per site", "example": "customfield_10020" },

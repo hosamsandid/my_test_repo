@@ -954,8 +954,12 @@ async function handleUiApi(req, res, apiPath, viewer) {
   }
   if (apiPath === '/admin/watch' && req.method === 'PUT') {
     const body = parseJson(await readBody(req));
+    // The page always sends a `watches` array (`[]` to clear). A body without
+    // one — empty or unparseable, e.g. lost in a proxy — must never be read as
+    // "no watches": that silently wiped a team's whole config.
+    if (!Array.isArray(body.watches)) return sendJson(res, 400, { error: 'a watches array is required' });
     const conf = watchStore.setConfig(team, {
-      watches: Array.isArray(body.watches) ? body.watches : [],
+      watches: body.watches,
       setBy: viewer.sub || 'admin',
     });
     return sendJson(res, 200, { ok: true, watches: conf.watches });

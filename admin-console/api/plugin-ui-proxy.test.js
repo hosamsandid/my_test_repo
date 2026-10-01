@@ -225,3 +225,30 @@ test('a legacy v1-only request (no v2, no role-map header) still verifies, with 
   const v = verifyViewerHeaders(legacy, secret);
   assert.deepEqual(v, { sub, role, teamIds: ['a', 'b'], teamRoles: {} });
 });
+
+// ── bodyWasParsed: re-serialise a consumed JSON body (Express 4 and 5) ───────
+
+test('bodyWasParsed: Express 4 flags a parsed body with req._body', () => {
+  const { bodyWasParsed } = require('./plugin-ui-proxy');
+  assert.equal(bodyWasParsed({ _body: true, body: { a: 1 }, readableEnded: true }), true);
+});
+
+test('bodyWasParsed: Express 5 has no _body flag — a read-to-end stream with a body counts', async () => {
+  const { bodyWasParsed } = require('./plugin-ui-proxy');
+  const { Readable } = require('node:stream');
+  const req = Readable.from([Buffer.from('{"watches":[{"projectKey":"KAN"}]}')]);
+  for await (const _chunk of req) { /* what express.json() does */ }
+  req.body = { watches: [{ projectKey: 'KAN' }] };
+  assert.equal(req._body, undefined);
+  assert.equal(bodyWasParsed(req), true);
+});
+
+test('bodyWasParsed: an unread stream is streamed through, even with body-parser 1\'s default {}', () => {
+  const { bodyWasParsed } = require('./plugin-ui-proxy');
+  const { Readable } = require('node:stream');
+  const req = Readable.from([Buffer.from('raw bytes')]);
+  req.body = {}; // body-parser 1 sets this for a content type it skipped
+  assert.equal(bodyWasParsed(req), false);
+  assert.equal(bodyWasParsed({ body: undefined, readableEnded: true }), false); // Express 5, no parser ran
+  assert.equal(bodyWasParsed(null), false);
+});

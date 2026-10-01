@@ -61,36 +61,23 @@ Several conditions combine with AND: `toStatus = Ready for Dev` plus
 
 ### The other kinds
 
-The trigger form's *Only when…* picker lists every kind's fields; the useful
-routing keys:
-
 | Event | Route on | Example |
 |---|---|---|
-| `issue_created` | `origin`, `issueType`, `status`, `priority` | *"new ticket → BA triages"*: `origin = human` |
-| `comment_added` | `origin`, `author`, `issueType` | `origin = human` (always — see below) |
-| `field_changed` | `field` or `fieldId` (custom fields), `to`, `origin` | `field = assignee` + `to = Jane Doe` |
+| `issue_created` | `origin`, `issueType`, `status`, `priority` | `origin = human` |
+| `comment_added` | `origin`, `author`, `issueType` | `origin = human` (always) |
+| `field_changed` | `field` / `fieldId`, `to`, `origin` | `field = assignee` |
 
-`field_changed` is one event per changed field — never status, description or
-Rank. A comment's text rides along as `body` (cut at 2000 characters; `aee-jira
-show` has the rest) — context, not a filter. Every wake is one kind only.
+`field_changed` is one event per field, never status, description or Rank. A
+comment's text rides along as `body` (cut at 2000 chars). One kind per wake.
 
 ## Avoid the comment loop
 
-An agent's own `aee-jira comment` is a comment, and Jira shows it under the
-Team Admin's account — the same account the admin uses by hand, so `author`
-cannot tell them apart. A `comment_added` trigger without a condition
-therefore wakes the agent on its **own** reply, which replies again. The
-platform only slows that down (5 wakes per issue per hour), it does not stop it.
-
-- Put **`origin = human`** on every `comment_added` trigger. The broker
-  records each comment it posts and stamps its echo `origin = agent`.
-- Only when an agent deliberately waits for a *teammate agent's* comment use
-  `origin = agent` — **and** a second condition that tells the two apart (a
-  different `issueType`, a project), and never let two agents both listen on
-  `origin = agent` for the same project without one.
-- Same for `issue_created` and `field_changed` (incl. a transition's `resolution`).
-- A status change has no `origin` — an agent's `aee-jira transition` wakes
-  whichever teammate's trigger names that target status, by design.
+Jira cannot tell an agent's `aee-jira` write from a human's (both use a
+human's token), so a `comment_added` trigger with no condition wakes the agent
+on its **own** reply. Put **`origin = human`** on every `comment_added`,
+`issue_created` and `field_changed` trigger — the broker stamps its own writes'
+echoes `origin = agent`. A status change has no `origin`: a transition wakes
+the next stage by design.
 
 When more than three transitions land in a single poll — on one issue, or
 across one project (a bulk move such as sprint planning) — they arrive as one
@@ -113,17 +100,17 @@ watching and automated runs use the team's service account.
 | `aee-jira inbox` / `aee-jira inbox --consume <id>…` | the queued events of the whole team (peek); `--consume` drains exactly the ids named — use the ids from your own wake (`id`, or `events[].id` in a digest), never a teammate's |
 | `aee-jira list --project KAN [--status "Ready for Dev"]`, `aee-jira show KAN-6 [--fields "Team"]` | read issues (`show` also lists any attachments, the `parent`/epic key so you can traverse Story→Epic, and `availableTransitions` — the moves reachable from the issue's current status, so you can `transition --to` one without guessing). `--fields` additionally reads **custom fields** by their Jira name (e.g. `Team`) — an empty field comes back as `null`, so you can tell unset from set |
 | `aee-jira statuses --project KAN` | every workflow status the project supports, grouped by issue type — the full set the workflow allows, independent of any one issue's current state |
-| `aee-jira search --jql "<JQL>" [--fields …] [--limit N]` | run any JQL the credential allows — for filters `list` can't express (a `created` range, an empty custom field, a summary match). Scoped to the team's bound site & projects; read-only, shaped like `list`. A `--fields` name that isn't a standard column is read as a custom field and rides alongside the row |
+| `aee-jira search --jql "<JQL>" [--fields …] [--limit N]` | any read-only JQL, scoped to the team's bound site & projects — for filters `list` can't express |
 | `aee-jira attachment get KAN-6 <id> [--out PATH]` | fetch one attachment's content by id (from `show`) — text prints inline, binary is saved to a workspace path |
-| `aee-jira attachment add KAN-6 <path> [<path>…]` | upload one or more local files as new attachments — each path becomes a separate attachment (Jira never overwrites); paths are checked to exist before any upload, and the result reports per-file success/failure with each created id |
+| `aee-jira attachment add KAN-6 <path> [<path>…]` | upload local files as new attachments; per-file result with each created id |
 | `aee-jira comment KAN-6 --body "…"` | add a comment |
 | `aee-jira update KAN-6 --description "…"` | replace the description (keep what the human wrote and add a section — the old text stays in Jira's history) |
-| `aee-jira set-field KAN-6 --field "Team" --value "<v>"` | set a custom field by its Jira name (writable by default; if a Team Admin set a non-empty `writable-custom-fields` list, only those fields are writable and any other is refused). For an id-bearing field like Team, pass the id you read via `show --fields "Team"`; `--value-json '<json>'` for an exotic field shape. Idempotent — a no-op re-set reports `changed: false` |
+| `aee-jira set-field KAN-6 --field "Team" --value "<v>"` | set a custom field by its Jira name (any, unless a Team Admin set a `writable-custom-fields` list); for Team pass the id from `show --fields "Team"` |
 | `aee-jira transition KAN-6 --to "In Progress"` | move the issue on — this is itself a status change and wakes whichever teammate's trigger names that target status |
-| `aee-jira create-epic --project KAN --file plan.json` | create one Epic and its child Stories in one operation — a JSON payload (from `--file` or stdin) of `{"epic": {"summary": …}, "stories": [{"summary": …, "assignee": "<accountId>", "status": …, "fields": {"Team": "<id>", "Story point estimate": 5}}]}`. Only a summary is required per issue; `status` is applied as a follow-up transition; custom fields in `fields` are writable by default (same gate as `set-field`) — if a non-empty `writable-custom-fields` list is set, every named field must be on it. The Epic key + each Story's key (or a per-Story error) come back — the Epic and other Stories still go through if one fails |
+| `aee-jira create-epic --project KAN --file plan.json` | create one Epic and its child Stories in one call (summary, assignee, status, custom fields per Story); reports each key or a per-Story error |
 | `aee-jira sprint list --board "<board name>"` | list a Scrum board's sprints (id, name, state, start/end), the board resolved by its human-readable name. Read-only |
 | `aee-jira sprint create --board "<board name>" --name "<name>" --start <date> --end <date>` | create one future sprint on the board (a Scrum board has only one active sprint) |
-| `aee-jira sprint bulk-create --board "<board name>" --name-template "<tmpl>" --until <date>` | pre-create a whole run of future sprints up to a target date in one call — each `--cadence-days` long (default 7, weekly Mon–Sun), continuing by default from the board's latest existing sprint (`--start` overrides / is required when the board has none). `--name-template` computes each name off the sprint's Monday: `{MMM}`/`{MMMM}` month, `{MM}`/`{M}`, `{YYYY}`/`{YY}`, `{DD}`/`{D}`, `{weekOfMonth}` (Nth-weekday-of-month), `{n}` (batch index) — the month is the Monday's month even when the week crosses into the next month (`Acc2.0 Oct_4` then `Acc2.0 Nov_1`). Per-sprint success/failure reported |
+| `aee-jira sprint bulk-create --board "<board name>" --name-template "<tmpl>" --until <date>` | pre-create weekly (`--cadence-days`) future sprints up to a date, named from a template such as `Acc2.0 {MMM}_{weekOfMonth}` |
 | `aee-jira sprint close --board "<board name>" [--sprint-id <id>]` | complete (close) the board's active sprint (`--sprint-id` closes a specific one). Reports the count of issues left incomplete — they stay on the closed sprint |
 | `aee-jira sprint start --board "<board name>" [--sprint-id <id>]` | start (activate) the board's next future sprint (`--sprint-id` for a specific one). Refused if the board already has an active sprint or the sprint has no dates |
 | `aee-jira sprint advance --board "<board name>" [--close-id <id>] [--start-id <id>]` | roll the board over in one call: close the active sprint, then start the next future one — each half reported separately, so a partial result is visible (exit 1 on a partial) |

@@ -195,6 +195,10 @@ Its owner may rename, **replace** (rotate) and delete it. Delete is permanent an
 affects only you: agents relying on it fail to authenticate until you add a
 replacement.
 
+You may add several personal GitHub tokens or SSH keys, but only **one of each
+kind is used — the one you added first**. Its **Used by** cell reads *Active
+(personal)*; any further one reads *Not in use*. To switch, delete the active one.
+
 When you create one, the owner is always you — forced server-side, never
 somebody else. Personal SSH keys are **account-wide**: one key covers all of your
 repositories; per-repository personal deploy keys are not offered.
@@ -243,8 +247,9 @@ between tiers, because a personal secret is held per owner and a team/system
 secret per Working Environment:
 
 - **Personal** keys and tokens rotate in place using the same **Replace key** /
-  **Replace value** action on their row. Afterwards the owner's affected running agents are restarted; only
-  yours, never anyone else's.
+  **Replace value** action on their row. If it is your active one, your running
+  agents are restarted afterwards — only yours, never anyone else's; replacing a
+  personal credential that is *Not in use* restarts nothing.
 - **Team and system** keys and tokens rotate in place using the **Replace value**
   (GitHub token) / **Replace key** (SSH key) action — the circular-arrows icon on
   the row — of the shared **SSH Keys** / **GitHub Tokens** pages. For an SSH key
@@ -291,9 +296,11 @@ with no edit. So a team whose Team Admin adds a personal GitHub token or SSH key
 starts acting on GitHub **as that Team Admin** for its automatic work — the team
 credential stays configured but is **not in use** while it is overridden.
 
-The change takes effect at the agents' **next start** (the next enable or
-respawn): the token and key are baked into a container when it starts, so a
-running agent keeps the old one until then.
+The token and key are baked into a container when it starts. Adding your
+**first** personal token or key therefore restarts your running agents right
+away (the create dialog warns you; a running loop or trigger run is cut off),
+while a further one is not used and restarts nothing. Deleting one takes effect
+at the agents' **next start** (the next enable or respawn).
 
 **Seeing it in the console.** Agent Chat → **Settings** → **Repositories** shows an
 **Effective GitHub identity** box for the team: for the GitHub token and the SSH

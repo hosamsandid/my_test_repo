@@ -19339,6 +19339,12 @@ app.get('/api/matrix/agents', (req, res) => {
         poolItem: cfg.poolItem != null ? cfg.poolItem : null,
         poolSpawnedAt: cfg.poolSpawnedAt || null,
       } : {}),
+      // #2760 AC5: a pooled role TEMPLATE's "Max parallel instances" cap, so
+      // the rail can show its "Instances (n)" count against it ("5 / 3").
+      // `null` = no per-role cap; absent on every non-pooled row.
+      ...(!cfg.poolInstance && cfg.pool && typeof cfg.pool === 'object' && cfg.pool.enabled === true ? {
+        poolMaxInstances: Number.isInteger(cfg.pool.maxInstances) && cfg.pool.maxInstances >= 1 ? cfg.pool.maxInstances : null,
+      } : {}),
     });
   }
   res.json(out);

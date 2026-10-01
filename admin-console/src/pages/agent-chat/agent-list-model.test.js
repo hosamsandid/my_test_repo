@@ -448,6 +448,9 @@ test('isPoolInstance tells a spawned instance from an ordinary member', () => {
 test('poolInstancesLabel carries the count, mirrors stubSectionLabel (AC1)', () => {
   assert.equal(poolInstancesLabel(2), 'Instances (2)');
   assert.equal(poolInstancesLabel(1), 'Instances (1)');
+  // #2760 AC5: against the role's cap when it has one.
+  assert.equal(poolInstancesLabel(5, 3), 'Instances (5 / 3)');
+  assert.equal(poolInstancesLabel(2, null), 'Instances (2)');
 });
 
 test('AC1 — a pooled role nests its live instances, sorted by poolItem', () => {

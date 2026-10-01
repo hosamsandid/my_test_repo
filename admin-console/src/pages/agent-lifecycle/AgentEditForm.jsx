@@ -61,6 +61,7 @@ import { inheritedMcpPreview, switchMcpMode, memberMcpBlockers } from './member-
 import { TEAM_CONFIG_TABS, ENV_TAB_IDS, resolveTeamConfigTab } from './team-config-tabs-view.js';
 import { parallelismSummary, hasPooledMember } from '../process/parallelism-view.js';
 import ScalingSection from '../process/ScalingSection';
+import { poolControlUrl, livePoolCount } from '../process/pool-cap-view.js';
 import ParallelismPanel from '../process/ParallelismPanel';
 
 // #2236: which help chapter each tab's "?" opens, and the tab's own label for
@@ -521,6 +522,8 @@ export default function AgentEditForm({
     ? `/api/agents/${encodeURIComponent(agent.parentTeamId)}`
     : null;
   const { data: parentTeam } = useApi(parentTeamUrl || '/api/agents');
+  // #2760 AC5: the role's live instance count against its cap, for Scaling.
+  const { data: poolControl } = useApi(poolControlUrl(agent));
   const parentTeamPrompt = parentTeamUrl && parentTeam?.role === 'team'
     ? (parentTeam.systemPromptTemplate || '')
     : '';
@@ -781,6 +784,7 @@ export default function AgentEditForm({
               onChange={v => update('poolDraft', v)}
               parentWipLimit={parentTeam?.wipLimit}
               error={scalingError}
+              live={livePoolCount(poolControl, agent.id)}
             />
           </div>
 

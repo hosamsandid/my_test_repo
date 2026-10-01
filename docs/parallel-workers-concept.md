@@ -1086,3 +1086,32 @@ was filed after exactly that was observed (a developer pool sitting at
   role-stage-scoped reap (freeing an instance when ITS stage hands off rather
   than only when the whole ticket closes) — unchanged, flagged as a
   follow-up rather than guessed at.
+
+## Amendment 13 — the per-role cap counts provisioning instances (#2760)
+
+`planPoolDispatch`'s `maxInstances` check used to count only instances whose
+config was on disk (`_liveInstanceIdsForRole`). `routePooledDispatch` starts the
+spawn without awaiting it, and the spawn (rework-ref lookup + `addTeamMember`)
+takes seconds — concurrent dispatches for other items in that window all passed
+the cap (observed: cap 3, 5 live instances).
+
+- **Provisioning slots** (`orchestrator/pool-spawn-slots.js`, in-memory): both
+  dispatch paths spawn through `startPoolSpawn`, which reserves a slot
+  synchronously — in the same tick as the cap check — and releases it when the
+  spawn settles. The cap counts `_cappedInstanceIdsForRole` = live ∪
+  provisioning; the recurring tick counts provisioning items as taken too.
+- **Same item while provisioning** (D11): the dispatch joins the in-flight spawn
+  and lands on the instance once it exists — no second spawn, no extra slot.
+- **Spawn failure**: the slot frees immediately; the dispatch is re-routed after
+  a bounded backoff (15 s / 1 min / 5 min), re-checking the cap each time.
+- **Restart**: slots are not persisted — nothing is in flight after a restart,
+  so none can leak; a spawn that already wrote its `_provisioning` config is
+  counted on disk and reaped by #2493 if it never finishes.
+- An ordinary `max-instances` refusal is unchanged (it still falls through to
+  the role template, as before #2760). Lowering the cap stops nothing; it only
+  refuses new spawns until the count is below it.
+- **UI**: `GET /internal/teams/:id/pool-control`'s `liveInstanceCount` includes
+  provisioning instances; `GET /api/matrix/agents` ships `poolMaxInstances` on
+  pooled role templates. The rail reads *Instances (5 / 3)* and the Scaling
+  section *Live instances: 5 / 3*, both marked when over the cap
+  (`admin-console/src/pages/process/pool-cap-view.js`).

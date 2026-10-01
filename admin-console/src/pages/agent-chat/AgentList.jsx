@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
-import { MessageCircle, Bot, Server, Users, ChevronDown, ChevronRight, GripVertical, MoreVertical, Loader2 } from 'lucide-react';
+import { MessageCircle, Bot, Server, Users, ChevronDown, ChevronRight, GripVertical, MoreVertical, Loader2, AlertTriangle } from 'lucide-react';
 
 import { computeReorder, dropPosition } from './agent-list-dnd.js';
 import { groupEnvironmentName, rowEnvironmentName } from './agent-list-env.js';
 import { buildGroups, groupKey, orderModel, filterModel, stubSectionLabel, poolInstancesLabel } from './agent-list-model.js';
+import { poolCapView } from '../process/pool-cap-view.js';
 import { teamMembershipIndicator, membershipsByTeam, fitAdminNames } from './team-membership-view.js';
 import { computeTeamAttention } from '../../context/agent-statuses.js';
 import { agentState, isChatOpenable } from '../agent-lifecycle/agent-lifecycle-menu.js';
@@ -675,7 +676,11 @@ function StubSection({ stubs, groupEnv, selectedAgentId, onSelect, busyIds, onRe
  */
 function PoolInstancesSection({ roleAgent, instances, groupEnv, collapsed, onToggle, selectedAgentId, onSelect, statuses, busyIds, onRequestMenu }) {
   const [hovered, setHovered] = useState(false);
-  const label = poolInstancesLabel(instances.length);
+  // #2760 AC5: the count reads against the role's cap ("5 / 3"), and an
+  // over-cap count is marked, its tooltip saying what that means.
+  const cap = roleAgent.poolMaxInstances ?? null;
+  const label = poolInstancesLabel(instances.length, cap);
+  const capView = poolCapView(instances.length, cap);
   const handleToggle = useCallback(
     () => onToggle({ kind: 'pool', id: roleAgent.id }),
     [onToggle, roleAgent.id],
@@ -688,7 +693,7 @@ function PoolInstancesSection({ roleAgent, instances, groupEnv, collapsed, onTog
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
         aria-expanded={!collapsed}
-        title={`Live pool instances of ${roleAgent.displayName || roleAgent.id}`}
+        title={`Live pool instances of ${roleAgent.displayName || roleAgent.id}: ${capView.title}`}
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -714,6 +719,14 @@ function PoolInstancesSection({ roleAgent, instances, groupEnv, collapsed, onTog
         <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {label}
         </span>
+        {capView.over && (
+          <AlertTriangle
+            size={12}
+            role="img"
+            aria-label="Over the instance limit"
+            style={{ flexShrink: 0, color: 'var(--eb-status-warning)' }}
+          />
+        )}
       </button>
       {!collapsed && instances.map((agent) => (
         <AgentRow

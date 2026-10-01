@@ -62,7 +62,7 @@ test("board removals (#2637) are stored per team and pruned only for repos the s
 test("the flow-board-removed route checks removability on the board and never writes to GitHub", () => {
   const i = SRC.indexOf("const flowBoardRemovedMatch");
   assert.ok(i > 0);
-  const route = SRC.slice(i, SRC.indexOf("// GET /internal/teams/:teamId/pool-control", i));
+  const route = SRC.slice(i, SRC.indexOf("// POST /internal/teams/:teamId/flow-board-release", i));
   assert.match(route, /if \(!row\.removable\) return sendJson\(res, 409/);
   // The store is read after the board, whose computation may have pruned it.
   const remove = route.slice(route.indexOf("parsed.action === 'remove'"));
@@ -70,4 +70,28 @@ test("the flow-board-removed route checks removability on the board and never wr
   assert.ok(remove.indexOf("await getTeamFlowBoard(teamId)") < remove.indexOf("removed = loadFlowBoardRemoved(teamId)"));
   assert.match(route, /_flowBoardCache\.delete\(teamId\)/);
   assert.doesNotMatch(route, /api\.github\.com|_flowGithub|gh-as-agent/);
+});
+
+test("the flow-board-release route (#2754) re-reads a fresh board, swaps via the pure helper and logs every swap", () => {
+  const i = SRC.indexOf("const flowBoardReleaseMatch");
+  assert.ok(i > 0);
+  const route = SRC.slice(i, SRC.indexOf("// GET /internal/teams/:teamId/pool-control", i));
+  // Only on a FRESH board — never the cached snapshot the page was showing.
+  assert.match(route, /flowClaimRelease\.planClaimRelease\(await getTeamFlowBoard\(teamId, \{ refresh: true \}\), rowId\)/);
+  assert.match(route, /if \(!plan\.ok\) return sendJson\(res, plan\.status/);
+  assert.match(route, /flowClaimRelease\.swapClaimLabel\(/);
+  assert.match(route, /githubEventLog\.record\(flowClaimRelease\.buildClaimReleaseLogEntry\(\{ teamId, rowId, actor, claim, result \}\)\)/);
+  assert.match(route, /_flowBoardCache\.delete\(teamId\)/);
+  // The swap goes through the repo's environment token, never a hard-coded host.
+  assert.match(route, /resolveRepoGithubTokenId\(claim\.repo\)/);
+  assert.match(route, /githubApiBase\(\)/);
+  assert.doesNotMatch(route, /api\.github\.com|gh-as-agent|wakeGithubLabelListeners/);
+  // A wake still present is removed and re-added, and the poller's wake dedup
+  // is cleared so the re-add reads as a rising edge (#2754 review).
+  assert.match(route, /wakePresent: claim\.wakePresent === true,/);
+  assert.match(route, /if \(result\.ok && githubPollerRef\) \{\s*githubPollerRef\.disarmWake\(\{ repo: claim\.repo, number: claim\.number, label: claim\.wake \}\)/);
+});
+
+test("_flowTeamMembers carries each member's enabled flag for the board (#2754)", () => {
+  assert.match(body("function _flowTeamMembers("), /enabled: cfg\.enabled !== false,/);
 });

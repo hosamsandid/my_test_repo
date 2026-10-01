@@ -295,8 +295,10 @@ test('buildFlowBoard: a claim past the threshold with no live worker needs help,
   const b = stuck(75);
   assert.equal(b.rows[0].status, 'working');
   assert.equal(b.rows[0].stageId, 't-developer');
-  assert.deepEqual(b.rows[0].needsHuman, { reason: 'stuck — no progress, needs help', since: iso(75) });
+  const release = [{ repo: 'o/r', number: 20, kind: 'issue', claim: 'ready:wip', wake: 'ready' }];
+  assert.deepEqual(b.rows[0].needsHuman, { reason: 'stuck — no progress, needs help', since: iso(75), release });
   assert.deepEqual(b.needsHuman.map((n) => [n.id, n.reason, n.since]), [['o/r#20', 'stuck — no progress, needs help', iso(75)]]);
+  assert.deepEqual(b.needsHuman[0].release, release);
   // Inside the threshold it is still ordinary in-progress work.
   assert.equal(stuck(59).rows[0].needsHuman, null);
   assert.deepEqual(stuck(59).needsHuman, []);
@@ -312,6 +314,11 @@ test('buildFlowBoard: a stale claim alongside a re-applied wake label still need
   });
   assert.equal(b.rows[0].status, 'working');
   assert.equal(b.rows[0].needsHuman.reason, 'stuck — no progress, needs help');
+  // Re-adding a wake already present wakes nobody, so its release entry is
+  // marked for a remove-then-re-add (#2754 review).
+  assert.deepEqual(b.rows[0].needsHuman.release, [
+    { repo: 'o/r', number: 21, kind: 'issue', claim: 'ready:wip', wake: 'ready', wakePresent: true },
+  ]);
 });
 
 test('buildFlowBoard: a long claim with a running session or a live pool instance is not flagged (#2734)', () => {
@@ -351,6 +358,72 @@ test('buildFlowBoard: the needs-help flag is report-only — the claim, status a
   const q = board({ github: { issues: [issue(23, { labels: ['ready-for-review'], updatedAt: iso(300) })] }, events: [delivered(23, 't-reviewer', 300)] });
   assert.equal(q.rows[0].status, 'queued');
   assert.equal(q.rows[0].needsHuman, null);
+});
+
+test('buildFlowBoard: a needs-help row lists every orphaned claim it can release, across its items (#2754)', () => {
+  const b = board({
+    github: {
+      issues: [issue(30, { labels: ['ready:wip', 'bug'], updatedAt: iso(200) })],
+      prs: [pr(60, { labels: ['ready-to-merge:wip'], updatedAt: iso(200), body: 'Closes #30\n<!-- agent: t-developer -->', closes: [30] })],
+    },
+    events: [delivered(30, 't-developer', 200)],
+  });
+  const row = b.rows.find((r) => r.id === 'o/r#30');
+  assert.equal(row.needsHuman.reason, fb.REASONS.needsHelp);
+  assert.deepEqual(row.needsHuman.release.map((r) => [r.number, r.kind, r.claim, r.wake]).sort(), [
+    [30, 'issue', 'ready:wip', 'ready'],
+    [60, 'pr', 'ready-to-merge:wip', 'ready-to-merge'],
+  ]);
+  // Other flags never carry a release list.
+  const flagged = board({ github: { issues: [issue(31, { labels: ['ready:wip', 'needs-human'], updatedAt: iso(200) })] }, events: [delivered(31, 't-developer', 200)] });
+  assert.equal(flagged.rows[0].needsHuman.reason, fb.REASONS.flagged);
+  assert.equal(flagged.rows[0].needsHuman.release, undefined);
+  assert.equal(flagged.needsHuman[0].release, undefined);
+});
+
+test('buildFlowBoard: a needs-help row offers only the claims a live consumer would pick up (#2754)', () => {
+  const offReviewer = SDLC.map((m) => (m.id === 't-reviewer' ? { ...m, enabled: false } : m));
+  const b = board({
+    members: offReviewer,
+    github: { issues: [issue(32, { labels: ['ready:wip', 'ready-for-review:wip'], updatedAt: iso(200) })] },
+    events: [delivered(32, 't-developer', 200)],
+  });
+  assert.equal(b.rows[0].needsHuman.reason, fb.REASONS.needsHelp);
+  assert.deepEqual(b.rows[0].needsHuman.release.map((r) => r.claim), ['ready:wip']);
+});
+
+test('buildFlowBoard: a wake whose only consumer is switched off reads as "nobody picks it up", not stuck or queued (#2754)', () => {
+  assert.equal(fb.REASONS.noConsumer, 'nobody picks it up — its agent is switched off');
+  const offDev = SDLC.map((m) => (m.id === 't-developer' ? { ...m, enabled: false } : m));
+  // A queued wake for a disabled agent.
+  const q = board({ members: offDev, github: { issues: [issue(40, { labels: ['ready'], updatedAt: iso(20) })] } });
+  assert.equal(q.rows[0].status, 'queued');
+  assert.deepEqual(q.rows[0].needsHuman, { reason: fb.REASONS.noConsumer, since: iso(20) });
+  // An orphaned claim for a disabled agent: releasing it would wake nobody.
+  const c = board({ members: offDev, github: { issues: [issue(41, { labels: ['ready:wip'], updatedAt: iso(200) })] }, events: [delivered(41, 't-developer', 200)] });
+  assert.equal(c.rows[0].needsHuman.reason, fb.REASONS.noConsumer);
+  assert.equal(c.rows[0].needsHuman.release, undefined);
+  // The consumer's only trigger on that label switched off counts too.
+  const offTrig = SDLC.map((m) => (m.id === 't-reviewer' ? { ...m, triggers: [trig('ready-for-review', { enabled: false })] } : m));
+  const t = board({ members: offTrig, github: { issues: [issue(42, { labels: ['ready-for-review'], updatedAt: iso(20) })] }, events: [delivered(42, 't-developer', 30)] });
+  assert.equal(t.rows[0].needsHuman.reason, fb.REASONS.noConsumer);
+  // Enabled consumers: ordinary queued work, no flag.
+  const ok = board({ github: { issues: [issue(43, { labels: ['ready'], updatedAt: iso(20) })] } });
+  assert.equal(ok.rows[0].needsHuman, null);
+});
+
+test('buildFlowBoard: one live consumer on the row keeps it off the "nobody picks it up" flag (#2754)', () => {
+  const offDev = SDLC.map((m) => (m.id === 't-developer' ? { ...m, enabled: false } : m));
+  // `ready` is dead, but `ready-for-review` still wakes the enabled reviewer.
+  const b = board({ members: offDev, github: { issues: [issue(44, { labels: ['ready', 'ready-for-review'], updatedAt: iso(20) })] } });
+  assert.equal(b.rows[0].needsHuman, null);
+  // A running session for the item is live work regardless.
+  const s = board({
+    members: offDev,
+    github: { issues: [issue(45, { labels: ['ready:wip'], updatedAt: iso(200) })] },
+    sessions: [{ agentId: 't-developer', session: { id: 's', startedAt: iso(5), workItem: { repo: 'o/r', kind: 'issue', number: 45 } } }],
+  });
+  assert.equal(s.rows[0].needsHuman, null);
 });
 
 test('buildFlowBoard: a label handed to a person reads as waiting for approval', () => {

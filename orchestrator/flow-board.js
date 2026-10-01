@@ -52,6 +52,7 @@ const REASONS = Object.freeze({
   checks: 'checks failing',
   stalled: 'no agent is scheduled to continue',
   needsHelp: 'stuck — no progress, needs help',
+  noConsumer: 'nobody picks it up — its agent is switched off',
 });
 
 function str(v) {
@@ -129,10 +130,16 @@ function buildRoleGraph(members, { labels = [], teamId = null } = {}) {
   const gateLabels = new Set(
     (Array.isArray(labels) ? labels : []).filter((l) => l && l.humanGate && str(l.name)).map((l) => str(l.name)),
   );
-  const roles = new Map(); // id -> { id, displayName, consumes:Set, emits:Set, from:Set }
+  const roles = new Map(); // id -> { id, displayName, enabled, consumes:Set, emits:Set, from:Set }
+  // Wake label -> roles that listen for it only through a switched-off
+  // trigger (#2754): no hand-off edge, but the label is not a person's either.
+  const dormantConsumersOf = new Map();
   for (const m of Array.isArray(members) ? members : []) {
     if (!m || !str(m.id) || m.poolInstance) continue;
-    const r = { id: m.id, displayName: str(m.displayName) || m.id, consumes: new Set(), emits: new Set(), from: new Set() };
+    const r = {
+      id: m.id, displayName: str(m.displayName) || m.id, enabled: m.enabled !== false,
+      consumes: new Set(), emits: new Set(), from: new Set(),
+    };
     for (const e of Array.isArray(m.emits) ? m.emits : []) if (str(e)) r.emits.add(str(e));
     const opts = m.outcomes && Array.isArray(m.outcomes.options) ? m.outcomes.options : [];
     for (const o of opts) {
@@ -141,6 +148,13 @@ function buildRoleGraph(members, { labels = [], teamId = null } = {}) {
       }
     }
     for (const t of Array.isArray(m.triggers) ? m.triggers : []) {
+      if (t && t.type === 'github-event' && t.enabled === false) {
+        const l = str(t.labelFilter);
+        if (l && !isStateSuffix(l)) {
+          if (!dormantConsumersOf.has(l)) dormantConsumersOf.set(l, []);
+          dormantConsumersOf.get(l).push(m.id);
+        }
+      }
       if (!t || t.type !== 'github-event' || t.enabled === false) continue;
       for (const e of Array.isArray(t.emits) ? t.emits : []) if (str(e)) r.emits.add(str(e));
       const l = str(t.labelFilter);
@@ -187,7 +201,7 @@ function buildRoleGraph(members, { labels = [], teamId = null } = {}) {
   // A label an agent sets that no team agent wakes on is a hand-off to a person
   // (e.g. "ready-for-human-review") — the item then waits for approval.
   const toHuman = new Set([...emitted].filter((l) => !consumersOf.has(l) && !isStateSuffix(l)));
-  return { roles, next, prev, gateLabels, emitted, consumersOf, toHuman };
+  return { roles, next, prev, gateLabels, emitted, consumersOf, dormantConsumersOf, toHuman };
 }
 
 /**
@@ -605,7 +619,10 @@ function buildFlowBoard(args = {}) {
   const byId = new Map(out.map((r) => [r.id, r]));
   const needsHuman = out
     .filter((r) => r.needsHuman)
-    .map((r) => ({ id: r.id, title: r.title, url: r.url, issue: r.issue, prs: r.prs, reason: r.needsHuman.reason, since: r.needsHuman.since }))
+    .map((r) => ({
+      id: r.id, title: r.title, url: r.url, issue: r.issue, prs: r.prs, reason: r.needsHuman.reason, since: r.needsHuman.since,
+      ...(r.needsHuman.release ? { release: r.needsHuman.release } : {}),
+    }))
     .sort((a, b) => (toMs(a.since) || now) - (toMs(b.since) || now));
 
   // --- area ①: every running session, and each pool's load ----------------
@@ -766,17 +783,49 @@ function lastWakeTs(wakes, key, roleId) {
 // agent is working on it or woken for it — a Conflict Solver already queued
 // on a conflict is not a human's problem — except a claim nobody alive holds:
 // past NEEDS_HELP_MS it is an orphaned `:wip` label, not work (#2734). The
-// flag only reports; it never releases the claim or touches a run.
+// flag never touches a run itself; it carries the `release` list (each
+// orphaned claim and the wake it swaps back to) that the board's explicit
+// "Release claim" action acts on (#2754).
+//
+// A wake (or its claim) whose every consumer is switched off is reported as
+// `noConsumer` instead (#2754): releasing it would wake nobody, so it is not
+// "stuck" but dead-ended until someone switches the agent back on.
 function humanBlock({ keys, items, graph, position, live = new Set(), now }) {
   const open = keys.map((k) => items.get(k)).filter((it) => it && it.state !== 'closed');
   const since = (it) => toMs(it.updatedAt) || position.since || now;
   const flagged = open.find((it) => it.labels.includes('needs-human'));
   if (flagged) return { reason: REASONS.flagged, since: new Date(since(flagged)).toISOString() };
+  const isLive = keys.some((k) => live.has(k));
+  if (!isLive) {
+    // Only when NO wake on the row can run: one live consumer still moves it.
+    const wakeItems = open.filter((it) => it.labels.some((l) => isWake(graph, wakeOf(l))));
+    const allDead = wakeItems.length && wakeItems.every((it) =>
+      it.labels.filter((l) => isWake(graph, wakeOf(l))).every((l) => wakeHasNoLiveConsumer(graph, wakeOf(l))));
+    if (allDead) return { reason: REASONS.noConsumer, since: new Date(since(wakeItems[0])).toISOString() };
+  }
   if (
-    position.status === 'working' && position.since != null && now - position.since > NEEDS_HELP_MS &&
-    !keys.some((k) => live.has(k))
+    position.status === 'working' && position.since != null && now - position.since > NEEDS_HELP_MS && !isLive
   ) {
-    return { reason: REASONS.needsHelp, since: new Date(position.since).toISOString() };
+    const release = [];
+    for (const it of open) {
+      for (const l of it.labels) {
+        if (!l.endsWith(CLAIM_SUFFIX)) continue;
+        const wake = wakeOf(l);
+        if (!graph.consumersOf.has(wake) || wakeHasNoLiveConsumer(graph, wake)) continue;
+        // The #2713 shape: the wake was re-applied on top of the claim. Re-adding
+        // a label already present creates no `labeled` event, so the swap must
+        // take the wake off and put it back (#2754 review).
+        release.push({
+          repo: it.repo, number: it.number, kind: it.kind, claim: l, wake,
+          ...(it.labels.includes(wake) ? { wakePresent: true } : {}),
+        });
+      }
+    }
+    return {
+      reason: REASONS.needsHelp,
+      since: new Date(position.since).toISOString(),
+      ...(release.length ? { release } : {}),
+    };
   }
   if (position.status === 'working' || position.status === 'queued') return null;
   const prs = open.filter((it) => it.kind === 'pr');
@@ -792,6 +841,24 @@ function humanBlock({ keys, items, graph, position, live = new Set(), now }) {
     return { reason: REASONS.stalled, since: new Date(position.since).toISOString() };
   }
   return null;
+}
+
+// The wake a label stands for: itself, or the wake its `:wip` claim holds.
+function wakeOf(label) {
+  return label.endsWith(CLAIM_SUFFIX) ? label.slice(0, -CLAIM_SUFFIX.length) : label;
+}
+
+// Whether some team agent listens for `wake`, switched on or off.
+function isWake(graph, wake) {
+  return graph.consumersOf.has(wake) || !!(graph.dormantConsumersOf && graph.dormantConsumersOf.has(wake));
+}
+
+// Whether `wake` is a label some team agent listens for, yet every listener is
+// off — the agent disabled, or its only trigger on that label disabled.
+function wakeHasNoLiveConsumer(graph, wake) {
+  if (!isWake(graph, wake)) return false;
+  const active = graph.consumersOf.get(wake) || [];
+  return active.every((id) => graph.roles.get(id) && graph.roles.get(id).enabled === false);
 }
 
 // Map a GraphQL PR node's statusCheckRollup state onto the board's three

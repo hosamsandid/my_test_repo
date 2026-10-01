@@ -465,6 +465,32 @@ class AskAnswerPrompt(unittest.TestCase):
         self.assertIn("_prepare_chat_prompt(_ask_answer_prompt(body, content),", src)
 
 
+class ChatAuthor(unittest.TestCase):
+    """The session log records the console-stamped author, not just the
+    Matrix sender, which may be the shared admin account (#2715)."""
+    fn = staticmethod(entrypoint._chat_author)
+    F = "io.aee.author"
+
+    def test_keeps_user_id_and_subject(self):
+        content = {"body": "hi", self.F: {"userId": " u-kj ", "subject": "kj@example.com", "x": 1}}
+        self.assertEqual(self.fn(content), {"userId": "u-kj", "subject": "kj@example.com"})
+
+    def test_env_single_admin_has_only_a_subject(self):
+        self.assertEqual(self.fn({self.F: {"subject": "admin"}}), {"subject": "admin"})
+
+    def test_missing_or_malformed_stamp_is_none(self):
+        for content in (None, "x", {}, {"body": "hi"}, {self.F: "junk"}, {self.F: []},
+                        {self.F: {"userId": "  ", "subject": 3}}):
+            self.assertIsNone(self.fn(content))
+
+    def test_dm_handler_records_the_author_on_message_received(self):
+        src = Path(entrypoint.__file__).read_text(encoding="utf-8")
+        i = src.index('"type": "message.received"')
+        block = src[i:i + 600]
+        self.assertIn("author = _chat_author(content)", block)
+        self.assertIn('received["author"] = author', block)
+
+
 class AeeAskEndToEnd(unittest.TestCase):
     """CLI → sentinel → interception → terminal message (#2523 AC), driving the
     real `_call_claude_once` against a fake `claude` that runs the real CLI."""

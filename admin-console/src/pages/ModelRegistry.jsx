@@ -1194,7 +1194,7 @@ export default function ModelRegistry() {
             <span style={{ fontSize: 'var(--eb-text-xs)' }} title={s.detail}>
               <span style={{
                 display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)',
-                background: 'var(--eb-accent-subtle, var(--eb-bg-elevated))', color: 'var(--eb-accent, var(--eb-text-secondary))',
+                background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
                 fontWeight: 'var(--eb-font-medium)',
               }}>Global</span>
             </span>

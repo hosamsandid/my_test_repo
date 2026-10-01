@@ -27,15 +27,15 @@ import { usePageActions } from '../context/PageActionsContext';
 // renderer.
 
 const RISK_TONE = {
-  high: { bg: 'var(--eb-danger-bg, #fee)', fg: 'var(--eb-danger-fg, #a00)', border: '1px solid var(--eb-danger-fg, #a00)' },
-  medium: { bg: 'var(--eb-warn-bg, #fff8e1)', fg: 'var(--eb-warn-fg, #8a6d00)', border: '1px solid var(--eb-warn-fg, #8a6d00)' },
+  high: { bg: 'var(--eb-status-error-bg)', fg: 'var(--eb-status-error-text)', border: '1px solid var(--eb-status-error-text)' },
+  medium: { bg: 'var(--eb-status-warning-bg)', fg: 'var(--eb-status-warning-text)', border: '1px solid var(--eb-status-warning-text)' },
   unknown: { bg: 'var(--eb-bg-app)', fg: 'var(--eb-text-muted)', border: '1px solid var(--eb-border-default)' },
 };
 
 const STATUS_TONE = {
-  ok: 'var(--eb-success-fg, #0a7)',
-  warn: 'var(--eb-warn-fg, #8a6d00)',
-  danger: 'var(--eb-danger-fg, #a00)',
+  ok: 'var(--eb-status-success-text)',
+  warn: 'var(--eb-status-warning-text)',
+  danger: 'var(--eb-status-error-text)',
   muted: 'var(--eb-text-muted)',
 };
 
@@ -56,7 +56,7 @@ function ActionButton({ icon: Icon, label, onClick, danger, disabled, title }) {
         borderRadius: 'var(--eb-radius-md)',
         border: '1px solid var(--eb-border-default)',
         background: 'var(--eb-bg-app)',
-        color: danger ? 'var(--eb-danger-fg, #a00)' : 'var(--eb-text-primary)',
+        color: danger ? 'var(--eb-status-error-text)' : 'var(--eb-text-primary)',
         cursor: disabled ? 'not-allowed' : 'pointer',
         opacity: disabled ? 0.5 : 1,
         whiteSpace: 'nowrap',
@@ -202,7 +202,7 @@ function PluginCard({ row, onInstall, onUninstall, busy, teams, stackRuntime, on
                 title="This plugin's UI is visible to every logged-in user once installed, independent of any team activation (#1599). Team activation is still the only way its agent CLI is granted."
                 style={{
                   fontSize: 'var(--eb-text-xs)', padding: '1px 8px', borderRadius: 999,
-                  border: '1px solid var(--eb-border)', color: 'var(--eb-text-secondary)',
+                  border: '1px solid var(--eb-border-default)', color: 'var(--eb-text-secondary)',
                   background: 'var(--eb-bg-elevated)',
                 }}
               >
@@ -230,7 +230,7 @@ function PluginCard({ row, onInstall, onUninstall, busy, teams, stackRuntime, on
           <BuildIdentity build={row.build} />
 
           {!row.ok && (
-            <div style={{ marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-danger-fg, #a00)' }}>
+            <div style={{ marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error-text)' }}>
               {row.errors.map((e, i) => <div key={i}>{e}</div>)}
             </div>
           )}
@@ -428,12 +428,12 @@ export default function Plugins() {
       </p>
 
       {error && (
-        <div style={{ color: 'var(--eb-danger-fg, #a00)', fontSize: 'var(--eb-text-sm)', marginBottom: 'var(--eb-space-3)' }}>
+        <div style={{ color: 'var(--eb-status-error-text)', fontSize: 'var(--eb-text-sm)', marginBottom: 'var(--eb-space-3)' }}>
           {String(error)}
         </div>
       )}
       {actionError && (
-        <div style={{ color: 'var(--eb-danger-fg, #a00)', fontSize: 'var(--eb-text-sm)', marginBottom: 'var(--eb-space-3)' }}>
+        <div style={{ color: 'var(--eb-status-error-text)', fontSize: 'var(--eb-text-sm)', marginBottom: 'var(--eb-space-3)' }}>
           {actionError}
         </div>
       )}

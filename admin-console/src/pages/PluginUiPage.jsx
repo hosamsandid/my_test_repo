@@ -118,7 +118,7 @@ const backLinkStyle = {
   fontSize: 'var(--eb-text-sm)',
   border: '1px solid var(--eb-accent-primary)',
   background: 'var(--eb-accent-primary)',
-  color: '#fff',
+  color: 'var(--eb-text-inverted)',
   textDecoration: 'none',
 };
 

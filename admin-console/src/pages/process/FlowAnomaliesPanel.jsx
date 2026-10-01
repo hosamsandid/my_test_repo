@@ -113,7 +113,7 @@ export default function FlowAnomaliesPanel({ teamId, onClose, onData }) {
       )}
 
       {data && data.generatedAt && (
-        <p style={{ marginTop: 'var(--eb-space-4)', fontSize: 11, color: 'var(--eb-text-tertiary, var(--eb-text-secondary))' }}>
+        <p style={{ marginTop: 'var(--eb-space-4)', fontSize: 11, color: 'var(--eb-text-secondary)' }}>
           Swept {data.swept ?? 0} open item(s) · <WhenCell iso={data.generatedAt} />
         </p>
       )}
@@ -150,14 +150,14 @@ function AnomalyRow({ v }) {
       {v.blurb && v.blurb !== v.message && (
         <div style={{
           marginTop: 4, display: 'flex', alignItems: 'flex-start', gap: 6,
-          fontSize: 11, color: 'var(--eb-text-tertiary, var(--eb-text-secondary))', lineHeight: 1.5,
+          fontSize: 11, color: 'var(--eb-text-secondary)', lineHeight: 1.5,
         }}>
           <Info size={12} style={{ flexShrink: 0, marginTop: 2 }} />
           <span>{v.blurb}</span>
         </div>
       )}
       {(v.agentId || v.label) && (
-        <div style={{ marginTop: 4, display: 'flex', gap: 8, flexWrap: 'wrap', fontSize: 11, color: 'var(--eb-text-tertiary, var(--eb-text-secondary))' }}>
+        <div style={{ marginTop: 4, display: 'flex', gap: 8, flexWrap: 'wrap', fontSize: 11, color: 'var(--eb-text-secondary)' }}>
           {v.agentId && <span>agent: <code>{v.agentId}</code></span>}
           {v.label && <span>label: <code>{v.label}</code></span>}
         </div>

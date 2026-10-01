@@ -55,7 +55,7 @@ export default function NotFound() {
               ...btnBase,
               background: 'var(--eb-accent-primary)',
               borderColor: 'var(--eb-accent-primary)',
-              color: '#fff',
+              color: 'var(--eb-text-inverted)',
             }}
           >
             {NOT_FOUND_COPY.home}

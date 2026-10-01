@@ -63,14 +63,19 @@ export function pageNameForPath(pathname, pluginTitles = {}) {
   // React Router ignores a trailing slash, so `/plugins/x/view/` renders the
   // same page as `/plugins/x/view` — resolve the title the same way (#2650).
   pathname = pathname.replace(/(.)\/+$/, '$1');
-  if (ROUTE_TITLES[pathname]) return ROUTE_TITLES[pathname];
+  // React Router also matches static segments case-insensitively (`caseSensitive`
+  // defaults to false), so `/Chats` or `/USERS` render the page — compare the
+  // static parts lowercased (#2697). Only the plugin id below keeps its case,
+  // since it is a route param and the display-name lookup is keyed by the id.
+  const lower = pathname.toLowerCase();
+  if (ROUTE_TITLES[lower]) return ROUTE_TITLES[lower];
   // "/" redirects to /chats — label the tab for the destination, not the raw slash.
   if (pathname === '/') return ROUTE_TITLES['/chats'];
   // `/chats/:agentId` reads plainly "Agent Chat" (#1921) — same as the
   // breadcrumb/header, which dropped the agent id because the selected agent is
   // already highlighted in the page's left-rail list.
-  if (pathname.startsWith('/chats/')) return ROUTE_TITLES['/chats'];
-  const pluginView = pathname.match(/^\/plugins\/([^/]+)\/view$/);
+  if (lower.startsWith('/chats/')) return ROUTE_TITLES['/chats'];
+  const pluginView = pathname.match(/^\/plugins\/([^/]+)\/view$/i);
   if (pluginView) return `Plugins / ${pluginTitleOf(pluginTitles, pluginView[1])}`;
   return null;
 }

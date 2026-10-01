@@ -39,7 +39,10 @@
   /* Text */
   --eb-text-primary:      oklch(0.93 0.005 293);
   --eb-text-secondary:    oklch(0.70 0.010 293);
-  --eb-text-muted:        oklch(0.55 0.008 293);
+  /* Muted stays ≥ 4.5:1 (WCAG AA) on bg-app … bg-hover: it is used for
+     11–12 px labels such as the sidebar section titles (#2701). */
+  --eb-text-muted:        oklch(0.63 0.008 293);
+  /* Also the text colour on accent-primary fills (primary buttons). */
   --eb-text-inverted:     oklch(0.13 0.006 293);
 
   /* Tooltip (shared dark hover tooltip — .eb-tooltip / Tooltip.jsx, #1850).
@@ -68,6 +71,12 @@
   --eb-status-error-bg:   oklch(0.25 0.04 25);
   --eb-status-info-bg:    oklch(0.25 0.04 230);
 
+  /* Status text: the status hue as readable text (≥ 4.5:1) on the app
+     surfaces AND on its own status-*-bg tint — notices, inline errors. */
+  --eb-status-success-text: oklch(0.78 0.17 155);
+  --eb-status-warning-text: oklch(0.82 0.15 85);
+  --eb-status-error-text:   oklch(0.75 0.16 25);
+
   /* ─── Typography ───────────────────────────────────────────────── */
   --eb-font-sans: 'Inter', 'Inter var', -apple-system, BlinkMacSystemFont,
                   'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
@@ -95,6 +104,7 @@
   --eb-space-0:   0px;
   --eb-space-0-5: 2px;
   --eb-space-1:   4px;
+  --eb-space-1-5: 6px;
   --eb-space-2:   8px;
   --eb-space-3:   12px;
   --eb-space-4:   16px;
@@ -151,7 +161,7 @@
 
   --eb-text-primary:      oklch(0.15 0.006 293);
   --eb-text-secondary:    oklch(0.45 0.010 293);
-  --eb-text-muted:        oklch(0.60 0.008 293);
+  --eb-text-muted:        oklch(0.51 0.008 293);
   --eb-text-inverted:     oklch(0.98 0.003 293);
 
   /* Tooltip: dark chip with light text, floating over the light page. */
@@ -168,6 +178,10 @@
   --eb-status-warning-bg: oklch(0.95 0.03 85);
   --eb-status-error-bg:   oklch(0.95 0.03 25);
   --eb-status-info-bg:    oklch(0.95 0.03 230);
+
+  --eb-status-success-text: oklch(0.48 0.13 155);
+  --eb-status-warning-text: oklch(0.48 0.11 70);
+  --eb-status-error-text:   oklch(0.50 0.20 25);
 }
 
 /* ─── High Contrast Theme ───────────────────────────────────────────── */
@@ -183,6 +197,8 @@
   --eb-text-primary:      oklch(1.0 0 0);
   --eb-text-secondary:    oklch(0.85 0 0);
   --eb-text-muted:        oklch(0.70 0 0);
+  /* Black on the bright accent: white would only reach ~3:1 (#2701). */
+  --eb-text-inverted:     oklch(0 0 0);
 
   --eb-border-default:    oklch(0.60 0 0);
   --eb-border-hover:      oklch(0.75 0 0);
@@ -190,6 +206,10 @@
 
   --eb-accent-primary:    oklch(0.75 0.30 293);
   --eb-accent-hover:      oklch(0.70 0.28 293);
+
+  --eb-status-success-text: oklch(0.85 0.17 155);
+  --eb-status-warning-text: oklch(0.88 0.15 85);
+  --eb-status-error-text:   oklch(0.80 0.15 25);
 
   /* Tooltip: pure-black chip, white text, bright border for max contrast. */
   --eb-tooltip-bg:        oklch(0.15 0 0);

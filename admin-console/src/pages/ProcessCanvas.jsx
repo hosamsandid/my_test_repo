@@ -360,6 +360,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // LabelRegistryPanel keeps its name-first contract in both modes.
   const liveLabelOps = useMemo(() => ({
     setLabelFlags: (name, flags) => liveOps.setLabelFlags(scope, name, flags),
+    removeLabels: (names) => liveOps.removeLabels(scope, names),
   }), [scope]);
 
   // Live human-role ops (#987): same teamId binding, so HumanRegistryPanel keeps
@@ -1266,8 +1267,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
 
       {labelsOpen && (isDraft || (isTeamScope && !imported)) && (
         <LabelRegistryPanel
-          key={JSON.stringify(displayGraph?.labels || [])}
+          key={JSON.stringify([displayGraph?.labels || [], displayGraph?.unusedLabels || []])}
           labels={displayGraph?.labels || []}
+          unusedLabels={displayGraph?.unusedLabels || []}
           ops={isDraft ? draftOps : liveLabelOps}
           onClose={() => setLabelsOpen(false)}
           onChanged={() => { if (!isDraft) refetch(); }}

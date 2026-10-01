@@ -331,6 +331,11 @@ Gate-ness is **configuration, not a naming convention**. A label called
 `approved-for-dispatch` is a gate because the registry says so, not because of
 how it is spelled — which is what lets human-applied labels have ordinary names.
 
+A label that only the registry still knows — nothing in the flow sets, listens
+on or gates with it — is marked *not used in this flow* and has a delete button;
+**Delete all unused (n)** removes them all. Labels in use cannot be deleted, and
+the label on GitHub is never touched.
+
 There is a third, quieter human touchpoint: **delivery**. A person can be wired
 to *consume* a label without the flow stopping — they are notified when it is
 set, and the flow carries on. Gate blocks, brake pauses, delivery only informs.

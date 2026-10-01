@@ -13,7 +13,7 @@ import { upsertChannel, removeChannelFrom, editChannel } from './channel-ops';
 import {
   stagesAfterAdd, stagesAfterRename, stagesAfterRemove, stagesAfterReorder, membersToCascade,
 } from './stage-list-ops';
-import { labelsAfterSet } from './label-registry-ops';
+import { labelsAfterSet, labelsAfterRemove, assertLabelsUnused } from './label-registry-ops';
 import {
   humansAfterUpsert, humansAfterRemove,
   humanAfterConsumeAdd, humanAfterConsumeRemove, humanAfterEmitAdd, humanAfterEmitRemove,
@@ -262,6 +262,15 @@ export const liveOps = {
   setLabelFlags: async (teamId, name, flags) => {
     const cur = await liveOps.listLabels(teamId);
     await apiCall('PUT', `/api/agents/${teamId}`, { labels: labelsAfterSet(cur, name, flags) });
+  },
+  // Delete UNUSED registry entries (#2716) in one PUT of the team's `labels[]`
+  // only — no agent/trigger/channel config is touched. Re-checks usage against
+  // a fresh server graph first so a label referenced meanwhile is never dropped.
+  removeLabels: async (teamId, names) => {
+    const g = await apiCall('GET', `/api/flows/graph?team=${encodeURIComponent(teamId)}`);
+    assertLabelsUnused(names, g?.unusedLabels);
+    const cur = await liveOps.listLabels(teamId);
+    await apiCall('PUT', `/api/agents/${teamId}`, { labels: labelsAfterRemove(cur, names) });
   },
 
   // ── named human roles (#987): first-class human flow nodes, TEAM-agent only ──
@@ -603,6 +612,16 @@ export function makeDraftOps(getBundle, persist) {
     setLabelFlags: async (name, flags) => {
       const b = clone(getBundle());
       const next = labelsAfterSet(b.labels, name, flags);
+      if (next.length) b.labels = next; else delete b.labels;
+      await persist(b);
+    },
+    // Delete UNUSED entries from the bundle's `labels[]` (#2716) — same
+    // server-side usage re-check as the live op, against the current bundle.
+    removeLabels: async (names) => {
+      const b = clone(getBundle());
+      const g = await apiCall('POST', '/api/flows/graph', { processTemplate: b });
+      assertLabelsUnused(names, g?.unusedLabels);
+      const next = labelsAfterRemove(b.labels, names);
       if (next.length) b.labels = next; else delete b.labels;
       await persist(b);
     },

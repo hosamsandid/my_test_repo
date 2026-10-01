@@ -25,7 +25,7 @@ const btn = (variant, disabled) => ({
   cursor: disabled ? 'not-allowed' : 'pointer',
   display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)',
   ...(variant === 'primary'
-    ? { border: 'none', background: disabled ? 'var(--eb-border-default)' : 'var(--eb-accent-primary)', color: disabled ? 'var(--eb-text-muted)' : '#fff' }
+    ? { border: 'none', background: disabled ? 'var(--eb-border-default)' : 'var(--eb-accent-primary)', color: disabled ? 'var(--eb-text-muted)' : 'var(--eb-text-inverted)' }
     : variant === 'danger'
       ? { border: '1px solid var(--eb-status-error)', background: 'transparent', color: 'var(--eb-status-error)' }
       : { border: '1px solid var(--eb-border-default)', background: 'var(--eb-bg-surface)', color: 'var(--eb-text-primary)' }),

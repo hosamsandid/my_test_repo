@@ -149,7 +149,7 @@ export default function ImprovementsPanel({ teamId, onClose }) {
           padding: 'var(--eb-space-6) var(--eb-space-4)', textAlign: 'center',
           color: 'var(--eb-text-secondary)',
         }}>
-          <TrendingUp size={28} style={{ color: 'var(--eb-text-tertiary, var(--eb-text-secondary))' }} />
+          <TrendingUp size={28} style={{ color: 'var(--eb-text-secondary)' }} />
           <div style={{ fontSize: 'var(--eb-text-sm)', lineHeight: 1.5 }}>
             No metrics pass has run for this team yet.<br />
             Run one now to fold the last window of run activity into the metric catalog.
@@ -173,7 +173,7 @@ export default function ImprovementsPanel({ teamId, onClose }) {
 
           <div style={{
             marginTop: 'var(--eb-space-4)', display: 'flex', alignItems: 'center', gap: 6,
-            fontSize: 11, color: 'var(--eb-text-tertiary, var(--eb-text-secondary))',
+            fontSize: 11, color: 'var(--eb-text-secondary)',
           }}>
             <Clock size={12} />
             {meta.windowDays ? `${meta.windowDays}-day window · ` : ''}
@@ -322,7 +322,7 @@ function ImprovementCard({ card, autonomy, busy, anyBusy, onAction }) {
         </div>
       )}
 
-      <div style={{ fontSize: 11, color: 'var(--eb-text-tertiary, var(--eb-text-secondary))' }}>
+      <div style={{ fontSize: 11, color: 'var(--eb-text-secondary)' }}>
         {object && <span>{object} · </span>}
         target metric <span style={{ fontFamily: 'var(--eb-font-mono, monospace)' }}>{card.targetMetric}</span>
       </div>
@@ -371,7 +371,7 @@ function ImprovementCard({ card, autonomy, busy, anyBusy, onAction }) {
           onClick={() => onAction(card, 'dismiss')}
         />
         {action.hint && (
-          <span style={{ fontSize: 11, color: 'var(--eb-text-tertiary, var(--eb-text-secondary))', flexBasis: '100%' }}>
+          <span style={{ fontSize: 11, color: 'var(--eb-text-secondary)', flexBasis: '100%' }}>
             {action.hint}
           </span>
         )}
@@ -417,7 +417,7 @@ function LedgerRow({ card }) {
         <StatusBadge status={card.status} />
         <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>{card.title}</span>
       </div>
-      <div style={{ fontSize: 11, color: 'var(--eb-text-tertiary, var(--eb-text-secondary))' }}>
+      <div style={{ fontSize: 11, color: 'var(--eb-text-secondary)' }}>
         {cardClassLabel(card.class)}
         {card.appliedBy ? ` · applied by ${card.appliedBy}` : ''}
         {when ? <> · <WhenCell iso={when} /></> : ''}
@@ -448,7 +448,7 @@ function MetricTile({ tile }) {
       <div style={{
         fontSize: isValue ? 'var(--eb-text-xl, 1.35rem)' : 'var(--eb-text-sm)',
         fontWeight: isValue ? 600 : 400,
-        color: isValue ? 'var(--eb-text-primary)' : 'var(--eb-text-tertiary, var(--eb-text-secondary))',
+        color: isValue ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
         fontStyle: isValue ? 'normal' : 'italic',
       }}>
         {isValue ? tile.value : stateLabel}
@@ -457,7 +457,7 @@ function MetricTile({ tile }) {
         <div style={{ fontSize: 11, color: 'var(--eb-text-secondary)' }}>{tile.sub}</div>
       )}
       {tile.note && (
-        <div style={{ fontSize: 11, color: 'var(--eb-text-tertiary, var(--eb-text-secondary))', lineHeight: 1.4 }}>
+        <div style={{ fontSize: 11, color: 'var(--eb-text-secondary)', lineHeight: 1.4 }}>
           {tile.note}
         </div>
       )}

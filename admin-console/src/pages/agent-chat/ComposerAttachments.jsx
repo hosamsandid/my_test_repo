@@ -79,7 +79,7 @@ function AttachmentCard({ attachment, onOpen, onRemove, onRetry }) {
           style={{
             width: '100%', height: '100%',
             padding: 0,
-            border: `1px solid ${failed ? 'var(--eb-status-error-text, #dc2626)' : 'var(--eb-border-default)'}`,
+            border: `1px solid ${failed ? 'var(--eb-status-error-text)' : 'var(--eb-border-default)'}`,
             borderRadius: 'var(--eb-radius-sm)',
             background: 'var(--eb-bg-surface)',
             cursor: onOpen ? 'pointer' : 'default',
@@ -143,7 +143,7 @@ function AttachmentCard({ attachment, onOpen, onRemove, onRetry }) {
       </div>
       {failed && (
         <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', fontSize: 10, lineHeight: 1.3 }}>
-          <span style={{ color: 'var(--eb-status-error-text, #dc2626)', whiteSpace: 'nowrap' }}>Upload failed</span>
+          <span style={{ color: 'var(--eb-status-error-text)', whiteSpace: 'nowrap' }}>Upload failed</span>
           <button
             type="button"
             onClick={onRetry}

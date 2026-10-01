@@ -121,8 +121,8 @@ export default function SkillPicker({ skills, selected, onChange, emptyHint }) {
                   ) : (
                     <>
                       <Chip
-                        bg={row.tier === 'team' ? 'var(--eb-accent-subtle, #eef2ff)' : 'var(--eb-bg-app)'}
-                        fg={row.tier === 'team' ? 'var(--eb-accent, #4f46e5)' : 'var(--eb-text-muted)'}
+                        bg={row.tier === 'team' ? 'var(--eb-accent-muted)' : 'var(--eb-bg-app)'}
+                        fg={row.tier === 'team' ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)'}
                       >{row.tier === 'team' ? 'Team' : 'Global'}</Chip>
                       {row.shadowsGlobal && (
                         <Chip title="A team skill of this name shadows the global skill — team-first resolution means the team version is the one granted.">

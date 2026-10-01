@@ -8,6 +8,9 @@ import { teamMembershipIndicator, membershipsByTeam, fitAdminNames } from './tea
 import { computeTeamAttention } from '../../context/agent-statuses.js';
 import { agentState, isChatOpenable } from '../agent-lifecycle/agent-lifecycle-menu.js';
 import { revealPlan } from './reveal-agent.js';
+import {
+  SHOW_ALL, NO_SELECTION_HINT, INDIVIDUAL_LABEL, selectionEntries, shownEntries, reorderAllowed,
+} from './list-selection.js';
 
 // Re-exported so `AgentChat` can populate the filter dropdown without importing
 // the model module directly (the grouping logic used to live in this file).
@@ -50,7 +53,7 @@ const DEFAULT_COLLAPSED = {
  * uses to tell where one team ends and the next begins even with many teams
  * stacked in the rail. All tokens, so it follows the active light/dark theme.
  *
- * The "Single agents" section (a plain `SectionHeader` + ungrouped rows) is
+ * The "Individual agents" section (a plain `SectionHeader` + ungrouped rows) is
  * deliberately NOT wrapped in this, so ungrouped agents stay visually distinct
  * from an actual team (AC6).
  */
@@ -103,7 +106,7 @@ function saveOrder(order) {
  * @param {string|null} selectedAgentId
  * @param {(id:string)=>void} onSelect
  * @param {Record<string,string>} statuses  Map agentId → activityState
- * @param {{kind:'all'}|{kind:'team',id:string}|{kind:'agent',id:string}} filter
+ * @param {{hidden:string[]}} filter  The rail team selection (#2740, list-selection.js)
  * @param {boolean} showDisabled  Opt-in: also list disabled agents (#1928 AC6)
  * @param {Set<string>} busyIds   ids with a lifecycle mutation in flight, owned
  *   by `RailLifecycleHost` and passed down so a **Materialize** shows progress
@@ -132,7 +135,7 @@ export default function AgentList({
   selectedAgentId,
   onSelect,
   statuses = {},
-  filter = { kind: 'all' },
+  filter = SHOW_ALL,
   showDisabled = false,
   busyIds = EMPTY_BUSY,
   onRequestMenu = null,
@@ -168,16 +171,20 @@ export default function AgentList({
     [orderedGroups, orderedSingles, filter, showDisabled],
   );
 
-  // Group and single-agent reorder are only offered when the full unfiltered
-  // list is visible so that the visual position matches the stored order — under
-  // a filter you cannot see the other groups/singles, so a move would be
-  // ambiguous.
-  const canReorder = filter.kind === 'all';
-  // Member-within-group reorder, by contrast, is unambiguous under a single-team
-  // filter too: that view shows the team's complete, ordered member set, and the
-  // drag writes the same complete per-group order it would in the unfiltered view
-  // (#1725). The single-agent filter stays out.
-  const canReorderMembers = filter.kind === 'all' || filter.kind === 'team';
+  // Group and single-agent reorder are only offered when every entry is
+  // selected, so the visual position matches the stored order — with teams
+  // hidden a move would be ambiguous. Member-within-group reorder is
+  // unambiguous when exactly one team is shown too: that view holds the team's
+  // complete, ordered member set (#1725, #2740 AC11).
+  const selectionEntryList = useMemo(
+    () => selectionEntries(rawGroups, rawSingles),
+    [rawGroups, rawSingles],
+  );
+  const { groups: canReorder, members: canReorderMembers } = useMemo(
+    () => reorderAllowed(selectionEntryList, filter),
+    [selectionEntryList, filter],
+  );
+  const nothingSelected = selectionEntryList.length > 0 && shownEntries(selectionEntryList, filter).length === 0;
 
   // Latest ordered lists behind a ref so the reorder/drag callbacks below stay
   // referentially stable across renders — otherwise every memoized row would
@@ -334,7 +341,7 @@ export default function AgentList({
     // separates one team from the next (#2370 follow-up): without it the cards
     // sat flush against the rail's top/left edge while only their `marginBottom`
     // gap — and the scrollbar on the right — gave them any room. The inset also
-    // aligns the ungrouped "Single agents" rows to the same left edge as the
+    // aligns the ungrouped "Individual agents" rows to the same left edge as the
     // cards' outer margin.
     <div role="listbox" style={{ display: 'flex', flexDirection: 'column', padding: 'var(--eb-space-2)' }}>
       {visibleGroups.map((group) => (
@@ -364,7 +371,7 @@ export default function AgentList({
 
       {visibleSingles.length > 0 && (
         <>
-          <SectionHeader label="Single agents" icon={MessageCircle} />
+          <SectionHeader label={INDIVIDUAL_LABEL} icon={MessageCircle} />
           {visibleSingles.map((agent) => (
             <AgentRow
               key={agent.id}
@@ -394,7 +401,7 @@ export default function AgentList({
           textAlign: 'center',
           lineHeight: 1.5,
         }}>
-          No agents match this filter.
+          {nothingSelected ? NO_SELECTION_HINT : 'No agents match this filter.'}
         </div>
       )}
     </div>

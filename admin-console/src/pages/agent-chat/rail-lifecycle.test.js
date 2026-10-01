@@ -202,24 +202,22 @@ test('the rail no longer builds a create menu — the header owns those actions'
 });
 
 test('importedAgentFilterNote stays silent when the new agent is visible (AC4)', () => {
-  assert.equal(importedAgentFilterNote({ kind: 'all' }, 'zeta', undefined), null);
+  assert.equal(importedAgentFilterNote({ hidden: [] }, 'zeta', undefined), null);
   assert.equal(importedAgentFilterNote(undefined, 'zeta', undefined), null);
-  // Filtered to the very agent that just landed.
-  assert.equal(importedAgentFilterNote({ kind: 'agent', id: 'zeta' }, 'zeta', undefined), null);
-  // Filtered to the team it was imported into.
-  assert.equal(importedAgentFilterNote({ kind: 'team', id: 'alpha' }, 'zeta', 'alpha'), null);
-  // An unknown filter kind is reported visible — a wrong "hidden" note next to
-  // an agent the user can see would be worse than no note. Since #1964 the
-  // retired `orchestrator` kind is exactly such an unknown.
-  assert.equal(importedAgentFilterNote({ kind: 'something-new' }, 'zeta', undefined), null);
-  assert.equal(importedAgentFilterNote({ kind: 'orchestrator', id: 'omega' }, 'zeta', 'alpha'), null);
+  // Imported into a team the selection shows (#2740).
+  assert.equal(importedAgentFilterNote({ hidden: ['team:beta'] }, 'zeta', 'alpha'), null);
+  // No team in the response: it may land as its own (new, so shown) team or
+  // as an ungrouped row — undecidable, so no note unless both are hidden.
+  assert.equal(importedAgentFilterNote({ hidden: ['singles'] }, 'zeta', undefined), null);
+  // A retired single-choice spec reads as "everything shown".
+  assert.equal(importedAgentFilterNote({ kind: 'team', id: 'alpha' }, 'zeta', 'beta'), null);
 });
 
-test('importedAgentFilterNote reports an import the filter swallows (AC4)', () => {
-  const other = importedAgentFilterNote({ kind: 'agent', id: 'dev' }, 'zeta', undefined);
-  assert.ok(other && /filter/i.test(other), 'names the filter as the reason');
-  assert.ok(importedAgentFilterNote({ kind: 'team', id: 'alpha' }, 'zeta', undefined));
-  assert.ok(importedAgentFilterNote({ kind: 'team', id: 'alpha' }, 'zeta', 'beta'));
+test('importedAgentFilterNote reports an import the selection swallows (AC4)', () => {
+  const hidden = importedAgentFilterNote({ hidden: ['team:alpha'] }, 'zeta', 'alpha');
+  assert.ok(hidden && /filter/i.test(hidden), 'names the filter as the reason');
+  assert.match(hidden, /Select all/);
+  assert.ok(importedAgentFilterNote({ hidden: ['singles', 'team:zeta'] }, 'zeta', undefined));
 });
 
 test('railMenuItems routes each target kind to its own menu', () => {

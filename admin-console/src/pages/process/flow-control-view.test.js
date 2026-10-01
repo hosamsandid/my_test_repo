@@ -29,6 +29,10 @@ import {
   removeDialogTitle,
   removedView,
   withoutRows,
+  instanceOf,
+  chatLink,
+  CHAT_LINK_CLASS,
+  CHAT_LINK_CSS,
 } from './flow-control-view.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -223,6 +227,72 @@ test('boardView: removed items are counted and listed for Restore (AC9)', () => 
   assert.deepEqual(v.removed.map((r) => [r.ref, r.removalId, r.removedAgo]), [['#2563', 'o/r#2563', '1h 30m'], ['PR #91', 'o/r#91', '5m']]);
   assert.deepEqual(boardView({}, NOW).removed, []);
   assert.equal(removedView({ id: 'x', removedAt: ago(1) }, { now: NOW }).title, '(untitled)');
+});
+
+// ── jump to the working agent's chat (#2723) ───────────────────────────────
+
+test('chatLink: in-console href to the exact agent, named for the role and instance (AC1, AC2, AC6)', () => {
+  assert.deepEqual(chatLink('t-dev-i2716', 'Developer'), { to: '/chats/t-dev-i2716', label: 'Open chat with Developer #2716' });
+  assert.deepEqual(chatLink('t-rev', 'Code Reviewer'), { to: '/chats/t-rev', label: 'Open chat with Code Reviewer' });
+  assert.equal(chatLink('a b/c', '').to, '/chats/a%20b%2Fc');
+  assert.equal(chatLink('a b/c', '').label, 'Open chat with a b/c');
+  assert.equal(chatLink('t-dev-i9', 'Developer', null).label, 'Open chat with Developer');
+  for (const none of [null, undefined, '', 42]) assert.equal(chatLink(none, 'Developer'), null);
+});
+
+test('instanceOf: reads the pool item from a <template>-i<item> id', () => {
+  assert.equal(instanceOf('team-developer-i2716'), 2716);
+  assert.equal(instanceOf('team-developer'), null);
+  assert.equal(instanceOf(null), null);
+});
+
+test('rowView: a working row with a running agent links to that pool instance, not the template (AC1, AC2)', () => {
+  const v = rowView(row({ stageId: 't-dev', stageIndex: 1, roleId: 't-dev', roleLabel: 'Developer', agentId: 't-dev-i2716' }), STAGES, { now: NOW });
+  assert.deepEqual(v.chat, { to: '/chats/t-dev-i2716', label: 'Open chat with Developer #2716' });
+});
+
+test('rowView: without a roleLabel the stage label names the link target', () => {
+  assert.equal(rowView(row(), STAGES).chat.label, 'Open chat with Code Reviewer');
+});
+
+test('rowView: working only by a claim label (no agentId) is not a link (AC4)', () => {
+  assert.equal(rowView(row({ agentId: null }), STAGES).chat, null);
+  assert.equal(rowView(row({ agentId: undefined }), STAGES).chat, null);
+});
+
+test('rowView: rows with any other status are not links, even with an agentId (AC5)', () => {
+  for (const status of ['queued', 'idle', 'draft', 'done']) {
+    assert.equal(rowView(row({ status, agentId: 't-dev-i7' }), STAGES).chat, null, status);
+  }
+});
+
+test('sessionView: every running session links to its own agent (AC3)', () => {
+  const pooled = sessionView({ id: 's1', agentId: 't-dev-i7', roleLabel: 'Developer', instance: 7, startedAt: ago(1) });
+  assert.deepEqual(pooled.chat, { to: '/chats/t-dev-i7', label: 'Open chat with Developer #7' });
+  const plain = sessionView({ id: 's2', agentId: 't-rev', roleId: 't-rev', instance: null, startedAt: ago(1) });
+  assert.deepEqual(plain.chat, { to: '/chats/t-rev', label: 'Open chat with t-rev' });
+  // The server's instance number is authoritative — never re-derived from the id.
+  assert.equal(sessionView({ agentId: 'x-i9', roleLabel: 'X', instance: null }).chat.label, 'Open chat with X');
+  const two = boardView({ sessions: [
+    { id: 'a', agentId: 't-dev-i7', roleLabel: 'Developer', instance: 7 },
+    { id: 'b', agentId: 't-dev-i8', roleLabel: 'Developer', instance: 8 },
+  ] }).sessions.map((s) => s.chat.to);
+  assert.deepEqual(two, ['/chats/t-dev-i7', '/chats/t-dev-i8']);
+});
+
+test('chat link CSS gives hover and keyboard-focus affordances', () => {
+  assert.match(CHAT_LINK_CSS, new RegExp(`\\.${CHAT_LINK_CLASS}:hover \\{[^}]*text-decoration: underline`));
+  assert.match(CHAT_LINK_CSS, new RegExp(`\\.${CHAT_LINK_CLASS}:focus-visible \\{[^}]*outline`));
+});
+
+test('FlowControl wires the chat links: router Link, stage cell and Working-now line (#651 source guard)', () => {
+  const jsx = fs.readFileSync(path.join(here, '..', 'FlowControl.jsx'), 'utf8');
+  assert.match(jsx, /import \{ Link as RouterLink \} from 'react-router';/);
+  assert.match(jsx, /<style>\{CHAT_LINK_CSS\}<\/style>/);
+  assert.match(jsx, /if \(!chat\) return children;/);
+  assert.match(jsx, /<RouterLink to=\{chat\.to\} title=\{chat\.label\} aria-label=\{chat\.label\} className=\{CHAT_LINK_CLASS\}/);
+  assert.match(jsx, /<ChatLink chat=\{row\.chat\}>\s*<div[^>]*>\{row\.stageLabel\}<\/div>\s*<div[^>]*>\{row\.statusText\}<\/div>\s*<\/ChatLink>/);
+  assert.match(jsx, /<ChatLink chat=\{s\.chat\}>\s*\{s\.role\}/);
 });
 
 // ── area ① (AC7, AC13) ─────────────────────────────────────────────────────

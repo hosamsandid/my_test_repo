@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   AlertTriangle, RefreshCw, ExternalLink, Info, Pause, Play, Waves, Zap, Power, Columns, UserRound, EyeOff, RotateCcw,
 } from 'lucide-react';
+import { Link as RouterLink } from 'react-router';
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import PageHelpButton from '../components/PageHelpButton';
@@ -9,7 +10,7 @@ import Modal from '../components/Modal';
 import { usePageActions } from '../context/PageActionsContext';
 import {
   boardView, updatedAgo, AUTO_REFRESH_MS, readAutoRefresh, writeAutoRefresh, configFormRows, configFromForm,
-  withoutRows, REMOVE_CONFIRM_TEXT, removeDialogTitle,
+  withoutRows, REMOVE_CONFIRM_TEXT, removeDialogTitle, CHAT_LINK_CLASS, CHAT_LINK_CSS,
 } from './process/flow-control-view';
 import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections';
 
@@ -185,6 +186,7 @@ export default function FlowControl() {
   return (
     <>
       {headerAction}
+      <style>{CHAT_LINK_CSS}</style>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
         {/* Title comes from the Shell header (#1847), so the page leads with the
             one-line description plus its "?". */}
@@ -375,6 +377,18 @@ const lineStyle = {
 
 const mutedStyle = { color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' };
 
+// In-console link to the chat of the agent working right now (#2723): a real
+// anchor, so Ctrl/Cmd- and middle-click open a new tab. `chat` is the view's
+// `chatLink` result; without one the content renders exactly as before.
+function ChatLink({ chat, children }) {
+  if (!chat) return children;
+  return (
+    <RouterLink to={chat.to} title={chat.label} aria-label={chat.label} className={CHAT_LINK_CLASS} style={{ display: 'block' }}>
+      {children}
+    </RouterLink>
+  );
+}
+
 function Link({ href, children }) {
   if (!href) return <span>{children}</span>;
   return (
@@ -400,7 +414,9 @@ function WorkingNow({ view, busy, onSetState, onForceDispatch }) {
       {view.sessions.map((s) => (
         <div key={s.id} style={lineStyle}>
           <span style={{ color: 'var(--eb-text-primary)', fontWeight: 500 }}>
-            {s.role}{s.instance && <span style={mutedStyle}> {s.instance}</span>}
+            <ChatLink chat={s.chat}>
+              {s.role}{s.instance && <span style={mutedStyle}> {s.instance}</span>}
+            </ChatLink>
           </span>
           <span style={{ fontFamily: 'var(--eb-font-mono)', ...mutedStyle }}>{s.item}</span>
           {s.title && <span style={{ color: 'var(--eb-text-primary)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.title}</span>}
@@ -548,8 +564,10 @@ function BoardRow({ row, canManage, busy, onRemove }) {
       </td>
       <td style={cellStyle}><StageProgress steps={row.steps} blocked={row.blocked} /></td>
       <td style={cellStyle}>
-        <div style={{ color: 'var(--eb-text-primary)' }}>{row.stageLabel}</div>
-        <div style={mutedStyle}>{row.statusText}</div>
+        <ChatLink chat={row.chat}>
+          <div style={{ color: 'var(--eb-text-primary)' }}>{row.stageLabel}</div>
+          <div style={mutedStyle}>{row.statusText}</div>
+        </ChatLink>
       </td>
       <td style={{ ...cellStyle, whiteSpace: 'nowrap', ...mutedStyle }}>
         {row.inStageTitle ? <span title={row.inStageTitle}>{row.inStage}</span> : row.inStage}

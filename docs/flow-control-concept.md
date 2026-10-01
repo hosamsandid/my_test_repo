@@ -655,6 +655,8 @@ with base, waiting for approval (a label the flow hands to no agent),
 approved — waiting for merge, checks failing, or no agent is scheduled to
 continue (nothing woke or queued for 30 min after the last run). A conflict
 already queued for an agent is not a human block.
+*(Extended by #2734/#2754: two more reasons — **stuck — no progress, needs
+help** and **nobody picks it up** — see Amendment 5.)*
 
 **A3.6 — Drain now ends in Off.** `pool-control.json` gains a third state,
 `off`: it refuses every dispatch, including reuse of a live instance.
@@ -690,3 +692,40 @@ was delivered on any of its items, or a team agent opened a PR for it. Edits,
 comments and cross-references (`updatedAt` only) do not count. Revived entries,
 and entries whose row left the snapshot, are pruned from the store — only for
 repos the sweep actually reached, so a GitHub outage never forgets a removal.
+
+## Amendment 5 — Release claim and wakes nobody can pick up (#2754)
+
+**A5.1 — the stuck reason gets a way out.** #2734 added the reason *stuck — no
+progress, needs help*: a row has read *working* for more than an hour only
+because of a `<wake>:wip` claim, and no session or pool instance is alive for
+it. The board only reported it. Since #2754 such a row carries a `release`
+list (`{repo, number, kind, claim, wake}`), one entry per `:wip` claim whose
+wake label still has a live consumer. A Team Admin (`canManageTeam`) gets a
+**Release claim** button with a confirmation dialog listing `claim → wake`.
+
+**A5.2 — the release swaps the label on GitHub, nothing else.** The console
+route `POST /api/teams/:teamId/flow-board-release` (`{ rowId }`; the actor is
+the session user, never the body) proxies to the orchestrator's
+`POST /internal/teams/:teamId/flow-board-release`. It re-reads a **fresh**
+board and refuses a stale board (503), an unknown row (404), or a row that is
+no longer stuck or has no claim (409) — `planClaimRelease` in the pure
+`orchestrator/flow-claim-release.js`. `swapClaimLabel` then removes the claim
+**first** and adds the wake label back (on a failed add it creates the label
+and retries once), with the token `resolveRepoGithubTokenId` picks for the
+repo. There is no in-process wake: the poller sees the re-applied wake label
+and re-dispatches the item on its next poll, as if a person had re-applied it.
+A partial failure comes back as a warning that says what to do by hand. Every
+swap writes one GitHub Event Log line, `flow-control.claim-released` (UI:
+*claim released (Flow Control)*), with the actor and the outcome. The board
+never releases a claim on its own.
+
+**A5.3 — wakes whose every consumer is switched off.** A new reason, *nobody
+picks it up — its agent is switched off*, replaces queued/stuck for an item
+with no live session when every wake label it carries (or its claim) is
+consumed only by switched-off agents — the agent is disabled, or its trigger
+on that label is. One live consumer clears it. Such rows get no release,
+because releasing would wake nobody. The flow lint
+`wake-label-no-live-consumer` (warning, *Nobody picks this label up*) reports
+the same on the Flows page; the graph endpoints now carry `enabled: false` on
+switched-off nodes. A label with no consumer at all stays with
+`dead-end-emitter` / `outcome-without-consumer`.

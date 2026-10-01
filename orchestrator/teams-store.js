@@ -149,17 +149,19 @@ function coerceChatListFilter(raw) {
   if (typeof raw !== 'object' || Array.isArray(raw) || !Array.isArray(raw.hidden)) {
     throw badRequest('chatListFilter must be an object with a hidden array');
   }
-  const hidden = [];
+  // Bound the raw array before touching its entries: request bodies are not
+  // size-capped on the orchestrator, so the cap must hold ahead of the loop.
+  if (raw.hidden.length > CHAT_LIST_FILTER_MAX_KEYS) {
+    throw badRequest(`chatListFilter.hidden may hold at most ${CHAT_LIST_FILTER_MAX_KEYS} entries`);
+  }
+  const hidden = new Set();
   for (const key of raw.hidden) {
     if (typeof key !== 'string' || !key || key.length > CHAT_LIST_FILTER_MAX_KEY_LENGTH) {
       throw badRequest(`chatListFilter.hidden entries must be non-empty strings of at most ${CHAT_LIST_FILTER_MAX_KEY_LENGTH} characters`);
     }
-    if (!hidden.includes(key)) hidden.push(key);
+    hidden.add(key);
   }
-  if (hidden.length > CHAT_LIST_FILTER_MAX_KEYS) {
-    throw badRequest(`chatListFilter.hidden may hold at most ${CHAT_LIST_FILTER_MAX_KEYS} entries`);
-  }
-  return { hidden };
+  return { hidden: [...hidden] };
 }
 
 // A membership's `teamId` may name an **Agent Team** as well as a legacy access

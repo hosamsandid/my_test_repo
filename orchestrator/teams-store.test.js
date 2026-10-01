@@ -341,6 +341,21 @@ test('chatListFilter: coerce accepts { hidden: string[] }, folds duplicates, tre
   assert.throws(() => coerceChatListFilter({ hidden: tooMany }), /at most 2000/);
 });
 
+test('chatListFilter: an oversized hidden array is rejected before its entries are inspected', () => {
+  // 2001 non-string entries: the size check must fire first, not the per-key one.
+  assert.throws(() => coerceChatListFilter({ hidden: Array(2001).fill(42) }), /at most 2000 entries/);
+  // A huge array must be rejected without iterating it (no O(n²) dedupe on the event loop).
+  const huge = new Proxy(Array(1_000_000).fill('team:x'), {
+    get(target, prop, receiver) {
+      if (prop === Symbol.iterator) throw new Error('hidden was iterated');
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  assert.throws(() => coerceChatListFilter({ hidden: huge }), /at most 2000 entries/);
+  // Duplicates up to the cap are still folded.
+  assert.deepEqual(coerceChatListFilter({ hidden: Array(2000).fill('team:a') }), { hidden: ['team:a'] });
+});
+
 test('chatListFilter: update stores it, leaves it alone when absent, blank clears it', () => {
   const { store } = freshStore();
   const u = store.createUser({ subject: 'filter@corp.com' });

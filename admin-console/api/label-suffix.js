@@ -165,12 +165,20 @@ function applyLabelSuffix(members, bundleLabels, suffix, humans = []) {
     if (remove) next.remove = stampLabel(claim.remove);
     if (typeof claim.add === 'string') {
       const add = claim.add.trim();
+      // The longest known label wins, so a known `foo-bar` in `foo-bar:wip`
+      // is never split into `foo-x1-bar:wip` just because it starts with
+      // `remove` = `foo` (#2718 AC4). The `remove` prefix is only the fallback
+      // for an unknown tail (`ready-wip` → `ready-x1-wip`).
       let base = '';
-      if (remove && stampSet.has(remove) && add.startsWith(remove)) base = remove;
-      else if (stampSet.has(add)) base = add;
-      else {
-        const colon = add.indexOf(':');
-        if (colon > 0 && stampSet.has(add.slice(0, colon))) base = add.slice(0, colon);
+      const colon = add.indexOf(':');
+      if (stampSet.has(add)) base = add;
+      else if (colon > 0 && stampSet.has(add.slice(0, colon))) base = add.slice(0, colon);
+      else if (remove && stampSet.has(remove) && add.startsWith(remove)) {
+        base = remove;
+        for (const t of stampSet) {
+          if (t.length > base.length && t.startsWith(`${remove}-`) && add.startsWith(t)
+              && (add.length === t.length || add[t.length] === '-' || add[t.length] === ':')) base = t;
+        }
       }
       if (base) next.add = `${base}-${suffix}${add.slice(base.length)}`;
     }
@@ -319,6 +327,10 @@ function applyLabelSuffix(members, bundleLabels, suffix, humans = []) {
  * @param {{ trigger?: boolean }} [opts] - `trigger: true` when body IS a trigger
  * @returns {object}
  */
+// The token set is built from `body` alone, so a body must carry every label it
+// references: a trigger PUT with a `claim` but no `labelFilter` leaves the claim
+// unstamped. All current callers (Flow editor dialogs, Copilot live apply) send
+// full triggers.
 function stampLiveLabels(body, suffix, { trigger = false } = {}) {
   if (!suffix || !validateSuffix(suffix).ok) return body;
   if (!body || typeof body !== 'object' || Array.isArray(body)) return body;

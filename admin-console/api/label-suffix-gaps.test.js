@@ -130,6 +130,19 @@ describe('no stamping inside a longer label name (AC4)', () => {
     assert.equal(r.members[0].promptTemplate, 'Use ready-to-review-x1 or ready-to-review-later-x1.');
   });
 
+  it('claim.add takes the longest known label, never splitting it after remove', () => {
+    const claimAdd = (add, emits) => applyLabelSuffix(
+      [{ id: 'a', triggers: [labelTrigger('foo', { claim: { remove: 'foo', add } })], emits }], [], S,
+    ).members[0].triggers[0].claim.add;
+    assert.equal(claimAdd('foo-bar:wip', ['foo-bar']), 'foo-bar-x1:wip');
+    assert.equal(claimAdd('foo-bar-wip', ['foo-bar']), 'foo-bar-x1-wip');
+    assert.equal(claimAdd('foo-bar', ['foo-bar']), 'foo-bar-x1');
+    assert.equal(claimAdd('ready-to-review-later:wip', ['ready-to-review-later']), 'ready-to-review-later-x1:wip');
+    // Unknown tail: the different-separator rule still stamps the remove base.
+    assert.equal(claimAdd('foo-wip', []), 'foo-x1-wip');
+    assert.equal(claimAdd('foo:wip', []), 'foo-x1:wip');
+  });
+
   it('outcome prose mentioning a label is stamped cleanly', () => {
     const r = applyLabelSuffix([{ id: 'a', emits: ['ready-to-merge'], promptTemplate: 'PR labelled ready-to-merge: done.' }], [], S);
     assert.equal(r.members[0].promptTemplate, 'PR labelled ready-to-merge-x1: done.');
@@ -335,13 +348,12 @@ describe('real-world style bundle (AC11)', () => {
     const out = applyLabelSuffix(members, bundle.labels, S, humans);
 
     const original = ['ready', 'spec-required', 'spec-ready-for-review', 'spec-ready-for-review-jvc', 'ready-for-qa'];
-    const bare = new RegExp(`(?<![\\w-])(${original.map(l => l.replace(/-/g, '\\-')).join('|')})(?!-?\\w)`);
+    const bare = new RegExp(`(?<![\\w-])(${original.join('|')})(?!-?\\w)`, 'g');
     for (const [at, v] of strings({ members: out.members, labels: out.bundleLabels, humans: out.humans })) {
       // Bare one-word mentions are out of scope (AC10) — only the port/claim
       // fields and multi-word prompt mentions are asserted here.
       if (/prompt/i.test(at)) {
-        const m = v.match(bare);
-        if (m) assert.equal(m[1], 'ready', `unstamped '${m[1]}' at ${at}: ${v}`);
+        for (const m of v.matchAll(bare)) assert.equal(m[1], 'ready', `unstamped '${m[1]}' at ${at}: ${v}`);
       } else if (/(labelFilter|\.label|emits\[\d+\]|^\$\.labels\[\d+\]\.name|claim\.(remove|add))$/.test(at)) {
         assert.match(v, /-x1(:wip)?$/, `unstamped ${at}: ${v}`);
       }

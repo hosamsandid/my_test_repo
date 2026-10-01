@@ -37,8 +37,8 @@ function eventKeyForKind(kind) {
 
 // Validate the request body into `{ok: true, value}` or `{ok: false, error}`.
 // Shape: { repo: "owner/name", number, kind?: issue|pr (default issue), label,
-// actor? }. `kind` defaults to `issue` because the GitHub Issues plugin — the
-// only caller today — lists issues; a caller may still pass `pr` explicitly.
+// actor? }. `kind` defaults to `issue`; the console proxy passes `pr` when the
+// GitHub Issues plugin's broker reports it labelled a pull request (#2746).
 function validateLabelAppliedRequest(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return { ok: false, error: 'body must be an object' };

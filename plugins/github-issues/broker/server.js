@@ -83,8 +83,8 @@ function readBody(req) {
   });
 }
 function parseJson(s) { try { return JSON.parse(s || '{}'); } catch { return {}; } }
-function sendJson(res, status, obj) {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
+function sendJson(res, status, obj, extraHeaders) {
+  res.writeHead(status, Object.assign({ 'Content-Type': 'application/json' }, extraHeaders));
   res.end(JSON.stringify(obj));
 }
 function query(req) {
@@ -143,6 +143,7 @@ async function handleUiApi(req, res, apiPath, viewer) {
       return Object.assign(ctx, {
         lastRepo: (pref && pref.repo) || null,
         lastState: (pref && pref.state) || null,
+        lastType: (pref && pref.type) || null,
       });
     });
     const lastUsed = store.pickLastUsed(viewer.teamIds || [], actor);
@@ -166,12 +167,13 @@ async function handleUiApi(req, res, apiPath, viewer) {
     const token = store.tokenForRepo(team, repo);
     if (!token) return void tokenErr(res, team, repo);
     const state = gh.normState(params.get('state'));
+    const type = gh.normType(params.get('type'));
     const page = Number(params.get('page')) || 1;
     try {
       const { data } = await gh.call('list_issues', { repo, state, page, perPage: gh.DEFAULT_PER_PAGE }, { token });
-      const issues = gh.shapeIssueList(data);
+      const issues = gh.shapeIssueList(data, type);
       // remember this team+repo for next visit (AC5)
-      store.savePref(team, actor, { repo, state, updatedAt: nowIso() });
+      store.savePref(team, actor, { repo, state, type, updatedAt: nowIso() });
       writeAudit(team, actor, 'list', 'ok', repo);
       return sendJson(res, 200, { issues, page, hasMore: Array.isArray(data) && data.length >= gh.DEFAULT_PER_PAGE });
     } catch (err) {
@@ -190,11 +192,12 @@ async function handleUiApi(req, res, apiPath, viewer) {
     if (!token) return void tokenErr(res, team, repo);
     const text = params.get('q') || '';
     const state = gh.normState(params.get('state'));
+    const type = gh.normType(params.get('type'));
     const page = Number(params.get('page')) || 1;
     const perPage = gh.DEFAULT_PER_PAGE;
     try {
-      const { data } = await gh.call('search_issues', { repo, text, state, page, perPage }, { token });
-      const shaped = gh.shapeSearchResult(data);
+      const { data } = await gh.call('search_issues', { repo, text, state, type, page, perPage }, { token });
+      const shaped = gh.shapeSearchResult(data, type);
       const hasMore = shaped.issues.length >= perPage && page * perPage < 1000;
       writeAudit(team, actor, 'search', 'ok', repo);
       return sendJson(res, 200, {
@@ -252,7 +255,10 @@ async function handleUiApi(req, res, apiPath, viewer) {
       // (and never silently clobbers a concurrent change — the issue's edge case).
       const { data } = await gh.call('get_issue', { repo: bRepo, number }, { token });
       writeAudit(team, actor, action === 'remove' ? 'label-remove' : 'label-add', 'ok', `${bRepo}#${number}:${label}`);
-      return sendJson(res, 200, { issue: gh.shapeIssue(data) });
+      const issue = gh.shapeIssue(data);
+      // #2746: tell the console proxy whether it labelled an issue or a PR, so
+      // the #1858 fast path wakes the matching `*.labeled` listeners.
+      return sendJson(res, 200, { issue }, { [gh.LABEL_TARGET_KIND_HEADER]: gh.labelTargetKind(issue) });
     } catch (err) {
       writeAudit(team, actor, action === 'remove' ? 'label-remove' : 'label-add', 'error', `${bRepo}#${number}:${label}`);
       return sendJson(res, err.status || 502, { error: err.message });
@@ -260,7 +266,7 @@ async function handleUiApi(req, res, apiPath, viewer) {
   }
 
   if (apiPath === '/pref' && req.method === 'POST') {
-    store.savePref(team, actor, { repo: body.repo || null, state: body.state || null, updatedAt: nowIso() });
+    store.savePref(team, actor, { repo: body.repo || null, state: body.state || null, type: body.type ? gh.normType(body.type) : null, updatedAt: nowIso() });
     return sendJson(res, 200, { ok: true });
   }
 

@@ -118,7 +118,45 @@ test('a path component cannot break out of the REST path', () => {
   assert.throws(() => gh.buildRequest('get_issue', { repo: '../../etc/passwd', number: 1 }), /invalid repository/);
 });
 
-test('isPullRequest / shapeIssueList drop PRs (MVP is issues-only)', () => {
+test('search_issues maps the item type to type:issue / type:pr / no type qualifier (#2746)', () => {
+  const q = (type) => decodeURIComponent(gh.buildRequest('search_issues', { repo: 'a/b', text: 'x', type }).path);
+  assert.match(q(undefined), /x repo:a\/b type:issue in:title state:open/);
+  assert.match(q('issues'), /x repo:a\/b type:issue in:title state:open/);
+  assert.match(q('prs'), /x repo:a\/b type:pr in:title state:open/);
+  assert.match(q('all'), /x repo:a\/b in:title state:open/);
+  assert.equal(/type:/.test(q('all')), false);
+  // an unknown type falls back to issues, never widens the scope
+  assert.match(q('weird'), /type:issue/);
+});
+
+test('normType defaults to issues and accepts only issues | prs | all (#2746)', () => {
+  assert.equal(gh.normType(), 'issues');
+  assert.equal(gh.normType('PRS'), 'prs');
+  assert.equal(gh.normType('all'), 'all');
+  assert.equal(gh.normType('pulls'), 'issues');
+});
+
+test('shapeIssueList / shapeSearchResult filter by item type and flag PRs (#2746)', () => {
+  const raw = [
+    { number: 1, title: 'Issue', state: 'open' },
+    { number: 2, title: 'A PR', state: 'open', pull_request: { url: 'x' } },
+  ];
+  assert.deepEqual(gh.shapeIssueList(raw, 'prs').map((i) => i.number), [2]);
+  assert.equal(gh.shapeIssueList(raw, 'prs')[0].isPullRequest, true);
+  assert.deepEqual(gh.shapeIssueList(raw, 'all').map((i) => i.number), [1, 2]);
+  assert.deepEqual(gh.shapeIssueList(raw, 'issues').map((i) => i.number), [1]);
+  assert.deepEqual(gh.shapeSearchResult({ items: raw }, 'prs').issues.map((i) => i.number), [2]);
+  assert.deepEqual(gh.shapeSearchResult({ items: raw }, 'all').issues.map((i) => i.number), [1, 2]);
+});
+
+test('labelTargetKind reports the fast-path kind of a labelled item (#2746)', () => {
+  assert.equal(gh.labelTargetKind(gh.shapeIssue({ number: 1, pull_request: { url: 'x' } })), 'pr');
+  assert.equal(gh.labelTargetKind(gh.shapeIssue({ number: 1 })), 'issue');
+  assert.equal(gh.labelTargetKind(null), 'issue');
+  assert.equal(gh.LABEL_TARGET_KIND_HEADER, 'x-aee-label-target-kind');
+});
+
+test('isPullRequest / shapeIssueList drop PRs by default (issues view)', () => {
   assert.equal(gh.isPullRequest({ pull_request: { url: 'x' } }), true);
   assert.equal(gh.isPullRequest({ number: 1 }), false);
   const raw = [

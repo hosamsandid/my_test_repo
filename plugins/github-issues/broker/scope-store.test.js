@@ -74,8 +74,8 @@ test('pickLastUsed returns the globally most-recently-used scope, not first-in-l
   s.savePref('team-a', 'alice', { repo: 'acme/a', state: 'open', updatedAt: '2026-01-01T00:00:00Z' });
   s.savePref('team-b', 'alice', { repo: 'acme/b', state: 'all', updatedAt: '2026-06-01T00:00:00Z' });
   // list order puts team-a first; the fix must still pick team-b by updatedAt
-  assert.deepEqual(s.pickLastUsed(['team-a', 'team-b'], 'alice'), { team: 'team-b', repo: 'acme/b', state: 'all' });
-  assert.deepEqual(s.pickLastUsed(['team-b', 'team-a'], 'alice'), { team: 'team-b', repo: 'acme/b', state: 'all' });
+  assert.deepEqual(s.pickLastUsed(['team-a', 'team-b'], 'alice'), { team: 'team-b', repo: 'acme/b', state: 'all', type: 'issues' });
+  assert.deepEqual(s.pickLastUsed(['team-b', 'team-a'], 'alice'), { team: 'team-b', repo: 'acme/b', state: 'all', type: 'issues' });
 });
 
 test('pickLastUsed preserves the `all` state and is per-user', () => {
@@ -85,6 +85,17 @@ test('pickLastUsed preserves the `all` state and is per-user', () => {
   s.savePref('team-a', 'bob', { repo: 'acme/z', state: 'closed', updatedAt: '2026-02-01T00:00:00Z' });
   assert.equal(s.pickLastUsed(['team-a'], 'alice').state, 'all'); // not coerced to open
   assert.equal(s.pickLastUsed(['team-a'], 'bob').repo, 'acme/z'); // bob's own selection
+});
+
+test('the item type (issues | prs | all) persists and is restored; legacy prefs default to issues (#2746)', () => {
+  const dir = tmpDir();
+  const s = new ScopeStore({ stateDir: dir });
+  s.savePref('team-a', 'alice', { repo: 'acme/a', state: 'open', type: 'prs', updatedAt: '2026-01-01T00:00:00Z' });
+  s.savePref('team-a', 'bob', { repo: 'acme/a', state: 'open' });
+  assert.equal(new ScopeStore({ stateDir: dir }).loadPref('team-a', 'alice').type, 'prs');
+  assert.equal(s.pickLastUsed(['team-a'], 'alice').type, 'prs');
+  assert.equal(s.loadPref('team-a', 'bob').type, null);
+  assert.equal(s.pickLastUsed(['team-a'], 'bob').type, 'issues');
 });
 
 test('pickLastUsed skips prefs without a repo, is null when none, and falls back to order without timestamps', () => {

@@ -9,6 +9,7 @@ const {
   signViewerHeaders,
   verifyViewerHeaders,
   HEADER_NAMES,
+  labelTargetKindFromHeaders,
 } = require('./plugin-ui-proxy');
 
 // ── scope discovery (derived from the resolved grant) ───────────────────────
@@ -267,4 +268,26 @@ test('pluginUiProxy re-serialises the body via bodyWasParsed(req), not req._body
   const body = src.slice(start, end > start ? end : undefined);
   assert.match(body, /const parsedBody = bodyWasParsed\(req\);/);
   assert.doesNotMatch(body, /req\._body\s*===/);
+});
+
+// ── label fast-path kind (#2746) ────────────────────────────────────────────
+
+test('labelTargetKindFromHeaders: the broker\'s pr report wakes pull_request.labeled listeners', () => {
+  assert.equal(labelTargetKindFromHeaders({ 'x-aee-label-target-kind': 'pr' }), 'pr');
+  assert.equal(labelTargetKindFromHeaders({ 'x-aee-label-target-kind': ' PR ' }), 'pr');
+  assert.equal(labelTargetKindFromHeaders({ 'x-aee-label-target-kind': ['pr'] }), 'pr');
+});
+
+test('labelTargetKindFromHeaders: issue, a missing header (older broker) or junk degrade to issue', () => {
+  assert.equal(labelTargetKindFromHeaders({ 'x-aee-label-target-kind': 'issue' }), 'issue');
+  assert.equal(labelTargetKindFromHeaders({}), 'issue');
+  assert.equal(labelTargetKindFromHeaders(undefined), 'issue');
+  assert.equal(labelTargetKindFromHeaders({ 'x-aee-label-target-kind': 'pull_request' }), 'issue');
+});
+
+test('api.js passes the broker-reported kind to the fast path, never a hard-coded issue (#2746)', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'api.js'), 'utf8');
+  const call = src.slice(src.indexOf('notifyGithubLabelApplied({\n'), src.indexOf('res.status(up.statusCode || 502)'));
+  assert.match(call, /kind: labelTargetKindFromHeaders\(up\.headers\)/);
+  assert.doesNotMatch(call, /kind: 'issue'/);
 });

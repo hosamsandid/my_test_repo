@@ -228,9 +228,9 @@ no labels, the repo's own labels are shown instead. Free-text entry always works
 **title filter** at the top. The filter drives a server-side search over the whole
 repository via GitHub's Search API (`GET /search` on the broker's `/ui` surface) so
 results are not limited to the currently loaded page; clearing the box restores the
-normal paginated listing. The broker owns all qualifiers (`repo:`, `type:issue`,
-`in:title`, `state:`) and strips colons from user input so a typed `qualifier:` can
-never broaden scope.
+normal paginated listing. The broker owns all qualifiers (`repo:`, `type:issue` /
+`type:pr`, `in:title`, `state:`) and strips colons from user input so a typed
+`qualifier:` can never broaden scope.
 
 **Workflow-trigger buttons (#1730):** the issue detail now leads with an **action
 bar** — between the issue's meta line and its description — of prominent
@@ -243,9 +243,17 @@ button shows the underlying label name and, when a label wakes more than one
 agent, says so; an already-applied label's button is shown visible-but-disabled.
 The "Labels" list and free-text "add a label" area at the bottom are unchanged.
 
+**Pull requests (#2746):** a **Show** selector — *Issues* (default), *Pull
+requests* or *Issues and pull requests* — drives both the listing and the title
+search (broker `type=issues|prs|all`); pull requests are marked **PR**, and the
+choice is remembered with the repository and state. A label added to a pull
+request goes to the #1858 label fast path as `pull_request.labeled` (the broker
+reports the kind in its `X-AEE-Label-Target-Kind` response header), so a PR-level
+gate wakes its agent immediately, just like an issue label.
+
 Agents can also browse issues read-only with the dependency-free `aee-issues` CLI
 (`aee-issues repos`, `aee-issues list --repo owner/name`, `aee-issues show --repo
-owner/name --number N`). Pull requests are deferred to a later iteration. See
+owner/name --number N`); the CLI still lists issues only. See
 `github-issues/broker/README.md`.
 
 ## `gke`

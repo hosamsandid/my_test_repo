@@ -39,10 +39,10 @@ function columnChunks() {
   return { chunks, order };
 }
 
-test('AC1: the table renders no ID column — columns are Name, Ownership, Base URL, Token, Models, Health, Added', () => {
+test('AC1: the table renders no ID column — columns are Name, Ownership, Base URL, Token, Models, Health, Budget, Added', () => {
   const { order } = columnChunks();
   assert.deepEqual(order, [
-    'name', '_scope', 'baseUrl', 'tokenPreview', 'models', 'health', 'createdAt', '_actions',
+    'name', '_scope', 'baseUrl', 'tokenPreview', 'models', 'health', 'budget', 'createdAt', '_actions',
   ]);
   assert.equal(order.includes('id'), false, 'the ID column must be gone');
 });

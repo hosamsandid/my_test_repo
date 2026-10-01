@@ -202,7 +202,8 @@ test('wiring: GET annotates, POST checks id shape/uniqueness and rawTriggerError
   const write = post.indexOf('putTriggers(id, triggers)');
   assert.ok(idCheck > 0 && guard > 0 && write > idCheck && write > guard, 'both guards run before the write');
   assert.match(post, /res\.status\(ide\.status\)/);
-  assert.match(post, /stripTriggerAnnotations\(\{ id: `t\$\{Date\.now\(\)\}`, \.\.\.req\.body \}\)/);
+  // The body is stamped with the team's label suffix first (#2718).
+  assert.match(post, /stripTriggerAnnotations\(\{ id: `t\$\{Date\.now\(\)\}`, \.\.\.reqTrigger \}\)/);
 });
 
 test('wiring: PUT and DELETE address one row (first match or ?position=)', () => {

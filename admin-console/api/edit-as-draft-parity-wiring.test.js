@@ -112,8 +112,8 @@ const MUTATIONS = [
     fires: 'materialiseExpandsHumanConsumes',
     // Revert BOTH sites to the old un-remapped form; the count check then reads 0.
     apply: (s) => s.replace(
-      /const bundleHumans = remapHumanConsumesFrom\(\s*normalizeHumans\(body\.processTemplate\?\.humans\),\s*\(f\) => `\$\{teamId\}-\$\{f\}`,?\s*\);/g,
-      'const bundleHumans = normalizeHumans(body.processTemplate?.humans);',
+      /let bundleHumans = remapHumanConsumesFrom\(\s*normalizeHumans\(body\.processTemplate\?\.humans\),\s*\(f\) => `\$\{teamId\}-\$\{f\}`,?\s*\);/g,
+      'let bundleHumans = normalizeHumans(body.processTemplate?.humans);',
     ),
   },
   {

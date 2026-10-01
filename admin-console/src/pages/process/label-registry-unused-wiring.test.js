@@ -32,4 +32,6 @@ test('ProcessCanvas threads unusedLabels and the live removeLabels op into the p
   const s = src('../ProcessCanvas.jsx');
   assert.match(s, /removeLabels: \(names\) => liveOps\.removeLabels\(scope, names\)/);
   assert.match(s, /<LabelRegistryPanel[\s\S]*?unusedLabels=\{displayGraph\?\.unusedLabels \|\| \[\]\}/);
+  // The key includes unusedLabels so an open panel remounts after a flow edit.
+  assert.match(s, /key=\{JSON\.stringify\(\[displayGraph\?\.labels \|\| \[\], displayGraph\?\.unusedLabels \|\| \[\]\]\)\}/);
 });

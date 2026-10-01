@@ -174,6 +174,22 @@ test('triggerDefsFromMembers carries the display fields and the activation stamp
   ]);
 });
 
+test('triggerDefsFromMembers falls back to the epoch in a console-generated id when unstamped (#2710)', () => {
+  const members = [{
+    id: 'dev',
+    triggers: [
+      { id: 't1790817163431', type: 'cron' },        // POST /api/agents/:id/triggers id
+      { id: 't1790817163431042', type: 'loop' },     // Flow editor uid (+ random suffix)
+      { id: 't1790817163431', type: 'cron', createdAt: '2026-07-01T00:00:00Z' }, // stamp wins
+      { id: 'nightly-sweep', type: 'cron' },         // agent-authored id: no age signal
+      { id: 't123', type: 'cron' },                  // too short to be an epoch
+    ],
+  }];
+  const since = triggerDefsFromMembers(members).map((t) => t.since);
+  const fromId = new Date(1790817163431).toISOString();
+  assert.deepEqual(since, [fromId, fromId, '2026-07-01T00:00:00Z', undefined, undefined]);
+});
+
 // ── waste signals from the event log ─────────────────────────────────────────
 
 test('wasteSignalsFromEventLog counts dropped/digest outcomes in window', () => {

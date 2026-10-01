@@ -3953,7 +3953,11 @@ async function computeTeamHillClimbMetrics(teamId, { now = Date.now() } = {}) {
     try {
       const raw = JSON.parse(fs.readFileSync(agentStatePath(id, "triggers.json"), "utf8"));
       if (Array.isArray(raw)) triggers = raw;
-    } catch { /* no triggers yet */ }
+    } catch {
+      // No triggers yet. Note: a transient read failure lands here too, so this
+      // pass supersedes the member's open trigger cards (liveTriggerRefs below);
+      // they are re-raised on the next pass that reads the file (#2710).
+    }
     members.push({ id, displayName: cfg.displayName, emits: cfg.emits, outcomes: cfg.outcomes, triggers });
   }
   const reworkTriggers = hillClimbSweep.reworkTriggerIds(members);

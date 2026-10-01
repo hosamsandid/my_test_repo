@@ -207,12 +207,24 @@ function consumedLabelsFromMembers(members) {
 // events and labelFilter — plus `since`, the trigger's activation stamp (the
 // same `activatedAt → createdAt` precedence as the poller's history horizon), so
 // a trigger younger than the measurement window is not reported as dead.
+// An unstamped trigger falls back to the creation time encoded in a
+// console-generated id (`t<epoch-ms>`, optionally + a short random suffix), so
+// a young cron/loop/agent-authored trigger is not mistaken for legacy (#2710).
+const ID_EPOCH_RE = /^t(\d{13})\d{0,3}$/;
+function sinceFromTriggerId(id) {
+  const m = typeof id === 'string' ? ID_EPOCH_RE.exec(id) : null;
+  if (!m) return null;
+  const ms = Number(m[1]);
+  const d = new Date(ms);
+  return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+}
+
 function triggerDefsFromMembers(members) {
   const out = [];
   for (const m of Array.isArray(members) ? members : []) {
     for (const t of Array.isArray(m && m.triggers) ? m.triggers : []) {
       if (!t || !t.id) continue;
-      const since = t.activatedAt || t.createdAt || null;
+      const since = t.activatedAt || t.createdAt || sinceFromTriggerId(t.id);
       out.push({
         agentId: m.id,
         triggerId: t.id,

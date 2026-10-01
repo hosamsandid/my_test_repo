@@ -347,3 +347,12 @@ test('exported card classes match the concept catalog', () => {
     'prompt-improvement', 'flow-wiring', 'threshold-tuning', 'trigger-hygiene', 'knowledge-handoff',
   ]);
 });
+
+// Source guard (#2710 review S1): the heuristic pass must hand the snapshot's
+// live trigger refs to the merge, or vanished-trigger cards are never superseded.
+test('runHillClimbPass passes liveTriggerRefs to the heuristic merge (#2710)', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'orchestrator.js'), 'utf8');
+  assert.match(src, /mergeAndPersistHillClimbCards\(teamId, findings, \{ now, source: "heuristic", liveTriggerRefs: snapshot\.liveTriggerRefs \}\)/);
+  assert.match(src, /const liveTriggerRefs = triggerDefs\.map\(\(t\) => `\$\{t\.agentId\}\/\$\{t\.triggerId\}`\);/);
+  assert.match(src, /\.\.\.snapshot, liveTriggerRefs \}/);
+});

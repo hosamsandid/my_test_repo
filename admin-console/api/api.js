@@ -6368,11 +6368,12 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   if (launchedLoopConflict(triggers, newTrigger)) {
     return res.status(409).json({ error: 'A loop is already running for this agent. Stop it before starting another.' });
   }
-  if (newTrigger.type === 'github-event') {
-    const now = new Date().toISOString();
-    if (!newTrigger.createdAt) newTrigger.createdAt = now;
-    if (!newTrigger.activatedAt) newTrigger.activatedAt = now;
-  }
+  // `createdAt` on every type gives the hill-climb pass an age signal, so a
+  // brand-new schedule is not proposed for deletion (#2710). `activatedAt` stays
+  // the github-event poller's history horizon.
+  const now = new Date().toISOString();
+  if (!newTrigger.createdAt) newTrigger.createdAt = now;
+  if (newTrigger.type === 'github-event' && !newTrigger.activatedAt) newTrigger.activatedAt = now;
   triggers.push(newTrigger);
   try {
     await putTriggers(id, triggers);
@@ -6431,15 +6432,17 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
     delete merged.pushedBy;
     Object.assign(merged, pbf.trigger);
   }
+  const now = new Date().toISOString();
+  // Backfill `createdAt` on any edit of a legacy unstamped trigger, of every
+  // type — the hill-climb age signal (#2710), as on POST.
+  if (!merged.createdAt) merged.createdAt = now;
   if (merged.type === 'github-event') {
-    const now = new Date().toISOString();
     // Refresh the activation horizon on a disable→enable flip so a
     // re-enabled trigger drops the backlog that accrued while it was off.
     if (prev.enabled === false && merged.enabled !== false) merged.activatedAt = now;
-    // Backfill the stamps on any edit of a legacy unstamped trigger. Its
+    // Backfill the stamp on any edit of a legacy unstamped trigger. Its
     // horizon was already drifting with the triggers.json mtime; stamping it
     // now makes it stable for all subsequent edits (#320 review follow-up).
-    if (!merged.createdAt) merged.createdAt = now;
     if (!merged.activatedAt) merged.activatedAt = now;
   }
   triggers[idx] = merged;

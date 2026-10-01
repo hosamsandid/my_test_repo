@@ -628,7 +628,8 @@ is read from the members' ports: labels a role emits (`emits`, trigger
 Roots are roles woken by a label no role emits; roles are placed by
 breadth-first depth, a loop-back role (e.g. a Reworker) before its forward
 sibling, then the longest forward path. Board columns = **Ready**, one per
-role in that order, **Done**. A role on several paths appears once; pool
+role in that order, **Done**. *(Superseded by #2637: the first column is
+**Draft** — see Amendment 4.)* A role on several paths appears once; pool
 instances (`<team>-<role>-i<item>`, live or already reaped) count as their
 role. An optional per-team `flow-board.json` (`{doneRetentionHours, stages:
 {<memberId>: {label, hidden, mergeInto}}}`) renames, merges or hides stages.
@@ -640,7 +641,8 @@ or — for an issue — carries a label a team role consumes (released). An
 issue and the PRs its woken agent opened form one row, linked through the
 pr-created record's correlation id to the waking event — no `Closes #n`
 needed. Dependabot PRs never appear. Finished rows stay for
-`doneRetentionHours` (default 24).
+`doneRetentionHours` (default 24); the console lists them in a separate
+**Recently completed** section below **In progress**, never mixed in (#2607).
 
 **A3.4 — sessions know their work item.** The agent runtime now records a
 `workItem` (`{repo, kind, number}`) on each triggered session, so the
@@ -664,3 +666,27 @@ also redelivers work held while the role was paused/draining/off.
 **Removed from the board:** the stat chips, the epic roll-up, the Backlog
 column and the list of all open PRs. The pool-lane panel is folded into
 "Working now".
+
+## Amendment 4 — Draft stage and Remove from board (#2637)
+
+**A4.1 — Ready becomes Draft.** Stage 0 only ever held rows with no running
+session, claim label, wake label or delivered wake — items nobody had
+released, not released ones (a released item already sits at the role it
+wakes, as *queued*). The column is now **Draft** and its rows carry status
+`draft` (UI: *awaiting release*).
+
+**A4.2 — Remove from board.** A Team Admin can take a row off the board while
+no agent is working on it or queued for it (`removable` on each row; the
+orchestrator re-checks it). Removals are stored per team in
+`flow-board-removed.json` beside `flow-board.json` —
+`{ "<row id>": { removedAt, keys: ["<repo>#<n>", …] } }` — and written through
+`POST /api/teams/:teamId/flow-board-removed` (`{ action: remove|restore,
+rowId }`). The GitHub item is never touched. The board returns the hidden rows
+as `removed[]` (the **Removed (n)** list with **Restore**).
+
+**A4.3 — a removal ends on new flow activity.** `removalRevived` brings a row
+back when, after `removedAt`, an agent is working on or queued for it, a wake
+was delivered on any of its items, or a team agent opened a PR for it. Edits,
+comments and cross-references (`updatedAt` only) do not count. Revived entries,
+and entries whose row left the snapshot, are pruned from the store — only for
+repos the sweep actually reached, so a GitHub outage never forgets a removal.

@@ -25,7 +25,7 @@ test('the reveal target comes from router state for the routed id only', () => {
 
 test('edge case — a not-yet-listed new agent holds the unknown-id bounce, with bounded retries', () => {
   assert.match(chat, /const awaitingReveal = isAwaitingReveal\(revealId, agents, revealExpiredFor\);/);
-  assert.match(chat, /if \(awaitingReveal\) return;\s*navigate\('\/chats', \{ replace: true \}\);/);
+  assert.match(chat, /if \(awaitingReveal\) return;\s*navigate\('\/chats', \{ replace: true, state: agentNotFoundState\(agentId\) \}\);/);
   assert.match(chat, /setInterval\(\(\) => \{ refetch\(\); \}, REVEAL_RETRY_MS\)/);
   assert.match(chat, /setTimeout\(\(\) => setRevealExpiredFor\(revealId\), REVEAL_WAIT_MS\)/);
 });

@@ -131,3 +131,13 @@ export function filterPlaceholder(columns = []) {
   const suffix = labels.length > shown.length ? '…' : '';
   return `Filter by ${shown.join(', ')}${suffix}`;
 }
+
+/**
+ * Accessible names for the icon-only pagination buttons (#2617). Rendered as
+ * both `aria-label` and `title`, so screen readers announce more than
+ * "button" and mouse users get a tooltip.
+ */
+export const PAGINATION_LABELS = Object.freeze({
+  prev: 'Previous page',
+  next: 'Next page',
+});

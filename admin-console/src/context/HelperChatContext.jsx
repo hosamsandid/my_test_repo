@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { useLocation } from 'react-router';
 import { assistHeaders, notifyAssistError } from './assist-transport.js';
-import { UNAUTHORIZED_EVENT } from '../auth/AuthContext';
+import { UNAUTHORIZED_EVENT, useAuth } from '../auth/AuthContext';
 import { BREADCRUMBS } from '../components/breadcrumbs';
 import {
   appendUserMessage,
@@ -118,7 +118,12 @@ export function HelperChatProvider({ children }) {
     [currentRoute, subjects],
   );
 
+  // Only fetched once a session exists (#2616): the provider is mounted above
+  // the auth gate, so an unconditional mount-time fetch hit the protected
+  // endpoint from the login screen and logged a 401 there. Re-runs on login.
+  const { authenticated } = useAuth();
   useEffect(() => {
+    if (!authenticated) return undefined;
     let alive = true;
     (async () => {
       try {
@@ -131,7 +136,7 @@ export function HelperChatProvider({ children }) {
       }
     })();
     return () => { alive = false; };
-  }, []);
+  }, [authenticated]);
 
   // A synchronous mirror of the list so sendMessage builds the request from the
   // just-appended user turn without waiting for a state flush.

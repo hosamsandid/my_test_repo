@@ -271,7 +271,7 @@ test('both confirm dialogs publish a help subject so the panel opens in front', 
     'the install body must be rendered only while a row is pending',
   );
   assert.ok(
-    page.includes('message={removing ? <UninstallDialogBody /> : \'\'}'),
+    page.includes('message={removing ? <UninstallDialogBody row={removing} /> : \'\'}'),
     'the uninstall body must be rendered only while a row is being removed',
   );
 });

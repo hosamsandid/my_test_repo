@@ -253,6 +253,7 @@ const AGENT_ROUTES = [
   // Session + telemetry push (agent-entrypoint.py)
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/status$/, scope: "own" },
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/running-sessions$/, scope: "own" },
+  { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/trigger-status$/, scope: "own" },
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/session-events$/, scope: "own" },
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/session-pointer$/, scope: "own" },
 

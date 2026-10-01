@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { upsertChannel, removeChannelFrom, chLabelKey } from './channel-ops.js';
+import { readFileSync } from 'node:fs';
+
+import { upsertChannel, removeChannelFrom, chLabelKey, hasChannel, editChannel } from './channel-ops.js';
 
 // #828 channel keying relaxation: (artifact, from) → (artifact, from, label) so a
 // single producer can feed one consumer through differently-labelled channels
@@ -132,4 +134,119 @@ test('#2578: upsertChannel drops a legacy transport key instead of persisting it
   const out = upsertChannel([{ artifact: 'pr', from: 'rev', label: 'go', transport: 'internal' }],
     { artifact: 'pr', from: 'rev', label: 'go', transport: 'internal', autoClaim: false });
   assert.deepEqual(out, [{ artifact: 'pr', from: 'rev', label: 'go', autoClaim: false }]);
+});
+
+// #2665: the create dialog marks a re-drawn channel as existing.
+test('hasChannel matches the full (artifact, from, label) key', () => {
+  const list = [
+    { artifact: 'pr', from: 'dev' },
+    { artifact: 'pr', from: 'rev', label: 'ready-to-merge' },
+  ];
+  assert.equal(hasChannel(list, { artifact: 'pr', from: 'dev', label: '' }), true);
+  assert.equal(hasChannel(list, { artifact: 'pr', from: 'dev', label: '  ' }), true);
+  assert.equal(hasChannel(list, { artifact: 'pr', from: 'dev', label: 'approved' }), false);
+  assert.equal(hasChannel(list, { artifact: 'issue', from: 'dev', label: '' }), false);
+  assert.equal(hasChannel(list, { artifact: 'pr', from: 'rev', label: ' ready-to-merge ' }), true);
+  assert.equal(hasChannel(list, { artifact: 'pr', from: 'other', label: '' }), false);
+  assert.equal(hasChannel(undefined, { artifact: 'pr', from: 'dev', label: '' }), false);
+});
+
+// ─── #2717: editing a channel renames it instead of adding a sibling ─────────
+
+test('editChannel: a label change renames the port in place (AC1)', () => {
+  const list = [
+    { artifact: 'issue', from: 'ba' },
+    { artifact: 'pr', from: 'dev', label: 'before' },
+  ];
+  const out = editChannel(list, 'before', { artifact: 'pr', from: 'dev', label: 'after' });
+  assert.deepEqual(out, [
+    { artifact: 'issue', from: 'ba' },
+    { artifact: 'pr', from: 'dev', label: 'after' },
+  ]);
+  assert.equal(hasChannel(out, { artifact: 'pr', from: 'dev', label: 'before' }), false);
+});
+
+test('editChannel: every label transition leaves exactly one channel (AC2)', () => {
+  for (const [from, to] of [['a', 'b'], ['a', ''], ['', 'a'], ['  a ', 'b'], ['a', '  b  ']]) {
+    const list = upsertChannel([], { artifact: 'pr', from: 'dev', label: from });
+    const out = editChannel(list, from, { artifact: 'pr', from: 'dev', label: to });
+    assert.equal(out.length, 1, `${JSON.stringify(from)} → ${JSON.stringify(to)}`);
+    assert.equal(chLabelKey(out[0].label), chLabelKey(to));
+    assert.equal(hasChannel(out, { artifact: 'pr', from: 'dev', label: from }), chLabelKey(from) === chLabelKey(to));
+  }
+});
+
+test('editChannel: renaming onto a sibling label is refused, list unchanged (AC4)', () => {
+  const list = [
+    { artifact: 'pr', from: 'rev', label: 'ready-to-merge' },
+    { artifact: 'pr', from: 'rev', label: 'revisions-required', gate: 'human' },
+  ];
+  const before = JSON.parse(JSON.stringify(list));
+  assert.throws(() => editChannel(list, 'ready-to-merge', { artifact: 'pr', from: 'rev', label: ' revisions-required ' }),
+    /already exists/);
+  assert.deepEqual(list, before, 'neither channel changes');
+  // Onto the label-less sibling too.
+  const withOpen = [{ artifact: 'pr', from: 'rev' }, { artifact: 'pr', from: 'rev', label: 'x' }];
+  assert.throws(() => editChannel(withOpen, 'x', { artifact: 'pr', from: 'rev', label: '' }), /already exists/);
+  // Same label on another producer or artifact is no conflict.
+  const other = [{ artifact: 'pr', from: 'a', label: 'x' }, { artifact: 'issue', from: 'b', label: 'y' }, { artifact: 'pr', from: 'b', label: 'z' }];
+  assert.equal(editChannel(other, 'z', { artifact: 'pr', from: 'b', label: 'x' }).length, 3);
+  assert.equal(editChannel(other, 'z', { artifact: 'pr', from: 'b', label: 'y' }).length, 3);
+});
+
+test('editChannel: unchanged label edits in place (AC5)', () => {
+  const list = [{ artifact: 'pr', from: 'dev', label: 'go', wakePrompt: 'old' }];
+  const out = editChannel(list, 'go', { artifact: 'pr', from: 'dev', label: 'go', gate: 'human', wakePrompt: 'new' });
+  assert.deepEqual(out, [{ artifact: 'pr', from: 'dev', label: 'go', gate: 'human', wakePrompt: 'new' }]);
+});
+
+test('editChannel: keeps the claim opt-out the editor does not touch (AC7)', () => {
+  const list = [{ artifact: 'pr', from: 'dev', label: 'go', autoClaim: false }];
+  assert.equal(editChannel(list, 'go', { artifact: 'pr', from: 'dev', label: 'go', gate: 'human' })[0].autoClaim, false);
+  assert.equal(editChannel(list, 'go', { artifact: 'pr', from: 'dev', label: 'went' })[0].autoClaim, false,
+    'the opt-out moves with a renamed channel');
+  // An explicit key still toggles it (the Routing section's claim switch).
+  assert.equal('autoClaim' in editChannel(list, 'go', { artifact: 'pr', from: 'dev', label: 'go', autoClaim: undefined })[0], false);
+});
+
+test('editChannel: wakePrompt is kept when absent from the spec, cleared by an explicit empty one (AC8)', () => {
+  const list = [{ artifact: 'pr', from: 'dev', label: 'go', wakePrompt: 'Custom.' }];
+  assert.equal(editChannel(list, 'go', { artifact: 'pr', from: 'dev', label: 'go' })[0].wakePrompt, 'Custom.');
+  assert.ok(!('wakePrompt' in editChannel(list, 'go', { artifact: 'pr', from: 'dev', label: 'go', wakePrompt: '' })[0]));
+});
+
+test('editChannel: gate moves with the rename; a missing original falls back to upsert', () => {
+  const list = [{ artifact: 'pr', from: 'dev', label: 'a', gate: 'human' }];
+  assert.deepEqual(editChannel(list, 'a', { artifact: 'pr', from: 'dev', label: 'b', gate: 'human' }),
+    [{ artifact: 'pr', from: 'dev', label: 'b', gate: 'human' }]);
+  assert.equal(editChannel(list, 'gone', { artifact: 'pr', from: 'dev', label: 'c' }).length, 2);
+  assert.equal(editChannel(undefined, 'a', { artifact: 'pr', from: 'dev', label: 'c' }).length, 1);
+});
+
+// #651 source guards: the shipped adapters and dialog route through the rename
+// path (JSX/HTTP are not unit-testable here).
+const src = (f) => readFileSync(new URL(f, import.meta.url), 'utf8');
+
+test('#2717: live + draft adapters edit channels via editChannel keyed on prevLabel', () => {
+  const s = src('./edit-adapters.js');
+  const hits = s.match(/editChannel\([^;]*prevLabel !== undefined \? prevLabel : spec\.label, spec\)/g) || [];
+  assert.equal(hits.length, 2, 'both liveOps.updateChannel and makeDraftOps.updateChannel');
+  assert.match(s, /updateChannel: async \(roleId, spec, \{ prevLabel \} = \{\}\) => \{\n    if \(!spec\.from/);
+  assert.doesNotMatch(s, /updateChannel: async \(roleId, spec\) => /, 'no upsert delegation left');
+  assert.match(src('./wiring-engine.js'), /await ops\.updateChannel\(to, spec, \{ prevLabel \}\);/);
+});
+
+test('#2717: EditChannelDialog saves with prevLabel, removes by full key, always sends wakePrompt', () => {
+  const s = src('./EdgeDialogs.jsx');
+  const body = s.slice(s.indexOf('function EditChannelDialog'), s.indexOf('function EditLabelHandoff'));
+  assert.match(body, /engineUpdateChannel\(\{ ops \}, \{ to, prevLabel: edge\.label \|\| '', spec: \{/);
+  assert.match(body, /\n\s+wakePrompt: wakePrompt\.trim\(\),\n/);
+  assert.match(body, /unwireChannel\(\{ ops \}, \{ from, to, artifact, label: edge\.label \|\| '' \}\)/);
+  assert.match(body, /\{error && <span style=\{errStyle\}>\{error\}<\/span>\}/, 'a refused rename shows inline');
+  assert.match(body, /catch \(e\) \{ setError\(e\.message\); setSaving\(false\); \}\n  \}\n  async function remove/);
+});
+
+test('#2717: Routing section hands the channel wake instruction to the edit dialog', () => {
+  assert.match(src('./RoutingSection.jsx'),
+    /<EditHandoffDialog\n\s+edge=\{\{ on: 'github',[^}]*wakePrompt: editChannel\.wakePrompt \|\| '' \}\}/);
 });

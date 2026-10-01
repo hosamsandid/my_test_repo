@@ -12,6 +12,7 @@ import IconButton from '../components/IconButton';
 import PageHelpButton from '../components/PageHelpButton';
 import ModeToggle from '../components/ModeToggle';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
+import { copyText, COPY_FAILED_HINT } from '../components/copy-text.js';
 import CredentialOwnership from '../components/CredentialOwnership';
 import ReassignPanel from '../components/CredentialReassignPanel';
 import { useAuth } from '../auth/AuthContext';
@@ -114,15 +115,23 @@ function Step({ n, children }) {
 
 function PublicKeyReveal({ publicKey, onDone }) {
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const copyResetTimerRef = useRef(null);
+  const publicKeyRef = useRef(null);
   useEffect(() => () => clearTimeout(copyResetTimerRef.current), []);
   async function copy() {
-    try {
-      await navigator.clipboard.writeText(publicKey);
+    // copyText falls back to execCommand on plain http, where
+    // navigator.clipboard is undefined (#2654).
+    if (await copyText(publicKey)) {
+      setCopyFailed(false);
       setCopied(true);
       clearTimeout(copyResetTimerRef.current);
       copyResetTimerRef.current = setTimeout(() => setCopied(false), 1500);
-    } catch { /* clipboard may be unavailable */ }
+    } else {
+      // Leave the key selected so a manual Ctrl+C works, and say so.
+      publicKeyRef.current?.select();
+      setCopyFailed(true);
+    }
   }
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
@@ -133,6 +142,8 @@ function PublicKeyReveal({ publicKey, onDone }) {
         <Check size={15} /> Keypair generated — copy the public key to GitHub
       </div>
       <textarea
+        ref={publicKeyRef}
+        aria-label="Public key"
         readOnly value={publicKey} rows={4}
         onFocus={e => e.target.select()}
         style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
@@ -160,6 +171,11 @@ function PublicKeyReveal({ publicKey, onDone }) {
           <ExternalLink size={13} /> Open GitHub SSH settings
         </a>
       </div>
+      {copyFailed && (
+        <div role="alert" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)' }}>
+          {COPY_FAILED_HINT}
+        </div>
+      )}
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.6 }}>
         The matching private key is stored in the workspace (mode 600) and is never returned by the API.
         For GitHub Enterprise, paste the key into <strong>your-host/settings/ssh/new</strong> instead.

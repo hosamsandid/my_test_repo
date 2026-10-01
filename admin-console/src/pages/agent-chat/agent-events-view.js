@@ -74,6 +74,10 @@ export function dropReasonText(row) {
       return 'The event is older than this trigger — it happened before the trigger was activated.';
     case 'push-duplicate':
       return 'A duplicate of a push already seen, so it was ignored.';
+    case 'knowledge-branch': {
+      const what = refText(row.ref);
+      return `${what.charAt(0).toUpperCase()}${what.slice(1)} is a knowledge-base branch — pushes to it never wake push triggers.`;
+    }
     case 'producer-filter': {
       const why = producerFilterText(row && row.producer);
       return `${why.charAt(0).toUpperCase()}${why.slice(1)} — this trigger only wakes on pushes by the agents it names.`;

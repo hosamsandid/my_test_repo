@@ -39,6 +39,7 @@
 // load-time cycle.
 const {
   isAuthoredOutcomes, normalizeOutcomes, outcomeEmitPairs, outcomeSetLabels, outcomesToGithub,
+  setLabelTarget, labelTargetEvent,
   // #2031: the `{to, note?, outcome}` triples a port hands off directly — the
   // wake-edge index, the sibling of `outcomeEmitPairs`.
   outcomeWakePairs,
@@ -1083,7 +1084,11 @@ function computeLints(nodes, edges, classifier) {
       lints.push({
         code: 'raw-trigger-nonconformant', severity: 'info', nodeId: n.id,
         ...(t.id ? { triggerIds: [t.id] } : {}),
-        message: `\`${n.id}\` trigger ${t.id ? `\`${t.id}\`` : '(unnamed)'} deviates from the wiring rules: ${te}. It still runs — edit it to conform.`,
+        // An invalid cron (#2626) is not a tolerated deviation: the agent's
+        // scheduler skips it, so the lint must not claim it still runs.
+        message: t.type === 'cron'
+          ? `\`${n.id}\` trigger ${t.id ? `\`${t.id}\`` : '(unnamed)'} never fires: ${te}. Fix the schedule.`
+          : `\`${n.id}\` trigger ${t.id ? `\`${t.id}\`` : '(unnamed)'} deviates from the wiring rules: ${te}. It still runs — edit it to conform.`,
       });
     }
   }
@@ -1169,6 +1174,51 @@ function computeLints(nodes, edges, classifier) {
           lints.push({ code: 'same-label-multiple-outcomes', severity: 'warning', nodeId: n.id, label: lbl,
             message: `\`${n.id}\` sets \`${lbl}\` from ${ids.size} exactlyOne options (${[...ids].map(i => `\`${i}\``).join(', ')})`
               + ` — consumers can't distinguish the branches.` });
+        }
+      }
+    }
+  }
+
+  // label-target-mismatch (#2629, warning): a producer's outcome sets a label on
+  // a PR (or an issue) — explicitly via `target`, or implied by the outcome /
+  // the producer's own triggers (setLabelTarget) — but a consumer listening on
+  // that label only subscribes to the OTHER object's `.labeled` event. GitHub
+  // emits `pull_request.labeled` for a PR label and `issues.labeled` for an
+  // issue label, never both, so that consumer can never wake: the hand-off
+  // silently dies. An unknown target is not flagged (nothing to disagree with).
+  const seenMismatch = new Set();
+  for (const n of nodes) {
+    if (n.synthetic) continue;
+    const oc = n.outcomes;
+    if (!oc || !Array.isArray(oc.options)) continue;
+    for (const o of oc.options) {
+      for (const a of (Array.isArray(o.actions) ? o.actions : [])) {
+        if (!a || a.type !== 'setLabel' || typeof a.label !== 'string') continue;
+        const lbl = a.label.trim();
+        if (!lbl || isHumanGate(lbl)) continue;
+        const target = setLabelTarget(o, a, n.triggers);
+        const expected = labelTargetEvent(target);
+        if (!expected) continue;
+        for (const m of nodes) {
+          if (m.synthetic || m.id === n.id) continue;
+          for (const t of (m.triggers || [])) {
+            if (!t || t.type !== 'github-event') continue;
+            const lf = typeof t.labelFilter === 'string' ? t.labelFilter.trim() : '';
+            if (lf !== lbl) continue;
+            const evs = Array.isArray(t.events) ? t.events : [];
+            const labeled = evs.filter(e => e === 'issues.labeled' || e === 'pull_request.labeled');
+            if (!labeled.length || labeled.includes(expected)) continue;
+            const key = `${n.id}|${o.id}|${m.id}|${t.id || ''}`;
+            if (seenMismatch.has(key)) continue;
+            seenMismatch.add(key);
+            const noun = target === 'pr' ? 'a pull request' : 'an issue';
+            lints.push({
+              code: 'label-target-mismatch', severity: 'warning', nodeId: m.id, label: lbl, outcome: o.id,
+              ...(t.id ? { triggerIds: [t.id] } : {}),
+              message: `\`${n.id}\` outcome \`${o.id}\` sets \`${lbl}\` on ${noun}, but \`${m.id}\``
+                + ` listens on \`${labeled.join('`, `')}\` — GitHub reports it as \`${expected}\`, so \`${m.id}\` never wakes.`,
+            });
+          }
         }
       }
     }

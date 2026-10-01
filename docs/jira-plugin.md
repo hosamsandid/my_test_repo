@@ -89,9 +89,13 @@ agent workspace and makes the broker hold that team's credential.
 
 ### 3. Set the team's Jira service account (Team Admin)
 
-The **Credentials** section on the Jira card (`/plugins`): three fields per
-granted team. The e-mail and token are the **service account** — used for
-automated runs and watching projects only, never for a chat turn (see
+Set it in **Agent Chat → Settings → Plugins** on the team agent (the
+**Plugin service accounts** section) — a Team Admin of the team owns this,
+no System-Admin access needed. The same fields also appear per granted team in
+the **Credentials** section of the Jira card on the System-Admin **Plugins**
+registry page (`/plugins`); both write the same per-team credential. The e-mail
+and token are the **service account** — used for automated runs and watching
+projects only, never for a chat turn (see
 [Whose Jira account is used](#whose-jira-account-is-used)).
 
 | Field | |
@@ -112,6 +116,14 @@ one. The non-secret fields (`site-url`, `email`, `readable-custom-fields`,
 `writable-custom-fields`) show their real, editable value so you can adjust them
 without retyping. Changing any of them takes effect on the next reconcile, no
 restart.
+
+Every Save is followed by a check of the stored credential, and **Test
+connection** runs the same check on demand (Team Admins of that team only): the
+broker reads the service account's own profile once (`GET /rest/api/3/myself`)
+and the form shows e.g. *Connected as Jira Bot* or *Token rejected (401) — check
+the service-account e-mail and API token*. With only the site set it checks that
+the site is reachable. The token never reaches the browser. **Clear** removes
+every stored value for the team and asks for confirmation first (#2640).
 
 ### 3a. Every member adds a personal credential
 
@@ -365,6 +377,29 @@ ask for a person's credential itself. That route checks the one active
 run, the sender's team trust (re-checked on every call) and the stored
 personal credential. The old `AEE_ACTING_SENDER` env var plays no part.
 
+**One refusal lists every missing setup item.** Because the orchestrator owns
+both the personal store and the team credential store, an interactive refusal
+aggregates ALL outstanding prerequisites into one message rather than surfacing
+them one failed call at a time: a missing personal token (the sender fixes it,
+Connections → Plugin Tokens) and a missing team site (a Team Admin fixes it,
+Agent Chat → Settings → Plugins). Both missing → code `setup-required`; only one
+→ the stable single-cause code (`personal-credential-required` / `no-site`). The
+site check is driven by the manifest: a team credential marked
+`requiredFor: ['interactive', …]` (Jira's `site-url`) is one an interactive turn
+needs too. The service-account fields are `requiredFor: ['automated']` only, so
+they never gate a chat turn and an interactive-only team is not asked to fill
+them.
+
+**Who "the sender" is.** The acting human is taken from the event's platform
+author stamp (`io.aee.author`, written server-side from the authenticated
+console session), falling back to the raw Matrix sender id. This matters in the
+single-operator stack: there every human's message is sent under the ONE shared
+Matrix identity (`@admin:local`), which maps to no user record — so without the
+stamp a chat turn could never name the acting person and would always be refused
+`untrusted-sender`. The stamp is as unforgeable from inside the container as the
+sender is (the container holds only its own Matrix token, and a self-posted
+event is rejected before the stamp is even read).
+
 Every broker audit line records `identity` (the member's user id, or `service-account`)
 and `interactive`. `aee-jira whoami` shows both.
 
@@ -400,18 +435,20 @@ with the service account.
 |---|---|---|
 | `aee-jira` exits 3 `not-granted` | the plugin isn't granted to this agent | grant it (Plugins page or agent Settings) |
 | `aee-jira` exits 3 `broker-unreachable` | the sidecar isn't running, or you're on Kubernetes | `podman ps \| grep aee-plugin-jira`; on k8s the CLI is expected to fail (see platforms note) |
-| a call returns `personal-credential-required` | a chat turn, and the sender has no personal Jira credential | the sender adds it under Connections → Plugin Tokens |
+| a call returns `setup-required` | a chat turn missing MORE than one interactive prerequisite (personal token AND team site) — the refusal message lists every item and who fixes each | the sender adds their token (Connections → Plugin Tokens); a Team Admin sets the site (Agent Chat → Settings → Plugins) |
+| a call returns `personal-credential-required` | a chat turn, the team site is set, but the sender has no personal Jira credential | the sender adds it under Connections → Plugin Tokens |
 | a call returns `personal-credential-rejected` | Jira refused the sender's personal token (401) — expired or revoked | the sender renews it on Plugin Tokens |
-| a call returns `untrusted-sender` | the chat message came from someone not trusted for this agent | share the team with that person, or ask a member |
+| a call returns `untrusted-sender` (message: *not a member of this agent's team*) | the sender resolves to a real account, but one that is not on this agent's team | share the team with that person, or ask a member |
+| a call returns `untrusted-sender` (message: *could not identify who sent this chat message*) | the sender maps to no user record — e.g. an agent container from before author-stamp resolution, or a message with no author stamp | respawn the agent; ensure the message was sent through the console (which stamps the author) |
 | a call returns `no-active-run` / `ambiguous-run` / `run-key-revoked` | the call is not inside exactly one run the runner declared (e.g. a second Claude run in the same agent overlapped a chat turn — the call is refused rather than guessed), or something in the container requested a second run key | respawn the agent; do not run `aee-jira` from background processes that outlive the turn |
-| a chat turn returns `no-site` | the sender has a personal credential, but the team has no Jira site set | Team Admin sets the site on the Plugins page |
-| an automated run returns `no-service-account` | the team has no service-account credential set | Team Admin sets it on the Plugins page |
-| broker log: `Jira rejected the credential (401)` | the e-mail and token aren't the same Atlassian identity, or the token was revoked | regenerate a **classic** token while signed in as the intended account |
+| a chat turn returns `no-site` | the sender has a personal credential, but the team has no Jira site set | Team Admin sets the site in Agent Chat → Settings → Plugins (or a System Admin on the Plugins page) |
+| an automated run returns `no-service-account` | the team has no service-account credential set | Team Admin sets it in Agent Chat → Settings → Plugins (or a System Admin on the Plugins page) |
+| broker log: `Jira rejected the credential (401)` | the e-mail and token aren't the same Atlassian identity, or the token was revoked | regenerate a **classic** token while signed in as the intended account; **Test connection** in the credential form confirms the fix |
 | `projects` returns nothing but the account sees projects in a browser | a **scoped** API token missing `read:jira-work` | use a classic (unscoped) token |
 | a transition "no transition to X" | X isn't reachable from the issue's current status, or the name doesn't match | the error lists the available transitions; use one of those target names |
 | the poll log shows `fetch failed` once then recovers | a stale keep-alive socket in the long-running broker | expected — the client retries transport failures once |
 | a fresh transition doesn't wake the agent | no status in the watch's `statusFilters` set exactly matches the Jira status name, or the agent has no `plugin-event` trigger, or the poll already baselined the change, or the trigger's payload filter names a status that is not the one the issue moved into | check the Activity tab (a `not a watched status` row means the set is wrong); copy the status name verbatim from Jira; add the trigger |
-| a watch card shows **Failing** | consecutive poll failures — expand it for the error log | usually a bad or expired API token: a Team Admin re-sets it on the Plugins page, then hits **Retry now** |
+| a watch card shows **Failing** | consecutive poll failures — expand it for the error log | usually a bad or expired API token: a Team Admin re-sets the service account (Agent Chat → Settings → Plugins), then hits **Retry now** |
 | the agent says `aee-jira` is read-only / only knows `whoami` and `inbox` | its workspace holds a CLI copy from an older plugin version (the grant sync copies the file only when the grant changes) | since this version the copy is refreshed on every plugin reconcile — restart the orchestrator or `POST /internal/plugins/reconcile`; re-run `make seed-plugins` + reinstall first if `/workspace/plugins/jira/bin/aee-jira.py` is itself old |
 | `aee-jira inbox --consume` fails with `broker HTTP 400: consume takes the event ids you were woken for…` (or, from a stale CLI copy, just `consume-requires-ids`) | the wake instruction still uses the pre-2026-09 team-wide drain | change it to `aee-jira inbox --consume <id>…` with the ids from the event payload (`id` / `events[].id`); the agent's own trigger filter already decided which events it received; a stale copy is refreshed on the next plugin reconcile (`planCliRefresh`) |
 | the wrong agent wakes, or an agent wakes on its own transition | the agents' `plugin-event` triggers carry no payload filter, so every watched transition wakes all of them | set `toStatus=<status>` on each agent's trigger (§5) |

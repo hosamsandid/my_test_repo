@@ -45,6 +45,7 @@ const { JiraPoller } = require('./poller');
 const { deriveWatchHealth, summariseWatchHealth } = require('./watch-health');
 const { EVENT_KINDS, EVENT_ID_RE, AGENT_COMMENT_MARKER, describeEvent } = require('./event-extract');
 const jira = require('./jira-client');
+const { checkScopeCredential } = require('./credential-check');
 const brokerPolicy = require('./broker-policy');
 const { verifyViewerHeaders, requiredRoleForPath, roleAllows, roleForTeam } = require('./viewer-headers');
 
@@ -1061,12 +1062,29 @@ const handleScopeCredentials = internalPushEndpoint(async (req, res) => {
   });
 }, { secret: SIGNING_SECRET, pluginId: PLUGIN_ID });
 
+// POST /internal/test-scope-credential — { scopeId } → does that team's saved
+// credential work? (#2640, plugins/CONTRACT.md). Orchestrator-only, like the
+// push above: the console's "Test connection" reaches it through the
+// orchestrator after the Team-Admin gate. One cheap read (credential-check.js);
+// the answer is a status line, never the token.
+const handleTestScopeCredential = internalPushEndpoint(async (req, res) => {
+  const body = parseJson(await readBody(req));
+  const scopeId = body && typeof body.scopeId === 'string' ? body.scopeId : '';
+  if (!scopeId) return sendJson(res, 400, { error: 'scopeId required' });
+  const result = await checkScopeCredential(
+    { site: resolveSiteSettings(scopeId), cred: resolveCredential(scopeId) },
+    { client: jira },
+  );
+  return sendJson(res, 200, { scopeId, ...result });
+}, { secret: SIGNING_SECRET, pluginId: PLUGIN_ID });
+
 async function handleRequest(req, res) {
   const urlPath = (req.url || '').split('?')[0];
 
   if (req.method === 'GET' && urlPath === '/healthz') return void (await handleHealth(req, res));
   if (req.method === 'POST' && urlPath === '/internal/teardown-scope') return void (await handleTeardown(req, res));
   if (req.method === 'PUT' && urlPath === '/internal/scope-credentials') return void (await handleScopeCredentials(req, res));
+  if (req.method === 'POST' && urlPath === '/internal/test-scope-credential') return void (await handleTestScopeCredential(req, res));
 
   // A read-only status endpoint for an operator: what the poller sees for the
   // token's own scope.

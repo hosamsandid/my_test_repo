@@ -35,6 +35,7 @@
 // plain fake req/res objects.
 
 const { verifyScopeToken, INTERNAL_SCOPE_ID } = require('./scope-token');
+const { buildInfoFromEnv } = require('./build-info');
 
 function sendJson(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -43,11 +44,16 @@ function sendJson(res, status, body) {
 
 // GET health probe. `extra` (optional) is a sync/async function returning extra
 // fields to merge into the `{ ok: true }` body (e.g. a backend reachability
-// flag). A thrown/failed `extra` degrades to `{ ok: true }` — health must never
-// hard-fail the probe over an optional detail.
-function healthEndpoint(extra = null) {
+// flag). A thrown/failed `extra` degrades to `{ ok: true, build }` — health must
+// never hard-fail the probe over an optional detail.
+//
+// `build` (#2646) is the image's baked-in git identity (build-info.js), always
+// present so the orchestrator can show which build the live sidecar really
+// runs. `env` is injectable for tests only.
+function healthEndpoint(extra = null, { env = process.env } = {}) {
+  const build = buildInfoFromEnv(env);
   return async function handleHealth(_req, res) {
-    let body = { ok: true };
+    let body = { ok: true, build };
     if (typeof extra === 'function') {
       try {
         const more = await extra();

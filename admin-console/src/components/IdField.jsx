@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useId, useState } from 'react';
 import { idFieldNotice, ID_FORMAT_HINT } from './id-field-view.js';
 
 /**
@@ -36,6 +36,8 @@ export default function IdField({
   // just vanish as the user types, which reads as a bug (#651-style pure logic
   // in id-field-view.js).
   const [rawInput, setRawInput] = useState('');
+  // Ties the visible label to the input so screen readers announce it (#2654).
+  const inputId = useId();
   const notice = disabled ? '' : idFieldNotice(rawInput, value);
 
   const handleInput = (e) => {
@@ -61,13 +63,13 @@ export default function IdField({
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 'var(--eb-space-2)' }}>
-        <div style={{
+        <label htmlFor={inputId} style={{
           fontSize: 'var(--eb-text-sm)',
           fontWeight: 'var(--eb-font-medium)',
           color: 'var(--eb-text-secondary)',
         }}>
           {label}{required && <span style={{ color: 'var(--eb-status-error)', marginLeft: 2 }}>*</span>}
-        </div>
+        </label>
         {!disabled && !isAutoDerived && onResetAuto && (
           <button
             type="button"
@@ -84,6 +86,7 @@ export default function IdField({
         )}
       </div>
       <input
+        id={inputId}
         value={value ?? ''}
         onChange={handleInput}
         placeholder={placeholder}

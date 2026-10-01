@@ -17,7 +17,7 @@ import {
   moveHumanDelivery, wireLabelHandoff, unwireLabelHandoff, wireChannel, unwireChannel,
 } from './wiring-engine.js';
 import {
-  rowArtifact, wireConsumerSpec, currentConsumers, consumerCandidates, openEndMarker,
+  rowArtifact, wireConsumerSpec, currentConsumers, consumerCandidates, openEndMarker, setLabelTarget,
 } from './outcome-routing.js';
 import { consumeKey } from './humans-registry-ops';
 import { WAKE_NOTE_MAX, clampWakeNote } from './wake-edge-view.js';
@@ -60,7 +60,7 @@ function humanConsuming(humans, entry) {
 // The Outcomes editor holds a local draft and persists only on Save (or when a
 // suggestion is confirmed) — nothing is written implicitly, so a declined
 // suggestion persists nothing (AC4).
-export default function RoutingSection({ node, peers = [], lints = [], labels = [], humans = [], humanOps, ops, onChanged, focusOutcome = null, focusSection = null, mode }) {
+export default function RoutingSection({ node, peers = [], lints = [], labels = [], humans = [], humanOps, ops, onChanged, onOutcomesDirtyChange, focusOutcome = null, focusSection = null, mode }) {
   const [outcomes, setOutcomes] = useState(null);   // { mode, options[] } local draft
   const [loaded, setLoaded] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -85,6 +85,10 @@ export default function RoutingSection({ node, peers = [], lints = [], labels = 
     })();
     return () => { alive = false; };
   }, [node.id]);
+
+  // #2660: the host inspector guards close / tab switch on this draft, which
+  // otherwise dies with this component.
+  useEffect(() => { onOutcomesDirtyChange?.(dirty); }, [dirty]);
 
   const mutate = (next) => { setOutcomes(next); setDirty(true); setSaved(false); setSuggested(false); };
 
@@ -412,7 +416,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
 
       {editChannel && (
         <EditHandoffDialog
-          edge={{ on: 'github', from: editChannel.from, to: node.id, artifact: editChannel.artifact, label: editChannel.label || '', gate: editChannel.gate }}
+          edge={{ on: 'github', from: editChannel.from, to: node.id, artifact: editChannel.artifact, label: editChannel.label || '', gate: editChannel.gate, wakePrompt: editChannel.wakePrompt || '' }}
           fromName={nameOf(editChannel.from)} toName={node.displayName || node.id}
           ops={ops}
           onClose={closeEdits} onDone={afterEdit} />
@@ -742,7 +746,7 @@ function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [
   const [wireError, setWireError] = useState(null);
 
   const artifact = rowArtifact(option);
-  const wireSpec = wireConsumerSpec(option);
+  const wireSpec = wireConsumerSpec(option, node);
   const wired = currentConsumers(option, node, peers);
   // Direct hand-offs (#2057): a consumer the ACTION names, so it is derived
   // beside `wired` rather than being one of it — the target is edited on the
@@ -761,7 +765,7 @@ function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [
     const target = peers.find(p => p.id === targetId);
     if (wireSpec.kind === 'label') {
       await wireLabelHandoff({ ops }, {
-        from: node.id, to: targetId, label: wireSpec.label, labels,
+        from: node.id, to: targetId, label: wireSpec.label, target: wireSpec.target, labels,
         fromName: node.displayName || node.id, toName: target?.displayName || targetId,
       });
     } else {
@@ -805,7 +809,7 @@ function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [
         onChange={e => onChange({ ...option, when: e.target.value })} style={{ ...input, fontSize: 'var(--eb-text-xs)' }} />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
         {actions.map((a, i) => (
-          <ActionRow key={i} action={a} node={node} peers={peers}
+          <ActionRow key={i} action={a} node={node} peers={peers} option={option}
             onChange={(na) => setActions(actions.map((x, j) => j === i ? na : x))}
             onRemove={actions.length > 1 ? () => setActions(actions.filter((_, j) => j !== i)) : null} />
         ))}
@@ -898,7 +902,7 @@ function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [
   );
 }
 
-function ActionRow({ action, node, peers = [], onChange, onRemove }) {
+function ActionRow({ action, node, peers = [], option, onChange, onRemove }) {
   const type = ACTION_TYPES.includes(action.type) ? action.type : 'setLabel';
   // Direct hand-off (#2031): P1 rendered this row READ-ONLY, because putting
   // `wakeAgent` in ACTION_TYPES without a matching `<option>` would have made a
@@ -911,7 +915,7 @@ function ActionRow({ action, node, peers = [], onChange, onRemove }) {
   // the target's pending queue and a human role has none.
   const targets = consumerCandidates(node, peers);
   const changeType = (next) => {
-    if (next === 'setLabel') return onChange({ type: 'setLabel', label: action.label || '' });
+    if (next === 'setLabel') return onChange({ type: 'setLabel', label: action.label || '', ...(action.target ? { target: action.target } : {}) });
     // A fresh hand-off starts target-less on purpose rather than defaulting to
     // whichever agent sorts first: `finalize()` drops a `to`-less wakeAgent, so
     // an unfinished row is discarded on Save instead of silently wiring a
@@ -930,8 +934,24 @@ function ActionRow({ action, node, peers = [], onChange, onRemove }) {
         <option value="none">no signal</option>
       </select>
       {type === 'setLabel' && (
-        <input value={action.label || ''} placeholder="label" onChange={e => onChange({ type: 'setLabel', label: e.target.value })}
-          style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} />
+        <>
+          <input value={action.label || ''} placeholder="label" onChange={e => onChange({ ...action, type: 'setLabel', label: e.target.value })}
+            style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} />
+          {/* #2629: where the label lands. GitHub reports a PR label as
+              pull_request.labeled and an issue label as issues.labeled, so the
+              consumer's listener is typed from this. "auto" shows what the
+              outcome / the agent's own triggers imply. */}
+          <select value={action.target || ''} title="Applies the label to an issue or a pull request"
+            onChange={e => {
+              const { target: _drop, ...rest } = action;
+              onChange(e.target.value ? { ...rest, type: 'setLabel', target: e.target.value } : { ...rest, type: 'setLabel' });
+            }}
+            style={{ ...input, width: 150, flexShrink: 0 }}>
+            <option value="">on: auto ({autoTargetLabel(setLabelTarget(option, { ...action, target: undefined }, node?.triggers))})</option>
+            <option value="issue">on: issue</option>
+            <option value="pr">on: pull request</option>
+          </select>
+        </>
       )}
       {type === 'wakeAgent' && (
         <>
@@ -977,6 +997,12 @@ const ACTION_TYPES = ['setLabel', 'openPr', 'openIssue', 'wakeAgent', 'none'];
 // copies of a cap is how caps drift. It is applied on input so the field cannot
 // submit a value the server would truncate behind the author's back.
 
+// "auto" reads as what the wiring engine will do: an unknown target keeps its
+// historical issue default, flagged with "?" so the guess is visible.
+function autoTargetLabel(target) {
+  return target === 'pr' ? 'pull request' : target === 'issue' ? 'issue' : 'issue?';
+}
+
 function emptyPort() { return { mode: 'anyOf', options: [] }; }
 function normalize(oc) {
   if (!oc || typeof oc !== 'object' || !Array.isArray(oc.options)) return emptyPort();
@@ -1011,7 +1037,10 @@ function finalize(oc) {
     seen.add(id);
     const actions = (Array.isArray(o.actions) ? o.actions : [])
       .map(a => {
-        if (a.type === 'setLabel') return { type: 'setLabel', label: String(a.label || '').trim() };
+        if (a.type === 'setLabel') {
+          return { type: 'setLabel', label: String(a.label || '').trim(),
+            ...(a.target === 'issue' || a.target === 'pr' ? { target: a.target } : {}) };
+        }
         // #2030: `to` + `note` must survive the Routing tab's save, or the
         // direct hand-off is dropped here with no error anywhere.
         if (a.type === 'wakeAgent') {

@@ -459,6 +459,9 @@ token (replaces webhooks for local stacks).
   self-caused. Exception: a push trigger's optional `pushedBy` (same-team agent
   ids, set automatically on Flow-editor data-flow hand-offs) fires only on pushes
   the platform recorded via `gh-as-agent push`/`pr` (`push-attribution.js`).
+  Built-in, non-configurable: a push to any team's knowledge-base branch on the
+  repo never wakes a push trigger — dropped `knowledge-branch` before every
+  other gate (`knowledge-branch-exclusion.js`, resolved per tick).
 - Resilience: hard request deadline + stall watchdog (self-heals a stuck poll).
 - **Event-transparency log** (`github-event-log.js`): every fresh event recorded
   (delivered / dropped / digest / no-subscriber) → `GET /api/github-events`, the
@@ -541,7 +544,11 @@ uncovered). Key pieces:
   questions (raised headlessly via the `aee-ask` CLI → per-turn sentinel file,
   #2523 — the only mechanism since #1719 removed the MCP path); inline image
   thumbnails; hover-revealed "Copy link" builds the `?msg=` deep-link above
-  (#2310, plain text bubbles only).
+  (#2310, plain text bubbles only); next to it "Show in session log" (#2603,
+  pure `session-jump.js`) opens the Sessions tab on the message's run and
+  scrolls to + flashes its rows — an agent reply's run is resolved server-side
+  from the runner's `message.posted` row (`GET …/session/:roomId/locate`), a
+  trigger notice uses its `io.aee.trigger.correlationId`.
 - `MessageInput` — composer, send-keybinding preset, per-agent drafts,
   slash-command palette, unified Send/Stop.
 - `RightRail` — tabs (Sessions, session log, Workspace, Triggers, Outcomes,

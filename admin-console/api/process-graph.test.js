@@ -1334,6 +1334,19 @@ test('#1006: raw-trigger-nonconformant lint — visible deviation, advisory only
   assert.deepEqual(raws.map(l => l.triggerIds[0]).sort(), ['t-badclaim', 't-two']);
 });
 
+test('#2626: an invalid cron trigger lints as never firing, not as a tolerated deviation', () => {
+  const g = buildProcessGraph([
+    { id: 'sched', triggers: [
+      { id: 'bad', type: 'cron', cron: '75 * * * *', prompt: 'p' },
+      { id: 'good', type: 'cron', cron: '0 9 * * 1-5', prompt: 'p' },
+    ] },
+  ], {});
+  const raws = g.lints.filter(l => l.code === 'raw-trigger-nonconformant');
+  assert.deepEqual(raws.map(l => l.triggerIds[0]), ['bad']);
+  assert.match(raws[0].message, /`bad` never fires: Invalid cron expression "75 \* \* \* \*": minute must be 0–59/);
+  assert.doesNotMatch(raws[0].message, /still runs/);
+});
+
 test('#1008: derived channel/data-flow triggers are exempt from the raw-trigger lint', () => {
   // A derived listener is ENGINE-written and regenerated on every port
   // reconcile — the operator cannot "edit it to conform". The unlabelled
@@ -1601,4 +1614,95 @@ test('#2032: computeLints still works without a classifier (nodes+edges callers)
   const nodes = [{ id: 'a', triggers: [] }, { id: 'b', triggers: [] }];
   const edges = [{ from: 'a', to: 'b', label: 'hold', kind: 'agent', triggerId: 't' }];
   assert.doesNotThrow(() => computeLints(nodes, edges));
+});
+
+// ─── label-target-mismatch (#2629) ───────────────────────────────────────────
+// A label on a PR arrives as `pull_request.labeled`, on an issue as
+// `issues.labeled` — a consumer subscribed to the other one never wakes.
+
+const prListener = (id, label) => ({
+  id, role: 'agent',
+  triggers: [{ id: `${id}-t`, type: 'github-event', events: ['pull_request.labeled'], labelFilter: label }],
+});
+// The #2622 incident shape: a merger woken on PRs sets `needs-conflict-resolution`.
+const merger = (actions) => ({
+  id: 'merger', role: 'agent',
+  triggers: [{ id: 'merger-t', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-to-merge' }],
+  outcomes: { mode: 'exactlyOne', options: [
+    { id: 'merged', actions: [{ type: 'none' }] },
+    { id: 'conflicts', actions },
+  ] },
+});
+const mismatches = g => g.lints.filter(l => l.code === 'label-target-mismatch');
+
+test('lint: label-target-mismatch fires (warning) when a PR label is consumed on issues.labeled', () => {
+  const g = buildProcessGraph([
+    merger([{ type: 'setLabel', label: 'needs-conflict-resolution', target: 'pr' }]),
+    outcomeListener('solver', 'needs-conflict-resolution'),
+  ]);
+  const [m] = mismatches(g);
+  assert.ok(m, 'mismatch lint expected');
+  assert.equal(m.severity, 'warning');
+  assert.equal(m.nodeId, 'solver');
+  assert.equal(m.label, 'needs-conflict-resolution');
+  assert.equal(m.outcome, 'conflicts');
+  assert.deepEqual(m.triggerIds, ['solver-t']);
+  assert.match(m.message, /pull_request\.labeled/);
+
+  // Consumer repointed to pull_request.labeled → cleared.
+  const ok = buildProcessGraph([
+    merger([{ type: 'setLabel', label: 'needs-conflict-resolution', target: 'pr' }]),
+    prListener('solver', 'needs-conflict-resolution'),
+  ]);
+  assert.equal(mismatches(ok).length, 0);
+});
+
+test('lint: label-target-mismatch infers the PR target from the producer\'s own PR-only triggers', () => {
+  // No explicit target — the incident as authored. The merger is only ever woken
+  // on pull requests, so the label it sets can only land on a PR.
+  const g = buildProcessGraph([
+    merger([{ type: 'setLabel', label: 'needs-conflict-resolution' }]),
+    outcomeListener('solver', 'needs-conflict-resolution'),
+  ]);
+  assert.equal(mismatches(g).length, 1);
+});
+
+test('lint: label-target-mismatch infers the target from an openPr in the same outcome', () => {
+  const dev = withOutcomes('dev', 'anyOf', [
+    { id: 'opens-pr', actions: [{ type: 'openPr' }, { type: 'setLabel', label: 'ready-for-docs' }] },
+  ]);
+  assert.equal(mismatches(buildProcessGraph([dev, outcomeListener('docs', 'ready-for-docs')])).length, 1);
+  assert.equal(mismatches(buildProcessGraph([dev, prListener('docs', 'ready-for-docs')])).length, 0);
+});
+
+test('lint: an explicit target wins over the producer-trigger inference', () => {
+  // Woken on PRs, but the outcome says it labels the linked issue.
+  const g = buildProcessGraph([
+    merger([{ type: 'setLabel', label: 'reopen', target: 'issue' }]),
+    outcomeListener('ba', 'reopen'),
+  ]);
+  assert.equal(mismatches(g).length, 0);
+  const g2 = buildProcessGraph([
+    merger([{ type: 'setLabel', label: 'reopen', target: 'issue' }]),
+    prListener('ba', 'reopen'),
+  ]);
+  assert.equal(mismatches(g2).length, 1);
+});
+
+test('lint: label-target-mismatch stays silent when the target is unknown', () => {
+  // No target, no artifact action, no triggers — nothing to disagree with.
+  const g = buildProcessGraph([
+    withOutcomes('router', 'anyOf', [{ id: 'go', actions: [{ type: 'setLabel', label: 'go' }] }]),
+    outcomeListener('a', 'go'), prListener('b', 'go'),
+  ]);
+  assert.equal(mismatches(g).length, 0);
+});
+
+test('lint: label-target-mismatch accepts a listener subscribed to both labeled events', () => {
+  const both = {
+    id: 'solver', role: 'agent',
+    triggers: [{ id: 'solver-t', type: 'github-event', events: ['issues.labeled', 'pull_request.labeled'], labelFilter: 'x' }],
+  };
+  const g = buildProcessGraph([merger([{ type: 'setLabel', label: 'x', target: 'pr' }]), both]);
+  assert.equal(mismatches(g).length, 0);
 });

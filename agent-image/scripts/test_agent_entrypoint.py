@@ -12,6 +12,8 @@ or directly:
     python3 agent-image/scripts/test_agent_entrypoint.py
 """
 import asyncio
+import inspect
+import types
 import importlib.util
 import json
 import os
@@ -668,6 +670,38 @@ class GithubEventDetail(unittest.TestCase):
         self.assertIsNone(github_event_detail("issues.labeled", {"issue": "not-a-dict"}))
 
 
+class LogRunReply(unittest.TestCase):
+    """#2603: error / abort replies leave a `message.posted` row so Agent Chat's
+    "Show in session log" resolves them to their run instead of "not found"."""
+
+    def test_appends_message_posted_row(self):
+        with patch.object(entrypoint, "_append_event") as append_mock:
+            entrypoint._log_run_reply("!room:local", "$u1", "$err1")
+        append_mock.assert_called_once_with("!room:local", {
+            "type": "message.posted", "correlationId": "$u1", "eventId": "$err1",
+        })
+
+    def test_noop_without_event_id_or_run(self):
+        with patch.object(entrypoint, "_append_event") as append_mock:
+            entrypoint._log_run_reply("!room:local", "$u1", "")
+            entrypoint._log_run_reply("!room:local", "$u1", None)
+            entrypoint._log_run_reply("!room:local", None, "$err1")
+        append_mock.assert_not_called()
+
+    def test_dm_error_and_abort_replies_are_logged(self):
+        src = _MODULE_PATH.read_text(encoding="utf-8")
+        import re
+        sends = re.findall(
+            r"(\w+) = await send_formatted\(\s*room_id,\s*"
+            r"(?:\"_\(Execution aborted\.\)_\"|f\"⚠️ \*\*Agent error\*\*)"
+            r"[\s\S]{0,120}?\)\n\s*_log_run_reply\(room_id, correlation_id, (\w+)\)",
+            src)
+        # One abort reply + the two Agent-error replies of the DM handler.
+        self.assertEqual(len(sends), 3, sends)
+        for assigned, logged in sends:
+            self.assertEqual(assigned, logged)
+
+
 class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
     def _scheduler(self):
         client = AsyncMock()
@@ -675,6 +709,27 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
             client=client, agent_id="agent-1", user_id="@agent-1:local",
             send_formatted=None, blueprint_id=None,
         ), client
+
+    # -- #2603: the run's correlationId rides on the notice ----------------------
+
+    async def test_correlation_id_added_when_known(self):
+        """#2603: the notice names its run so the chat can open its session log."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t1", "type": "cron", "description": "Nightly"}
+        await scheduler._post_trigger_notice(trigger, None, "!room:local", "trigger:t1:1700000000000")
+        meta = client.room_send.call_args.kwargs["content"]["io.aee.trigger"]
+        self.assertEqual(meta["correlationId"], "trigger:t1:1700000000000")
+        # The #158 keys are untouched.
+        self.assertEqual(meta["triggerId"], "t1")
+        self.assertEqual(meta["triggerType"], "cron")
+        self.assertIsNone(meta["event"])
+
+    async def test_correlation_id_omitted_when_unknown(self):
+        """#2603: without a correlationId the envelope keeps its original keys."""
+        scheduler, client = self._scheduler()
+        await scheduler._post_trigger_notice({"id": "t1", "type": "cron"}, None, "!room:local")
+        meta = client.room_send.call_args.kwargs["content"]["io.aee.trigger"]
+        self.assertEqual(set(meta), {"triggerId", "triggerType", "event"})
 
     # -- AC1: friendly event name -----------------------------------------------
 
@@ -896,26 +951,40 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
     # -- AC6: cron / once / http description-vs-generic fallback ---------------
 
     async def test_cron_with_description_uses_description(self):
-        """AC6: cron body is the trigger description when present."""
+        """AC6: cron body is the trigger description when present — plus the
+        schedule, so it's clear which trigger fired (#2628)."""
         scheduler, client = self._scheduler()
         await scheduler._post_trigger_notice(
-            {"id": "c1", "type": "cron", "description": "nightly"}, None, "!room:local")
+            {"id": "c1", "type": "cron", "description": "nightly",
+             "cron": "0 9 * * *"}, None, "!room:local")
         body = client.room_send.call_args.kwargs["content"]["body"]
-        self.assertEqual(body, "⚡ Trigger fired — nightly — starting work…")
+        self.assertEqual(body, "⚡ Trigger fired — nightly (cron `0 9 * * *`) — starting work…")
 
-    async def test_cron_without_description_uses_generic_phrase(self):
-        """AC6: cron with no description falls back to 'Scheduled trigger'."""
+    async def test_cron_without_description_names_the_trigger_id(self):
+        """#2628 AC3: without a description the notice falls back to the
+        trigger id, not a generic phrase."""
         scheduler, client = self._scheduler()
         await scheduler._post_trigger_notice(
-            {"id": "c1", "type": "cron"}, None, "!room:local")
+            {"id": "uitest-cron-near", "type": "cron", "cron": "21 18 * * *"},
+            None, "!room:local")
         body = client.room_send.call_args.kwargs["content"]["body"]
-        self.assertEqual(body, "⚡ Trigger fired — Scheduled trigger — starting work…")
+        self.assertEqual(
+            body, "⚡ Trigger fired — uitest-cron-near (cron `21 18 * * *`) — starting work…")
 
-    async def test_once_without_description_uses_scheduled_generic(self):
-        """AC6: once trigger with no description uses 'Scheduled trigger'."""
+    async def test_once_without_description_names_the_trigger_id(self):
+        """#2628 AC3: once trigger with no description uses its id + time."""
         scheduler, client = self._scheduler()
         await scheduler._post_trigger_notice(
-            {"id": "o1", "type": "once"}, None, "!room:local")
+            {"id": "o1", "type": "once", "at": "2026-10-01T09:00:00Z"},
+            None, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertEqual(
+            body, "⚡ Trigger fired — o1 (once `2026-10-01T09:00:00Z`) — starting work…")
+
+    async def test_scheduled_trigger_without_id_or_description_uses_generic_phrase(self):
+        scheduler, client = self._scheduler()
+        await scheduler._post_trigger_notice(
+            {"type": "cron"}, None, "!room:local")
         body = client.room_send.call_args.kwargs["content"]["body"]
         self.assertEqual(body, "⚡ Trigger fired — Scheduled trigger — starting work…")
 
@@ -1742,6 +1811,419 @@ class MaintenanceModeGating(unittest.IsolatedAsyncioTestCase):
             await scheduler._cron_runner({"id": "c1", "type": "cron"}, "* * * * *")
         execute_mock.assert_called_once()
         self.assertEqual(len(maintenance_calls), 2)
+
+
+class TriggerScheduleStatus(unittest.IsolatedAsyncioTestCase):
+    """#2628: the scheduler records per trigger when it fires next, when it
+    last fired and how that went, and why it refused a trigger — the console's
+    trigger list reads this from trigger-status.json."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir",
+                               return_value=Path(self._tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=None, blueprint_id=None,
+        )
+
+    async def _sync(self, scheduler, triggers):
+        with patch.object(entrypoint, "_load_triggers", return_value=triggers), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             patch.object(scheduler, "_execute", AsyncMock()):
+            await scheduler._sync()
+            await entrypoint.asyncio.sleep(0)
+
+    async def test_invalid_cron_is_reported_and_cleared_once_fixed(self):
+        scheduler = self._scheduler()
+        self.addAsyncCleanup(scheduler.stop)
+        await self._sync(scheduler, [{"id": "c1", "type": "cron", "cron": "75 * * * *"}])
+        self.assertEqual(scheduler._trigger_status["c1"],
+                         {"invalid": "Invalid cron expression `75 * * * *`"})
+        self.assertNotIn("c1", scheduler._cron_tasks)
+        await self._sync(scheduler, [{"id": "c1", "type": "cron", "cron": "15 * * * *"}])
+        self.assertNotIn("invalid", scheduler._trigger_status.get("c1", {}))
+
+    async def test_missing_cron_expression_is_reported(self):
+        scheduler = self._scheduler()
+        await self._sync(scheduler, [{"id": "c1", "type": "cron"}])
+        self.assertEqual(scheduler._trigger_status["c1"]["invalid"], "No cron expression")
+
+    async def test_future_once_reports_next_fire_and_bad_at_is_invalid(self):
+        scheduler = self._scheduler()
+        await self._sync(scheduler, [
+            {"id": "o1", "type": "once", "at": "2999-01-01T09:00:00+01:00"},
+            {"id": "o2", "type": "once", "at": "tomorrow-ish"},
+        ])
+        self.assertEqual(scheduler._trigger_status["o1"], {"nextFireAt": "2999-01-01T08:00:00Z"})
+        self.assertEqual(scheduler._trigger_status["o2"],
+                         {"invalid": "Invalid date/time `tomorrow-ish`"})
+
+    async def test_naive_once_time_is_read_in_the_trigger_time_zone(self):
+        scheduler = self._scheduler()
+        await self._sync(scheduler, [{"id": "o1", "type": "once", "at": "2999-07-01T09:00:00"}])
+        # Europe/Berlin is UTC+2 in July.
+        self.assertEqual(scheduler._trigger_status["o1"]["nextFireAt"], "2999-07-01T07:00:00Z")
+
+    async def test_disabled_trigger_drops_next_and_invalid_but_keeps_last_run(self):
+        scheduler = self._scheduler()
+        scheduler._trigger_status = {"c1": {
+            "nextFireAt": "2999-01-01T00:00:00Z", "invalid": "x",
+            "lastFiredAt": "2026-01-01T00:00:00Z", "lastResult": "ok"}}
+        await self._sync(scheduler, [{"id": "c1", "type": "cron", "cron": "75 * * * *",
+                                       "enabled": False}])
+        self.assertEqual(scheduler._trigger_status["c1"],
+                         {"lastFiredAt": "2026-01-01T00:00:00Z", "lastResult": "ok"})
+
+    async def test_deleted_trigger_status_is_pruned(self):
+        scheduler = self._scheduler()
+        scheduler._trigger_status = {"gone": {"lastResult": "ok"}}
+        await self._sync(scheduler, [])
+        self.assertEqual(scheduler._trigger_status, {})
+
+    async def _run_cron_once(self, scheduler, execute, maintenance=None):
+        async def fake_execute(trigger):
+            scheduler._shutdown_event.set()
+            await execute(trigger)
+        seen = []
+
+        def spy(tid, **fields):
+            seen.append(dict(fields))
+            return orig(tid, **fields)
+        orig = scheduler._set_trigger_status
+        with patch.object(scheduler, "_execute", AsyncMock(side_effect=fake_execute)), \
+             patch.object(scheduler, "_maintenance_active",
+                          maintenance or AsyncMock(return_value=False)), \
+             patch.object(scheduler, "_set_trigger_status", side_effect=spy), \
+             patch.object(entrypoint.asyncio, "sleep", AsyncMock(return_value=None)):
+            await scheduler._cron_runner({"id": "c1", "type": "cron"}, "* * * * *")
+        return seen
+
+    async def test_cron_runner_records_next_fire_and_ok_result(self):
+        scheduler = self._scheduler()
+
+        async def ok(_t):
+            scheduler._exec_results["c1"] = "ok"
+        seen = await self._run_cron_once(scheduler, ok)
+        self.assertIn("nextFireAt", seen[0])
+        self.assertEqual(seen[1]["lastResult"], "running")
+        st = scheduler._trigger_status["c1"]
+        self.assertEqual(st["lastResult"], "ok")
+        self.assertRegex(st["lastFiredAt"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertNotIn("nextFireAt", st)
+
+    async def test_cron_runner_records_error_and_skipped_results(self):
+        scheduler = self._scheduler()
+
+        async def failed(_t):
+            scheduler._exec_results["c1"] = "error"
+        await self._run_cron_once(scheduler, failed)
+        self.assertEqual(scheduler._trigger_status["c1"]["lastResult"], "error")
+
+        scheduler = self._scheduler()
+
+        async def gated(_t):
+            scheduler._exec_results["c1"] = "skipped"
+        await self._run_cron_once(scheduler, gated)
+        self.assertEqual(scheduler._trigger_status["c1"]["lastResult"], "skipped")
+
+    async def test_cron_runner_records_a_maintenance_skip(self):
+        scheduler = self._scheduler()
+        calls = []
+
+        async def maintenance():
+            calls.append(None)
+            return len(calls) == 1
+
+        async def ok(_t):
+            pass
+        seen = await self._run_cron_once(scheduler, ok, maintenance)
+        self.assertIn({"lastFiredAt": seen[1]["lastFiredAt"],
+                       "lastResult": "skipped-maintenance", "nextFireAt": None}, seen)
+        # The catch-up run then overwrites it.
+        self.assertEqual(scheduler._trigger_status["c1"]["lastResult"], "ok")
+
+    async def test_execute_guarded_reports_precheck_skip_and_errors(self):
+        scheduler = self._scheduler()
+        with patch.object(scheduler, "_execute_inner", AsyncMock(return_value="skipped")):
+            await scheduler._execute_guarded({"id": "c1"}, None, None)
+        self.assertEqual(scheduler._exec_results["c1"], "skipped")
+        with patch.object(scheduler, "_execute_inner", AsyncMock(return_value=None)):
+            await scheduler._execute_guarded({"id": "c1"}, None, None)
+        self.assertEqual(scheduler._exec_results["c1"], "ok")
+        with patch.object(scheduler, "_execute_inner", AsyncMock(side_effect=RuntimeError("x"))):
+            await scheduler._execute_guarded({"id": "c1"}, None, None)
+        self.assertEqual(scheduler._exec_results["c1"], "error")
+
+    async def test_execute_guarded_records_still_running_and_backstop_skips(self):
+        # Review S2: both early returns record "skipped", not the default "ok".
+        scheduler = self._scheduler()
+        scheduler._running.add("c1")
+        await scheduler._execute_guarded({"id": "c1"}, None, None)
+        self.assertEqual(scheduler._exec_results["c1"], "skipped")
+        scheduler = self._scheduler()
+        denied = types.SimpleNamespace(allowed=False, warn=False, reason="rate",
+                                       active=1, window_count=1)
+        with patch.object(scheduler._backstop, "try_acquire", return_value=denied), \
+             patch.object(scheduler, "_execute_inner", AsyncMock()) as inner:
+            await scheduler._execute_guarded({"id": "c1"}, None, None)
+        inner.assert_not_called()
+        self.assertEqual(scheduler._exec_results["c1"], "skipped")
+
+    async def test_failing_precheck_is_recorded_as_skipped(self):
+        # Review S2: drives the real _execute_inner, whose preCheck gate
+        # returns "skipped" before Claude is called.
+        scheduler = self._scheduler()
+        with patch.object(entrypoint, "_run_pre_check", return_value=(1, "")):
+            await scheduler._execute_guarded(
+                {"id": "c1", "preCheckScript": "exit 1"}, None, None)
+        self.assertEqual(scheduler._exec_results["c1"], "skipped")
+
+    async def test_cron_runner_records_error_when_execute_raises(self):
+        scheduler = self._scheduler()
+
+        async def boom(_t):
+            raise RuntimeError("x")
+        await self._run_cron_once(scheduler, boom)
+        self.assertEqual(scheduler._trigger_status["c1"]["lastResult"], "error")
+
+    async def test_cancelled_run_is_recorded_as_interrupted(self):
+        # Review S1: a runner cancelled mid-run must not leave "running".
+        scheduler = self._scheduler()
+        started = asyncio.Event()
+
+        async def hang(_t):
+            started.set()
+            await asyncio.Event().wait()
+        with patch.object(scheduler, "_execute", AsyncMock(side_effect=hang)), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            orig_sleep = asyncio.sleep
+            with patch.object(entrypoint.asyncio, "sleep", AsyncMock(return_value=None)):
+                task = asyncio.create_task(
+                    scheduler._cron_runner({"id": "c1", "type": "cron"}, "* * * * *"))
+                await started.wait()
+            self.assertEqual(scheduler._trigger_status["c1"]["lastResult"], "running")
+            task.cancel()
+            await orig_sleep(0)
+            await orig_sleep(0)
+        self.assertTrue(task.done())
+        self.assertEqual(scheduler._trigger_status["c1"]["lastResult"], "interrupted")
+
+    def test_running_status_left_by_a_restart_becomes_interrupted(self):
+        # Review S1: start() rewrites a stale "running" from before a restart.
+        scheduler = self._scheduler()
+        scheduler._trigger_status = {
+            "c1": {"lastFiredAt": "2026-09-30T07:00:00Z", "lastResult": "running"},
+            "c2": {"lastResult": "ok"},
+        }
+        scheduler._mark_interrupted_runs()
+        self.assertEqual(scheduler._trigger_status["c1"],
+                         {"lastFiredAt": "2026-09-30T07:00:00Z", "lastResult": "interrupted"})
+        self.assertEqual(scheduler._trigger_status["c2"], {"lastResult": "ok"})
+        # …and start() applies it right after loading the status file.
+        src = inspect.getsource(entrypoint.TriggerScheduler.start)
+        self.assertRegex(src, r"_load_trigger_status\(\)\n\s+self\._mark_interrupted_runs\(\)")
+
+    def test_status_file_round_trips_with_the_time_zone(self):
+        pc = unittest.mock.MagicMock()
+        with patch.object(entrypoint, "_get_push_client", return_value=pc):
+            entrypoint._save_trigger_status({"c1": {"lastResult": "ok"}})
+        data = json.loads((Path(self._tmpdir.name) / "trigger-status.json").read_text())
+        self.assertEqual(data["timeZone"], "Europe/Berlin")
+        self.assertEqual(data["triggers"], {"c1": {"lastResult": "ok"}})
+        pc.push_trigger_status.assert_called_once_with(data)
+        self.assertEqual(entrypoint._load_trigger_status(), {"c1": {"lastResult": "ok"}})
+
+    def test_scheduler_never_persists_under_a_test_harness(self):
+        # #606: status writes from a test must not reach the live workdir.
+        scheduler = self._scheduler()
+        with patch.object(entrypoint, "_save_trigger_status") as save:
+            scheduler._set_trigger_status("c1", lastResult="ok")
+        save.assert_not_called()
+        self.assertEqual(scheduler._trigger_status, {"c1": {"lastResult": "ok"}})
+
+
+class TriggerEditTakesEffect(unittest.IsolatedAsyncioTestCase):
+    """#2627: editing a trigger without changing its schedule (prompt,
+    description, roomId, …) must reach the next run — the running cron task is
+    kept, but it fires with the trigger as of the latest sync."""
+
+    EXPR = "*/1 * * * *"
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir",
+                               return_value=Path(self._tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        scheduler = entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+        self.addAsyncCleanup(scheduler.stop)
+        return scheduler
+
+    def _cron(self, prompt, **extra):
+        return {"id": "c1", "type": "cron", "enabled": True,
+                "cron": self.EXPR, "prompt": prompt, **extra}
+
+    async def _run_with_gated_sleep(self, scheduler, steps):
+        """Run `steps` (async callables) while every cron sleep blocks on a
+        gate; the gate opens after the last step so the runner fires once."""
+        real_sleep = asyncio.sleep
+        gate = asyncio.Event()
+
+        async def fake_sleep(delay, *args, **kwargs):
+            if delay == 0:
+                return await real_sleep(0)
+            await gate.wait()
+
+        async def fake_execute(_trigger, *args, **kwargs):
+            scheduler._shutdown_event.set()
+
+        execute_mock = AsyncMock(side_effect=fake_execute)
+        with patch.object(scheduler, "_execute", execute_mock), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             patch.object(entrypoint.asyncio, "sleep", fake_sleep):
+            for step in steps:
+                await step()
+                await real_sleep(0)
+            gate.set()
+            for _ in range(5):
+                await real_sleep(0)
+        return execute_mock
+
+    async def test_prompt_only_edit_reaches_next_run(self):
+        scheduler = self._scheduler()
+        tasks = []
+
+        async def sync_with(trigger):
+            with patch.object(entrypoint, "_load_triggers", return_value=[trigger]):
+                await scheduler._sync()
+            tasks.append(scheduler._cron_tasks["c1"]["task"])
+
+        execute_mock = await self._run_with_gated_sleep(scheduler, [
+            lambda: sync_with(self._cron("cron ok v1")),
+            lambda: sync_with(self._cron("cron ok VERSION-2", description="new")),
+        ])
+        # Same schedule → the running task is kept, not rescheduled…
+        self.assertIs(tasks[0], tasks[1])
+        # …and its next fire uses the edited prompt and description.
+        execute_mock.assert_called_once()
+        fired = execute_mock.call_args.args[0]
+        self.assertEqual(fired["prompt"], "cron ok VERSION-2")
+        self.assertEqual(fired["description"], "new")
+
+    async def test_disable_after_edit_still_stops_next_run(self):
+        scheduler = self._scheduler()
+
+        async def sync_with(triggers):
+            with patch.object(entrypoint, "_load_triggers", return_value=triggers):
+                await scheduler._sync()
+
+        task_holder = {}
+
+        async def first():
+            await sync_with([self._cron("v1")])
+            task_holder["task"] = scheduler._cron_tasks["c1"]["task"]
+
+        execute_mock = await self._run_with_gated_sleep(scheduler, [
+            first,
+            lambda: sync_with([self._cron("v2")]),
+            lambda: sync_with([self._cron("v2", enabled=False)]),
+        ])
+        execute_mock.assert_not_called()
+        self.assertNotIn("c1", scheduler._cron_tasks)
+        # The runner swallows its CancelledError, so it ends done, not cancelled.
+        self.assertTrue(task_holder["task"].done())
+
+    async def test_delete_after_edit_still_stops_next_run(self):
+        scheduler = self._scheduler()
+
+        async def sync_with(triggers):
+            with patch.object(entrypoint, "_load_triggers", return_value=triggers):
+                await scheduler._sync()
+
+        execute_mock = await self._run_with_gated_sleep(scheduler, [
+            lambda: sync_with([self._cron("v1")]),
+            lambda: sync_with([self._cron("v2")]),
+            lambda: sync_with([]),
+        ])
+        execute_mock.assert_not_called()
+        self.assertNotIn("c1", scheduler._cron_tasks)
+
+    async def test_duplicate_ids_do_not_cancel_each_other(self):
+        scheduler = self._scheduler()
+        first = self._cron("first")
+        second = {**self._cron("second"), "cron": "0 * * * *"}
+        with patch.object(entrypoint, "_load_triggers", return_value=[first, second]), \
+             patch.object(scheduler, "_cron_runner", AsyncMock()) as runner_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._sync()
+            task = scheduler._cron_tasks["c1"]["task"]
+            await scheduler._sync()
+            await asyncio.sleep(0)
+        # The first trigger wins and stays scheduled across syncs; the
+        # duplicate is warned about once, not scheduled.
+        runner_mock.assert_called_once()
+        self.assertIs(scheduler._cron_tasks["c1"]["task"], task)
+        self.assertEqual(scheduler._cron_tasks["c1"]["expr"], self.EXPR)
+        self.assertEqual(scheduler._cron_tasks["c1"]["trigger"]["prompt"], "first")
+        self.assertIn("dup:c1", scheduler._skipped_notified)
+
+    async def test_running_loop_picks_up_the_edited_trigger(self):
+        scheduler = self._scheduler()
+        v1 = {"id": "lp", "type": "loop", "enabled": True,
+              "maxIterations": 5, "prompt": "v1"}
+        v2 = {**v1, "prompt": "v2"}
+        blocker = asyncio.Event()
+
+        async def fake_runner(_trigger):
+            await blocker.wait()
+
+        with patch.object(scheduler, "_loop_runner", fake_runner), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            with patch.object(entrypoint, "_load_triggers", return_value=[v1]):
+                await scheduler._sync()
+            task = scheduler._loop_tasks["lp"]["task"]
+            with patch.object(entrypoint, "_load_triggers", return_value=[v2]):
+                await scheduler._sync()
+            self.assertIs(scheduler._loop_tasks["lp"]["task"], task)
+            latest = scheduler._latest_trigger(scheduler._loop_tasks, "lp", v1)
+            self.assertEqual(latest["prompt"], "v2")
+            blocker.set()
+            await task
+
+    async def test_loop_runner_runs_the_next_iteration_with_the_edited_trigger(self):
+        # Drives the real `_loop_runner` (review S1): an edit that `_sync`
+        # stores in the loop's map entry between iterations reaches the next
+        # `_execute` call, not only the map.
+        scheduler = self._scheduler()
+        v1 = {"id": "lp", "type": "loop", "enabled": True,
+              "maxIterations": 2, "prompt": "v1"}
+        scheduler._loop_tasks["lp"] = {"trigger": v1}
+        prompts = []
+
+        async def fake_execute(trig, *args, **kwargs):
+            prompts.append(trig["prompt"])
+            scheduler._loop_tasks["lp"] = {"trigger": {**v1, "prompt": "v2"}}
+
+        with patch.object(scheduler, "_execute", side_effect=fake_execute), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._loop_runner(v1)
+        self.assertEqual(prompts, ["v1", "v2"])
+
+    def test_latest_trigger_falls_back_to_the_runner_copy(self):
+        own = {"id": "c1", "prompt": "own"}
+        self.assertIs(entrypoint.TriggerScheduler._latest_trigger({}, "c1", own), own)
 
 
 class LoopTriggerValidation(unittest.TestCase):
@@ -3732,6 +4214,7 @@ class TriggerClaudeFailureRetry(unittest.IsolatedAsyncioTestCase):
 
     def _run(self, scheduler, call_mock, trigger=None):
         trigger = trigger or {"id": "t1", "type": "github-event"}
+        self._notice_mock = AsyncMock()
         patches = [
             patch.object(entrypoint, "_load_dm_room_id",
                          return_value="!room:local"),
@@ -3750,7 +4233,7 @@ class TriggerClaudeFailureRetry(unittest.IsolatedAsyncioTestCase):
             patch.object(entrypoint, "_write_last_response_at"),
             patch.object(entrypoint, "TRIGGER_RETRY_DELAY_SEC", 0),
             patch.object(entrypoint, "_call_claude_once", call_mock),
-            patch.object(scheduler, "_post_trigger_notice", AsyncMock()),
+            patch.object(scheduler, "_post_trigger_notice", self._notice_mock),
         ]
         async def go():
             for p in patches:
@@ -3784,6 +4267,12 @@ class TriggerClaudeFailureRetry(unittest.IsolatedAsyncioTestCase):
         content = scheduler._client.room_send.await_args.kwargs["content"]
         self.assertIn("io.aee.triggerFailure", content)
         self.assertEqual(content["io.aee.triggerFailure"]["triggerId"], "t1")
+        # #2603: the failure notice names its run for "Show in session log".
+        self.assertTrue(
+            content["io.aee.triggerFailure"]["correlationId"].startswith("trigger:t1:"))
+        # S1 (#2603): the start notice got the same run's correlationId.
+        notice_cid = self._notice_mock.await_args.args[3]
+        self.assertEqual(notice_cid, content["io.aee.triggerFailure"]["correlationId"])
 
     async def test_user_abort_is_not_retried_and_stays_silent(self):
         scheduler = self._scheduler()
@@ -4509,6 +4998,79 @@ class PluginRunIdentity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SkippedTriggerNotices(unittest.IsolatedAsyncioTestCase):
+    """#2626: an invalid cron or a duplicate trigger id is reported to the
+    user once (advisory DM), not only on stderr; the first of two enabled
+    triggers sharing an id keeps running instead of the two thrashing."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir",
+                               return_value=Path(self._tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    async def _sync(self, scheduler, triggers, runs=1):
+        with patch.object(entrypoint, "_load_triggers", return_value=triggers), \
+             patch.object(entrypoint, "_load_dm_room_id", return_value="!dm:local"), \
+             patch.object(scheduler, "_cron_runner", AsyncMock()) as runner_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            for _ in range(runs):
+                await scheduler._sync()
+            await entrypoint.asyncio.sleep(0)
+        return runner_mock
+
+    async def test_invalid_cron_is_reported_once_and_not_scheduled(self):
+        scheduler = self._scheduler()
+        runner = await self._sync(scheduler, [
+            {"id": "bad", "type": "cron", "enabled": True, "cron": "75 * * * *", "prompt": "x"},
+        ], runs=3)
+        runner.assert_not_called()
+        self.assertNotIn("bad", scheduler._cron_tasks)
+        scheduler._send_formatted.assert_awaited_once()
+        room, body = scheduler._send_formatted.await_args.args[:2]
+        self.assertEqual(room, "!dm:local")
+        self.assertIn("Trigger `bad` is not scheduled", body)
+        self.assertIn("`75 * * * *`", body)
+
+    async def test_a_changed_invalid_cron_is_reported_again(self):
+        scheduler = self._scheduler()
+        await self._sync(scheduler, [{"id": "bad", "type": "cron", "cron": "75 * * * *"}])
+        await self._sync(scheduler, [{"id": "bad", "type": "cron", "cron": "0 0 40 * *"}])
+        self.assertEqual(scheduler._send_formatted.await_count, 2)
+
+    async def test_duplicate_id_first_wins_and_is_reported_once(self):
+        scheduler = self._scheduler()
+        triggers = [
+            {"id": "x-dup", "type": "cron", "enabled": True, "cron": "0 9 * * *", "prompt": "daily"},
+            {"id": "x-dup", "type": "cron", "enabled": True, "cron": "0 9 * * 1", "prompt": "weekly"},
+        ]
+        runner = await self._sync(scheduler, triggers, runs=3)
+        # Scheduled once and never cancelled/rescheduled by the twin.
+        runner.assert_called_once()
+        self.assertEqual(runner.call_args.args[0]["prompt"], "daily")
+        self.assertEqual(scheduler._cron_tasks["x-dup"]["expr"], "0 9 * * *")
+        scheduler._send_formatted.assert_awaited_once()
+        self.assertIn("another enabled trigger already uses this id",
+                      scheduler._send_formatted.await_args.args[1])
+
+    async def test_a_disabled_twin_is_not_a_duplicate(self):
+        scheduler = self._scheduler()
+        runner = await self._sync(scheduler, [
+            {"id": "x-dup", "type": "cron", "enabled": False, "cron": "0 9 * * *"},
+            {"id": "x-dup", "type": "cron", "enabled": True, "cron": "0 9 * * 1"},
+        ])
+        runner.assert_called_once()
+        scheduler._send_formatted.assert_not_awaited()
 
 
 class NonconformantTriggerReasonTest(unittest.TestCase):

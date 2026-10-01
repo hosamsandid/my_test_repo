@@ -8,6 +8,7 @@ import {
   buildLaunchBody,
   launchSubmitLabel,
   launchResultMessage,
+  launchFailure,
   runLaunchStream,
   slugify,
   sanitizeTeamIdInput,
@@ -169,6 +170,7 @@ export default function LaunchStep({
     }
   }
 
+  const failure = launchFailure({ message: progressError, steps: progressSteps });
   const primaryLabel = launchSubmitLabel({ saving: submitting, extend: values.extend, materializeNow: values.materializeNow });
   // Single source for the disabled state AND its reason (#2157 AC4) — replaces
   // the old `envBlocking`, which decided disabled-ness with no connection to the
@@ -327,7 +329,7 @@ export default function LaunchStep({
         </>
       )}
 
-      {progressSteps && !result && <ProgressList steps={progressSteps} error={progressError} />}
+      {progressSteps && !result && <ProgressList steps={progressSteps} error={failure.message} />}
 
       {progressError && !result && !collisionInfo && (
         <div style={{ ...cardBox, borderColor: 'var(--eb-status-error)' }}>
@@ -337,10 +339,23 @@ export default function LaunchStep({
               <div style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
                 Team creation failed
               </div>
+              {/* #2658: a refusal before the plan has no progress list to carry
+                  the message, and created nothing — so no rollback claim. */}
+              {!progressSteps && (
+                <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)', marginTop: 4 }}>
+                  {failure.message}
+                </div>
+              )}
               <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 4 }}>
-                No partial team was left behind — every resource created during this attempt
-                (members, then the team, then the working environment) was rolled back. Fix the
-                issue above and try again.
+                {failure.rolledBack ? (
+                  <>
+                    No partial team was left behind — every resource created during this attempt
+                    (members, then the team, then the working environment) was rolled back. Fix the
+                    issue above and try again.
+                  </>
+                ) : (
+                  <>Nothing was created. Fix the issue above and try again.</>
+                )}
               </div>
               <div style={{ marginTop: 'var(--eb-space-3)' }}>
                 <button type="button" onClick={() => submit('create')} disabled={submitting} style={primaryStyle(submitting)}>

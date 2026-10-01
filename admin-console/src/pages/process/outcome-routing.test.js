@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   rowLabels, rowArtifact, consumerCandidates, wireConsumerSpec, unwireConsumerSpec, currentConsumers,
   outcomeDropDialog, openEndMarker, edgeOpensProducerOutcome, labelEdgeHasListener,
+  setLabelTarget, triggerObjectKind, labelTargetKind, nodeLabelTarget,
 } from './outcome-routing.js';
 
 // #1003 — pure specs for the per-row consumer picker (concept §4.2).
@@ -35,9 +36,10 @@ test('consumerCandidates excludes self and human roles', () => {
 });
 
 test('wireConsumerSpec: label wins over artifact; terminal rows wire nothing', () => {
-  assert.deepEqual(wireConsumerSpec(labelOpt), { kind: 'label', label: 'ready' });
+  assert.deepEqual(wireConsumerSpec(labelOpt), { kind: 'label', label: 'ready', target: 'issues' });
   assert.deepEqual(wireConsumerSpec(issueOpt), { kind: 'channel', artifact: 'issue' });
-  assert.deepEqual(wireConsumerSpec(mixedOpt), { kind: 'label', label: 'x' });
+  // #2629: the label rides on the PR this outcome opens → PR-typed listener.
+  assert.deepEqual(wireConsumerSpec(mixedOpt), { kind: 'label', label: 'x', target: 'pull_request' });
   assert.equal(wireConsumerSpec(noneOpt), null);
 });
 
@@ -211,6 +213,46 @@ test('#2057 D2: a hand-off row is not offered the label/channel consumer picker'
   // A row carrying both keeps the label picker for the label half only.
   assert.deepEqual(
     wireConsumerSpec({ id: 'm', actions: [{ type: 'setLabel', label: 'ready' }, { type: 'wakeAgent', to: 'dev' }] }),
-    { kind: 'label', label: 'ready' },
+    { kind: 'label', label: 'ready', target: 'issues' },
   );
+});
+
+// ── #2629: where a setLabel lands (Issue vs PR) ─────────────────────────────
+
+const prWoken = [{ type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-to-merge' }];
+const issueWoken = [{ type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' }];
+
+test('#2629: setLabelTarget — explicit target, then the outcome artifact, then the producer triggers', () => {
+  const a = { type: 'setLabel', label: 'x' };
+  assert.equal(setLabelTarget({ actions: [a] }, { ...a, target: 'issue' }, prWoken), 'issue');
+  assert.equal(setLabelTarget(mixedOpt, mixedOpt.actions[1], issueWoken), 'pr');
+  assert.equal(setLabelTarget({ actions: [a] }, a, prWoken), 'pr');
+  assert.equal(setLabelTarget({ actions: [a] }, a, issueWoken), 'issue');
+  assert.equal(setLabelTarget({ actions: [a] }, a, [...prWoken, ...issueWoken]), null);
+  assert.equal(triggerObjectKind([{ type: 'github-event', events: ['issue_comment.created'] }]), null);
+  assert.equal(labelTargetKind('pr'), 'pull_request');
+  assert.equal(labelTargetKind('issue'), 'issues');
+  assert.equal(labelTargetKind(null), 'issues');
+});
+
+test('#2629: wireConsumerSpec types a PR-label hand-off as pull_request (the #2622 merger → conflict solver case)', () => {
+  const conflicts = { id: 'conflicts', actions: [{ type: 'setLabel', label: 'needs-conflict-resolution' }] };
+  const merger = { id: 'merger', triggers: prWoken };
+  assert.deepEqual(wireConsumerSpec(conflicts, merger),
+    { kind: 'label', label: 'needs-conflict-resolution', target: 'pull_request' });
+  const explicit = { id: 'c', actions: [{ type: 'setLabel', label: 'l', target: 'pr' }] };
+  assert.equal(wireConsumerSpec(explicit, { id: 'ba', triggers: issueWoken }).target, 'pull_request');
+});
+
+test('#2629: nodeLabelTarget resolves the target of the outcome that sets a dragged label', () => {
+  const merger = { id: 'merger', triggers: issueWoken, outcomes: { mode: 'anyOf', options: [
+    { id: 'a', actions: [{ type: 'setLabel', label: 'on-pr', target: 'pr' }] },
+    { id: 'b', actions: [{ type: 'setLabel', label: 'plain' }] },
+  ] } };
+  assert.equal(nodeLabelTarget(merger, 'on-pr'), 'pr');
+  assert.equal(nodeLabelTarget(merger, 'plain'), 'issue');
+  assert.equal(nodeLabelTarget(null, 'x'), null);
+  // No outcome sets the dragged label → fall back to the node's own triggers (review S2).
+  assert.equal(nodeLabelTarget(merger, 'unlisted'), 'issue');
+  assert.equal(nodeLabelTarget({ id: 'm', triggers: prWoken }, 'unlisted'), 'pr');
 });

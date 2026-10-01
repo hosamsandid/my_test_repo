@@ -9,7 +9,7 @@
 import { apiCall } from '../../hooks/useApi';
 import { PROMPT_MODES } from '../prompt-mode-view.js';
 import { wouldCreateCycle } from './hierarchy-utils';
-import { upsertChannel, removeChannelFrom } from './channel-ops';
+import { upsertChannel, removeChannelFrom, editChannel } from './channel-ops';
 import {
   stagesAfterAdd, stagesAfterRename, stagesAfterRemove, stagesAfterReorder, membersToCascade,
 } from './stage-list-ops';
@@ -19,6 +19,7 @@ import {
   humanAfterConsumeAdd, humanAfterConsumeRemove, humanAfterEmitAdd, humanAfterEmitRemove,
 } from './humans-registry-ops';
 import { parseGitHubUrl } from '../../components/repository-url-view.js';
+import { triggerPath } from '../agent-chat/trigger-issues.js';
 
 // owner/repo from a repository URL, for a canvas-created github-event trigger.
 // Delegates to the shared `parseGitHubUrl` (#2345) rather than keep a partial
@@ -117,8 +118,10 @@ export const liveOps = {
     }
     return apiCall('POST', `/api/agents/${roleId}/triggers`, b);
   },
-  updateTrigger: (roleId, tid, body) => apiCall('PUT', `/api/agents/${roleId}/triggers/${tid}`, body),
-  deleteTrigger: (roleId, tid) => apiCall('DELETE', `/api/agents/${roleId}/triggers/${tid}`),
+  // `position` (optional, #2626) addresses one row of a legacy duplicated id —
+  // the index the GET annotates on such rows; without it the first match.
+  updateTrigger: (roleId, tid, body, position) => apiCall('PUT', triggerPath(roleId, tid, position), body),
+  deleteTrigger: (roleId, tid, position) => apiCall('DELETE', triggerPath(roleId, tid, position)),
   // Trigger-level `emits` was removed (#783) — label hand-offs live on the agent
   // level (setRoleEmits below), so there is no per-trigger setEmits any more.
   // Display name (#692) — safe on a live agent: it is display-only and does not
@@ -325,7 +328,16 @@ export const liveOps = {
     const channels = upsertChannel(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label, gate, wakePrompt, autoClaim });
     await apiCall('PUT', `/api/agents/${roleId}`, { channels });
   },
-  updateChannel: async (roleId, spec) => liveOps.addChannel(roleId, spec),
+  // Edit an existing channel (#2717): `prevLabel` is its label when the editor
+  // opened, so a label change renames that port instead of adding a sibling.
+  // Omitted = edit in place on the spec's own key (e.g. the claim toggle).
+  updateChannel: async (roleId, spec, { prevLabel } = {}) => {
+    if (!spec.from || spec.from === roleId) return;
+    const a = await apiCall('GET', `/api/agents/${roleId}`);
+    const channels = editChannel(Array.isArray(a?.channels) ? a.channels : [],
+      prevLabel !== undefined ? prevLabel : spec.label, spec);
+    await apiCall('PUT', `/api/agents/${roleId}`, { channels });
+  },
   removeChannel: async (roleId, { artifact, from, label }) => {
     const a = await apiCall('GET', `/api/agents/${roleId}`);
     const channels = removeChannelFrom(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label });
@@ -753,9 +765,16 @@ export function makeDraftOps(getBundle, persist) {
       r.channels = upsertChannel(r.channels, spec);
       await persist(b);
     },
-    // Upsert keyed on (artifact, from, label) (#828), so editing a channel's
-    // gate reuses it while a new label adds a switch fan-in sibling.
-    updateChannel: async (roleId, spec) => makeDraftOps(getBundle, persist).addChannel(roleId, spec),
+    // Edit keyed on the channel's ORIGINAL (artifact, from, label) (#2717), so a
+    // label change renames the port rather than adding a switch fan-in sibling.
+    updateChannel: async (roleId, spec, { prevLabel } = {}) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (!r) throw new Error(`role ${roleId} not found`);
+      if (!spec.from || spec.from === roleId) return;
+      r.channels = editChannel(r.channels, prevLabel !== undefined ? prevLabel : spec.label, spec);
+      await persist(b);
+    },
     removeChannel: async (roleId, { artifact, from, label }) => {
       const b = clone(getBundle());
       const r = role(b, roleId);

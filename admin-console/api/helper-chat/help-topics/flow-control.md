@@ -14,11 +14,12 @@ askPrompts:
   - "How long do finished items stay on the board?"
   - "Can I rename or merge the stages?"
   - "What does Force dispatch do?"
+  - "What does Draft mean, and how do I remove an item from the board?"
 ---
 
 ## What the Flow Control board shows
 
-One **Agent Team**, one board, three areas from top to bottom:
+One **Agent Team**, one board, these areas from top to bottom:
 
 1. **Working now** — every agent run in progress, and how busy each pooled
    role is.
@@ -26,12 +27,15 @@ One **Agent Team**, one board, three areas from top to bottom:
    hidden when nothing needs you.
 3. **In progress** — one row per work item, with the stage it is in and how
    long it has been there.
+4. **Recently completed** — closed issues and merged pull requests, in the
+   same table layout. This area is hidden when nothing finished recently.
 
 **Only work the team took part in appears.** An issue or pull request is on
 the board once a team agent was woken on it, created it or pushed to it — or,
 for an issue, once a person released it to the team (whichever comes first).
 The untouched backlog, Dependabot pull requests and other people's PRs are not
-shown. When there is nothing to show, the board says **Nothing in progress**.
+shown. When no work item is active, the **In progress** area says
+**Nothing in progress**.
 
 **Refreshing.** The board refreshes itself every 30 seconds while
 **Auto-refresh** is on (your choice is remembered for you on this browser).
@@ -47,8 +51,9 @@ result, so the board stays fast.
   and the board says that too.
 - **GitHub unreachable**: the board keeps the last state it knew, shows when
   that was, and warns you that it is not current.
-- A **finished** item stays in **Done** for 24 hours (a team can change that —
-  see *Changing the columns*), then drops off.
+- A **finished** item moves to **Recently completed** and stays there for 24
+  hours (a team can change that — see *Changing the columns*), then drops off.
+  The note under the heading shows the team's current setting.
 
 ## Who is working right now
 
@@ -56,6 +61,8 @@ Each line is a run in progress: the **role**, the **instance** number for a
 pooled role, the **issue or pull request** it works on, and **how long it has
 been running**. Agents that are idle are not listed. A run whose item has just
 closed keeps its line until it ends, but never adds a row to the board.
+Click a line to open that agent's chat — for a pooled role, the chat of that
+exact instance.
 
 A **pooled** role (one that starts a separate instance per work item) shows
 how busy it is — for example **2 of 3 busy** — and its controls.
@@ -95,7 +102,7 @@ spelled out, together with how long it has been waiting:
 
 ## The stages
 
-The columns come from the team's own flow on the **Flows** page: **Ready**,
+The columns come from the team's own flow on the **Flows** page: **Draft**,
 then one stage per role in hand-off order, then **Done**. A team with a
 different flow gets different stages; nothing depends on label names. A role
 that appears on several paths is shown once, at its first position, and pooled
@@ -108,17 +115,49 @@ own row.
 
 Each row shows its **current stage**, whether an agent is **working** on it or
 it is **up next**, and the **time in that stage** — not the item's total age.
+For a finished item it shows the **time since completion** (hover it for the
+exact date and time).
 
-Rows read like the pipeline, **top to bottom**: **Ready** first, then each
+On a row an agent is **working** on, the stage cell links to the chat of the
+agent running it — for a pooled role, the item's own instance (e.g.
+*Developer #2716*). A row that is working only by a claim label, with no run
+going, has no link.
+
+**Draft** holds items a team agent created or took part in that no person has
+released yet and no agent is working on or queued for — for example a concept
+ticket. They read **awaiting release**: a person has to review the item and
+release it (add the label the first role wakes on, e.g. `ready`). A released
+item never sits in Draft — it shows at the role it wakes, as **up next**.
+
+Rows read like the pipeline, **top to bottom**: **Draft** first, then each
 stage in hand-off order. Within a stage the item that entered it most recently
 is on top, so an item that moves on appears at the top of the next stage's
-block. **Done** items sit at the bottom, the most recently finished first. An
-item that needs you keeps its place in this order.
+block. An item that needs you keeps its place in this order. Finished items
+are listed separately under **Recently completed**, the most recently finished
+first.
 
 ## Changing the columns
 
 Team Admins can open **Columns** to adjust the automatic stages for their
 team: **rename** a stage, **merge** it into another one (its items are then
 shown there), or **hide** it (its items appear in the stage before it). The
-same dialog sets how long finished items stay in **Done**. Without a saved
-configuration the stages are derived automatically.
+same dialog sets how long finished items stay in **Recently completed**.
+Without a saved configuration the stages are derived automatically.
+
+## Removing items from the board
+
+Team Admins see **Remove from board** on every row no agent is working on or
+queued for — typically a long-lived concept ticket in **Draft**. Before
+anything happens the board asks you to confirm: only the board entry is
+removed — the GitHub ticket stays unchanged (no closing, no labels, no edits).
+The row disappears right away, for every viewer of the team's board, and stays
+removed across reloads and restarts.
+
+A removed item **comes back on its own** as soon as the flow picks it up
+again: a wake or claim label is added, a team agent is woken on it, starts a
+run on it or opens a pull request for it. Edits, comments and cross-references
+do not bring it back.
+
+**Removed (n)** next to **Columns** lists the removed items; **Restore** puts
+one back at its current stage. Entries for items that are closed, deleted or no
+longer part of the board's GitHub snapshot are cleaned up automatically.

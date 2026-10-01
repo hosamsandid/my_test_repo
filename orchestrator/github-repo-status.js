@@ -32,6 +32,7 @@
 // ============================================================
 
 const { pollerSubscribes, parseRepoFullName, isValidTokenId } = require('./github-poller');
+const { knowledgeBranchesByRepo } = require('./knowledge-branch-exclusion');
 
 const STATUS = {
   LISTENING: 'listening',
@@ -80,6 +81,7 @@ function ignoredReason(agent, t) {
 function buildRepoStatusView({
   environments = [],
   agents = [],
+  knowledgeLocations = [],
   allowNonGithubHost = false,
   plan = new Map(),
   state = {},
@@ -180,6 +182,12 @@ function buildRepoStatusView({
     }
   }
 
+  // #2602: the repo's knowledge-base branches — pushes to them never wake a
+  // push trigger. The trigger form names them next to its Branches field.
+  const kbBranches = knowledgeBranchesByRepo(
+    knowledgeLocations, (url) => parseRepoFullName(url, { allowNonGithubHost }),
+  );
+
   const out = [];
   for (const r of rows.values()) {
     const st = (r.parsed && state && state[r.repo]) || {};
@@ -232,6 +240,7 @@ function buildRepoStatusView({
       environments: r.environments,
       agentRepositoryAgents: r.agentRepositoryAgents,
       triggers: r.triggers,
+      knowledgeBranches: (r.parsed && kbBranches.get(r.repo)) || [],
       lastPolledAt: st.lastPolledAt || null,
       lastEventAt: st.lastEventAt || null,
       lastError: st.lastError || null,

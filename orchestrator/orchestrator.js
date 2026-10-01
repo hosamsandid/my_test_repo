@@ -71,6 +71,7 @@ const hillClimbSweep = require("./hill-climb-sweep");
 const hillClimbCards = require("./hill-climb-cards");
 const hillClimbApply = require("./hill-climb-apply");
 const hillClimbVerdict = require("./hill-climb-verdict");
+const { createHillClimbCardRoutes } = require("./hill-climb-card-routes");
 const knowledgeFeed = require("./knowledge-feed");
 const { buildKnowledgeDigest, foldVisibleEntries, DIGEST_FILENAME: KNOWLEDGE_DIGEST_FILENAME } = require("./knowledge-digest");
 const memoryMigration = require("./memory-migration");
@@ -111,6 +112,7 @@ const { resolveCloneTarget } = require("./clone-target");
 const { assessConversionEligibility, planTeamConversion, planTeamOfOneCreation } = require("./team-conversion");
 const teamOfOneMigration = require("./team-of-one-migration");
 const pushAttribution = require("./push-attribution");
+const knowledgeBranchExclusion = require("./knowledge-branch-exclusion");
 const { nextAvailableAgentId, suggestFreeAgentId } = require("./agent-id-resolution");
 const { syncAgentRepoPlan, summarizeRepoResults, repoDivergence } = require("./repo-sync");
 // Agent-scoped repositories (#2067): a repository attached to ONE agent,
@@ -162,13 +164,14 @@ const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit, p
 // Plugin system (#1516). The grant is the sibling of the skill grant — it lives
 // on the agent construct, never on the environment — and (de)activation is the
 // same additive live file sync, no respawn (#1547).
-const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantFor, normalizeGrantList } = require("./plugin-grants");
-const { planWorkspaceSync, planCliRefresh } = require("./plugin-sync");
+const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantFor, normalizeGrantList, uninstalledRevokeGrant } = require("./plugin-grants");
+const { planWorkspaceSync, withStoredCliNames, withStoredCommandNamespaces, uninstalledCommandRevokes, PLUGINS_DIR, planCliRefresh } = require("./plugin-sync");
 const { resolveAgentStateDir } = require("./agent-state-dir");
 const mcpSeed = require("./mcp-seed");
 const { resolveScopeId, scopeIdFromGrantScope } = require("./plugin-scope");
 const pluginRegistry = require("./plugin-registry");
 const pluginRuntime = require("./plugin-runtime");
+const { probeRunningBrokerBuilds, inspectSidecarImageBuilds } = require("./plugin-build-info");
 const { resolveScopeGithubCredentials, buildTeamFlowLabels } = require("./plugin-github-creds");
 // Generic per-scope plugin credential store + wiring (Jira plan §5). Makes the
 // manifest's `credentials[]` real: a Team Admin sets values in the console,
@@ -2719,6 +2722,27 @@ function loadFlowBoardConfig(teamId) {
   }
 }
 
+// Rows a person took off the board (#2637), per team, beside the column
+// config so every viewer shares them and they survive a restart. The GitHub
+// item itself is never touched.
+function flowBoardRemovedPath(teamId) {
+  return controlOrPoolPath(teamId, "flow-board-removed.json");
+}
+
+function loadFlowBoardRemoved(teamId) {
+  try {
+    return flowBoard.normalizeRemoved(JSON.parse(fs.readFileSync(flowBoardRemovedPath(teamId), "utf8")));
+  } catch {
+    return {};
+  }
+}
+
+function saveFlowBoardRemoved(teamId, removed) {
+  const p = flowBoardRemovedPath(teamId);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(removed, null, 2));
+}
+
 async function computeTeamFlowBoard(teamId, { now = Date.now() } = {}) {
   const teamCfg = loadAgentConfig(teamId) || {};
   const labels = Array.isArray(teamCfg.labels) ? teamCfg.labels : [];
@@ -2738,12 +2762,14 @@ async function computeTeamFlowBoard(teamId, { now = Date.now() } = {}) {
     ),
   );
   let reached = 0;
+  const reachedRepos = new Set();
   for (const r of swept) {
     if (r.error) {
       warnings.push(`${r.repo}: ${r.error}`);
       continue;
     }
     reached++;
+    reachedRepos.add(r.repo);
     github.issues.push(...r.issues);
     github.prs.push(...r.prs);
     warnings.push(...r.warnings);
@@ -2784,10 +2810,23 @@ async function computeTeamFlowBoard(teamId, { now = Date.now() } = {}) {
     };
   });
 
-  const board = flowBoard.buildFlowBoard({
+  const removed = loadFlowBoardRemoved(teamId);
+  const { removalsToPrune, ...board } = flowBoard.buildFlowBoard({
     members, labels, teamId, config, github, events, prRecords,
-    sessions: _flowBoardSessions(members), pools, now,
+    sessions: _flowBoardSessions(members), pools, removed, now,
   });
+  // Drop removals that were revived or whose row left the snapshot — but only
+  // for a repo this sweep actually reached, so an outage never forgets them.
+  const prune = removalsToPrune.filter((id) => reachedRepos.has(id.slice(0, id.lastIndexOf("#"))));
+  if (prune.length) {
+    const current = loadFlowBoardRemoved(teamId);
+    for (const id of prune) delete current[id];
+    try {
+      saveFlowBoardRemoved(teamId, current);
+    } catch (err) {
+      console.warn(`[Orchestrator] flow-board: could not prune removals for ${teamId}: ${err.message}`);
+    }
+  }
   const lane = loadAdmissionLane(teamId);
   const held = lane.held.map((h) => ({
     id: admissionControl.heldIdentity(h.agentId, h.entry),
@@ -3915,8 +3954,12 @@ async function computeTeamHillClimbMetrics(teamId, { now = Date.now() } = {}) {
     try {
       const raw = JSON.parse(fs.readFileSync(agentStatePath(id, "triggers.json"), "utf8"));
       if (Array.isArray(raw)) triggers = raw;
-    } catch { /* no triggers yet */ }
-    members.push({ id, emits: cfg.emits, outcomes: cfg.outcomes, triggers });
+    } catch {
+      // No triggers yet. Note: a transient read failure lands here too, so this
+      // pass supersedes the member's open trigger cards (liveTriggerRefs below);
+      // they are re-raised on the next pass that reads the file (#2710).
+    }
+    members.push({ id, displayName: cfg.displayName, emits: cfg.emits, outcomes: cfg.outcomes, triggers });
   }
   const reworkTriggers = hillClimbSweep.reworkTriggerIds(members);
 
@@ -3959,18 +4002,22 @@ async function computeTeamHillClimbMetrics(teamId, { now = Date.now() } = {}) {
   } catch { /* no event log */ }
   const waste = hillClimbSweep.wasteSignalsFromEventLog(eventLogEntries, fromMs, now, teamAgentIds);
 
+  const triggerDefs = hillClimbSweep.triggerDefsFromMembers(members);
   const snapshot = hillClimbMetrics.computeHillClimbMetrics({
     runs,
     anomalyHistory,
     configBoundaries,
-    triggerDefs: hillClimbSweep.triggerDefsFromMembers(members),
+    triggerDefs,
     emitLabels: hillClimbSweep.emitLabelsFromMembers(members),
     consumedLabels: hillClimbSweep.consumedLabelsFromMembers(members),
     throttleDrops: waste.throttleDrops,
     digestFolds: waste.digestFolds,
   }, { now, windowDays, minRunsPerWindow, excludeAgents });
 
-  return { teamId, generatedAt: new Date(now).toISOString(), ...snapshot };
+  // Every trigger the team declares right now, so the card pass can supersede
+  // open cards whose trigger has since been deleted (#2710).
+  const liveTriggerRefs = triggerDefs.map((t) => `${t.agentId}/${t.triggerId}`);
+  return { teamId, generatedAt: new Date(now).toISOString(), ...snapshot, liveTriggerRefs };
 }
 
 // Day-keyed snapshot path (same-day re-run overwrites). Traversal-guarded via
@@ -4046,9 +4093,14 @@ function hillClimbCardConfig(teamId) {
 // store under the budget/dedup/cooldown rules, re-validating every incoming card
 // through the schema (invalid ones are dropped — the store is the authority even
 // for analyst output). Persists and returns the merge summary. Never throws.
-function mergeAndPersistHillClimbCards(teamId, incoming, { now = Date.now(), source = "heuristic" } = {}) {
+function mergeAndPersistHillClimbCards(teamId, incoming, { now = Date.now(), source = "heuristic", liveTriggerRefs = null } = {}) {
   const { maxCardsPerPass, windowDays } = hillClimbCardConfig(teamId);
   const existing = readHillClimbCards(teamId);
+  // A pass that knows the team's live triggers retires open cards whose trigger
+  // is gone (#2710); the analyst merge passes none and leaves them alone.
+  const superseded = Array.isArray(liveTriggerRefs)
+    ? hillClimbCards.supersedeVanishedTriggerCards(existing, liveTriggerRefs, { now })
+    : 0;
   const passId = `pass-${new Date(now).toISOString()}`;
   const valid = [];
   let rejected = 0;
@@ -4063,7 +4115,7 @@ function mergeAndPersistHillClimbCards(teamId, incoming, { now = Date.now(), sou
   }
   const merged = hillClimbCards.mergeCards(existing, valid, { maxCardsPerPass, windowDays, now, passId });
   const savedPath = writeHillClimbCards(teamId, merged.cards);
-  return { ...merged, rejected, path: savedPath, cards: merged.cards };
+  return { ...merged, rejected, superseded, path: savedPath, cards: merged.cards };
 }
 
 // Dismiss a card (human action): flip its status to 'dismissed' so it is not
@@ -4159,6 +4211,18 @@ function rollbackHillClimbCard(teamId, cardId, { now = Date.now(), rolledBackBy 
   return { ok: true, card };
 }
 
+// The card-store write routes (merge/apply/rollback), deps injected (#2709).
+const hillClimbCardRoutes = createHillClimbCardRoutes({
+  loadAgentConfig,
+  hillClimbCardConfig,
+  readHillClimbCards,
+  mergeAndPersistHillClimbCards,
+  applyHillClimbCard,
+  rollbackHillClimbCard,
+  readBody,
+  sendJson,
+});
+
 // Run one hill-climb pass for a team behind the per-team single-flight lock —
 // the SAME code path for the scheduled timer and the manual POST endpoint (AC:
 // manual and scheduled passes produce identical snapshots for identical inputs).
@@ -4185,7 +4249,7 @@ async function runHillClimbPass(teamId, { now = Date.now() } = {}) {
       // Deterministic findings → cards (the honest fallback shipped every pass).
       const anomalyHistory = _readTeamAnomalyHistory(teamId);
       const findings = hillClimbCards.heuristicFindings(snapshot, { now, anomalyHistory });
-      merge = mergeAndPersistHillClimbCards(teamId, findings, { now, source: "heuristic" });
+      merge = mergeAndPersistHillClimbCards(teamId, findings, { now, source: "heuristic", liveTriggerRefs: snapshot.liveTriggerRefs });
       // Secret-free digest for the console's server-side analyst (concept §3.2).
       digest = hillClimbCards.buildAnalystDigest(snapshot, { findings });
     }
@@ -4194,7 +4258,7 @@ async function runHillClimbPass(teamId, { now = Date.now() } = {}) {
       snapshot,
       path: savedPath,
       cards: merge ? merge.cards : [],
-      merge: merge ? { added: merge.added, bumped: merge.bumped, deferred: merge.deferred, rejected: merge.rejected } : null,
+      merge: merge ? { added: merge.added, bumped: merge.bumped, deferred: merge.deferred, rejected: merge.rejected, superseded: merge.superseded } : null,
       verdict: { transitioned: verdict.transitioned, verdicts: verdict.verdicts },
       digest,
       autonomy,
@@ -6524,6 +6588,60 @@ function resolveActingSenderUserId(actingSenderMatrixId, cfg) {
   return credentialResolution.isActingSenderTrusted(cfg, userId, hasMembership) ? userId : null;
 }
 
+// The acting human for a PLUGIN credential grant on a chat turn (#2562). Unlike
+// the gh-as-agent path above — which only ever sees a raw Matrix sender id — a
+// plugin grant runs against the homeserver EVENT, so it also has the platform's
+// own `io.aee.author` stamp (`run.author`, resolved by `chatSenderFromEvent`).
+// That is what makes the single-operator model work: every human's message is
+// sent under the ONE shared Matrix identity (`@admin:local`), which resolves to
+// no user record, so the raw sender alone could never name the acting person and
+// a chat turn could NEVER use a personal plugin credential. The stamp is written
+// server-side from the authenticated session (never the request body, stripped
+// from the send route's pass-through), so it is trusted exactly as far as the
+// sender is — and the container cannot forge it (it holds only its own Matrix
+// token, and a self-posted event is already rejected as `sender-is-agent`).
+//
+// Resolution order: the stamp's userId (if it is a live user) → the stamp's
+// login subject → the raw Matrix sender id. Then the SAME trust boundary as the
+// gh path (`isActingSenderTrusted`). Returns { userId, resolved }:
+//   userId   — the acting user iff resolved AND trusted for this agent, else null
+//   resolved — a real platform account was found for the sender at all (trusted
+//              or not), letting the refusal tell "not a member of this team"
+//              apart from "could not identify who sent this message".
+function resolvePluginChatSender(run, cfg) {
+  let knownUsers = [];
+  try {
+    knownUsers = teamsStore.listUsers();
+  } catch {
+    knownUsers = [];
+  }
+  const author = run && run.author && typeof run.author === 'object' ? run.author : null;
+  let candidate = null;
+  if (author && author.userId) {
+    const hit = knownUsers.find((u) => u && String(u.id) === String(author.userId));
+    if (hit) candidate = String(hit.id);
+  }
+  if (!candidate && author && author.subject) {
+    const want = String(author.subject).trim().toLowerCase();
+    const hit = knownUsers.find((u) => u && typeof u.subject === 'string'
+      && u.subject.trim().toLowerCase() === want);
+    if (hit) candidate = String(hit.id);
+  }
+  if (!candidate) {
+    candidate = usageAttribution.userIdForMatrixId(knownUsers, run && run.sender) || null;
+  }
+  if (!candidate) return { userId: null, resolved: false };
+  const hasMembership = (teamId, uid) => {
+    try {
+      return teamsStore.listMemberships({ teamId, userId: uid }).length > 0;
+    } catch {
+      return false;
+    }
+  };
+  const trusted = credentialResolution.isActingSenderTrusted(cfg, candidate, hasMembership);
+  return { userId: trusted ? candidate : null, resolved: true };
+}
+
 // The `{ users, memberships }` snapshot `resolveBaselineOwnerId` (#2176, epic
 // #2166 B4) needs to find a team's CURRENT `team-admin`. Loaded fresh per call
 // like `loadLiveUserGate` — a succession must be picked up on the very next
@@ -7363,6 +7481,27 @@ function resolveTeamKbRepo(teamId) {
     if (repoRef && repoRef.url) return { repoRef, env };
   }
   return null;
+}
+
+// Where every team's KB is pushed (#2602): one `{ url, branch }` per (team,
+// environment) with a git-backed KB it syncs, across the whole platform — the
+// GitHub poller never wakes a push trigger on a push to one of those branches,
+// whichever team's trigger it is. Read fresh on every poll tick.
+function listKnowledgeLocations() {
+  const out = [];
+  const seen = new Set();
+  for (const id of listAgentIds()) {
+    let cfg = null;
+    try { cfg = loadAgentConfig(id); } catch { cfg = null; }
+    if (!cfg || !cfg.environmentId) continue;
+    const teamId = agentKnowledgeTeamId(cfg);
+    const key = `${teamId}\u0000${cfg.environmentId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const loc = knowledgeBranchExclusion.knowledgeLocationOf(teamKnowledgeEnv(teamId, loadEnvironment(cfg.environmentId)));
+    if (loc) out.push(loc);
+  }
+  return out;
 }
 
 // The environment id a team shares (from any of its agents' configs). A team is
@@ -12630,9 +12769,26 @@ class Orchestrator {
   // Apply one agent's move from prevGrant to nextGrant.
   async _syncPluginIntoWorkspace(id, cfg, prevGrant, nextGrant) {
     const manifests = pluginRegistry.installedManifests();
+    const dir = agentDir(id);
+    // Migrate a legacy `.aee/` to `.agent-studio/` before the plan's relative
+    // paths (`.agent-studio/bin`, `.agent-studio/plugins`) are read or written,
+    // so an upgraded agent's plugin CLIs/grants move with the rename instead of
+    // splitting across two dirs (#1549).
+    resolveAgentStateDir(dir);
+    // A revoked plugin that is no longer installed has no manifest to name its
+    // CLI; read the name back from the config file seeded with it (#2651).
+    const readStoredConfig = (pluginId) => {
+      try { return JSON.parse(fs.readFileSync(path.join(dir, PLUGINS_DIR, `${pluginId}.json`), "utf8")); }
+      catch { return null; }
+    };
+    // Its command namespace is read the same way, before the plan removes the
+    // config file (#2657).
+    const storedPrevGrant = withStoredCommandNamespaces(
+      withStoredCliNames(prevGrant, manifests, readStoredConfig), manifests, readStoredConfig,
+    );
     const plan = planWorkspaceSync({
       agentCfg: cfg,
-      prevGrant,
+      prevGrant: storedPrevGrant,
       nextGrant,
       manifests,
       resolveScopeId,
@@ -12640,12 +12796,6 @@ class Orchestrator {
       networkNameFor: perAgentNetworkName,
     });
 
-    const dir = agentDir(id);
-    // Migrate a legacy `.aee/` to `.agent-studio/` before the plan's relative
-    // paths (`.agent-studio/bin`, `.agent-studio/plugins`) are written, so an
-    // upgraded agent's plugin CLIs/grants move with the rename instead of
-    // splitting across two dirs (#1549).
-    resolveAgentStateDir(dir);
     const written = [];
     const removed = [];
     const errors = [];
@@ -12775,6 +12925,12 @@ class Orchestrator {
           commandReseedPaths.push(...projectPluginScaffold(id, pDir, pm, { remove: true }));
         }
       }
+      // A revoked plugin that is no longer installed is not in `manifests`;
+      // remove its commands under the namespace its seeded config recorded.
+      for (const { namespace } of uninstalledCommandRevokes(storedPrevGrant, nextGrant, manifests)) {
+        const nsRel = projectSkillCommands(id, namespace, null, seededCmds, { remove: true });
+        if (nsRel) commandReseedPaths.push(nsRel);
+      }
       writeSeededCommands(id, seededCmds);
     } catch (err) {
       console.warn(`[Orchestrator] plugin command sync ${id}: ${err.message}`);
@@ -12881,11 +13037,18 @@ class Orchestrator {
 
   // Validate that a plugin may be granted at the requested granularity. The UI
   // bounds the choice too, but the server is the authority (§4.4).
-  _resolvePluginGrant(pluginId, scopeGranularity) {
+  // A deactivate of a grant `currentGrant` still carries is allowed without a
+  // manifest (#2651): uninstalling keeps grants, and revoking one only removes
+  // files and the prompt line — it must not require a re-install first.
+  _resolvePluginGrant(pluginId, scopeGranularity, { active = true, currentGrant = [] } = {}) {
     const id = typeof pluginId === "string" ? pluginId.trim() : "";
     if (!id) throw new Error("pluginId required");
     const entry = pluginRegistry.readPluginManifest(id);
-    if (!entry.ok) throw new Error(`Plugin '${id}' is not installed or its manifest is invalid`);
+    if (!entry.ok) {
+      const orphan = uninstalledRevokeGrant(active, currentGrant, id);
+      if (orphan) return { manifest: null, granularity: orphan.scopeGranularity };
+      throw new Error(`Plugin '${id}' is not installed or its manifest is invalid`);
+    }
     const granularity = scopeGranularity || defaultGranularity(entry.manifest);
     const problem = assertGranularityGrantable(entry.manifest, granularity);
     if (problem) throw new Error(problem);
@@ -12900,7 +13063,9 @@ class Orchestrator {
     const teamCfg = loadAgentConfig(teamId);
     if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
     if (teamCfg.role !== "team") throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
-    const { granularity } = this._resolvePluginGrant(pluginId, scopeGranularity);
+    const { granularity } = this._resolvePluginGrant(pluginId, scopeGranularity, {
+      active, currentGrant: normalizeGrantList(teamCfg.plugins),
+    });
     const id = pluginId.trim();
 
     const before = Array.isArray(teamCfg.plugins) ? teamCfg.plugins.slice() : [];
@@ -12960,7 +13125,9 @@ class Orchestrator {
     const cfg = loadAgentConfig(id);
     if (!cfg) throw new Error(`Agent '${id}' not found`);
     if (cfg.role === "team") throw new Error(`Agent '${id}' is a team — use the team route`);
-    const { granularity } = this._resolvePluginGrant(pluginId, scopeGranularity);
+    const { granularity } = this._resolvePluginGrant(pluginId, scopeGranularity, {
+      active, currentGrant: effectivePlugins(cfg, loadAgentConfig),
+    });
     const pid = pluginId.trim();
 
     const prev = effectivePlugins(cfg, loadAgentConfig);
@@ -16484,6 +16651,38 @@ async function main() {
       return;
     }
 
+    // ── Push: per-trigger schedule status (#2628) ─────────────────────────
+    // Agents POST their trigger-status.json ({timeZone, updatedAt, triggers:
+    // {<id>: {nextFireAt, lastFiredAt, lastResult, invalid}}}); we persist it
+    // to the control plane so the console's trigger list can show next/last
+    // run and scheduling errors under per-agent volume isolation.
+    const pushTriggerStatusMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/trigger-status$/);
+    if (pushTriggerStatusMatch) {
+      const id = decodeURIComponent(pushTriggerStatusMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', () => {
+        if (!isSafePathSeg(id)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+          return;
+        }
+        try {
+          const data = JSON.parse(body || '{}');
+          if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('expected an object');
+          const dir = controlAgentDir(id);
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(path.join(dir, 'trigger-status.json'), JSON.stringify(data));
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
     // ── Push: agent session-log lines (#185) ──────────────────────────────
     // Agents POST { roomId, baseOffset, dataB64 } where dataB64 is the raw
     // bytes appended to their local sessions/<roomId>.jsonl since baseOffset.
@@ -16904,7 +17103,8 @@ async function main() {
             console.warn(`[Orchestrator] chat run declaration for ${id} refused: ${decided.reason}`);
             return sendJson(res, 403, decided);
           }
-          run = { kind: 'chat', roomId, eventId, sender: decided.sender };
+          run = { kind: 'chat', roomId, eventId, sender: decided.sender,
+            ...(decided.author ? { author: decided.author } : {}) };
         }
         const r = pluginRunRegistry.begin(id, payload.key, run);
         return sendJson(res, r.ok ? 200 : 403, r);
@@ -16956,26 +17156,45 @@ async function main() {
         const manifest = entry && entry.ok ? entry.manifest : null;
         const active = pluginRunRegistry.active(agentId);
         let senderUserId = null;
+        let senderResolved = false;
         let personalValues = null;
+        let teamSiteConfigured; // undefined = not checked (plugin declares no interactive connection)
         if (active.ok && active.run.kind === 'chat') {
           // Fresh trust check on EVERY call — a sender removed from the team
           // mid-turn is refused on their next action.
-          senderUserId = resolveActingSenderUserId(active.run.sender, cfg);
+          const acting = resolvePluginChatSender(active.run, cfg);
+          senderUserId = acting.userId;
+          senderResolved = acting.resolved;
           if (senderUserId) {
             try { personalValues = (pluginCredentialStore.readPersonal(pluginId, senderUserId) || {}).values || null; }
             catch { personalValues = null; }
+            // A team credential key marked `requiredFor: ['interactive', …]` is a
+            // connection an interactive turn needs too (Jira: `site-url`). We own
+            // the same store the broker reads, so we can fold a missing site into
+            // the SAME refusal as a missing personal token — no second round-trip.
+            const teamConnKeys = ((manifest && manifest.credentials) || [])
+              .filter((c) => Array.isArray(c.requiredFor) && c.requiredFor.includes('interactive'))
+              .map((c) => c.key);
+            if (teamConnKeys.length) {
+              let teamValues = {};
+              try { teamValues = (pluginCredentialStore.read(pluginId, scopeId) || {}).values || {}; }
+              catch { teamValues = {}; }
+              teamSiteConfigured = teamConnKeys.every((k) => typeof teamValues[k] === 'string' && teamValues[k].trim());
+            }
           }
         }
         const d = pluginRunIdentity.decideCredentialGrant({
           active,
           senderUserId,
+          senderResolved,
           personalValues,
           personalKeys: (manifest && manifest.personalCredentials) || [],
+          teamSiteConfigured,
           pluginName: (manifest && manifest.name) || pluginId,
         });
         const who = d.ok ? (d.mode === 'personal' ? `person ${d.userId}` : 'service account') : `refused (${d.code})`;
         console.log(`[Orchestrator] plugin-credential-grant ${pluginId}/${scopeId} agent=${agentId} → ${who}`);
-        if (!d.ok) return sendJson(res, d.status, { ok: false, code: d.code, message: d.message, agentId });
+        if (!d.ok) return sendJson(res, d.status, { ok: false, code: d.code, message: d.message, agentId, ...(d.missing ? { missing: d.missing } : {}) });
         return sendJson(res, 200, {
           ok: true, mode: d.mode, interactive: d.interactive, agentId,
           ...(d.mode === 'personal' ? { userId: d.userId, values: d.values } : {}),
@@ -19600,6 +19819,54 @@ async function main() {
       return;
     }
 
+    // POST /internal/teams/:teamId/flow-board-removed — "Remove from board" and
+    // its undo (#2637). Body `{ action: "remove"|"restore", rowId }`. A row
+    // can only be removed while no agent is working on it or queued for it;
+    // the check reads the board itself, so it is the same rule the page shows.
+    const flowBoardRemovedMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/?]+)\/flow-board-removed(?:\?.*)?$/);
+    if (flowBoardRemovedMatch) {
+      const teamId = decodeURIComponent(flowBoardRemovedMatch[1]);
+      const cfg = loadAgentConfig(teamId);
+      if (!cfg || cfg.role !== 'team') {
+        return sendJson(res, 404, { error: 'agent team not found' });
+      }
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 10_000) req.destroy(); });
+      req.on('end', async () => {
+        try {
+          const parsed = JSON.parse(body || '{}');
+          const rowId = typeof parsed.rowId === 'string' ? parsed.rowId.trim() : '';
+          if (!rowId) return sendJson(res, 400, { error: 'rowId is required' });
+          let removed;
+          if (parsed.action === 'restore') {
+            removed = loadFlowBoardRemoved(teamId);
+            delete removed[rowId];
+          } else if (parsed.action === 'remove') {
+            const board = await getTeamFlowBoard(teamId);
+            // Read after the board: computing it may have pruned the store.
+            removed = loadFlowBoardRemoved(teamId);
+            const row = (board.rows || []).find((r) => r.id === rowId);
+            if (!row) return sendJson(res, 404, { error: 'That item is not on the board' });
+            if (!row.removable) return sendJson(res, 409, { error: 'An agent is working on this item or is up next — it stays on the board' });
+            const keys = [
+              ...(row.issue ? [`${row.issue.repo}#${row.issue.number}`] : []),
+              ...(row.prs || []).map((p) => `${p.repo}#${p.number}`),
+            ];
+            removed[rowId] = { removedAt: new Date().toISOString(), keys };
+          } else {
+            return sendJson(res, 400, { error: 'action must be "remove" or "restore"' });
+          }
+          saveFlowBoardRemoved(teamId, removed);
+          _flowBoardCache.delete(teamId);
+          return sendJson(res, 200, { teamId, rowId, action: parsed.action });
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
+      });
+      return;
+    }
+
     // GET /internal/teams/:teamId/pool-control — board data for #2250 Phase 5:
     // every pooled role's live pause/drain state + instance count, plus the
     // team's admission-lane `held` entries (each carrying an `id` — the same
@@ -19875,36 +20142,11 @@ async function main() {
       }
     }
 
-    // POST /internal/teams/:teamId/hill-climb/cards/merge — hand-back path for
-    // the console's server-side analyst (#1224). Body: { cards: [...] } (raw
-    // analyst JSON). Every card is re-validated through the schema here (the
-    // store is the authority — the analyst is untrusted) and merged under the
-    // budget/dedup/cooldown rules. Proposals only; nothing mutates agent config.
-    const hillClimbMergeMatch = req.method === 'POST' &&
-      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/cards\/merge$/);
-    if (hillClimbMergeMatch) {
-      const teamId = decodeURIComponent(hillClimbMergeMatch[1]);
-      (async () => {
-        try {
-          const cfg = loadAgentConfig(teamId);
-          if (!cfg || cfg.role !== 'team') return sendJson(res, 404, { error: 'agent team not found' });
-          const { autonomy } = hillClimbCardConfig(teamId);
-          if (autonomy < 1) return sendJson(res, 200, { teamId, autonomy, merge: null, cards: readHillClimbCards(teamId) });
-          const body = JSON.parse((await readBody(req)) || '{}');
-          const incoming = Array.isArray(body.cards) ? body.cards : [];
-          const merge = mergeAndPersistHillClimbCards(teamId, incoming, { source: 'analyst' });
-          return sendJson(res, 200, {
-            teamId,
-            merge: { added: merge.added, bumped: merge.bumped, deferred: merge.deferred, rejected: merge.rejected },
-            cards: merge.cards,
-          });
-        } catch (err) {
-          console.error(`[Orchestrator] hill-climb cards merge error for ${teamId}: ${err.message}`);
-          return sendJson(res, 500, { error: err.message });
-        }
-      })();
-      return;
-    }
+    // POST /internal/teams/:teamId/hill-climb/cards/{merge,:cardId/apply,
+    // :cardId/rollback} — the card-store writes the console relays (analyst
+    // hand-back #1224, applied #1225, rolled-back #1226). Handlers live in
+    // hill-climb-card-routes.js so they are executed by a test (#2709).
+    if (hillClimbCardRoutes.handle(req, res)) return;
 
     // POST /internal/teams/:teamId/hill-climb/cards/:cardId/dismiss — flip a card
     // to 'dismissed' so it is not re-raised (#1224). Human action; card-state
@@ -19924,79 +20166,6 @@ async function main() {
         console.error(`[Orchestrator] hill-climb card dismiss error for ${teamId}: ${err.message}`);
         return sendJson(res, 500, { error: err.message });
       }
-    }
-
-    // POST /internal/teams/:teamId/hill-climb/cards/:cardId/apply — record an
-    // APPLIED card (hill-climbing loop Phase 2b, #1225). The console has already
-    // run the card's declared apply path through the existing audited choke-point
-    // (as the acting human); this only stamps the outcome onto the card so #1226
-    // can measure it. Autonomy < 2 refuses (apply is a level-2 action even via a
-    // direct call), and only an open card can be applied. Body: { appliedBy?,
-    // undo?, configVersionRef? } gathered console-side before the mutation.
-    const hillClimbApplyMatch = req.method === 'POST' &&
-      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/cards\/([^/]+)\/apply$/);
-    if (hillClimbApplyMatch) {
-      const teamId = decodeURIComponent(hillClimbApplyMatch[1]);
-      const cardId = decodeURIComponent(hillClimbApplyMatch[2]);
-      (async () => {
-        try {
-          const cfg = loadAgentConfig(teamId);
-          if (!cfg || cfg.role !== 'team') return sendJson(res, 404, { error: 'agent team not found' });
-          const body = JSON.parse((await readBody(req)) || '{}');
-          const result = applyHillClimbCard(teamId, cardId, {
-            appliedBy: body.appliedBy || null,
-            undo: body.undo || null,
-            configVersionRef: body.configVersionRef || null,
-          });
-          if (!result.ok) {
-            const status = result.code === 'card-not-found' ? 404
-              : result.code === 'autonomy-locked' ? 403
-              : 409;
-            return sendJson(res, status, { error: result.code, autonomy: result.autonomy, status: result.status });
-          }
-          return sendJson(res, 200, { teamId, card: result.card });
-        } catch (err) {
-          console.error(`[Orchestrator] hill-climb card apply error for ${teamId}: ${err.message}`);
-          return sendJson(res, 500, { error: err.message });
-        }
-      })();
-      return;
-    }
-
-    // POST /internal/teams/:teamId/hill-climb/cards/:cardId/rollback — record a
-    // ROLLED-BACK card (hill-climbing loop Phase 3, #1226). The console has
-    // already executed the card's rollback plan through the existing audited
-    // choke-point (as the acting human); this only stamps the outcome + a fresh
-    // cooldown so the object re-enters detection after a full window. Autonomy
-    // < 2 refuses, and only a `regressed` card (one that carries a rollback
-    // offer) can be rolled back. Body: { rolledBackBy?, undoResult? }.
-    const hillClimbRollbackMatch = req.method === 'POST' &&
-      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/cards\/([^/]+)\/rollback$/);
-    if (hillClimbRollbackMatch) {
-      const teamId = decodeURIComponent(hillClimbRollbackMatch[1]);
-      const cardId = decodeURIComponent(hillClimbRollbackMatch[2]);
-      (async () => {
-        try {
-          const cfg = loadAgentConfig(teamId);
-          if (!cfg || cfg.role !== 'team') return sendJson(res, 404, { error: 'agent team not found' });
-          const body = JSON.parse((await readBody(req)) || '{}');
-          const result = rollbackHillClimbCard(teamId, cardId, {
-            rolledBackBy: body.rolledBackBy || null,
-            undoResult: body.undoResult || null,
-          });
-          if (!result.ok) {
-            const status = result.code === 'card-not-found' ? 404
-              : result.code === 'autonomy-locked' ? 403
-              : 409;
-            return sendJson(res, status, { error: result.code, autonomy: result.autonomy, status: result.status });
-          }
-          return sendJson(res, 200, { teamId, card: result.card });
-        } catch (err) {
-          console.error(`[Orchestrator] hill-climb card rollback error for ${teamId}: ${err.message}`);
-          return sendJson(res, 500, { error: err.message });
-        }
-      })();
-      return;
     }
 
     // POST /internal/teams/:teamId/skills/{activate,deactivate} — team-owned
@@ -20142,6 +20311,14 @@ async function main() {
           let live = [];
           try { live = await pluginRuntime.listLiveSidecars(); } catch { /* runtime down: report none */ }
           const running = new Set(live.map((c) => (c.Labels || {})['aee.plugin.id']).filter(Boolean));
+          // #2646: the build each LIVE broker reports on /healthz — what the
+          // container really runs, not what `:latest` points at now — and the
+          // build of the image a recreated sidecar would run (its labels). The
+          // two differ after a rebuild until the sidecar is recreated (AC8).
+          const [brokerBuilds, imageBuilds] = await Promise.all([
+            probeRunningBrokerBuilds(entries, running, pluginRuntime.brokerBaseUrl),
+            inspectSidecarImageBuilds(entries, pluginRuntime.inspectSidecarImage),
+          ]);
           return sendJson(res, 200, {
             plugins: entries.map((e) => ({
               id: e.id,
@@ -20149,6 +20326,8 @@ async function main() {
               errors: e.errors,
               manifest: e.manifest,
               sidecarRunning: running.has(e.id),
+              brokerBuild: brokerBuilds[e.id] ?? null,
+              imageBuild: imageBuilds[e.id] ?? null,
             })),
           });
         } catch (err) {
@@ -20242,10 +20421,11 @@ async function main() {
     }
 
     // GET/PUT/DELETE /internal/plugins/:id/credentials[/:scopeId] — the generic
-    // per-scope plugin credential store (Jira plan §5). The console proxy applies
+    // per-scope plugin credential store (Jira plan §5) — and POST
+    // …/:scopeId/test, "does it work?" (#2640). The console proxy applies
     // the Team-Admin-of-that-scope gate (§D2); this layer enforces only that the
     // scope is one the plugin is actually granted to. All logic in the module.
-    if (/^\/internal\/plugins\/[^/]+\/credentials(?:\/[^/]+)?$/.test((req.url || '').split('?')[0])) {
+    if (/^\/internal\/plugins\/[^/]+\/credentials(?:\/[^/]+(?:\/test)?)?$/.test((req.url || '').split('?')[0])) {
       pluginCredentialWiring
         .handleCredentialRoute(req, res, { sendJson, readBody })
         .catch((err) => { if (!res.headersSent) sendJson(res, 500, { error: err.message }); });
@@ -20767,6 +20947,8 @@ async function main() {
     labelMarkers: labelDedupMarkers, // #1858 internal fast-path dedup (shared with the label-applied endpoint)
     // #2571: who pushed a (repo, ref, head) — recorded by gh-as-agent push/pr.
     lookupPushProducer: (q) => pushAttribution.defaultStore().lookup(q),
+    // #2602: every team's KB branch — pushes to it never wake a push trigger.
+    listKnowledgeLocations,
   });
   githubPollerRef = ghPoller; // #2525: the manual re-fire re-arms through it; #2537: repo status
   ghPoller.start();

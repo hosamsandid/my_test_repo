@@ -417,11 +417,10 @@ editable form; nothing about it becomes editable that was not editable before.
 
 ### Sessions — watching a run
 
-The **Sessions** tab is the monitoring surface: the runs this agent has done and
-the one it is doing now. Its badge counts the currently active sessions. Pick a
-run to see its structured **session log** — every step the agent took — together
-with what that run cost and how much context it used. A live run streams in as it
-happens and can be stopped from here; a finished one can be reopened any time.
+The **Sessions** tab lists this agent's runs, past and current; its badge counts
+active ones. Pick a run to see its **session log** — every step the agent took —
+with its cost and context use. A live run streams in and can be stopped here. A
+message's **Show in session log** icon jumps to its run.
 
 ### The session log and the TODO panel
 
@@ -520,11 +519,12 @@ same question, "what wakes this agent", and every one of them delivers a
 | **Plugin event** | a granted plugin's broker reports something (a Jira status change, say). Two filters narrow it — see *Which event vs. Only when* below. |
 | **Loop (re-run until done)** | you start it. It is not a subscription (see below). |
 
-### Cron and once fire on the container clock
+### Cron and once: time zone and status
 
-Both are evaluated against the clock inside the container, not your laptop's. On
-a Podman VM that clock can drift; a forward correction fires every `once` whose
-time it passes and every `cron` whose time it crosses.
+Cron runs in **Europe/Berlin** (your time is shown if it differs); a once time
+is your local time. Rows show next/last run, or a red warning if the agent
+cannot schedule the trigger. The container clock can drift on a Podman VM; a
+forward correction fires whatever it skips.
 
 ### A GitHub event fires regardless of who caused it
 

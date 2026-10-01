@@ -41,6 +41,7 @@ import { notifyPluginsChanged } from '../../components/plugin-nav';
 import FormInput from '../../components/FormInput';
 import SkillPicker from '../../components/SkillPicker';
 import PluginGrantPicker from '../../components/PluginGrantPicker';
+import PluginCredentials from '../../components/PluginCredentials';
 import SyncReposPanel from '../../components/SyncReposPanel';
 import AgentRepositoriesPanel from '../agent-chat/AgentRepositoriesPanel';
 import TeamEnvironmentPanel from '../agent-chat/TeamEnvironmentPanel';
@@ -48,7 +49,8 @@ import ShareTeamPanel from '../agent-chat/ShareTeamPanel.jsx';
 import McpServerRows from '../../components/McpServerRows';
 import PageHelpButton from '../../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from '../agent-chat/agent-chat-help-sections.js';
-import { effectiveGrantFor } from '../plugin-grant-view.js';
+import { effectiveGrantFor, uninstalledGrantRows, UNINSTALLED_GRANT_HINT } from '../plugin-grant-view.js';
+import { pluginRegistryRow } from '../plugin-registry-view.js';
 import {
   labelStyle, inputStyle, helpTextStyle, PrimaryBtn, SecondaryBtn,
 } from './form-kit.jsx';
@@ -101,6 +103,11 @@ export function PluginGrantSection({ agent, parentTeam, alwaysVisible = false })
   React.useEffect(() => { setGrant(serverGrant); }, [serverGrant]);
 
   const installed = (data && data.installed) || [];
+  // Grants left behind by an uninstall (#2651): the picker lists installed
+  // plugins only, so these get their own rows with a Revoke. Only once the
+  // installed list is known — null while loading or after a failed fetch.
+  const knownInstalled = data && Array.isArray(data.installed) ? data.installed : null;
+  const orphans = React.useMemo(() => uninstalledGrantRows(grant, knownInstalled), [grant, knownInstalled]);
 
   // The quota ceiling for "per agent" granularity is only honest if it counts
   // the members that would actually carry the grant, so a team's members are
@@ -152,7 +159,36 @@ export function PluginGrantSection({ agent, parentTeam, alwaysVisible = false })
   // disappears depending on installation state is itself a puzzle, and a
   // Team Admin cannot resolve "nothing installed" anyway (System-Admin-only).
   // Every other caller keeps the pre-#2236 self-hide.
-  if (installed.length === 0) {
+  const orphanList = orphans.length > 0 && (
+    <div style={{ marginTop: 'var(--eb-space-3)' }}>
+      <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>{UNINSTALLED_GRANT_HINT}</div>
+      {orphans.map((row) => (
+        <div
+          key={row.id}
+          style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) 0', fontSize: 'var(--eb-text-sm)' }}
+        >
+          <span style={{ fontWeight: 600 }}>{row.id}</span>
+          <span style={{ color: 'var(--eb-status-warning)', fontSize: 'var(--eb-text-xs)' }}>{row.status}</span>
+          <button
+            type="button"
+            aria-label={row.revokeLabel}
+            title={row.revokeLabel}
+            disabled={busy}
+            onClick={() => onToggle(row.id, false, row.granularity)}
+            style={{
+              marginLeft: 'auto', padding: '2px var(--eb-space-3)', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+              background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)', cursor: busy ? 'default' : 'pointer',
+            }}
+          >
+            Revoke
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+
+  if (installed.length === 0 && !orphanList) {
     if (!alwaysVisible) return null;
     return (
       <div>
@@ -189,6 +225,48 @@ export function PluginGrantSection({ agent, parentTeam, alwaysVisible = false })
         memberCount={memberCount}
         disabled={busy}
       />
+      {orphanList}
+    </div>
+  );
+}
+
+// The team-wide service account for a credential-declaring plugin (Jira),
+// #2608, set here in Team Settings so a Team Admin owns it without needing the
+// System-Admin-only Plugins registry page. This account is used only for
+// AUTOMATED runs (schedules, loops, GitHub events, hand-offs) and background
+// polling; a chat turn uses the sender's own Plugin Token instead. The write
+// API is `canManageTeam`-gated, so a Team Admin of this team (or a System
+// Admin) may save. Team-only: a member inherits the team's account and has no
+// service account of its own. `onlyScopeId={agent.id}` pins the shared
+// PluginCredentials component to this team's own (team-granularity) scope.
+export function PluginServiceAccountSection({ agent }) {
+  const { data } = useApi('/api/plugins');
+  if (agent.role !== 'team') return null;
+  const installed = (data && data.installed) || [];
+  const granted = new Set(effectiveGrantFor(agent, null).map((g) => g.id));
+  const rows = installed
+    .map((e) => pluginRegistryRow(e, { canManage: true }))
+    .filter((r) => r.installed && r.credentialKeys.length > 0 && granted.has(r.id));
+  if (rows.length === 0) return null;
+
+  return (
+    <div style={{ marginTop: 'var(--eb-space-4)' }}>
+      <div style={labelStyle}>Plugin service accounts</div>
+      <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
+        The team-wide account a granted plugin uses for automated runs (schedules,
+        loops, GitHub events, hand-offs) and background polling. Chat turns never
+        use it — each member acts under their own Plugin Token. Changes apply
+        immediately; the account is stored server-side and never read back.
+      </div>
+      {rows.map((row) => (
+        <PluginCredentials
+          key={row.id}
+          row={row}
+          onlyScopeId={agent.id}
+          defaultOpen
+          label={`Set the ${row.name || row.id} service account (${row.credentialKeys.join(' / ')})`}
+        />
+      ))}
     </div>
   );
 }
@@ -670,6 +748,9 @@ export default function AgentEditForm({
 
       {(!isTeam || activeTab === 'plugins') && (
         <PluginGrantSection agent={agent} parentTeam={parentTeam} alwaysVisible={isTeam} />
+      )}
+      {isTeam && activeTab === 'plugins' && (
+        <PluginServiceAccountSection agent={agent} />
       )}
 
       {/* Sharing (formerly the rail's "Share…" SidePanel, relocated here as a

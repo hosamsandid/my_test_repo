@@ -70,3 +70,12 @@ export function buildPluginNav(installed, scopesById = {}) {
   }
   return out;
 }
+
+// `{ [pluginId]: displayName }` for every installed UI plugin (#2650), so the
+// breadcrumb names a plugin viewer the way the sidebar entry does instead of by
+// its raw id. Not scope-filtered: a name is not access, the proxy still decides.
+export function pluginTitleMap(installed) {
+  const out = {};
+  for (const p of uiPlugins(installed)) out[p.id] = pluginTitle(p);
+  return out;
+}

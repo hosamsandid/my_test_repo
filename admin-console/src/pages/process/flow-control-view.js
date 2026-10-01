@@ -11,7 +11,10 @@
 //
 // Input is the `GET /api/teams/:teamId/flow-board` response:
 //   { stages[{id,label,roles}], rows[], needsHuman[], sessions[], pools[],
-//     held[], config, canManage, generatedAt, stale, warning, maintenance }
+//     held[], removed[], config, canManage, generatedAt, stale, warning,
+//     maintenance }
+
+import { absoluteWhen } from '../../components/format-when.js';
 
 // ---------------------------------------------------------------------------
 // Durations
@@ -68,16 +71,58 @@ function prLinks(prs, singleRepo) {
   }));
 }
 
+// `draft` is stage 0: nobody released the item yet and no agent is on it, so
+// the sub-label says a person has to act (#2637) — never "released".
 const STATUS_TEXT = {
   working: 'working',
   queued: 'up next',
   idle: 'waiting',
-  ready: 'released',
+  draft: 'awaiting release',
   done: 'done',
 };
 
+// Hover text for a done row's "In stage" value: the absolute completion time
+// in the viewer's local time zone (#2643). '' when the row is not done or has
+// no usable timestamp, so the cell then carries no tooltip either.
+export function doneTitle(row) {
+  if (!row || !row.done) return '';
+  const when = absoluteWhen(row.since);
+  return when ? `Finished ${when}` : '';
+}
+
+// ---------------------------------------------------------------------------
+// Jump to the working agent's chat (#2723)
+// ---------------------------------------------------------------------------
+
+// The pool item a `<template>-i<item>` instance id encodes, or null — the same
+// shape `orchestrator/flow-board.js` reads.
+export function instanceOf(agentId) {
+  const m = /-i(\d+)$/.exec(typeof agentId === 'string' ? agentId : '');
+  return m ? Number(m[1]) : null;
+}
+
+// The in-console link to the chat of the agent running right now, or null.
+// `agentId` is the exact runner — for a pooled role its instance, never the
+// template — so a row that is `working` only by a claim label (no session,
+// `agentId` null) gets no link. `name` is the role's display name.
+export function chatLink(agentId, name, instance = instanceOf(agentId)) {
+  if (typeof agentId !== 'string' || !agentId) return null;
+  const who = `${name || agentId}${instance != null ? ` #${instance}` : ''}`;
+  return { to: `/chats/${encodeURIComponent(agentId)}`, label: `Open chat with ${who}` };
+}
+
+// Hover and keyboard-focus affordance for those links; inline styles cannot
+// express `:hover`/`:focus-visible`, so `FlowControl.jsx` mounts this once.
+export const CHAT_LINK_CLASS = 'flow-control-chat-link';
+export const CHAT_LINK_CSS = `
+.${CHAT_LINK_CLASS} { color: inherit; text-decoration: none; border-radius: var(--eb-radius-sm, 4px); }
+.${CHAT_LINK_CLASS}:hover { text-decoration: underline; color: var(--eb-accent-primary); }
+.${CHAT_LINK_CLASS}:focus-visible { outline: 2px solid var(--eb-accent-primary); outline-offset: 2px; }
+`.trim();
+
 // One board row: title, links, the progress steps and the current stage with
-// its time in stage. `stages` is the board's own stage list, so the step count
+// its time in stage. For a done row `since` is the completion time, so "in
+// stage" reads "in Done since" (#2643). `stages` is the board's own stage list, so the step count
 // is exactly the team's hand-off chain.
 export function rowView(row, stages, { now = Date.now(), singleRepo = true } = {}) {
   const list = Array.isArray(stages) ? stages : [];
@@ -100,9 +145,52 @@ export function rowView(row, stages, { now = Date.now(), singleRepo = true } = {
     status: row.status,
     statusText: STATUS_TEXT[row.status] || '',
     agentId: row.agentId || null,
+    chat: row.status === 'working' ? chatLink(row.agentId, row.roleLabel || (stage && stage.label)) : null,
     inStage: since(row.since, now),
+    inStageTitle: doneTitle(row),
     done: !!row.done,
     blocked: !!row.needsHuman,
+    removable: !!row.removable,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Remove from board (#2637)
+// ---------------------------------------------------------------------------
+
+// Said before anything is removed: only the board entry goes, the GitHub item
+// stays as it is. `help-topics/flow-control.md` quotes the same promise.
+export const REMOVE_CONFIRM_TEXT = 'Only the board entry is removed — the GitHub ticket stays unchanged. The item comes back on its own as soon as the flow picks it up again, and you can restore it from Removed at any time.';
+
+export function removeDialogTitle(ref) {
+  return ref ? `Remove ${ref} from the board?` : 'Remove this item from the board?';
+}
+
+export function removedView(entry, { now = Date.now(), singleRepo = true } = {}) {
+  const ref = entry.issue
+    ? itemRef(entry.issue.repo, entry.issue.number, singleRepo)
+    : Array.isArray(entry.prs) && entry.prs[0]
+      ? `PR ${itemRef(entry.prs[0].repo, entry.prs[0].number, singleRepo)}`
+      : '';
+  return {
+    id: entry.id,
+    removalId: entry.removalId || entry.id,
+    ref,
+    title: entry.title || '(untitled)',
+    url: entry.url || null,
+    removedAgo: since(entry.removedAt, now),
+  };
+}
+
+// The rows left once `ids` are taken off — so a removal shows at once, before
+// the next snapshot arrives (AC6).
+export function withoutRows(data, ids) {
+  if (!data || !Array.isArray(data.rows)) return data;
+  const gone = new Set(ids);
+  return {
+    ...data,
+    rows: data.rows.filter((r) => !gone.has(r.id)),
+    needsHuman: Array.isArray(data.needsHuman) ? data.needsHuman.filter((n) => !gone.has(n.id)) : data.needsHuman,
   };
 }
 
@@ -116,11 +204,13 @@ export function sessionView(s, { now = Date.now(), singleRepo = true } = {}) {
     : Array.isArray(s.prs) && s.prs[0]
       ? `PR ${itemRef(s.prs[0].repo, s.prs[0].number, singleRepo)}`
       : '';
+  const role = s.roleLabel || s.roleId || s.agentId;
   return {
     id: s.id || s.agentId,
-    role: s.roleLabel || s.roleId || s.agentId,
+    role,
     instance: s.instance != null ? `#${s.instance}` : null,
     agentId: s.agentId,
+    chat: chatLink(s.agentId, role, s.instance != null ? s.instance : null),
     item,
     title: s.title || null,
     running: since(s.startedAt, now),
@@ -207,15 +297,29 @@ export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}
 
 export const EMPTY_TEXT = 'Nothing in progress';
 
-// Everything the page renders, in render order. Area ② is `null` when empty
-// so the page simply does not mount it (AC8).
+// The note under "Recently completed": how long a finished item stays on the
+// board. `doneRetentionHours` comes from the per-team column configuration.
+export function retentionHint(hours) {
+  const h = Number(hours);
+  if (hours == null || !Number.isFinite(h) || h <= 0) return 'Kept for a limited time · configurable in columns settings';
+  return `Kept for ${h} h · configurable in columns settings`;
+}
+
+// Everything the page renders, in render order. Area ② and "Recently
+// completed" are `null`/empty when there is nothing to show so the page simply
+// does not mount them (AC8, #2607). Finished rows (closed issue, merged PR) are
+// never mixed into "In progress": `empty` counts active rows only.
 export function boardView(data, now = Date.now()) {
   const d = data || {};
   const repos = Array.isArray(d.repos) ? d.repos : [];
   const opts = { now, singleRepo: repos.length <= 1 };
   const stages = Array.isArray(d.stages) ? d.stages : [];
   const rows = (Array.isArray(d.rows) ? d.rows : []).map((r) => rowView(r, stages, opts));
+  const activeRows = rows.filter((r) => !r.done);
+  const doneRows = rows.filter((r) => r.done);
+  const doneRetentionHours = d.doneRetentionHours ?? (d.config && d.config.doneRetentionHours) ?? null;
   const needs = (Array.isArray(d.needsHuman) ? d.needsHuman : []).map((n) => needsYouView(n, opts));
+  const removed = (Array.isArray(d.removed) ? d.removed : []).map((r) => removedView(r, opts));
   return {
     stages,
     roles: Array.isArray(d.roles) ? d.roles : [],
@@ -223,8 +327,11 @@ export function boardView(data, now = Date.now()) {
     pools: (Array.isArray(d.pools) ? d.pools : []).map(poolView),
     held: Array.isArray(d.held) ? d.held : [],
     needsYou: needs.length ? needs : null,
-    rows,
-    empty: rows.length === 0,
+    activeRows,
+    doneRows,
+    removed,
+    removedLabel: `Removed (${removed.length})`,
+    empty: activeRows.length === 0,
     emptyText: EMPTY_TEXT,
     warning: d.warning || null,
     stale: !!d.stale,
@@ -232,7 +339,8 @@ export function boardView(data, now = Date.now()) {
     noRepos: !d.maintenance && repos.length === 0 && d.generatedAt != null,
     maintenance: !!d.maintenance,
     canManage: !!d.canManage,
-    doneRetentionHours: d.doneRetentionHours ?? (d.config && d.config.doneRetentionHours) ?? null,
+    doneRetentionHours,
+    retentionHint: retentionHint(doneRetentionHours),
   };
 }
 
@@ -281,7 +389,7 @@ export function writeAutoRefresh(username, on, store) {
 
 // The editable form of the config: one entry per role in the order the graph
 // derives (`roles` from the board response — before any rename/merge/hide, so
-// a hidden or merged role can be brought back). Ready and Done are fixed frames
+// a hidden or merged role can be brought back). Draft and Done are fixed frames
 // and never appear here.
 export function configFormRows(roles, config) {
   const cfg = (config && config.stages) || {};

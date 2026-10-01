@@ -79,6 +79,7 @@ const { listPersonalResources } = require('./personal-resource-view');
 // Resolve the immutable identity stamp for an SSH key / GitHub token, honouring a
 // client override behind the flag ("mark a personal credential as service", #2360).
 const { resolveStampedIdentity } = require('./credential-identity');
+const { credentialName, isValidNewCredentialId, sshPrivateKeyError } = require('./credential-input');
 const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
         WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
 const { buildAssistModelOptions } = require('./assist-model-options');
@@ -103,6 +104,7 @@ const { CHAT_AUTHOR_FIELD, chatAuthorStamp } = require('./chat-author');
 const { createHumanMatrixStore } = require('./human-matrix-store');
 const { parseAssistSelection, resolveAssistSelection } = require('./assist-target');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
+const { locateCorrelationId } = require('./session-locate');
 const { buildProcessGraph } = require('./process-graph');
 const {
   validateHostMountPath,
@@ -116,6 +118,7 @@ const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { applyPushedBy } = require('./push-producer-filter');
 const { normalizeBranchFilter } = require('./branch-filter');
+const { newTriggerIdError, annotateTriggerList, stripTriggerAnnotations, resolveTriggerIndex } = require('./trigger-validate');
 const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { rederiveTeamDataFlow } = require('./derived-data-flow');
@@ -172,6 +175,7 @@ const { admitsToChatList } = require('./matrix-agent-list');
 const { parseMemberMaterialize } = require('./member-materialize');
 const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentBaseId } = require('./quickstart-llm');
 const { validatePluginManifest } = require('./plugin-manifest');
+const { readPluginBuildInfo } = require('./plugin-build-info');
 // Agent toolchain registry (#1940) — the pure validator/resolver, byte-identical
 // to orchestrator/toolchain-registry.js. The console owns the WRITE side (a
 // System Admin registering an image reference); the orchestrator reads the same
@@ -189,6 +193,7 @@ const { resolveSpecKitCommand, hasUnresolvedPlaceholders } = require('./speckit-
 const { deriveScopeList, enforceUiRoute, signViewerHeaders, bodyWasParsed } = require('./plugin-ui-proxy');
 const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole, viewerTeamRoles } = require('./plugin-ui-viewer');
 const pluginCredView = require('./plugin-credential-view');
+const { PLUGIN_ID_RE, invalidPluginIdMessage, isRemovableRegistryDirName } = require('./plugin-registry-ids');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -3334,6 +3339,10 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
         artifact: c.artifact, from: c.from,
         ...(typeof c.label === 'string' && c.label.trim() ? { label: c.label.trim() } : {}),
         ...(c.gate === 'human' ? { gate: 'human' } : {}),
+        // Authored wake-instruction override (#868) — dropping it here lost it
+        // on every live channel write (#2717); the reconciler feeds it into the
+        // derived listener's prompt.
+        ...(typeof c.wakePrompt === 'string' && c.wakePrompt.trim() ? { wakePrompt: c.wakePrompt.trim() } : {}),
         // Claim opt-out (#958) — must survive the live port write, otherwise
         // reconcileTeamGithubChannels re-stamps the claim the author just turned
         // off. Only the non-default is persisted.
@@ -6252,7 +6261,21 @@ app.get('/api/agents/:id/triggers', (req, res) => {
   const agentDir = safeAgentPath(id, '');
   if (!agentDir) return res.status(404).json({ error: 'Agent not found' });
   const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []); // canonical copy (#185)
-  res.json(Array.isArray(triggers) ? triggers : []);
+  // Legacy entries the write guard would now reject (invalid cron, shared id)
+  // are flagged — `invalid` + `position` — never rewritten (#2626).
+  res.json(annotateTriggerList(Array.isArray(triggers) ? triggers : []));
+});
+
+// Per-trigger schedule status written by the agent's scheduler (#2628):
+// { timeZone, updatedAt, triggers: { <id>: { nextFireAt, lastFiredAt,
+// lastResult, invalid } } }. Empty object until the agent first reports.
+app.get('/api/agents/:id/trigger-status', (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const agentDir = safeAgentPath(id, '');
+  if (!agentDir) return res.status(404).json({ error: 'Agent not found' });
+  const status = readJsonFile(controlOrAgentPath(id, 'trigger-status.json'), {});
+  res.json(status && typeof status === 'object' && !Array.isArray(status) ? status : {});
 });
 
 // Read-only proxy to the orchestrator's allowlisted script content. Used by
@@ -6314,7 +6337,11 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   if (denyUnlessCanManageAgent(req, res, agentDir)) return;
   const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
   const triggers = Array.isArray(cur) ? cur : [];
-  const newTrigger = { id: `t${Date.now()}`, ...req.body };
+  const newTrigger = stripTriggerAnnotations({ id: `t${Date.now()}`, ...req.body });
+  // Trigger ids (#2626): URL-safe shape (400), unique per agent (409) — a
+  // shared id makes DELETE/PUT ambiguous and the agent runs only one of them.
+  const ide = newTriggerIdError(triggers, newTrigger.id);
+  if (ide) return res.status(ide.status).json({ error: ide.error });
   // Raw-layer guard (#1006, concept §4.8): one event per github-event trigger
   // + claim shape — enforced server-side so no surface (engine dialog, panel,
   // direct API) can persist a non-conformant listener unchallenged again.
@@ -6341,11 +6368,12 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   if (launchedLoopConflict(triggers, newTrigger)) {
     return res.status(409).json({ error: 'A loop is already running for this agent. Stop it before starting another.' });
   }
-  if (newTrigger.type === 'github-event') {
-    const now = new Date().toISOString();
-    if (!newTrigger.createdAt) newTrigger.createdAt = now;
-    if (!newTrigger.activatedAt) newTrigger.activatedAt = now;
-  }
+  // `createdAt` on every type gives the hill-climb pass an age signal, so a
+  // brand-new schedule is not proposed for deletion (#2710). `activatedAt` stays
+  // the github-event poller's history horizon.
+  const now = new Date().toISOString();
+  if (!newTrigger.createdAt) newTrigger.createdAt = now;
+  if (newTrigger.type === 'github-event' && !newTrigger.activatedAt) newTrigger.activatedAt = now;
   triggers.push(newTrigger);
   try {
     await putTriggers(id, triggers);
@@ -6373,10 +6401,14 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   if (denyUnlessCanManageAgent(req, res, agentDir)) return;
   const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
   const triggers = Array.isArray(cur) ? cur : [];
-  const idx = triggers.findIndex(t => t.id === triggerId);
-  if (idx === -1) return res.status(404).json({ error: 'Trigger not found' });
+  // `?position=` addresses one row of a legacy duplicated id (#2626); without
+  // it the FIRST entry with the id is edited. The id itself is immutable here
+  // (body `id` is ignored), so an edit can never rename onto another trigger.
+  const at = resolveTriggerIndex(triggers, triggerId, req.query.position);
+  if (at.error) return res.status(at.status).json({ error: at.error });
+  const idx = at.index;
   const prev = triggers[idx];
-  const merged = { ...prev, ...req.body, id: triggerId };
+  const merged = stripTriggerAnnotations({ ...prev, ...req.body, id: triggerId });
   // Trigger-level `emits` was removed (#783): the agent/role level is canonical.
   // Ignore any supplied `emits` and drop a legacy field so an edit never
   // re-persists it (a persisted-but-ignored value can't create a phantom edge).
@@ -6400,15 +6432,17 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
     delete merged.pushedBy;
     Object.assign(merged, pbf.trigger);
   }
+  const now = new Date().toISOString();
+  // Backfill `createdAt` on any edit of a legacy unstamped trigger, of every
+  // type — the hill-climb age signal (#2710), as on POST.
+  if (!merged.createdAt) merged.createdAt = now;
   if (merged.type === 'github-event') {
-    const now = new Date().toISOString();
     // Refresh the activation horizon on a disable→enable flip so a
     // re-enabled trigger drops the backlog that accrued while it was off.
     if (prev.enabled === false && merged.enabled !== false) merged.activatedAt = now;
-    // Backfill the stamps on any edit of a legacy unstamped trigger. Its
+    // Backfill the stamp on any edit of a legacy unstamped trigger. Its
     // horizon was already drifting with the triggers.json mtime; stamping it
     // now makes it stable for all subsequent edits (#320 review follow-up).
-    if (!merged.createdAt) merged.createdAt = now;
     if (!merged.activatedAt) merged.activatedAt = now;
   }
   triggers[idx] = merged;
@@ -6426,13 +6460,16 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
 // hill-climb applier (#1225) run the exact same write + reconcile. Returns the
 // removed trigger object (or null if it wasn't present) so a caller can retain
 // it (the applier keeps the deleted trigger JSON as its undo payload). Throws on
-// a write failure.
-async function deleteAgentTrigger(id, triggerId) {
+// a write failure. Removes exactly ONE entry (#2626): the one at `position`
+// when given, else the first with the id — a legacy duplicated id is never
+// wiped wholesale.
+async function deleteAgentTrigger(id, triggerId, position) {
   const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
   const triggers = Array.isArray(cur) ? cur : [];
-  const removed = triggers.find(t => t && t.id === triggerId) || null;
-  const filtered = triggers.filter(t => t.id !== triggerId);
-  await putTriggers(id, filtered);
+  const at = resolveTriggerIndex(triggers, triggerId, position);
+  if (at.error) return null;
+  const [removed] = triggers.splice(at.index, 1);
+  await putTriggers(id, triggers);
   // Consumer write (#1007) — a trigger write changes who consumes its siblings'
   // labels, so re-render the team's Outcomes blocks.
   await reconcileTeamOutcomesForAgent(id);
@@ -6475,7 +6512,14 @@ app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) =
   // team-admin management rights, not visibility.
   if (denyUnlessCanManageAgent(req, res, agentDir)) return;
   try {
-    await deleteAgentTrigger(id, triggerId);
+    // `?position=` deletes exactly that row of a legacy duplicated id (#2626)
+    // and must point at it; without it an unknown id stays an idempotent 204.
+    const { position } = req.query;
+    if (position !== undefined) {
+      const at = resolveTriggerIndex(readJsonFile(controlOrAgentPath(id, 'triggers.json'), []), triggerId, position);
+      if (at.error) return res.status(at.status).json({ error: at.error });
+    }
+    await deleteAgentTrigger(id, triggerId, position);
   } catch (err) {
     return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
   }
@@ -9037,6 +9081,32 @@ app.post('/api/teams/:teamId/flow-board-config', apiLimiter, async (req, res) =>
   }
 });
 
+// POST /api/teams/:teamId/flow-board-removed — "Remove from board" and its
+// Restore (#2637). Body `{ action: 'remove'|'restore', rowId }`. Changes what
+// every viewer of the team's board sees, so gated like the column config.
+// Only the board entry changes — the GitHub item is never touched.
+app.post('/api/teams/:teamId/flow-board-removed', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!canManageTeam(scope, teamId)) return denyAdmin(res, 'You may not manage this team');
+  const action = req.body && req.body.action;
+  const rowId = req.body && typeof req.body.rowId === 'string' ? req.body.rowId.trim() : '';
+  if (action !== 'remove' && action !== 'restore') return res.status(400).json({ error: 'action must be "remove" or "restore"' });
+  if (!rowId || rowId.length > 300) return res.status(400).json({ error: 'rowId is required' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/flow-board-removed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, rowId }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // GET /api/teams/:teamId/pool-control — board data for the Flow Control
 // board's pause/drain/force-dispatch controls (#2250 Phase 5, epic #2251).
 // Visibility-only like `tickets`/`flow-anomalies`: no `canManageTeam` gate on
@@ -9310,8 +9380,16 @@ app.post('/api/teams/:teamId/hill-climb/cards/:cardId/apply', apiLimiter, async 
   }
   // Guard: never delete an intrinsic/derived/human-gate trigger (AC).
   const teamCfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
+  // Labels the team's members emit — a listener for one is a Flow label
+  // hand-off and is protected while its producer still emits it (#2710).
+  const teamMembers = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (cfg && cfg.parentTeamId === teamId) teamMembers.push({ emits: cfg.emits, outcomes: cfg.outcomes });
+  }
   const guardReason = hillClimbApplyGuard.triggerApplyGuardError(liveTrigger, {
     humanGateLabels: hillClimbApplyGuard.humanGateLabelSet(teamCfg),
+    handoffLabels: hillClimbApplyGuard.emittedLabelSet(teamMembers),
   });
   if (guardReason) {
     return res.status(403).json({ error: 'protected-trigger', code: 'protected-trigger', reason: guardReason });
@@ -9873,13 +9951,13 @@ app.get('/api/process-templates/:id', (req, res) => {
  * NOTHING to any agent — that is the separate grant step (§4.4). */
 const POOL_PLUGINS_DIR = path.join(POOL_DIR, 'plugins');
 const REGISTRY_PLUGINS_DIR = path.join(WORKSPACE, 'plugins');
-const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+// PLUGIN_ID_RE and the removable-directory rule live in plugin-registry-ids.js (#2649).
 
 // Read + validate one plugin.json under a base dir. Never throws; an invalid
 // plugin is reported WITH its errors rather than hidden, so an operator can see
 // why something they dropped in isn't installable.
 function readPluginDir(baseDir, id) {
-  if (!PLUGIN_ID_RE.test(id)) return { id, ok: false, errors: ['invalid plugin id'], manifest: null };
+  if (!PLUGIN_ID_RE.test(id)) return { id, ok: false, errors: [invalidPluginIdMessage(id)], manifest: null };
   const file = path.join(baseDir, id, 'plugin.json');
   // Containment: id is regex-bounded above (no dots, no slashes), so the join
   // cannot escape — re-checked here because this path is attacker-adjacent.
@@ -10032,22 +10110,53 @@ app.get('/api/plugins', apiLimiter, async (req, res) => {
   // Which sidecars are actually up — an installed plugin whose broker is not
   // running is a real state an operator needs to see, not an error.
   let running = {};
+  // #2646: the build each live broker reports — probed by the orchestrator,
+  // which owns sidecar truth on both runtimes.
+  const brokerBuilds = {};
+  // …and the build of the image a recreated sidecar would run (AC8).
+  const imageBuilds = {};
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/plugins`);
     if (resp.ok) {
       const body = await resp.json();
-      for (const p of body.plugins || []) running[p.id] = !!p.sidecarRunning;
+      for (const p of body.plugins || []) {
+        running[p.id] = !!p.sidecarRunning;
+        brokerBuilds[p.id] = p.brokerBuild || null;
+        imageBuilds[p.id] = p.imageBuild || null;
+      }
     }
   } catch { /* orchestrator unreachable — report unknown rather than false */ }
 
+  // sourceBuild (#2646): the commit the plugin's files were seeded from — the
+  // registry copy for an installed plugin, the pool copy for an available one.
   res.json({
     installed: installed.map((p) => {
       const iv = readInstalledVersion(REGISTRY_PLUGINS_DIR, p.id);
-      return { ...p, installed: true, sidecarRunning: running[p.id] ?? null, ...(iv ? { installedVersion: iv } : {}) };
+      return {
+        ...p,
+        installed: true,
+        sidecarRunning: running[p.id] ?? null,
+        sourceBuild: readPluginBuildInfo(REGISTRY_PLUGINS_DIR, p.id),
+        brokerBuild: brokerBuilds[p.id] ?? null,
+        imageBuild: imageBuilds[p.id] ?? null,
+        ...(iv ? { installedVersion: iv } : {}),
+      };
     }),
-    available: available.map((p) => ({ ...p, installed: false, sidecarRunning: false })),
+    available: available.map((p) => ({
+      ...p,
+      installed: false,
+      sidecarRunning: false,
+      sourceBuild: readPluginBuildInfo(POOL_PLUGINS_DIR, p.id),
+      brokerBuild: null,
+      imageBuild: null,
+    })),
     canManage: !!getScope(req).all,
+    // The runtime a plugin's `platforms` is checked against (#2649) — the same
+    // AEE_CONTAINER_RUNTIME signal the orchestrator spawns on; the k8s overlay
+    // sets it on the console too. Without it the page assumed podman, so a
+    // podman-only plugin on Kubernetes read "starting" instead of its mismatch.
+    stackRuntime: normalizeToolchainRuntime(process.env.AEE_CONTAINER_RUNTIME),
   });
 });
 
@@ -10098,7 +10207,10 @@ app.post('/api/plugins/:id/install', heavyLimiter, async (req, res) => {
 app.delete('/api/plugins/:id', heavyLimiter, async (req, res) => {
   if (!getScope(req).all) return res.status(403).json({ error: 'System Admin required' });
   const id = req.params.id;
-  if (!PLUGIN_ID_RE.test(id)) return res.status(400).json({ error: 'invalid plugin id' });
+  // A broken registry entry whose directory name is not a valid id (e.g. an
+  // operator's `jira.bak-…` copy) is still listed on the Plugins page, so it
+  // must be removable from there too (#2649) — see plugin-registry-ids.js.
+  if (!isRemovableRegistryDirName(id)) return res.status(400).json({ error: invalidPluginIdMessage(id) });
   const dest = path.join(REGISTRY_PLUGINS_DIR, id);
   if (!path.resolve(dest).startsWith(path.resolve(REGISTRY_PLUGINS_DIR) + path.sep)) {
     return res.status(400).json({ error: 'invalid plugin id' });
@@ -10114,13 +10226,16 @@ app.delete('/api/plugins/:id', heavyLimiter, async (req, res) => {
   // reinstall does not silently resurrect a team's old vendor token.
   // PLUGIN_ID_RE already excludes every path separator; the resolve-guard
   // mirrors the one on `dest` above (defense in depth, CodeQL js/path-injection).
-  try {
-    const credRoot = path.resolve(REGISTRY_PLUGINS_DIR, '_credentials');
-    const credDest = path.resolve(credRoot, id);
-    if (credDest.startsWith(credRoot + path.sep)) {
-      fs.rmSync(credDest, { recursive: true, force: true });
-    }
-  } catch { /* best effort */ }
+  // Only a valid id can own credentials, so a removed broken entry reaps none.
+  if (PLUGIN_ID_RE.test(id)) {
+    try {
+      const credRoot = path.resolve(REGISTRY_PLUGINS_DIR, '_credentials');
+      const credDest = path.resolve(credRoot, id);
+      if (credDest.startsWith(credRoot + path.sep)) {
+        fs.rmSync(credDest, { recursive: true, force: true });
+      }
+    } catch { /* best effort */ }
+  }
   // Existing grants are deliberately LEFT ALONE: uninstalling is an operator
   // action on the registry, not a mass revoke. The orchestrator's reconcile
   // stops the orphaned sidecar, and a grant with no installed manifest seeds
@@ -10272,6 +10387,30 @@ async function proxyPluginCredentialWrite(req, res, method) {
 }
 app.put('/api/plugins/:id/credentials/:scopeId', apiLimiter, (req, res) => proxyPluginCredentialWrite(req, res, 'PUT'));
 app.delete('/api/plugins/:id/credentials/:scopeId', apiLimiter, (req, res) => proxyPluginCredentialWrite(req, res, 'DELETE'));
+
+// POST /api/plugins/:id/credentials/:scopeId/test — "does the saved credential
+// work?" (#2640). Same Team-Admin gate as a write: the broker spends that
+// team's credential on one vendor read, so a viewer who cannot manage the team
+// must not trigger it. The answer is a status line (`result`), never a value.
+app.post('/api/plugins/:id/credentials/:scopeId/test', apiLimiter, async (req, res) => {
+  const id = req.params.id;
+  const scopeId = req.params.scopeId;
+  if (!PLUGIN_ID_RE.test(id)) return res.status(400).json({ error: 'invalid plugin id' });
+  const gate = pluginCredView.assertCanWriteScope(scopeId, (t) => canManageTeam(getScope(req), t));
+  if (!gate.ok) return res.status(gate.status).json({ error: gate.error });
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  let resp;
+  try {
+    resp = await fetch(
+      `${orchestratorUrl}/internal/plugins/${encodeURIComponent(id)}/credentials/${encodeURIComponent(scopeId)}/test`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+    );
+  } catch (err) {
+    return res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+  const body = await resp.json().catch(() => ({}));
+  return res.status(resp.status).json(body);
+});
 
 // ALL /plugins/:id/ui and /plugins/:id/ui/* — the UI proxy. NOT under /api, so
 // the session gate is applied explicitly (a session-less request is refused
@@ -18194,7 +18333,8 @@ app.get('/api/ssh-keys', (req, res) => {
 });
 
 app.post('/api/ssh-keys', apiLimiter, (req, res) => {
-  const { name, privateKey, id: rawId } = req.body || {};
+  const { privateKey, id: rawId } = req.body || {};
+  const name = credentialName(req.body?.name);
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (!privateKey || typeof privateKey !== 'string') {
     return res.status(400).json({ error: 'privateKey (string) is required' });
@@ -18207,15 +18347,16 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
     return res.status(403).json({ error: 'forbidden: you may not create this credential', code: 'forbidden' });
   }
   const trimmed = privateKey.trim();
-  if (!/-----BEGIN [A-Z ]+PRIVATE KEY-----/.test(trimmed)) {
-    return res.status(400).json({ error: 'privateKey does not look like an SSH private key' });
-  }
+  // Parse the key, not just its BEGIN marker (#2654) — garbage between the
+  // armour lines used to be stored and only failed when an agent cloned.
+  const keyError = sshPrivateKeyError(trimmed);
+  if (keyError) return res.status(400).json({ error: keyError });
 
   const existing = listSshKeys();
   let id;
   if (rawId !== undefined && rawId !== null && String(rawId).trim() !== '') {
     id = String(rawId).trim();
-    if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and hyphens only' });
+    if (!SSH_KEY_ID_RE.test(id) || !isValidNewCredentialId(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and single hyphens only, and must not start or end with a hyphen' });
     if (existing.some(k => k.id === id)) return res.status(409).json({ error: `SSH key id '${id}' already exists` });
   } else {
     // Generate a stable, filesystem-safe id from the name
@@ -18258,10 +18399,9 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
 // Server-side keypair generation. Returns the public key once so the user
 // can paste it into GitHub; the private key never leaves the workspace.
 app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
-  const { name, comment, id: rawId } = req.body || {};
-  if (!name || typeof name !== 'string') {
-    return res.status(400).json({ error: 'name is required' });
-  }
+  const { comment, id: rawId } = req.body || {};
+  const name = credentialName(req.body?.name);
+  if (!name) return res.status(400).json({ error: 'name is required' });
   const scope = getScope(req);
   let ownership;
   try { ownership = resolveCredentialOwnership(req.body, scope.userId); }
@@ -18273,7 +18413,7 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
   let id;
   if (rawId !== undefined && rawId !== null && String(rawId).trim() !== '') {
     id = String(rawId).trim();
-    if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and hyphens only' });
+    if (!SSH_KEY_ID_RE.test(id) || !isValidNewCredentialId(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and single hyphens only, and must not start or end with a hyphen' });
     if (existing.some(k => k.id === id)) return res.status(409).json({ error: `SSH key id '${id}' already exists` });
   } else {
     const baseId = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
@@ -18390,9 +18530,8 @@ app.post('/api/ssh-keys/:id/rotate', heavyLimiter, (req, res) => {
       return res.status(400).json({ error: 'privateKey (string) is required, or set generate:true' });
     }
     const trimmed = privateKey.trim();
-    if (!/-----BEGIN [A-Z ]+PRIVATE KEY-----/.test(trimmed)) {
-      return res.status(400).json({ error: 'privateKey does not look like an SSH private key' });
-    }
+    const keyError = sshPrivateKeyError(trimmed);
+    if (keyError) return res.status(400).json({ error: keyError });
     fs.writeFileSync(keyPath, trimmed.endsWith('\n') ? trimmed : trimmed + '\n', { mode: 0o600 });
     try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
     fingerprint = sshKeyFingerprint(trimmed);
@@ -18422,7 +18561,8 @@ app.get('/api/github-tokens', (req, res) => {
 });
 
 app.post('/api/github-tokens', apiLimiter, (req, res) => {
-  const { name, token, id: rawId } = req.body || {};
+  const { token, id: rawId } = req.body || {};
+  const name = credentialName(req.body?.name);
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (!token || typeof token !== 'string') {
     return res.status(400).json({ error: 'token (string) is required' });
@@ -18445,7 +18585,7 @@ app.post('/api/github-tokens', apiLimiter, (req, res) => {
   let id;
   if (rawId !== undefined && rawId !== null && String(rawId).trim() !== '') {
     id = String(rawId).trim();
-    if (!GH_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and hyphens only' });
+    if (!GH_TOKEN_ID_RE.test(id) || !isValidNewCredentialId(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and single hyphens only, and must not start or end with a hyphen' });
     if (existing.some(t => t.id === id)) return res.status(409).json({ error: `GitHub token id '${id}' already exists` });
   } else {
     const baseId = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
@@ -19873,6 +20013,38 @@ app.get('/api/agents/:agentId/sessions/history', apiLimiter, (req, res) => {
   }
   if (!events.length) return res.json({ sessions: [], total: 0, truncated: false });
   res.json(buildSessionHistory(events, activeCorrelationIds, { limit, offset }));
+});
+
+// Which run produced a chat message (#2603, Agent Chat "Show in session log").
+// `eventId` is the message's Matrix event id; answers the correlationId of its
+// run from the runner's own `message.posted` row (or the user message's own
+// rows), spanning rotated archives like the history route above. 404 when the
+// log holds no row for it, so the console shows its "not found" notice instead
+// of guessing a session.
+app.get('/api/agents/:agentId/session/:roomId/locate', apiLimiter, (req, res) => {
+  const { agentId, roomId } = req.params;
+  if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const eventId = typeof req.query.eventId === 'string' ? req.query.eventId : '';
+  if (!eventId || eventId.length > 512) return res.status(400).json({ error: 'invalid eventId' });
+
+  const filepath = controlOrAgentPath(agentId, 'sessions', roomId + '.jsonl'); // pushed copy preferred (#185)
+  const events = readSessionArchiveEvents(agentId, roomId, parseJsonlLine);
+  if (fs.existsSync(filepath)) {
+    let raw;
+    try {
+      raw = fs.readFileSync(filepath, 'utf8');
+    } catch (err) {
+      return res.status(500).json({ error: 'read failed: ' + err.message });
+    }
+    for (const line of raw.split('\n')) {
+      if (line.trim()) events.push(parseJsonlLine(line));
+    }
+  }
+  const correlationId = locateCorrelationId(events, eventId);
+  if (!correlationId) return res.status(404).json({ error: 'not found' });
+  res.json({ correlationId });
 });
 
 /* ─── Workspace browser (read-only) ────────────────────────────────── */

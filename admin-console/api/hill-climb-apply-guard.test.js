@@ -9,6 +9,7 @@ const {
   triggerApplyGuardError,
   staleTriggerReason,
   humanGateLabelSet,
+  emittedLabelSet,
 } = require('./hill-climb-apply-guard');
 
 const triggerCard = (over = {}) => ({
@@ -97,4 +98,54 @@ test('humanGateLabelSet: extracts only humanGate-flagged label names', () => {
   assert.equal(s.size, 2);
   assert.deepEqual([...humanGateLabelSet({})], []);
   assert.deepEqual([...humanGateLabelSet(null)], []);
+});
+
+test('triggerApplyGuardError: protects a Flow label hand-off listener (#2710)', () => {
+  // What wireLabelHandoff writes: a plain github-event listener with no derived flag.
+  const listener = {
+    id: 't1790817163431', type: 'github-event', events: ['issues.labeled'],
+    labelFilter: 'ready-for-review', claim: { remove: 'ready-for-review', add: 'in-review' },
+    description: 'Wake when `ready-for-review` is added to an issue (from Dev)',
+  };
+  const handoffLabels = emittedLabelSet([
+    { outcomes: { options: [{ actions: [{ type: 'setLabel', label: 'ready-for-review' }] }] } },
+  ]);
+  assert.match(triggerApplyGuardError(listener, { handoffLabels }), /hand-off label 'ready-for-review'/);
+  assert.match(triggerApplyGuardError(listener, { handoffLabels: ['ready-for-review'] }), /hand-off label/);
+  // Nobody emits the label any more → a genuinely dead listener stays deletable.
+  assert.equal(triggerApplyGuardError(listener, { handoffLabels: new Set(['other']) }), null);
+  assert.equal(triggerApplyGuardError(listener), null);
+});
+
+test('emittedLabelSet: outcomes setLabel actions plus legacy emits', () => {
+  const s = emittedLabelSet([
+    { emits: ['ready-for-qa', ' ', null] },
+    { outcomes: { options: [
+      { actions: [{ type: 'setLabel', label: 'ready-for-review' }, { type: 'openPr' }] },
+      { actions: [{ type: 'setLabel', label: '' }] },
+    ] } },
+    null,
+  ]);
+  assert.deepEqual([...s].sort(), ['ready-for-qa', 'ready-for-review']);
+  assert.deepEqual([...emittedLabelSet(null)], []);
+});
+
+// Source guards (#2710 review S1): the pure guard is covered above, but the
+// production wiring is not exercised by any route test — pin it so a refactor
+// cannot silently drop the hand-off protection or the trigger age stamp.
+test('apply route passes the team members\' emitted labels as handoffLabels (#2710)', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'api.js'), 'utf8');
+  const start = src.indexOf("app.post('/api/teams/:teamId/hill-climb/cards/:cardId/apply'");
+  assert.ok(start > 0, 'apply route present');
+  const body = src.slice(start, src.indexOf('\napp.', start + 1));
+  assert.match(body, /if \(cfg && cfg\.parentTeamId === teamId\) teamMembers\.push\(\{ emits: cfg\.emits, outcomes: cfg\.outcomes \}\);/);
+  assert.match(body, /handoffLabels: hillClimbApplyGuard\.emittedLabelSet\(teamMembers\),/);
+});
+
+test('POST /api/agents/:id/triggers stamps createdAt on every trigger type (#2710)', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'api.js'), 'utf8');
+  const start = src.indexOf("app.post('/api/agents/:id/triggers'");
+  assert.ok(start > 0, 'trigger POST route present');
+  const body = src.slice(start, src.indexOf('triggers.push(newTrigger);', start));
+  assert.match(body, /\n  if \(!newTrigger\.createdAt\) newTrigger\.createdAt = now;/, 'createdAt stamped outside any type branch');
 });

@@ -599,6 +599,10 @@ class _StatePushClient:
         # isolation (#185), where the agent's own copy is on an unreachable volume.
         self._q.put(("running", list(sessions)))
 
+    def push_trigger_status(self, data: dict) -> None:
+        # Per-trigger next/last-run status (#2628) — last write per tick wins.
+        self._q.put(("trigger-status", dict(data)))
+
     def mark_session_dirty(self, room_id: str) -> None:
         self._q.put(("session", room_id))
 
@@ -638,6 +642,7 @@ class _StatePushClient:
                     break
             status_data = None
             running_sessions = None
+            trigger_status = None
             dirty: list[str] = []
             pointers: dict[str, tuple[str, str]] = {}
             drain_usage = False
@@ -646,6 +651,8 @@ class _StatePushClient:
                     status_data = payload
                 elif kind == "running":
                     running_sessions = payload  # last write within the tick wins
+                elif kind == "trigger-status":
+                    trigger_status = payload  # last write within the tick wins
                 elif kind == "session" and payload not in dirty:
                     dirty.append(payload)  # type: ignore[arg-type]
                 elif kind == "rotate":
@@ -664,6 +671,8 @@ class _StatePushClient:
                     self._post_status(status_data)
                 if running_sessions is not None:
                     self._post_running_sessions(running_sessions)
+                if trigger_status is not None:
+                    self._post_trigger_status(trigger_status)
                 for room_id in dirty:
                     self._flush_session(room_id)
                 for room_id, (sid, upd) in pointers.items():
@@ -680,6 +689,10 @@ class _StatePushClient:
     def _post_running_sessions(self, sessions: list) -> None:
         body = json.dumps(sessions).encode("utf-8")
         self._post(f"/internal/agents/{self._agent_id}/running-sessions", body)
+
+    def _post_trigger_status(self, data: dict) -> None:
+        body = json.dumps(data).encode("utf-8")
+        self._post(f"/internal/agents/{self._agent_id}/trigger-status", body)
 
     def _post_pointer(self, room_id: str, session_id: str, updated_at: str) -> None:
         body = json.dumps({
@@ -1182,6 +1195,19 @@ def _append_event(room_id: str, event: dict) -> None:
     except Exception as exc:
         # Logging never crashes the runner.
         print(f"[Runner] session-log append failed: {exc}", file=sys.stderr)
+
+
+def _log_run_reply(room_id: str, correlation_id: str | None, event_id: str | None) -> None:
+    """Record the `message.posted` row that ties a reply to its run (#2603), so
+    Agent Chat's "Show in session log" resolves the agent-error / abort replies
+    too, not only the answer. No-op without an event id (send failed)."""
+    if not (isinstance(event_id, str) and event_id and correlation_id):
+        return
+    _append_event(room_id, {
+        "type": "message.posted",
+        "correlationId": correlation_id,
+        "eventId": event_id,
+    })
 
 
 def _normalize_usage_tokens(usage: dict) -> dict:
@@ -4177,6 +4203,53 @@ def _save_triggers(triggers: list[dict]) -> None:
         print(f"[Runner] _save_triggers: {exc}", file=sys.stderr)
 
 
+# Per-trigger scheduling status (#2628): what the console shows next to each
+# cron / once trigger — when it fires next, when it last fired and how that
+# went, and why the scheduler refused it. Agent → control state, so it is
+# mirrored to the orchestrator like status.json (the admin can't read an
+# isolated agent's volume). Shape:
+#   {"timeZone": "Europe/Berlin", "updatedAt": "<iso>",
+#    "triggers": {<id>: {"nextFireAt"?, "lastFiredAt"?, "lastResult"?, "invalid"?}}}
+# `lastResult` is one of running / ok / error / skipped / skipped-maintenance /
+# interrupted (a run cut off by a restart or cancellation).
+_TRIGGER_STATUS_FILENAME = "trigger-status.json"
+
+
+def _iso_utc(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _load_trigger_status() -> dict[str, dict]:
+    p = _agent_workdir() / _TRIGGER_STATUS_FILENAME
+    try:
+        if not p.exists():
+            return {}
+        data = json.loads(p.read_text(encoding="utf-8"))
+        entries = data.get("triggers") if isinstance(data, dict) else None
+        if not isinstance(entries, dict):
+            return {}
+        return {k: dict(v) for k, v in entries.items()
+                if isinstance(k, str) and isinstance(v, dict)}
+    except Exception as exc:
+        print(f"[Runner] _load_trigger_status: {exc}", file=sys.stderr)
+        return {}
+
+
+def _save_trigger_status(entries: dict[str, dict]) -> None:
+    data = {
+        "timeZone": _TRIGGER_TZ.key,
+        "updatedAt": _iso_utc(datetime.now(timezone.utc)),
+        "triggers": entries,
+    }
+    try:
+        _atomic_write_json(_agent_workdir() / _TRIGGER_STATUS_FILENAME, data)
+        pc = _get_push_client()  # mirror to control plane (#185)
+        if pc:
+            pc.push_trigger_status(data)
+    except Exception as exc:
+        print(f"[Runner] _save_trigger_status: {exc}", file=sys.stderr)
+
+
 def _load_in_flight() -> list[dict]:
     p = _agent_workdir() / _IN_FLIGHT_FILENAME
     try:
@@ -4845,11 +4918,18 @@ class TriggerScheduler:
         # always self-consistent.
         self._gate = workspace_gate if workspace_gate is not None else WorkspaceGate()
 
-        self._cron_tasks: dict[str, dict] = {}  # triggerId -> {"task": Task, "expr": str}
-        self._loop_tasks: dict[str, dict] = {}  # loop triggerId -> {"task": Task} (#932)
+        # triggerId -> {"task": Task, "expr": str, "trigger": dict}. `trigger` is
+        # refreshed on every sync, so a runner fires with the latest edit (#2627).
+        self._cron_tasks: dict[str, dict] = {}
+        self._loop_tasks: dict[str, dict] = {}  # loop triggerId -> {"task": Task, "trigger": dict} (#932)
         # Raw-layer guard (#1006): trigger ids already flagged as deviating
         # from the wiring rules — each gets ONE advisory DM, never a repeat.
         self._nonconformant_notified: set[str] = set()
+        # Triggers the scheduler SKIPS (#2626) — an invalid cron expression
+        # (keyed "cron:<id>:<expr>", so a re-broken fix is reported again) or a
+        # second enabled trigger sharing an id ("dup:<id>"). One advisory DM
+        # each, like the nonconformant guard; stderr alone reached nobody.
+        self._skipped_notified: set[str] = set()
         self._loop_done: set[str] = set()  # loop triggers that reached a terminal state this lifetime (#932)
         # Chat-launched loops (#1020): a loop launched from the composer is a
         # one-off "run until done", NOT a standing subscription. It carries
@@ -4861,6 +4941,12 @@ class TriggerScheduler:
         self._stale_launched_loops: set[str] = set()
         self._running: set[str] = set()
         self._fired_once: set[str] = set()  # once-triggers already fired this lifetime (#185)
+        # Per-trigger next/last-run status shown in the console (#2628). Loaded
+        # from trigger-status.json in start() so a restart keeps "last run".
+        self._trigger_status: dict[str, dict] = {}
+        # Outcome of the latest _execute per trigger id (#2628), read back by
+        # the cron runner: ok / error / skipped.
+        self._exec_results: dict[str, str] = {}
         # Blast-radius backstop (#611): caps concurrent + per-window triggered
         # Claude spawns so a self-triggering loop can't fan out unbounded.
         self._backstop = TriggerBackstop(
@@ -4887,6 +4973,8 @@ class TriggerScheduler:
                   file=sys.stderr)
         await self._reconcile_in_flight()
         self._capture_stale_launched_loops()
+        self._trigger_status = _load_trigger_status()
+        self._mark_interrupted_runs()
         await self._sync()
         self._sync_task = asyncio.create_task(self._sync_loop())
         self._pending_task = asyncio.create_task(self._pending_loop())
@@ -4919,6 +5007,55 @@ class TriggerScheduler:
             asyncio.get_running_loop().remove_signal_handler(signal.SIGUSR2)
         except (NotImplementedError, RuntimeError, ValueError):
             pass
+
+    # -- per-trigger status (#2628) ------------------------------------------
+
+    def _set_trigger_status(self, tid: str, *, persist: bool = True,
+                            **fields) -> bool:
+        """Merge `fields` into the trigger's status entry (a None value drops
+        the key). Persists only when something actually changed, so the 60 s
+        sync tick re-reporting the same invalid cron costs nothing. Returns
+        whether the entry changed."""
+        prev = self._trigger_status.get(tid) or {}
+        cur = dict(prev)
+        for key, value in fields.items():
+            if value is None:
+                cur.pop(key, None)
+            else:
+                cur[key] = value
+        if cur == prev:
+            return False
+        if cur:
+            self._trigger_status[tid] = cur
+        else:
+            self._trigger_status.pop(tid, None)
+        if persist:
+            self._persist_trigger_status()
+        return True
+
+    def _persist_trigger_status(self) -> None:
+        # #606: a test harness must never write the live workdir or push to
+        # the control plane of the agent it happens to run inside.
+        if _under_test_harness():
+            return
+        _save_trigger_status(self._trigger_status)
+
+    def _reconcile_trigger_status(self, triggers: list, scheduled: set[str]) -> None:
+        """Drop status for triggers that no longer exist, and clear the
+        next-run / invalid fields of every trigger the scheduler is not
+        currently handling (disabled, or not a cron/once trigger) — neither
+        claim is true for a trigger that doesn't run. `lastFiredAt` stays."""
+        known = {t.get("id") for t in triggers if isinstance(t, dict)}
+        changed = False
+        for tid in list(self._trigger_status):
+            if tid not in known:
+                self._trigger_status.pop(tid, None)
+                changed = True
+            elif tid not in scheduled:
+                changed |= self._set_trigger_status(
+                    tid, persist=False, nextFireAt=None, invalid=None)
+        if changed:
+            self._persist_trigger_status()
 
     # -- in-flight markers (#506 crash reconciliation) -----------------------
 
@@ -5193,9 +5330,18 @@ class TriggerScheduler:
         triggers = _load_triggers()
         active_ids: set[str] = set()
         active_loop_ids: set[str] = set()
+        # cron/once ids the scheduler is handling this tick — their status
+        # entries keep nextFireAt/invalid; every other entry drops them (#2628).
+        status_ids: set[str] = set()
         # Checked once per tick (not per overdue once-trigger) — a single
         # HTTP round-trip to the orchestrator covers the whole batch.
         maintenance_active = await self._maintenance_active()
+        # Enabled trigger ids seen this pass (#2626). Every per-id structure
+        # (_cron_tasks, _loop_tasks, _running) assumes ids are unique; with two
+        # enabled entries sharing one, each sync would cancel and reschedule
+        # the other. The FIRST wins (the console API edits/deletes the first
+        # match too); later ones are skipped and reported once.
+        seen_ids: set[str] = set()
 
         for trigger in triggers:
             if not isinstance(trigger, dict):
@@ -5205,6 +5351,17 @@ class TriggerScheduler:
             tid = trigger.get("id")
             if not isinstance(tid, str) or not tid:
                 continue
+            # Duplicate ids (#2627): the task maps are keyed by id, so two
+            # triggers sharing one would cancel and reschedule each other on
+            # every sync. The first one wins; the rest are skipped, and the
+            # user is told once (#2626).
+            if tid in seen_ids:
+                await self._notify_skipped_trigger(
+                    f"dup:{tid}", tid,
+                    "another enabled trigger already uses this id, so only the first one runs — "
+                    "give each trigger its own id")
+                continue
+            seen_ids.add(tid)
 
             # Raw-layer guard (#1006, §4.8): a self-managed edit that deviates
             # from the wiring rules is flagged ONCE (stderr + advisory DM) and
@@ -5219,32 +5376,49 @@ class TriggerScheduler:
 
             ttype = trigger.get("type")
             if ttype == "cron":
+                status_ids.add(tid)
                 expr = trigger.get("cron")
                 if not isinstance(expr, str) or not expr:
+                    self._set_trigger_status(
+                        tid, invalid="No cron expression", nextFireAt=None)
                     continue
                 active_ids.add(tid)
                 existing = self._cron_tasks.get(tid)
                 if existing and existing.get("expr") == expr and not existing["task"].done():
+                    # Same schedule: keep the running task, but hand it the
+                    # latest trigger so its next fire uses the edited prompt,
+                    # description, roomId, … (#2627).
+                    existing["trigger"] = dict(trigger)
                     continue
                 if existing:
                     existing["task"].cancel()
                     print(f"[Runner:{self._agent_id}] Trigger updated: {tid}",
                           file=sys.stderr)
                 if not self._croniter.is_valid(expr):
-                    print(f"[Runner:{self._agent_id}] Invalid cron: {expr} ({tid})",
-                          file=sys.stderr)
+                    self._set_trigger_status(
+                        tid, invalid=f"Invalid cron expression `{expr}`",
+                        nextFireAt=None)
+                    await self._notify_skipped_trigger(
+                        f"cron:{tid}:{expr}", tid,
+                        f"its cron expression `{expr}` is not valid, so it never fires")
                     continue
-                # Snapshot the trigger dict so later edits to triggers.json
-                # don't mutate the running task's view.
+                self._set_trigger_status(tid, invalid=None)
+                # Copy the trigger dict so later edits to triggers.json don't
+                # mutate the running task's view; each sync replaces the
+                # entry's copy and the runner reads it at fire time (#2627).
                 snapshot = dict(trigger)
                 task = asyncio.create_task(self._cron_runner(snapshot, expr))
-                self._cron_tasks[tid] = {"task": task, "expr": expr}
+                self._cron_tasks[tid] = {"task": task, "expr": expr,
+                                         "trigger": snapshot}
                 print(f"[Runner:{self._agent_id}] Trigger scheduled: {tid} ({expr})",
                       file=sys.stderr)
 
             elif ttype == "once":
+                status_ids.add(tid)
                 at_raw = trigger.get("at")
                 if not isinstance(at_raw, str):
+                    self._set_trigger_status(
+                        tid, invalid="No date/time set", nextFireAt=None)
                     continue
                 try:
                     # Accept ISO-8601 with trailing Z (Python <3.11 quirk).
@@ -5255,7 +5429,12 @@ class TriggerScheduler:
                 except Exception as exc:
                     print(f"[Runner:{self._agent_id}] Invalid once 'at' for {tid}: {exc}",
                           file=sys.stderr)
+                    self._set_trigger_status(
+                        tid, invalid=f"Invalid date/time `{at_raw}`",
+                        nextFireAt=None)
                     continue
+                self._set_trigger_status(
+                    tid, invalid=None, nextFireAt=_iso_utc(fire_at))
                 now = datetime.now(tz=_TRIGGER_TZ)
                 if now >= fire_at:
                     # AC1 (#504): don't fire while Maintenance Mode is active.
@@ -5329,18 +5508,23 @@ class TriggerScheduler:
                     continue
                 existing = self._loop_tasks.get(tid)
                 if existing and not existing["task"].done():
+                    # Next iteration runs with the edited trigger (#2627); the
+                    # stop contract and verifier stay as resolved at loop start.
+                    existing["trigger"] = dict(trigger)
                     continue
-                # Snapshot so later edits to triggers.json don't mutate the
-                # running task's view (same as the cron path).
+                # Copy so later edits to triggers.json don't mutate the running
+                # task's view (same as the cron path).
                 snapshot = dict(trigger)
                 task = asyncio.create_task(self._loop_runner(snapshot))
-                self._loop_tasks[tid] = {"task": task}
+                self._loop_tasks[tid] = {"task": task, "trigger": snapshot}
                 print(f"[Runner:{self._agent_id}] Loop scheduled: {tid} "
                       f"(maxIterations={trigger.get('maxIterations')})",
                       file=sys.stderr)
 
             # http / github-event triggers are scheduled by the pending-poll
             # loop (see _process_pending), not here.
+
+        self._reconcile_trigger_status(triggers, status_ids)
 
         # Stop cron tasks that disappeared / got disabled.
         for tid in list(self._cron_tasks.keys()):
@@ -5372,6 +5556,7 @@ class TriggerScheduler:
                     print(f"[Runner:{self._agent_id}] cron next_fire failed for {tid}: {exc}",
                           file=sys.stderr)
                     return
+                self._set_trigger_status(tid, nextFireAt=_iso_utc(next_fire))
                 delay = max(0.0, (next_fire - now).total_seconds())
                 try:
                     await asyncio.sleep(delay)
@@ -5389,19 +5574,54 @@ class TriggerScheduler:
                     print(f"[Runner:{self._agent_id}] cron {tid} fire skipped "
                           f"(maintenance mode active) — will catch up once it ends",
                           file=sys.stderr)
+                    self._set_trigger_status(
+                        tid, lastFiredAt=_iso_utc(next_fire),
+                        lastResult="skipped-maintenance", nextFireAt=None)
                     while not self._shutdown_event.is_set() and await self._maintenance_active():
                         await asyncio.sleep(5.0)
                     if self._shutdown_event.is_set():
                         return
                     print(f"[Runner:{self._agent_id}] cron {tid} catching up "
                           f"after maintenance mode ended", file=sys.stderr)
+                self._exec_results.pop(tid, None)
+                self._set_trigger_status(
+                    tid, lastFiredAt=_iso_utc(datetime.now(tz=_TRIGGER_TZ)),
+                    lastResult="running", nextFireAt=None)
                 try:
-                    await self._execute(trigger)
+                    await self._execute(self._latest_trigger(self._cron_tasks, tid, trigger))
+                    result = self._exec_results.pop(tid, "ok")
                 except Exception as exc:
                     print(f"[Runner:{self._agent_id}] cron _execute({tid}) error: {exc}",
                           file=sys.stderr)
+                    result = "error"
+                self._set_trigger_status(tid, lastResult=result)
         except asyncio.CancelledError:
+            # Cancelled mid-run (disable / reschedule): don't leave "running".
+            if (self._trigger_status.get(tid) or {}).get("lastResult") == "running":
+                self._set_trigger_status(tid, lastResult="interrupted")
             return
+
+    def _mark_interrupted_runs(self) -> None:
+        """A run still recorded as "running" at start-up was cut off by a
+        restart; record it as "interrupted" instead of "running" until the
+        next fire (#2628 review S1)."""
+        for tid, entry in list(self._trigger_status.items()):
+            if isinstance(entry, dict) and entry.get("lastResult") == "running":
+                self._set_trigger_status(tid, lastResult="interrupted")
+
+    @staticmethod
+    def _latest_trigger(tasks: dict[str, dict], tid: str, fallback: dict) -> dict:
+        """The trigger as of the last sync (#2627), else the runner's own copy.
+
+        A runner is started with a copy of its trigger, but `_sync` keeps the
+        task alive across edits that leave the schedule unchanged and only
+        swaps the entry's `trigger`. Reading it here, right before a run, is
+        what makes a prompt-only edit take effect on the next fire. Removal and
+        disabling need no check here: `_sync` cancels the task instead.
+        """
+        entry = tasks.get(tid)
+        latest = entry.get("trigger") if isinstance(entry, dict) else None
+        return dict(latest) if isinstance(latest, dict) else fallback
 
     async def _loop_runner(self, trigger: dict) -> None:
         """Run a `loop` trigger (#932): a continuation primitive.
@@ -5491,8 +5711,9 @@ class TriggerScheduler:
                 try:
                     # `_gate_held=True`: the gate is already held for the whole
                     # loop (above), so the iteration must not re-acquire it.
-                    await self._execute(trigger, ctx, loop_sink=sink,
-                                        _gate_held=True)
+                    await self._execute(
+                        self._latest_trigger(self._loop_tasks, tid, trigger),
+                        ctx, loop_sink=sink, _gate_held=True)
                 except Exception as exc:
                     print(f"[Runner:{self._agent_id}] loop _execute({tid}) error: {exc}",
                           file=sys.stderr)
@@ -5633,6 +5854,28 @@ class TriggerScheduler:
             )
         except Exception as exc:
             print(f"[Runner:{self._agent_id}] nonconformant-trigger DM failed: {exc}",
+                  file=sys.stderr)
+
+    async def _notify_skipped_trigger(self, key: str, tid: str, reason: str) -> None:
+        """One-time advisory DM for a trigger the scheduler skips (#2626) —
+        an invalid cron or a duplicate id. Unlike a wiring deviation (#1006)
+        the trigger does NOT run, so the message says so. `key` de-duplicates
+        across the 60 s sync ticks. Best-effort, like the nonconformant DM."""
+        if key in self._skipped_notified:
+            return
+        self._skipped_notified.add(key)
+        print(f"[Runner:{self._agent_id}] trigger {tid} skipped: {reason}", file=sys.stderr)
+        room_id = _load_dm_room_id()
+        if not room_id:
+            return
+        try:
+            await self._send_formatted(
+                room_id,
+                f"⚠️ **Trigger `{tid}` is not scheduled** — {reason}.\n\n"
+                "Fix it in the Triggers panel or `triggers.json`.",
+            )
+        except Exception as exc:
+            print(f"[Runner:{self._agent_id}] skipped-trigger DM failed: {exc}",
                   file=sys.stderr)
 
     async def _post_loop_outcome(self, trigger: dict, outcome: str,
@@ -6726,7 +6969,8 @@ class TriggerScheduler:
         return None
 
     async def _post_trigger_notice(self, trigger: dict, ctx: dict | None,
-                                   room_id: str) -> None:
+                                   room_id: str,
+                                   correlation_id: str | None = None) -> None:
         """Send the m.notice envelope that issue #158 republishes.
 
         Keys are fixed:
@@ -6734,6 +6978,10 @@ class TriggerScheduler:
           io.aee.trigger.triggerId   (string)
           io.aee.trigger.triggerType (string)
           io.aee.trigger.event       (string|None — None for non-github triggers)
+
+        Additive (#2603): io.aee.trigger.correlationId (string, only when
+        known) — the run's session-log correlationId, so Agent Chat's "Show in
+        session log" button can open the run the notice announces.
         """
         ttype = trigger.get("type", "")
         tid = trigger.get("id", "")
@@ -6744,7 +6992,12 @@ class TriggerScheduler:
         formatted_body: str | None = None
 
         if ttype in ("cron", "once"):
-            phrase = trigger.get("description") or "Scheduled trigger"
+            # Name the trigger (#2628): with several schedules on one agent a
+            # generic phrase doesn't say which one fired.
+            phrase = trigger.get("description") or tid or "Scheduled trigger"
+            sched = trigger.get("cron") if ttype == "cron" else trigger.get("at")
+            if isinstance(sched, str) and sched:
+                phrase += f" ({ttype} `{sched}`)"
             body = f"⚡ Trigger fired — {phrase} — starting work…"
         elif ttype == "github-event":
             event_key = gh.get("event") or ""
@@ -6821,6 +7074,8 @@ class TriggerScheduler:
                 "event": gh.get("event") or None,
             },
         }
+        if isinstance(correlation_id, str) and correlation_id:
+            content["io.aee.trigger"]["correlationId"] = correlation_id
         # AC3: carry the HTML so the abbreviated `[#N](url)` link renders in the
         # Admin Console and other Matrix clients; the plain `body` (`#N (url)`)
         # stays the fallback for clients that ignore formatting. AC7: the
@@ -6870,6 +7125,9 @@ class TriggerScheduler:
         serialization gate is held (by ``_execute`` for a non-loop caller, or by
         the loop runner's ``acquire_loop`` for a loop iteration)."""
         tid = trigger.get("id", "?")
+        # Outcome read back by the cron runner for the trigger list (#2628) —
+        # set before the still-running check so that skip is recorded too.
+        self._exec_results[tid] = "skipped"
         if tid in self._running:
             print(f"[Runner:{self._agent_id}] Trigger {tid} still running — skipping",
                   file=sys.stderr)
@@ -6903,8 +7161,10 @@ class TriggerScheduler:
             return
         self._running.add(tid)
         try:
-            await self._execute_inner(trigger, ctx, loop_sink)
+            skipped = await self._execute_inner(trigger, ctx, loop_sink)
+            self._exec_results[tid] = "skipped" if skipped == "skipped" else "ok"
         except Exception as exc:
+            self._exec_results[tid] = "error"
             # A user Stop aborts the in-flight iteration (#1231): surface it to
             # the loop runner via the sink so the loop terminates with a
             # `stopped` outcome (and leaves a persistent record) instead of
@@ -6970,7 +7230,8 @@ class TriggerScheduler:
     async def _post_trigger_failure_notice(self, trigger: dict, room_id: str,
                                            err: Exception,
                                            permanent: bool = False,
-                                           restored_label: str | None = None
+                                           restored_label: str | None = None,
+                                           correlation_id: str | None = None
                                            ) -> None:
         """Post one plain DM notice when a triggered run is given up. Best-effort,
         no Claude call — the triggering event is consumed and will not re-fire,
@@ -6982,7 +7243,11 @@ class TriggerScheduler:
         attempts. When the run had claimed the item and the claim was rolled
         back (#957), `restored_label` names the wake label that is back on it:
         the poller re-fires the chain by itself, so the notice must not ask for
-        a manual re-issue that would double-run the work."""
+        a manual re-issue that would double-run the work.
+
+        `correlation_id` (#2603) is carried as
+        `io.aee.triggerFailure.correlationId` so Agent Chat's "Show in session
+        log" button can open the failed run."""
         if not (isinstance(room_id, str) and _MATRIX_ROOM_ID_RE.match(room_id)):
             return
         tid = trigger.get("id", "?")
@@ -7016,6 +7281,8 @@ class TriggerScheduler:
         }
         if restored_label:
             failure_block["claimRolledBack"] = restored_label
+        if isinstance(correlation_id, str) and correlation_id:
+            failure_block["correlationId"] = correlation_id
         content = {
             "msgtype": "m.notice",
             "body": body,
@@ -7039,7 +7306,9 @@ class TriggerScheduler:
             self._clear_in_flight(marker_id)
 
     async def _execute_inner(self, trigger: dict, ctx: dict | None,
-                             loop_sink: dict | None = None) -> None:
+                             loop_sink: dict | None = None) -> str | None:
+        """Run one triggered invocation. Returns "skipped" when the run was
+        gated off before Claude was called (preCheck, no room); None otherwise."""
         tid = trigger.get("id", "?")
 
         # Optional preCheck — gates the LLM call.
@@ -7056,7 +7325,7 @@ class TriggerScheduler:
                     f"{exit_code} — skipping LLM",
                     file=sys.stderr,
                 )
-                return
+                return "skipped"
             pre_check_output = stdout or None
 
         room_id = trigger.get("roomId") or _load_dm_room_id()
@@ -7066,7 +7335,7 @@ class TriggerScheduler:
                 f"no DM room exists yet",
                 file=sys.stderr,
             )
-            return
+            return "skipped"
 
         gh = (ctx or {}).get("github") or {}
         gh_event_id = gh.get("eventId")
@@ -7268,7 +7537,7 @@ class TriggerScheduler:
         _bump_active(+1, session)
         try:
             try:
-                await self._post_trigger_notice(trigger, ctx, room_id)
+                await self._post_trigger_notice(trigger, ctx, room_id, correlation_id)
             except Exception as exc:
                 print(
                     f"[Runner:{self._agent_id}] Could not post trigger notice for "
@@ -7367,7 +7636,8 @@ class TriggerScheduler:
                         try:
                             await self._post_trigger_failure_notice(
                                 trigger, room_id, err, permanent=permanent,
-                                restored_label=restored_label)
+                                restored_label=restored_label,
+                                correlation_id=correlation_id)
                         except Exception as exc:
                             print(
                                 f"[Runner:{self._agent_id}] Could not post "
@@ -7951,7 +8221,8 @@ async def run_dm_listener() -> None:
             if getattr(err, "user_aborted", False):
                 print(f"[Runner:{agent_id}] Session stopped by user", file=sys.stderr)
                 try:
-                    await send_formatted(room_id, "_(Execution aborted.)_")
+                    abort_event_id = await send_formatted(room_id, "_(Execution aborted.)_")
+                    _log_run_reply(room_id, correlation_id, abort_event_id)
                 except Exception as post_exc:
                     print(f"[Runner:{agent_id}] Could not post abort notice: {post_exc}",
                           file=sys.stderr)
@@ -7963,10 +8234,11 @@ async def run_dm_listener() -> None:
                 })
                 print(f"[Runner:{agent_id}] Error: {detail}", file=sys.stderr)
                 try:
-                    await send_formatted(
+                    err_event_id = await send_formatted(
                         room_id,
                         f"⚠️ **Agent error**\n\n```\n{detail[:800]}\n```",
                     )
+                    _log_run_reply(room_id, correlation_id, err_event_id)
                 except Exception:
                     pass
         except Exception as err:
@@ -7977,10 +8249,11 @@ async def run_dm_listener() -> None:
             })
             print(f"[Runner:{agent_id}] Error: {detail}", file=sys.stderr)
             try:
-                await send_formatted(
+                err_event_id = await send_formatted(
                     room_id,
                     f"⚠️ **Agent error**\n\n```\n{detail[:800]}\n```",
                 )
+                _log_run_reply(room_id, correlation_id, err_event_id)
             except Exception:
                 pass
         finally:

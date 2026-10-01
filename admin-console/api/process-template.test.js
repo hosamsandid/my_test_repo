@@ -1931,9 +1931,9 @@ test('#1006: rawTriggerError — one event per github-event trigger, legacy pass
   assert.equal(rawTriggerError(two, { ...two }), null);
   // Changing events but staying multi: rejected.
   assert.match(rawTriggerError(two, { ...two, events: ['issues.labeled', 'push'] }), /exactly ONE event/);
-  // Single event: fine; non-github types: never checked.
+  // Single event: fine; non-github types: the event rule never applies.
   assert.equal(rawTriggerError({ type: 'github-event', events: ['issues.labeled'], labelFilter: 'x' }), null);
-  assert.equal(rawTriggerError({ type: 'cron', events: ['a', 'b'] }), null);
+  assert.equal(rawTriggerError({ type: 'cron', cron: '0 9 * * *', events: ['a', 'b'] }), null);
   // Claim shape folds in (same claimError as the bundle validator).
   assert.match(
     rawTriggerError({ type: 'github-event', events: ['issues.labeled'], labelFilter: 'x', claim: { remove: 'x', add: 'wrong' } }),

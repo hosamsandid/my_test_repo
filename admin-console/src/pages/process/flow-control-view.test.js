@@ -4,17 +4,20 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { absoluteWhen } from '../../components/format-when.js';
 import {
   formatDuration,
   since,
   updatedAgo,
   itemRef,
   rowView,
+  doneTitle,
   sessionView,
   poolView,
   needsYouView,
   boardView,
   EMPTY_TEXT,
+  retentionHint,
   POOL_ACTION_TOOLTIPS,
   AUTO_REFRESH_MS,
   autoRefreshKey,
@@ -22,6 +25,14 @@ import {
   writeAutoRefresh,
   configFormRows,
   configFromForm,
+  REMOVE_CONFIRM_TEXT,
+  removeDialogTitle,
+  removedView,
+  withoutRows,
+  instanceOf,
+  chatLink,
+  CHAT_LINK_CLASS,
+  CHAT_LINK_CSS,
 } from './flow-control-view.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -31,7 +42,7 @@ const NOW = Date.parse('2026-09-29T12:00:00Z');
 const ago = (mins) => new Date(NOW - mins * 60_000).toISOString();
 
 const STAGES = [
-  { id: 'ready', label: 'Ready', roles: [] },
+  { id: 'draft', label: 'Draft', roles: [] },
   { id: 't-dev', label: 'Developer', roles: ['t-dev'] },
   { id: 't-rev', label: 'Code Reviewer', roles: ['t-rev'] },
   { id: 'done', label: 'Done', roles: [] },
@@ -99,14 +110,189 @@ test('rowView: a PR-only row has no issue ref; a done row marks every step past'
   assert.ok(pr.steps.every((s) => s.state === 'past'));
 });
 
+// ── #2643: time since completion on done rows ─────────────────────────────────
+
+const doneRow = (over = {}) => row({ stageId: 'done', stageIndex: 3, status: 'done', done: true, ...over });
+
+test('rowView: a done row shows the time since completion, in the same format as other rows (AC1)', () => {
+  const v = rowView(doneRow({ since: ago(135) }), STAGES, { now: NOW });
+  assert.equal(v.inStage, '2h 15m');
+  assert.equal(v.inStage, since(ago(135), NOW));
+});
+
+test('rowView: a PR-only done row shows the time since its merge/close (AC2)', () => {
+  const v = rowView(doneRow({ issue: null, since: ago(7) }), STAGES, { now: NOW });
+  assert.equal(v.inStage, '7m');
+});
+
+test('rowView: hovering a done row\'s value gives the absolute completion time (AC3)', () => {
+  const at = ago(135);
+  const v = rowView(doneRow({ since: at }), STAGES, { now: NOW });
+  assert.equal(v.inStageTitle, `Finished ${absoluteWhen(at)}`);
+  assert.ok(absoluteWhen(at));
+  assert.equal(doneTitle(doneRow({ since: at })), v.inStageTitle);
+});
+
+test('rowView: a done row without a usable completion time stays empty — no placeholder, no NaN (AC4)', () => {
+  for (const bad of [undefined, null, '', 'not-a-date']) {
+    const v = rowView(doneRow({ since: bad }), STAGES, { now: NOW });
+    assert.equal(v.inStage, '', `since=${bad}`);
+    assert.equal(v.inStageTitle, '', `since=${bad}`);
+  }
+});
+
+test('rowView: rows that are not done keep their value and get no tooltip (AC5)', () => {
+  const v = rowView(row(), STAGES, { now: NOW });
+  assert.equal(v.inStage, '1h 15m');
+  assert.equal(v.inStageTitle, '');
+  assert.equal(doneTitle(null), '');
+});
+
+test('rowView: done edge cases — just inside retention, and a completion slightly in the future', () => {
+  assert.equal(rowView(doneRow({ since: ago(23 * 60 + 59) }), STAGES, { now: NOW }).inStage, '23h 59m');
+  const future = rowView(doneRow({ since: ago(-2) }), STAGES, { now: NOW });
+  assert.equal(future.inStage, 'under 1m');
+});
+
+test('rowView: the value follows the injected now, so each refresh advances it (AC6)', () => {
+  const r = doneRow({ since: ago(10) });
+  assert.equal(rowView(r, STAGES, { now: NOW }).inStage, '10m');
+  assert.equal(rowView(r, STAGES, { now: NOW + 30 * 60_000 }).inStage, '40m');
+});
+
+test('BoardRow renders In stage for done rows too, with the view\'s tooltip (#651 source guard)', () => {
+  const jsx = fs.readFileSync(path.join(here, '..', 'FlowControl.jsx'), 'utf8');
+  assert.doesNotMatch(jsx, /row\.done \? '' : row\.inStage/);
+  assert.match(jsx, /title=\{row\.inStageTitle\}/);
+});
+
 test('rowView: the step list is exactly the team\'s own stages — no fixed vocabulary', () => {
   const kitchen = [
-    { id: 'ready', label: 'Ready' }, { id: 'k-chef', label: 'Chef' },
+    { id: 'draft', label: 'Draft' }, { id: 'k-chef', label: 'Chef' },
     { id: 'k-taster', label: 'Taster' }, { id: 'done', label: 'Done' },
   ];
   const v = rowView(row({ stageId: 'k-chef', stageIndex: undefined }), kitchen, { now: NOW });
-  assert.deepEqual(v.steps.map((s) => s.label), ['Ready', 'Chef', 'Taster', 'Done']);
+  assert.deepEqual(v.steps.map((s) => s.label), ['Draft', 'Chef', 'Taster', 'Done']);
   assert.equal(v.stageLabel, 'Chef');
+});
+
+// ── #2637: Draft and "Remove from board" ─────────────────────────────────────
+
+test('rowView: an unreleased item reads Draft · awaiting release — never "released" (AC1, AC2)', () => {
+  const v = rowView(row({ stageId: 'draft', stageIndex: 0, status: 'draft', removable: true }), STAGES, { now: NOW });
+  assert.equal(v.stageLabel, 'Draft');
+  assert.equal(v.statusText, 'awaiting release');
+  assert.deepEqual(v.steps.map((s) => [s.label, s.state]).slice(0, 2), [['Draft', 'current'], ['Developer', 'future']]);
+  assert.equal(v.removable, true);
+  for (const status of ['draft', 'ready', 'working', 'queued', 'idle', 'done']) {
+    assert.doesNotMatch(rowView(row({ status }), STAGES).statusText, /released/);
+  }
+});
+
+test('rowView: a released item is up next at its role and offers no removal (AC4, AC5)', () => {
+  const v = rowView(row({ stageId: 't-dev', stageIndex: 1, status: 'queued', removable: false }), STAGES, { now: NOW });
+  assert.equal(v.stageLabel, 'Developer');
+  assert.equal(v.statusText, 'up next');
+  assert.equal(v.removable, false);
+  assert.equal(rowView(row(), STAGES).removable, false); // absent → not offered
+});
+
+test('remove confirmation says only the board entry goes and the ticket stays unchanged (AC6)', () => {
+  assert.match(REMOVE_CONFIRM_TEXT, /only the board entry is removed/i);
+  assert.match(REMOVE_CONFIRM_TEXT, /GitHub ticket stays unchanged/);
+  assert.equal(removeDialogTitle('#2563'), 'Remove #2563 from the board?');
+  assert.equal(removeDialogTitle(''), 'Remove this item from the board?');
+  const topic = fs.readFileSync(HELP_TOPIC, 'utf8');
+  assert.match(topic, /only the board entry is\s+removed — the GitHub ticket stays unchanged/);
+});
+
+test('withoutRows: a removed row leaves the board (and Needs you) at once, before the next snapshot (AC6)', () => {
+  const data = { rows: [row({ id: 'a' }), row({ id: 'b' })], needsHuman: [{ id: 'a' }, { id: 'c' }], stages: STAGES };
+  const next = withoutRows(data, ['a']);
+  assert.deepEqual(next.rows.map((r) => r.id), ['b']);
+  assert.deepEqual(next.needsHuman.map((n) => n.id), ['c']);
+  assert.equal(next.stages, STAGES);
+  assert.equal(withoutRows(null, ['a']), null);
+});
+
+test('boardView: removed items are counted and listed for Restore (AC9)', () => {
+  const v = boardView({
+    repos: ['o/r'], stages: STAGES, rows: [row()],
+    removed: [
+      { id: 'o/r#2563', removalId: 'o/r#2563', title: 'Concept', url: 'u', issue: { repo: 'o/r', number: 2563 }, prs: [], removedAt: ago(90) },
+      { id: 'o/r#91', title: 'PR only', issue: null, prs: [{ repo: 'o/r', number: 91 }], removedAt: ago(5) },
+    ],
+  }, NOW);
+  assert.equal(v.removedLabel, 'Removed (2)');
+  assert.deepEqual(v.removed.map((r) => [r.ref, r.removalId, r.removedAgo]), [['#2563', 'o/r#2563', '1h 30m'], ['PR #91', 'o/r#91', '5m']]);
+  assert.deepEqual(boardView({}, NOW).removed, []);
+  assert.equal(removedView({ id: 'x', removedAt: ago(1) }, { now: NOW }).title, '(untitled)');
+});
+
+// ── jump to the working agent's chat (#2723) ───────────────────────────────
+
+test('chatLink: in-console href to the exact agent, named for the role and instance (AC1, AC2, AC6)', () => {
+  assert.deepEqual(chatLink('t-dev-i2716', 'Developer'), { to: '/chats/t-dev-i2716', label: 'Open chat with Developer #2716' });
+  assert.deepEqual(chatLink('t-rev', 'Code Reviewer'), { to: '/chats/t-rev', label: 'Open chat with Code Reviewer' });
+  assert.equal(chatLink('a b/c', '').to, '/chats/a%20b%2Fc');
+  assert.equal(chatLink('a b/c', '').label, 'Open chat with a b/c');
+  assert.equal(chatLink('t-dev-i9', 'Developer', null).label, 'Open chat with Developer');
+  for (const none of [null, undefined, '', 42]) assert.equal(chatLink(none, 'Developer'), null);
+});
+
+test('instanceOf: reads the pool item from a <template>-i<item> id', () => {
+  assert.equal(instanceOf('team-developer-i2716'), 2716);
+  assert.equal(instanceOf('team-developer'), null);
+  assert.equal(instanceOf(null), null);
+});
+
+test('rowView: a working row with a running agent links to that pool instance, not the template (AC1, AC2)', () => {
+  const v = rowView(row({ stageId: 't-dev', stageIndex: 1, roleId: 't-dev', roleLabel: 'Developer', agentId: 't-dev-i2716' }), STAGES, { now: NOW });
+  assert.deepEqual(v.chat, { to: '/chats/t-dev-i2716', label: 'Open chat with Developer #2716' });
+});
+
+test('rowView: without a roleLabel the stage label names the link target', () => {
+  assert.equal(rowView(row(), STAGES).chat.label, 'Open chat with Code Reviewer');
+});
+
+test('rowView: working only by a claim label (no agentId) is not a link (AC4)', () => {
+  assert.equal(rowView(row({ agentId: null }), STAGES).chat, null);
+  assert.equal(rowView(row({ agentId: undefined }), STAGES).chat, null);
+});
+
+test('rowView: rows with any other status are not links, even with an agentId (AC5)', () => {
+  for (const status of ['queued', 'idle', 'draft', 'done']) {
+    assert.equal(rowView(row({ status, agentId: 't-dev-i7' }), STAGES).chat, null, status);
+  }
+});
+
+test('sessionView: every running session links to its own agent (AC3)', () => {
+  const pooled = sessionView({ id: 's1', agentId: 't-dev-i7', roleLabel: 'Developer', instance: 7, startedAt: ago(1) });
+  assert.deepEqual(pooled.chat, { to: '/chats/t-dev-i7', label: 'Open chat with Developer #7' });
+  const plain = sessionView({ id: 's2', agentId: 't-rev', roleId: 't-rev', instance: null, startedAt: ago(1) });
+  assert.deepEqual(plain.chat, { to: '/chats/t-rev', label: 'Open chat with t-rev' });
+  // The server's instance number is authoritative — never re-derived from the id.
+  assert.equal(sessionView({ agentId: 'x-i9', roleLabel: 'X', instance: null }).chat.label, 'Open chat with X');
+  const two = boardView({ sessions: [
+    { id: 'a', agentId: 't-dev-i7', roleLabel: 'Developer', instance: 7 },
+    { id: 'b', agentId: 't-dev-i8', roleLabel: 'Developer', instance: 8 },
+  ] }).sessions.map((s) => s.chat.to);
+  assert.deepEqual(two, ['/chats/t-dev-i7', '/chats/t-dev-i8']);
+});
+
+test('chat link CSS gives hover and keyboard-focus affordances', () => {
+  assert.match(CHAT_LINK_CSS, new RegExp(`\\.${CHAT_LINK_CLASS}:hover \\{[^}]*text-decoration: underline`));
+  assert.match(CHAT_LINK_CSS, new RegExp(`\\.${CHAT_LINK_CLASS}:focus-visible \\{[^}]*outline`));
+});
+
+test('FlowControl wires the chat links: router Link, stage cell and Working-now line (#651 source guard)', () => {
+  const jsx = fs.readFileSync(path.join(here, '..', 'FlowControl.jsx'), 'utf8');
+  assert.match(jsx, /import \{ Link as RouterLink \} from 'react-router';/);
+  assert.match(jsx, /<style>\{CHAT_LINK_CSS\}<\/style>/);
+  assert.match(jsx, /if \(!chat\) return children;/);
+  assert.match(jsx, /<RouterLink to=\{chat\.to\} title=\{chat\.label\} aria-label=\{chat\.label\} className=\{CHAT_LINK_CLASS\}/);
+  assert.match(jsx, /<ChatLink chat=\{row\.chat\}>\s*<div[^>]*>\{row\.stageLabel\}<\/div>\s*<div[^>]*>\{row\.statusText\}<\/div>\s*<\/ChatLink>/);
+  assert.match(jsx, /<ChatLink chat=\{s\.chat\}>\s*\{s\.role\}/);
 });
 
 // ── area ① (AC7, AC13) ─────────────────────────────────────────────────────
@@ -192,7 +378,7 @@ test('boardView: stale snapshot keeps its rows and surfaces the warning', () => 
     stages: STAGES, rows: [row()], needsHuman: [{ id: 'o/r#7', reason: 'checks failing', since: ago(5), issue: { repo: 'o/r', number: 7 } }],
     repos: ['o/r'], generatedAt: ago(10), stale: true, warning: 'GitHub is unreachable — showing the last known state from X.',
   }, NOW);
-  assert.equal(v.rows.length, 1);
+  assert.equal(v.activeRows.length, 1);
   assert.equal(v.stale, true);
   assert.match(v.warning, /unreachable/);
   assert.equal(v.needsYou.length, 1);
@@ -200,7 +386,7 @@ test('boardView: stale snapshot keeps its rows and surfaces the warning', () => 
 
 test('boardView: qualifies refs only on a multi-repo board; flags a team without a repository', () => {
   const multi = boardView({ stages: STAGES, rows: [row()], repos: ['o/r', 'o/s'], generatedAt: ago(0) }, NOW);
-  assert.equal(multi.rows[0].ref, 'o/r#7');
+  assert.equal(multi.activeRows[0].ref, 'o/r#7');
   const none = boardView({ stages: STAGES, rows: [], repos: [], generatedAt: ago(0) }, NOW);
   assert.equal(none.noRepos, true);
   const maint = boardView({ maintenance: true, repos: [], generatedAt: ago(0) }, NOW);
@@ -213,6 +399,50 @@ test('boardView: none of the removed surfaces are produced (AC10)', () => {
   for (const gone of ['summary', 'epics', 'rollups', 'backlog', 'openPrs', 'lanes']) {
     assert.ok(!(gone in v), `"${gone}" must not come back`);
   }
+});
+
+// ── #2607: "Recently completed" is its own section ─────────────────────────
+
+const boardOf = (rows, extra = {}) => boardView({ stages: STAGES, rows, repos: ['o/r'], generatedAt: ago(0), ...extra }, NOW);
+
+test('boardView: an all-active board has no done rows and is not empty (#2607)', () => {
+  const v = boardOf([row({ id: 'a' }), row({ id: 'b' })]);
+  assert.deepEqual(v.activeRows.map((r) => r.id), ['a', 'b']);
+  assert.deepEqual(v.doneRows, []);
+  assert.equal(v.empty, false);
+});
+
+test('boardView: an all-done board leaves "In progress" empty (#2607)', () => {
+  const v = boardOf([row({ id: 'a', done: true, status: 'done' }), row({ id: 'b', done: true, status: 'done' })]);
+  assert.deepEqual(v.activeRows, []);
+  assert.deepEqual(v.doneRows.map((r) => r.id), ['a', 'b']);
+  assert.equal(v.empty, true);
+  assert.equal(v.emptyText, 'Nothing in progress');
+});
+
+test('boardView: a mixed board puts each row in exactly one section, order kept (#2607)', () => {
+  const v = boardOf([row({ id: 'a' }), row({ id: 'b', done: true }), row({ id: 'c' }), row({ id: 'd', done: true })]);
+  assert.deepEqual(v.activeRows.map((r) => r.id), ['a', 'c']);
+  assert.deepEqual(v.doneRows.map((r) => r.id), ['b', 'd']);
+  assert.ok(v.activeRows.every((r) => !r.done));
+  assert.ok(v.doneRows.every((r) => r.done));
+  assert.ok(!('rows' in v), 'no mixed row list');
+});
+
+test('boardView: a stale snapshot still sorts rows by their done flag (#2607)', () => {
+  const v = boardOf([row({ id: 'a' }), row({ id: 'b', done: true })], { stale: true });
+  assert.deepEqual(v.activeRows.map((r) => r.id), ['a']);
+  assert.deepEqual(v.doneRows.map((r) => r.id), ['b']);
+});
+
+test('retentionHint: states the retention window, with a fallback (#2607)', () => {
+  assert.equal(retentionHint(24), 'Kept for 24 h · configurable in columns settings');
+  assert.equal(retentionHint(1.5), 'Kept for 1.5 h · configurable in columns settings');
+  for (const none of [0, null, undefined, 'x', -3]) {
+    assert.equal(retentionHint(none), 'Kept for a limited time · configurable in columns settings');
+  }
+  assert.equal(boardOf([], { config: { doneRetentionHours: 48 } }).retentionHint, 'Kept for 48 h · configurable in columns settings');
+  assert.equal(boardOf([], { doneRetentionHours: 12 }).retentionHint, 'Kept for 12 h · configurable in columns settings');
 });
 
 // ── AC12: auto-refresh, remembered per user ────────────────────────────────

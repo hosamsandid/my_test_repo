@@ -13,6 +13,7 @@ import { FLOWS_HELP_SECTIONS } from './process/flows-help-sections';
 import RowContextMenu from '../components/RowContextMenu.jsx';
 import { buildFlowsRailMenu, intentForMenuKey, parseFlowIntent } from './process/flows-rail-menu.js';
 import { downloadBundle } from './process/bundle-download.js';
+import { canSubmitRename, nextUntitledName, BLANK_RENAME_HINT } from './process/draft-names.js';
 import SidePanel from '../components/SidePanel';
 import { useHelpSubject } from '../context/HelperChatContext';
 import { OVERLAY_DRAFT_SHARE } from '../context/page-help-view.js';
@@ -592,7 +593,7 @@ export default function Briefings() {
 
   async function newProcess() {
     try {
-      const d = await apiCall('POST', '/api/process/drafts', { name: 'Untitled flow' });
+      const d = await apiCall('POST', '/api/process/drafts', { name: nextUntitledName(drafts) });
       refetchDrafts();
       setSearchParams({ proc: `draft:${d.id}` });
     } catch { /* surfaced elsewhere; keep the list usable */ }
@@ -603,7 +604,7 @@ export default function Briefings() {
   // path to a first flow. The first generation also proposes the draft's name.
   async function describeFlow() {
     try {
-      const d = await apiCall('POST', '/api/process/drafts', { name: 'Untitled flow' });
+      const d = await apiCall('POST', '/api/process/drafts', { name: nextUntitledName(drafts) });
       refetchDrafts();
       persistLastSelected('proc', `draft:${d.id}`);
       setSearchParams({ proc: `draft:${d.id}`, copilot: '1' });
@@ -696,7 +697,7 @@ export default function Briefings() {
     // dialog's confirm button is, so key-repeat would otherwise fork the rename:
     // two GET+PUT pairs interleave, the second re-derives an id that is now
     // taken and gets bumped to `<name>-2`, leaving two drafts with one name.
-    if (!d || !name || renameBusy) return;
+    if (!d || !canSubmitRename(name) || renameBusy) return;
     if (name === d.name) { setRenameTarget(null); return; }
     setRenameBusy(true); setRenameError(null);
     try {
@@ -1165,6 +1166,8 @@ export default function Briefings() {
         variant="info"
         confirmLabel={renameBusy ? 'Renaming…' : 'Rename'}
         busy={renameBusy}
+        // A blank name is refused up front (#2662) rather than silently ignored.
+        confirmDisabled={!canSubmitRename(renameValue)}
         onConfirm={confirmRenameDraft}
         onCancel={() => setRenameTarget(null)}
         message={
@@ -1176,7 +1179,7 @@ export default function Briefings() {
               ref={renameInputRef}
               value={renameValue}
               onChange={e => setRenameValue(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter' && renameValue.trim()) confirmRenameDraft(); }}
+              onKeyDown={e => { if (e.key === 'Enter' && canSubmitRename(renameValue)) confirmRenameDraft(); }}
               style={{
                 width: '100%', boxSizing: 'border-box', padding: '6px 10px', fontFamily: 'inherit',
                 fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)',
@@ -1184,6 +1187,11 @@ export default function Briefings() {
                 borderRadius: 'var(--eb-radius-md)',
               }}
             />
+            {!canSubmitRename(renameValue) && (
+              <p style={{ margin: 'var(--eb-space-2) 0 0', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
+                {BLANK_RENAME_HINT}
+              </p>
+            )}
             {renameError && (
               <p style={{ margin: 'var(--eb-space-2) 0 0', color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>
                 {renameError}

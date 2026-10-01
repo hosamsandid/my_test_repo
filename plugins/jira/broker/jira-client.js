@@ -713,6 +713,19 @@ async function whoAmI(cred, { env } = {}) {
   };
 }
 
+// Whether a Jira site answers at all, without a credential (#2640): Jira Cloud's
+// `GET /serverInfo` is anonymous, so a team with only a site (no service
+// account) can still learn that the site is right.
+async function serverInfo(siteUrl, { env } = {}) {
+  const base = apiBaseFor(siteUrl, env);
+  const info = await requestJson({ base, path: '/rest/api/3/serverInfo' });
+  return {
+    baseUrl: info.baseUrl || base,
+    serverTitle: info.serverTitle || null,
+    deploymentType: info.deploymentType || null,
+  };
+}
+
 // The projects the credential's user can see (CLI `projects`; spike diagnostics).
 // Paginated `/rest/api/3/project/search`.
 async function listProjects(cred, { env } = {}) {
@@ -1989,6 +2002,7 @@ module.exports = {
   mapJiraError,
   apiBaseFor,
   whoAmI,
+  serverInfo,
   searchProjectIssues,
   fetchRecentComments,
   listProjectIssues,

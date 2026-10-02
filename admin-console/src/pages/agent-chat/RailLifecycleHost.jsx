@@ -18,6 +18,7 @@ import {
   renderDeleteMessage,
 } from '../agent-lifecycle/AgentLifecycleDialogs.jsx';
 import { deleteDialogCopy, cascadeResidueNotice } from '../agent-lifecycle/agent-lifecycle-menu.js';
+import { importSuccessNotice } from '../agent-lifecycle/import-agent-view.js';
 import RowContextMenu from '../../components/RowContextMenu.jsx';
 import {
   deleteTargetFor,
@@ -380,10 +381,11 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
     }
   }
 
-  async function submitImport({ newId, parentTeamId }) {
+  async function submitImport({ newId, displayName, parentTeamId }) {
     const formData = new FormData();
     formData.append('file', importFile);
     if (newId) formData.append('newId', newId);
+    if (displayName) formData.append('displayName', displayName);
     if (parentTeamId) formData.append('parentTeamId', parentTeamId);
     const resp = await fetch('/api/agents/import', { method: 'POST', body: formData });
     const data = await resp.json().catch(() => ({}));
@@ -393,10 +395,7 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
       // filter, which the header button that started this knows nothing about
       // (#1956 AC4), so say so rather than let it land out of sight.
       const hidden = importedAgentFilterNote(listFilter, data.agentId, data.parentTeamId);
-      setNotice(
-        `Agent '${data.agentId}' imported${data.parentTeamId ? ` into team '${data.parentTeamId}'` : ''} and started.`
-        + (hidden || ''),
-      );
+      setNotice(importSuccessNotice(data) + (hidden || ''));
       setImportFile(null);
       closePanel();
       refresh();

@@ -290,7 +290,10 @@ share one session.
 (top right) hands over to the create launcher, where *Configure an agent
 manually* — under **Advanced options** — opens the direct form; **Import Agent**
 next to it takes an exported agent ZIP and asks for an id and a team before it
-lands. The imported agent joins the list
+lands — leave the team on *Its own team* and the agent becomes a team of one,
+like any newly created agent. If the exported id is taken, the dialog suggests
+a free one and a display name ("<name> (Copy)") so the copy can be told apart
+from its source. The imported agent starts right away and joins the list
 without a reload — but if the list filter is narrowed at the time, the
 confirmation says so rather than letting it arrive out of sight. Both buttons
 are greyed out with the reason when you may not create agents.

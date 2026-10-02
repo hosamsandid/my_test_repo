@@ -1754,6 +1754,10 @@ it. The row now states the tier, edits it through the shared
 `CredentialOwnership` control (no second copy of the tier semantics) and shows
 the resulting tier before the save. Agents keep the plain selector: an agent has
 no tier, and an Agent Team still moves as one unit.
+*Superseded by #2695:* agent rows are now read-only (an agent's boundary is
+its Agent Team, which the selector could neither show nor change), and the
+environment owner picker lists Agent Teams instead of access scopes; the server
+accepts an Agent Team id as an environment or MCP-server owner.
 
 **A7.4 — A stated capability removal: access scopes lose their console surface.**
 §9.1 retires the team table with the page and names no replacement, so `PUT` and
@@ -1762,7 +1766,7 @@ neither created (#2081, 410) nor renamed nor deleted from the console. That is
 deliberate rather than an oversight: A3.3 retires `teams/index.json` outright,
 and building a management surface for a record on its way out would be work
 undone by the next phase. The scope survives only as the stamp the Resources tab
-assigns. **This is the thing to reverse first if it bites** — the API verbs are
+assigns (since #2695 not even that: the tab offers Agent Teams only). **This is the thing to reverse first if it bites** — the API verbs are
 untouched, so a surface can be restored without a server change.
 
 **A7.5 — Two `seeAlso` links were dropped rather than re-pointed.** §9.3 allows

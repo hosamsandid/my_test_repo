@@ -471,6 +471,25 @@ work. A context folder is **read-only** unless it was mounted read-write; a
 read-write one also offers upload, delete and drag-to-move, and a read-only one
 simply offers no write action at all.
 
+**HTML files** (`.html`, `.htm`) open as source code. The **Rendered** toggle
+shows the page itself, but it asks first, **every time**: the page was written
+by an agent and may contain harmful content, so nothing runs until you click
+**Show preview**. The dialog also has an **Also load external resources**
+checkbox. It starts unticked and only applies to this one opening. Unticked,
+inline styles, scripts and embedded (`data:`) images work, but external
+scripts, stylesheets, fonts and images do not load, and scripts cannot fetch or
+send anything. Ticked, it may load from any
+host. Either way the page runs isolated from Agent Studio: it cannot read your
+session, the console or other agents' data. A banner above the preview says
+so, and also says whether external resources are on. Do not enter passwords
+or credentials into a preview. Relative links to other workspace files (images,
+stylesheets) do not load. A page that navigates away (a link or a redirect)
+closes the preview back to source, but the address it navigated to has
+already been requested, even with external resources off. A page stuck in an endless loop can freeze
+the tab until you reload. Files above **5 MB** offer **Download** instead of a
+preview. The same preview is available in the expanded viewer and when you
+open a file referenced in chat.
+
 ### Repositories: inherited, and this agent's own
 
 The Workspace toolbar's **repositories** button (and the same panel in

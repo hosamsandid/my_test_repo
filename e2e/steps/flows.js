@@ -686,6 +686,9 @@ async function wireOutcome(ctx, { from, to, outcome, label }) {
   const d = page.getByRole('dialog', { name: 'Wire a label hand-off' });
   await expect(d).toBeVisible();
   if (label !== undefined) await d.getByPlaceholder(/dispatch, stage/).fill(label);
+  // #2665: the default wake instruction carries a `<Describe …>` placeholder the
+  // save now refuses; replace it with a concrete instruction, as a user would.
+  await d.locator('textarea').first().fill(`Pick up the hand-off from ${from} and do the work.`);
   const persisted = page.waitForResponse(
     (r) => /\/api\/process\/drafts\/[^/]+$/.test(r.url())
       && r.request().method() === 'PUT'
@@ -1212,6 +1215,9 @@ async function wireLabelHandoff(ctx, { from, to, label }) {
   const d = page.getByRole('dialog', { name: 'Wire a label hand-off' });
   await expect(d).toBeVisible();
   await d.locator('input[list]').first().fill(label);
+  // #2665: replace the default `<Describe …>` placeholder wake instruction,
+  // which the save now refuses, with a concrete one.
+  await d.locator('textarea').first().fill(`Pick up the hand-off from ${from} and do the work.`);
   const persisted = page.waitForResponse((r) => r.request().method() === 'PUT' && r.ok());
   await d.getByRole('button', { name: 'Create hand-off' }).click();
   await persisted;
@@ -1278,6 +1284,9 @@ async function wireGithubSource(ctx, { to, event, labelFilter }) {
   if (labelFilter) {
     await d.getByPlaceholder(/e\.g\. priorisiert/).fill(labelFilter);
   }
+  // #2665: replace the default `<Describe …>` placeholder wake instruction,
+  // which the save now refuses, with a concrete one.
+  await d.locator('textarea').first().fill(`Handle the ${event} event and act on it.`);
   const persisted = page.waitForResponse((r) => r.request().method() === 'PUT' && r.ok());
   await d.getByRole('button', { name: 'Create trigger' }).click();
   await persisted;
@@ -1304,6 +1313,9 @@ async function wireWebhookSource(ctx, { to, description }) {
   }
   await expect(d).toBeVisible();
   await d.getByPlaceholder('e.g. CI pipeline finished').fill(description);
+  // #2665: replace the default `<Describe …>` placeholder wake instruction,
+  // which the save now refuses, with a concrete one.
+  await d.locator('textarea').first().fill(`Handle the external call (${description}).`);
   const persisted = page.waitForResponse((r) => r.request().method() === 'PUT' && r.ok());
   await d.getByRole('button', { name: 'Create webhook' }).click();
   await persisted;

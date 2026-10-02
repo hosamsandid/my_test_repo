@@ -107,7 +107,7 @@ Request body:
 
 **State provider:** `src/context/HelperChatContext.jsx`
 - Mounted in `index.jsx` above `BrowserRouter` — same position as `TranscriptionSessionProvider`
-- Holds: `isOpen`, `toggle()`, `messages[]`, `sendMessage()`, streaming state
+- Holds: `isOpen`, `toggle()`, `messages[]`, `sendMessage()`, `stopMessage()` (aborts the in-flight request; #2700), streaming state
 - `sendMessage` calls `POST /api/helper/chat` via `useApi` + `assistHeaders()` from `src/context/assist-transport.js`
 - Injects `currentRoute` from `useLocation()` (react-router)
 

@@ -1078,13 +1078,29 @@ function readJsonFile(filePath, fallback = null) {
   }
 }
 
+// Does `id` name a legacy human Team (access scope) in teams/index.json?
+function legacyTeamExists(id) {
+  const teams = readJsonFile(TEAMS_INDEX, []);
+  return Array.isArray(teams) && teams.some(t => t.id === id);
+}
+
+// The owner-team check for a TIERED CONFIGURATION resource (environment / MCP
+// server, #2695). Since #2078 a membership's `teamId` is an Agent Team id, so an
+// Agent Team is the referent that makes a team-tier environment reachable —
+// the Administration → Resources picker offers Agent Teams. A legacy access
+// scope is still accepted so a record already owned by one stays savable.
+function tieredOwnerTeamExists(id) {
+  return agentTeamExists(id) || legacyTeamExists(id);
+}
+
 // Resolve the owning (human) Team for a newly created resource (#299). An
 // explicit id must reference an existing team; absence falls back to the
-// default team. Throws a 400-tagged error for an unknown team.
-function resolveOwnerTeamId(teamId) {
+// default team. Throws a 400-tagged error for an unknown team. `teamExists`
+// defaults to the legacy access-scope check; tiered resources pass
+// `tieredOwnerTeamExists` (#2695).
+function resolveOwnerTeamId(teamId, teamExists = legacyTeamExists) {
   if (!teamId) return DEFAULT_TEAM_ID;
-  const teams = readJsonFile(TEAMS_INDEX, []);
-  if (!Array.isArray(teams) || !teams.some(t => t.id === teamId)) {
+  if (!teamExists(teamId)) {
     const err = new Error(`Owning team '${teamId}' not found`);
     err.status = 400;
     throw err;
@@ -1102,7 +1118,7 @@ function resolveOwnerTeamId(teamId) {
 // body that omits it is filled in, a body that names a DIFFERENT owner is
 // rejected 403 (an agent/human may never register a credential under a foreign
 // identity, edge case + AC2). The owner is validated against a known user record.
-function resolveCredentialOwnership(body, actingUserId) {
+function resolveCredentialOwnership(body, actingUserId, { teamExists = legacyTeamExists } = {}) {
   const b = body || {};
   if (b.scope === 'personal') {
     if (!actingUserId) {
@@ -1121,19 +1137,16 @@ function resolveCredentialOwnership(body, actingUserId) {
   if (reqScope === 'system') {
     const raw = Array.isArray(b.assignedTeamIds) ? b.assignedTeamIds : [];
     const ids = [...new Set(raw.map(String))];
-    if (ids.length) {
-      const teams = readJsonFile(TEAMS_INDEX, []);
-      for (const id of ids) {
-        if (!Array.isArray(teams) || !teams.some(t => t.id === id)) {
-          const err = new Error(`Assigned team '${id}' not found`);
-          err.status = 400;
-          throw err;
-        }
+    for (const id of ids) {
+      if (!teamExists(id)) {
+        const err = new Error(`Assigned team '${id}' not found`);
+        err.status = 400;
+        throw err;
       }
     }
     return { scope: 'system', teamId: null, assignedTeamIds: ids };
   }
-  const teamId = resolveOwnerTeamId(b.teamId);
+  const teamId = resolveOwnerTeamId(b.teamId, teamExists);
   return { scope: 'team', teamId, assignedTeamIds: [] };
 }
 
@@ -1180,8 +1193,8 @@ function resolveTieredOwnership(body) {
   }
   // No `actingUserId`: without it `resolveCredentialOwnership` refuses a
   // personal request anyway, so the explicit 400 above is the message and this
-  // is the backstop.
-  return resolveCredentialOwnership(b);
+  // is the backstop. Owner/assigned teams may be Agent Teams (#2695).
+  return resolveCredentialOwnership(b, undefined, { teamExists: tieredOwnerTeamExists });
 }
 
 // Apply a rename/reassign patch to a credential entry (#798), enforcing the

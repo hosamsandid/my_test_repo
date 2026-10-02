@@ -481,7 +481,8 @@ session, the console or other agents' data. A banner above the preview says
 so, and also says whether external resources are on. Do not enter passwords
 or credentials into a preview. Relative links to other workspace files (images,
 stylesheets) do not load. A page that navigates away (a link or a redirect)
-closes the preview back to source. A page stuck in an endless loop can freeze
+closes the preview back to source, but the address it navigated to has
+already been requested, even with external resources off. A page stuck in an endless loop can freeze
 the tab until you reload. Files above **5 MB** offer **Download** instead of a
 preview. The same preview is available in the expanded viewer and when you
 open a file referenced in chat.

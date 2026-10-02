@@ -204,6 +204,16 @@ test('wasteSignalsFromEventLog counts dropped/digest outcomes in window', () => 
   assert.deepEqual(w, { throttleDrops: 1, digestFolds: 2 });
 });
 
+test('#2693: wasteSignalsFromEventLog counts a delivered+digest outcome (the poller\'s burst shape) as a digest fold', () => {
+  const NOW = Date.parse('2026-08-03T12:00:00Z');
+  const entries = [
+    { ts: '2026-08-03T11:00:00.000Z', outcomes: [
+      { status: 'delivered', digest: true }, { status: 'delivered', digest: false }, { status: 'reaped', reason: null },
+    ] },
+  ];
+  assert.deepEqual(wasteSignalsFromEventLog(entries, NOW - 3600000, NOW), { throttleDrops: 0, digestFolds: 1 });
+});
+
 test('wasteSignalsFromEventLog scopes to the team agents when given a set', () => {
   const NOW = Date.parse('2026-08-03T12:00:00Z');
   const fromMs = NOW - 7 * 24 * 3600000;

@@ -20,9 +20,11 @@ export function buildTriggerCorrelationId(triggerId, eventId) {
 
 // Only `delivered` outcomes actually woke an agent and ran a session, so only
 // they are clickable (AC1/AC2). A missing triggerId means the correlationId
-// can't be reconstructed, so such an outcome is not linkable either.
+// can't be reconstructed, so such an outcome is not linkable either. A burst
+// digest is recorded as `delivered` + `digest: true` (#2693) but posts one
+// summary wake, not a session per event, so it is not linkable.
 export function isSessionOutcome(outcome) {
-  return !!(outcome && outcome.status === 'delivered' && outcome.triggerId);
+  return !!(outcome && outcome.status === 'delivered' && outcome.digest !== true && outcome.triggerId);
 }
 
 // Match against the active-sessions list: each active session carries a single

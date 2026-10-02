@@ -102,3 +102,8 @@ test('sessionLinkTarget: held / digest / dropped outcomes are not linkable (AC6)
   assert.equal(sessionLinkTarget(null), null);
   assert.equal(reapedInstanceNotice({ kind: 'agent', agentId: 'x' }), null);
 });
+
+test('#2693: a burst digest (delivered + digest:true) is not linkable to a session', () => {
+  assert.equal(isSessionOutcome({ status: 'delivered', digest: true, triggerId: 't1' }), false);
+  assert.equal(isSessionOutcome({ status: 'delivered', digest: false, triggerId: 't1' }), true);
+});

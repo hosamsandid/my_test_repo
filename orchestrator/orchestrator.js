@@ -108,7 +108,7 @@ const { resolveAgentTeam } = require("./agent-team");
 const membershipSweep = require("./membership-sweep");
 const ownershipMigration = require("./ownership-migration");
 const gitPanelOps = require("./git-panel-ops");
-const { resolveCloneTarget } = require("./clone-target");
+const { resolveCloneTarget, teamOfOneIdConflict } = require("./clone-target");
 const { assessConversionEligibility, planTeamConversion, planTeamOfOneCreation } = require("./team-conversion");
 const teamOfOneMigration = require("./team-of-one-migration");
 const pushAttribution = require("./push-attribution");
@@ -14876,14 +14876,40 @@ class Orchestrator {
   }
 
   // ===========================================================
+  // Clone / import without a target team → a team of one (#2684)
+  // ===========================================================
+  // Clone and Import write their config directly rather than going through
+  // `createTeamOfOneAgent`, so a "no team" target used to land as a bare
+  // `role: 'agent'` — which the rail never lists (#2234), leaving the agent
+  // with no row and no context menu. Every created agent is a team of one
+  // (#2229/#2231), so these two paths fold the freshly written standalone
+  // config into one with the in-place conversion (#2052) before its first
+  // start: same derived `<id>-team`, same member shape, nothing duplicated.
+  //
+  // Called before `startAgentProcess`, so the conversion's reseed/respawn are
+  // no-ops and the first container already sees the member's prompt. A failed
+  // fold is reported, not fatal: the conversion is all-or-nothing (AC9 of
+  // #2052), so the agent is left exactly as the pre-#2684 standalone shape,
+  // which the team-of-one migration sweep can still bring into line.
+  async _foldIntoTeamOfOne(id) {
+    try {
+      const result = await this.convertAgentToTeam(id, { force: true });
+      return { teamId: result.teamId, warnings: result.warnings || [] };
+    } catch (err) {
+      console.warn(`[Orchestrator] ${id}: could not fold into a team of one: ${err.message}`);
+      return { teamId: null, warnings: [`could not create a team of one: ${err.message}`] };
+    }
+  }
+
+  // ===========================================================
   // Agent cloning
   // ===========================================================
   // opts:
   //   - parentTeamId — when set, the clone is grafted into an existing team as
   //                    a `team-member` and inherits the team's environment
-  //                    (same resolution importAgent() uses). Absent → cloned
-  //                    as a standalone `agent`, even if the source itself was
-  //                    a team-member of some other team.
+  //                    (same resolution importAgent() uses). Absent → the
+  //                    clone becomes its own team of one (#2684), even if the
+  //                    source itself was a team-member of some other team.
   async cloneAgent(sourceId, newId, newDisplayName, opts = {}) {
     const sourceCfg = loadAgentConfig(sourceId);
     if (!sourceCfg) throw new Error(`Source agent '${sourceId}' not found`);
@@ -14894,6 +14920,8 @@ class Orchestrator {
 
     const teamCfg = opts.parentTeamId ? loadAgentConfig(opts.parentTeamId) : null;
     const { role, parentTeamId, environmentId } = resolveCloneTarget(sourceCfg, opts, teamCfg);
+    const teamClash = !parentTeamId && teamOfOneIdConflict(newId, isAgentIdTaken);
+    if (teamClash) throw new Error(`Team '${teamClash}' already exists — choose a different agent id`);
 
     const password = `agent-${newId}-${Date.now()}`;
     const userId = `@${newId}:local`;
@@ -14928,12 +14956,23 @@ class Orchestrator {
       delete newConfig.parentTeamId;
     }
     saveAgentConfig(newId, newConfig);
-
     this.agentConfigs.set(newId, { config: newConfig });
-    startAgentProcess(newConfig);
 
-    console.log(`[Orchestrator] Cloned agent ${sourceId} → ${newId}${parentTeamId ? ` (team=${parentTeamId})` : ''}`);
-    return { id: newId, userId, clonedFrom: sourceId, role, parentTeamId };
+    const fold = parentTeamId ? null : await this._foldIntoTeamOfOne(newId);
+    const started = fold && fold.teamId ? loadAgentConfig(newId) : newConfig;
+    this.agentConfigs.set(newId, { config: started });
+    startAgentProcess(started);
+
+    console.log(`[Orchestrator] Cloned agent ${sourceId} → ${newId}${parentTeamId ? ` (team=${parentTeamId})` : ''}${fold && fold.teamId ? ` (team of one ${fold.teamId})` : ''}`);
+    return {
+      id: newId,
+      userId,
+      clonedFrom: sourceId,
+      role: started.role,
+      parentTeamId: started.parentTeamId || null,
+      teamOfOne: !!(fold && fold.teamId),
+      ...(fold && fold.warnings.length ? { warnings: fold.warnings } : {}),
+    };
   }
 
   // ===========================================================
@@ -14954,7 +14993,7 @@ class Orchestrator {
   //                     as a `team-member`. Its imported system prompt is kept
   //                     as a per-member override (so a later team-prompt edit
   //                     won't wipe it), and it inherits the team's environment.
-  //                     Absent → imported as a standalone `agent`.
+  //                     Absent → imported as its own team of one (#2684).
   async importAgent(stagingDir, agentId, opts = {}) {
     if (!agentId || !AGENT_ID_RE.test(agentId)) throw new Error(`Invalid agent id '${agentId}'`);
     if (loadAgentConfig(agentId) || agentTeardownRegistry.has(agentId)) throw new Error(`Agent '${agentId}' already exists`);
@@ -14999,6 +15038,9 @@ class Orchestrator {
       role = "agent";
       environmentId = sourceCfg.environmentId;
     }
+
+    const teamClash = !parentTeamId && teamOfOneIdConflict(agentId, isAgentIdTaken);
+    if (teamClash) throw new Error(`Team '${teamClash}' already exists — choose a different agent id`);
 
     const displayName = opts.displayName || sourceCfg.displayName || agentId;
     const password = `agent-${agentId}-${Date.now()}`;
@@ -15053,15 +15095,27 @@ class Orchestrator {
 
     saveAgentConfig(agentId, newConfig);
     this.agentConfigs.set(agentId, { config: newConfig });
-    startAgentProcess(newConfig);
+
+    const fold = role === "agent" ? await this._foldIntoTeamOfOne(agentId) : null;
+    const started = fold && fold.teamId ? loadAgentConfig(agentId) : newConfig;
+    this.agentConfigs.set(agentId, { config: started });
+    startAgentProcess(started);
 
     try { fs.rmSync(resolvedStaging, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
 
     console.log(
-      `[Orchestrator] Imported agent → ${agentId} (role=${role}` +
-      `${parentTeamId ? `, team=${parentTeamId}` : ""})`
+      `[Orchestrator] Imported agent → ${agentId} (role=${started.role}` +
+      `${started.parentTeamId ? `, team=${started.parentTeamId}` : ""}` +
+      `${fold && fold.teamId ? ", team of one" : ""})`
     );
-    return { id: agentId, userId, role, parentTeamId };
+    return {
+      id: agentId,
+      userId,
+      role: started.role,
+      parentTeamId: started.parentTeamId || null,
+      teamOfOne: !!(fold && fold.teamId),
+      ...(fold && fold.warnings.length ? { warnings: fold.warnings } : {}),
+    };
   }
 }
 

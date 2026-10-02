@@ -145,6 +145,8 @@ legend — this is the longer version.
 | **dropped (knowledge-branch)** | Push to a knowledge-base branch (`agent-knowledge`); never wakes push triggers. | No; built in. |
 | **dropped (internal-dedup)** | The wake was already delivered on the internal fast path; this is GitHub telling us about the same label a second time. | No. |
 | **dropped (wake-already-armed)** | Already woken for this label on this item; a repeat does not wake it again until the label is removed and re-added. | Usually no. Re-fire a lost hand-off from the agent's Events tab. |
+| **reaped → agent** | Not a GitHub event: the provisioning sweep removed an agent or pool instance whose setup failed and was left half-created. The row's event reads *orphaned instance cleaned up*. | No. |
+| **reap failed → agent** | The sweep tried to remove such an instance, but the removal did not go through. | Only if it repeats — the sweep retries on its next run. |
 | **nobody's listening** | No trigger subscribed to this event **type** at all. | Maybe. If something should have reacted, the wiring is missing — add or fix the `github-event` trigger on the target agent. |
 
 A **dropped (branch-filter)** row comes from a *Push* trigger with a
@@ -160,14 +162,11 @@ For a pooled role, `delivered` names and opens the ticket's instance
 (*Developer · #2562*); once it is removed, the click says so. **held (role
 paused)**: fires when the role resumes.
 
-*One caveat about digests as currently recorded:* the fold itself is real and
-lossless, but a folded event is written to the log as **`delivered`** with a
-separate digest marker rather than as a `digest` status — so today a digested
-burst reads as a run of ordinary `delivered` outcomes, and following one of those
-outcomes to "the session it started" can land on nothing, because a digest posts a
-single plain message instead of starting one session per event. If a burst looks
-like several deliveries but you only find one summary message, that is what you
-are looking at.
+A `digested` outcome does not open a session: a digest posts one summary
+message, not one session per event.
+
+The table's filter box also matches the Outcomes column — agent or instance
+name or id, and drop reason (e.g. `label-filter`).
 
 **There is no source filtering** (one exception below). Every agent shares one GitHub token, so an
 event caused by an agent looks exactly like an event caused by a human, and a

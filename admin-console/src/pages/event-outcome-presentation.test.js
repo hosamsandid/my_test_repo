@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   OUTCOME_TONES, NO_MATCH_LABEL, outcomeLabel, outcomeTone, outcomePresentation,
+  outcomeStatus, outcomesFilterText,
 } from './event-outcome-presentation.js';
 
 // #2524: the GitHub Event Log's Outcomes column shows plain text lines instead
@@ -23,7 +24,7 @@ function block(startMarker, endMarker) {
 }
 const outcomeBlock = block('/* ── Outcome line (#2524)', '/* ── Work-item cell (#1827)');
 const noMatchBlock = block('function NoMatchLine()', '\n}\n');
-const columnBlock = block("key: 'outcomes', label: 'Outcomes'", '} },');
+const columnBlock = block("key: 'outcomes', label: 'Outcomes'", 'filterValue: outcomesFilterText }');
 
 test('label wording is unchanged from the pre-#2524 chips', () => {
   assert.equal(outcomeLabel({ status: 'delivered', agentId: 'agent-x' }), 'delivered → agent-x');
@@ -171,4 +172,61 @@ test('a pool pause/drain hold reads as held by the role, not by WIP (AC6)', () =
   assert.equal(outcomeLabel({ status: 'held', reason: 'pool-paused', agentId: 'r' }), 'held (role paused) → r');
   assert.equal(outcomeLabel({ status: 'held', reason: 'pool-draining', wakeLabel: 'ready', agentId: 'r' }), 'held (role draining) (ready) → r');
   assert.equal(outcomeTone({ status: 'held', reason: 'pool-off' }), 'held');
+});
+
+// ── #2693: digest flag, provisioning-sweep rows, Outcomes filter text ──────
+test('#2693: a delivered outcome with digest:true is shown as a digest', () => {
+  const o = { agentId: 'dev', status: 'delivered', digest: true };
+  assert.equal(outcomeStatus(o), 'digest');
+  assert.equal(outcomeTone(o), 'digest');
+  assert.equal(outcomeLabel(o), 'digested → dev');
+  // a plain delivery and a literal digest status are unchanged
+  assert.equal(outcomeStatus({ status: 'delivered', digest: false }), 'delivered');
+  assert.equal(outcomeLabel({ agentId: 'dev', status: 'digest' }), 'digested → dev');
+  assert.equal(outcomeStatus(null), undefined);
+});
+
+test('#2693: provisioning-sweep reaped / reap-failed rows are never shown as a drop', () => {
+  const reaped = { agentId: 't-dev-i9', status: 'reaped', reason: null };
+  const failed = { agentId: 't-dev-i9', status: 'reap-failed', reason: null };
+  assert.equal(outcomeTone(reaped), 'reaped');
+  assert.equal(outcomeLabel(reaped), 'reaped → t-dev-i9');
+  assert.equal(outcomeTone(failed), 'reapFailed');
+  assert.equal(outcomeLabel(failed), 'reap failed → t-dev-i9');
+  for (const o of [reaped, failed]) {
+    assert.doesNotMatch(outcomeLabel(o), /dropped/);
+    const p = outcomePresentation(o);
+    assert.ok(p.marker && p.markerColor && p.textColor, 'tone has a marker');
+  }
+  assert.notEqual(OUTCOME_TONES.reaped.marker, OUTCOME_TONES.dropped.marker);
+  assert.notEqual(OUTCOME_TONES.reapFailed.marker, OUTCOME_TONES.dropped.marker);
+});
+
+test('#2693: outcomesFilterText carries the rendered line, agent name + id and the raw reason', () => {
+  const outcomes = [
+    { agentId: 't-code-reviewer', agentName: 'Code Reviewer', status: 'delivered', triggerId: 't1' },
+    { agentId: 't-developer', agentName: 'Developer', status: 'dropped', reason: 'label-filter' },
+    { agentId: 't-developer', status: 'delivered', instanceId: 't-developer-i2666', instanceName: 'Developer · #2666', triggerId: 't2' },
+    { agentId: 't-pusher', status: 'dropped', reason: 'producer-filter', producer: 'x' },
+  ];
+  const text = outcomesFilterText(outcomes, {}).toLowerCase();
+  for (const needle of ['code-reviewer', 'code reviewer', 'developer', 'i2666', '#2666', 'label-filter',
+    'dropped (label-filter) → developer', 'delivered → code reviewer', 'producer-filter', 'not in producer filter']) {
+    assert.ok(text.includes(needle), `filter text misses ${needle}: ${text}`);
+  }
+  assert.doesNotMatch(text, /\[object object\]/);
+});
+
+test('#2693: outcomesFilterText for digests, sweep rows, re-fires and no-subscriber rows', () => {
+  assert.match(outcomesFilterText([{ agentId: 'dev', status: 'delivered', digest: true }], {}), /digested → dev/);
+  assert.match(outcomesFilterText([{ agentId: 'dev-i1', status: 'reaped', reason: null }], {}), /reaped → dev-i1/);
+  assert.match(outcomesFilterText([{ agentId: 'dev', status: 'delivered' }], { source: 'manual-refire' }), /fired again/);
+  assert.equal(outcomesFilterText([], { noMatchingTrigger: true }), NO_MATCH_LABEL);
+  assert.equal(outcomesFilterText(undefined, {}), '');
+  assert.equal(outcomesFilterText([null, 'x'], null), '');
+});
+
+test('#2693: the Outcomes column wires outcomesFilterText as its filterValue', () => {
+  const src = readFileSync(fileURLToPath(new URL('./GithubEventLog.jsx', import.meta.url)), 'utf8').replace(/\s+/g, ' ');
+  assert.match(src, /\{ key: 'outcomes', label: 'Outcomes',[^]*?filterValue: outcomesFilterText \}, \];/);
 });

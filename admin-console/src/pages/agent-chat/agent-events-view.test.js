@@ -136,3 +136,11 @@ test('#2602 AC4: a knowledge-branch drop names the KB branch and is never re-fir
   assert.doesNotMatch(dropReasonText(drop('knowledge-branch', {})), /branch filter/);
   assert.equal(canRefire(drop('knowledge-branch'), { canManage: true }), false);
 });
+
+test('#2693: outcomeView reads the digest flag and shows sweep rows as reaped, not dropped', () => {
+  assert.deepEqual(outcomeView({ status: 'delivered', digest: true }), { tone: 'info', text: 'digested' });
+  assert.equal(outcomeView({ status: 'reaped', reason: null }).text, 'reaped (orphaned instance cleaned up)');
+  assert.deepEqual(outcomeView({ status: 'reap-failed', reason: null }), { tone: 'warning', text: 'reap failed' });
+  assert.equal(sessionCorrelationId({ status: 'delivered', digest: true, triggerId: 't', eventId: 'e' }), null);
+  assert.equal(sessionCorrelationId(null), null);
+});

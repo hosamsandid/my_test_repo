@@ -1521,6 +1521,8 @@ function FileViewerBody({ agentId, relPath, loading, error, data, viewMode, html
           </a>
         </div>
       )}
+      {/* Collapsing the expanded viewer remounts this frame, so the page runs
+          again without a new dialog — intended: it is the same confirmed opening. */}
       {!loading && !error && data && !data.binary && isHtml && viewMode === 'rendered' && htmlPreview && (
         frameSuppressed ? (
           <div style={{ ...emptyStyle, padding: 'var(--eb-space-4)' }}>
@@ -1707,7 +1709,7 @@ function HtmlPreviewConfirm({ dispatch }) {
             Also load external resources
           </label>
           <div style={{ marginTop: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-            Fonts, scripts and images from other hosts. Off by default — the page then cannot send or load anything over the network.
+            Fonts, scripts and images from other hosts. Off by default — the page then cannot load external fonts, scripts or images, or make network requests from script.
           </div>
         </>
       )}

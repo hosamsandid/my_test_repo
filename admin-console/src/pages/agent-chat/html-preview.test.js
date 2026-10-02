@@ -180,6 +180,20 @@ test('the only <iframe> is the preview frame: sandboxed, endpoint-served, never 
   assert.ok(fn.includes('{htmlPreviewBannerText(external)}'), 'the banner is always rendered above the frame');
 });
 
+test('a second iframe load (the page navigated itself away) closes the preview', () => {
+  const fn = CODE.slice(CODE.indexOf('function HtmlPreviewFrame('), CODE.indexOf('function HtmlPreviewConfirm('))
+    .replace(/^\s*\/\/.*$/gm, '').replace(/\s+/g, ' ');
+  assert.ok(fn.includes('const loadsRef = useRef(0);'));
+  assert.ok(fn.includes('onLoad={() => { loadsRef.current += 1; if (loadsRef.current > 1 && onNavigated) onNavigated(); }}'),
+    'onLoad must count loads and call onNavigated from the second one');
+});
+
+test('the confirm hint does not claim the page cannot send anything (navigation still can)', () => {
+  const fn = CODE.slice(CODE.indexOf('function HtmlPreviewConfirm('), CODE.indexOf('function useFileViewState('));
+  assert.ok(!/cannot send/.test(fn));
+  assert.ok(fn.includes('cannot load external fonts, scripts or images, or make network requests from script'));
+});
+
 test('the frame is only reached through a confirmed rendered state', () => {
   const body = CODE.replace(/\s+/g, ' ');
   assert.ok(body.includes("isHtml && viewMode === 'rendered' && htmlPreview && ("));

@@ -472,10 +472,10 @@ simply offers no write action at all.
 shows the page itself, but it asks first, **every time**: the page was written
 by an agent and may contain harmful content, so nothing runs until you click
 **Show preview**. The dialog also has an **Also load external resources**
-checkbox. It starts unticked and only applies to this one opening. Unticked, the
-page gets no network access at all: inline styles, scripts and embedded
-(`data:`) images work, but external scripts, stylesheets, fonts and images do
-not load, and the page cannot send data anywhere. Ticked, it may load from any
+checkbox. It starts unticked and only applies to this one opening. Unticked,
+inline styles, scripts and embedded (`data:`) images work, but external
+scripts, stylesheets, fonts and images do not load, and scripts cannot fetch or
+send anything. Ticked, it may load from any
 host. Either way the page runs isolated from Agent Studio: it cannot read your
 session, the console or other agents' data. A banner above the preview says
 so, and also says whether external resources are on. Do not enter passwords

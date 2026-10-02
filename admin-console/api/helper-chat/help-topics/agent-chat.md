@@ -222,8 +222,9 @@ on hover, a right-click, or the **Menu** / **Shift+F10** keys. It carries:
   Team** additionally removes that team's locally cached and curated knowledge
   (knowledge shared through its repository is untouched). When the agent is
   the **last member of its team** (e.g. a team of one), the confirm says so and
-  offers **Also delete the team** (ticked by default); untick it to keep the
-  empty team.
+  offers **Also delete the team** (ticked by default; this also removes the
+  team's knowledge); untick it to keep the empty team. Without the rights to
+  delete the team, the confirm says it stays.
 - **Clone**, **Export (ZIP)** and **Save as template** — copy this agent, take a
   copy away, or turn it into a reusable template.
 - A group header carries the team-wide equivalents: **Enable/Disable** for the

@@ -94,6 +94,7 @@ const WORK_PLANE_ROUTES = Object.freeze([
   { method: 'get', path: '/api/agents/:agentId/workspace/file', cls: MUTATION_CLASS.READ },
   { method: 'get', path: '/api/agents/:agentId/workspace/image', cls: MUTATION_CLASS.READ },
   { method: 'get', path: '/api/agents/:agentId/workspace/download', cls: MUTATION_CLASS.READ },
+  { method: 'get', path: '/api/agents/:agentId/workspace/html-preview', cls: MUTATION_CLASS.READ },
   { method: 'get', path: '/api/agents/:agentId/workspace/zip', cls: MUTATION_CLASS.READ },
   { method: 'get', path: '/api/agents/:agentId/workspace/git-status', cls: MUTATION_CLASS.READ },
   { method: 'get', path: '/api/agents/:agentId/workspace/git-diff', cls: MUTATION_CLASS.READ },
@@ -113,6 +114,7 @@ const WORK_PLANE_ROUTES = Object.freeze([
   { method: 'get', path: '/api/agents/:agentId/context/file', cls: MUTATION_CLASS.READ },
   { method: 'get', path: '/api/agents/:agentId/context/image', cls: MUTATION_CLASS.READ },
   { method: 'get', path: '/api/agents/:agentId/context/download', cls: MUTATION_CLASS.READ },
+  { method: 'get', path: '/api/agents/:agentId/context/html-preview', cls: MUTATION_CLASS.READ },
 
   // ── Context-folder writes — "Team Admin only" ───────────────────────────
   // §6's row names "delete/move/upload file"; these are those three operations

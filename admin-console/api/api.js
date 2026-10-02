@@ -32,6 +32,9 @@ const { buildWorkItems, workItemDetail } = require('./work-items');
 const usageExport = require('./usage-export');
 const maintenanceMode = require('./maintenance-mode');
 const { detectRasterImageType, imageContentType } = require('./image-type');
+const {
+  HTML_PREVIEW_MAX_BYTES, wantsExternalResources, htmlPreviewHeaders, htmlPreviewRefusal,
+} = require('./html-preview');
 const { discoverBoundAgents, hiddenBlastRadius, projectRespawnOutcome, respawnWithConcurrency } = require('./respawn-agents');
 const { githubApiBase } = require('./github-api-base');
 const { createTtlCache } = require('./ttl-cache');
@@ -6300,6 +6303,30 @@ app.get('/api/agents/:agentId/context/image', apiLimiter, async (req, res) => {
   res.setHeader('Content-Length', buf.length);
   res.setHeader('Content-Disposition', 'inline');
   res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.end(buf);
+});
+
+// Sandboxed HTML preview (#2778) — same contract and headers as the workspace
+// `/html-preview` route. The bytes come through the orchestrator's download cap
+// (25 MB, above HTML_PREVIEW_MAX_BYTES); a truncated read is refused rather than
+// rendered half-way.
+app.get('/api/agents/:agentId/context/html-preview', apiLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  let status; let body;
+  try {
+    ({ status, body } = await fetchContextBrowse(agentId, 'download', relPath));
+  } catch (err) {
+    console.error(`[api] context html-preview ${agentId} failed: ${err.message}`);
+    return res.status(502).json({ error: 'Reading the context folder failed' });
+  }
+  if (status >= 300) return res.status(status).json(body);
+  const buf = Buffer.from(String(body.content || ''), 'base64');
+  const size = body.truncated ? Infinity : (typeof body.size === 'number' ? body.size : buf.length);
+  const refusal = htmlPreviewRefusal({ relPath: String(body.path || relPath), size, head: buf });
+  if (refusal) return res.status(refusal.status).json({ error: refusal.error, code: refusal.code });
+  res.set(htmlPreviewHeaders({ external: wantsExternalResources(req.query), size: buf.length }));
   res.end(buf);
 });
 
@@ -20620,6 +20647,42 @@ app.get('/api/agents/:agentId/workspace/image', apiLimiter, (req, res) => {
   const stream = fs.createReadStream(target);
   stream.on('error', () => res.end());
   stream.pipe(res);
+});
+
+// Sandboxed rendered preview of an agent-written HTML file (#2778). Serves the
+// FULL file (up to HTML_PREVIEW_MAX_BYTES, not the 512 KB /file cap — AC9) as
+// text/html, but ONLY with the html-preview.js headers: a CSP `sandbox` (opaque
+// origin, scripts only) plus network-off fetch directives unless `?external=1`.
+// The headers are the security boundary, not the viewer's iframe attribute, so
+// opening this URL directly in a tab is equally safe (S4). Read-class like
+// /file (team-member-boundary.js) behind the same work-plane tenant gate.
+app.get('/api/agents/:agentId/workspace/html-preview', apiLimiter, (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  const target = safeAgentPath(agentId, relPath);
+  if (!target) return res.status(400).json({ error: 'invalid path' });
+
+  let st;
+  try {
+    st = fs.statSync(target);
+  } catch (err) {
+    if (err.code === 'ENOENT') return res.status(404).json({ error: 'not found' });
+    return res.status(500).json({ error: err.message });
+  }
+  if (!st.isFile()) return res.status(400).json({ error: 'not a file' });
+
+  let buf;
+  try {
+    buf = st.size > 0 && st.size <= HTML_PREVIEW_MAX_BYTES ? fs.readFileSync(target) : Buffer.alloc(0);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  const refusal = htmlPreviewRefusal({ relPath: target, size: st.size, head: buf });
+  if (refusal) return res.status(refusal.status).json({ error: refusal.error, code: refusal.code });
+
+  res.set(htmlPreviewHeaders({ external: wantsExternalResources(req.query), size: buf.length }));
+  res.end(buf);
 });
 
 // Raw file download — streams the full file with Content-Disposition: attachment

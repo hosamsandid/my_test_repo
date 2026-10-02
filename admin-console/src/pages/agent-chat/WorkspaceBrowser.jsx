@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -7,10 +7,14 @@ import {
   ChevronRight, ChevronDown, Folder, FolderOpen, FileText, FileCode,
   Brain, Sparkles, BookOpen, Loader2, X, RefreshCw, AlertCircle, FileWarning,
   Maximize2, Minimize2, Code2, Eye, GitBranch, Upload, GitCompare, Download, Trash2,
-  ImageOff, AtSign,
+  ImageOff, AtSign, ShieldAlert,
 } from 'lucide-react';
 import DiffView from './DiffView';
 import { isImageData, imageSrcUrl } from './workspace-image';
+import {
+  HTML_PREVIEW_SANDBOX, HTML_PREVIEW_MAX_BYTES, isHtmlFile, canOfferHtmlPreview, isHtmlTooLarge,
+  htmlPreviewUrl, initialViewState, viewStateFor, viewStateReducer, bodyViewMode, htmlPreviewBannerText,
+} from './html-preview.js';
 import {
   isContextKey, isReadOnlyKey, workspaceUrl, withContextRoot, childKey,
   mountForKey, sameWritableSource, writeApiBase, apiRelOf,
@@ -1306,7 +1310,12 @@ function isMarkdownFile(path) {
   return String(path || '').toLowerCase().endsWith('.md');
 }
 
-function FileViewerHeader({ relPath, data, isMarkdown, viewMode, onToggleViewMode, expanded, onToggleExpand, onClose }) {
+function toggleLabel(viewMode, isHtml) {
+  if (viewMode !== 'raw') return 'Show raw source';
+  return isHtml ? 'Show rendered HTML (sandboxed preview)' : 'Show rendered Markdown';
+}
+
+function FileViewerHeader({ relPath, data, isMarkdown, isHtml = false, viewMode, onToggleViewMode, expanded, onToggleExpand, onClose }) {
   const idx = relPath.lastIndexOf('/');
   const dir = idx >= 0 ? relPath.slice(0, idx + 1) : '';
   const file = idx >= 0 ? relPath.slice(idx + 1) : relPath;
@@ -1362,16 +1371,16 @@ function FileViewerHeader({ relPath, data, isMarkdown, viewMode, onToggleViewMod
           <FileWarning size={12} />
         </span>
       )}
-      {isMarkdown && (
+      {(isMarkdown || isHtml) && (
         <button
           onClick={onToggleViewMode}
-          title={viewMode === 'rendered' ? 'Show raw source' : 'Show rendered Markdown'}
-          aria-label={viewMode === 'rendered' ? 'Show raw source' : 'Show rendered Markdown'}
+          title={toggleLabel(viewMode, isHtml)}
+          aria-label={toggleLabel(viewMode, isHtml)}
           style={iconBtnStyle}
           onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
           onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
         >
-          {viewMode === 'rendered' ? <Code2 size={13} /> : <Eye size={13} />}
+          {viewMode !== 'raw' ? <Code2 size={13} /> : <Eye size={13} />}
         </button>
       )}
       <button
@@ -1462,7 +1471,8 @@ function ImagePreview({ agentId, relPath, data }) {
   );
 }
 
-function FileViewerBody({ agentId, relPath, loading, error, data, viewMode }) {
+function FileViewerBody({ agentId, relPath, loading, error, data, viewMode, htmlPreview = null, onHtmlNavigated, frameSuppressed = false }) {
+  const isHtml = isHtmlFile(relPath);
   return (
     <div style={{
       flex: 1,
@@ -1495,7 +1505,38 @@ function FileViewerBody({ agentId, relPath, loading, error, data, viewMode }) {
           </div>
         </div>
       )}
-      {!loading && !error && data && !data.binary && viewMode === 'rendered' && (
+      {!loading && !error && data && !data.binary && isHtml && viewMode === 'too-large' && (
+        <div style={{ ...emptyStyle, padding: 'var(--eb-space-4)', flexDirection: 'column', textAlign: 'center' }}>
+          <FileWarning size={20} />
+          <div style={{ marginTop: 8 }}>File too large to preview — download it instead</div>
+          <div style={{ marginTop: 4, fontSize: 'var(--eb-text-xs)' }}>
+            {formatBytes(data.size)}; the rendered preview is limited to {formatBytes(HTML_PREVIEW_MAX_BYTES)}.
+          </div>
+          <a
+            href={workspaceUrl(agentId, relPath, 'download')}
+            download
+            style={{ marginTop: 'var(--eb-space-2)', display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--eb-accent-primary)', fontSize: 'var(--eb-text-xs)' }}
+          >
+            <Download size={12} /> Download
+          </a>
+        </div>
+      )}
+      {!loading && !error && data && !data.binary && isHtml && viewMode === 'rendered' && htmlPreview && (
+        frameSuppressed ? (
+          <div style={{ ...emptyStyle, padding: 'var(--eb-space-4)' }}>
+            The rendered preview is open in the expanded viewer.
+          </div>
+        ) : (
+          <HtmlPreviewFrame
+            agentId={agentId}
+            relPath={relPath}
+            external={htmlPreview.external}
+            openId={htmlPreview.openId}
+            onNavigated={onHtmlNavigated}
+          />
+        )
+      )}
+      {!loading && !error && data && !data.binary && !isHtml && viewMode === 'rendered' && (
         <div style={{ padding: 'var(--eb-space-3)', fontSize: 'var(--eb-text-sm)' }} className="ws-md">
           <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>
             {data.content || ''}
@@ -1592,71 +1633,185 @@ export function useWorkspaceFileData(agentId, relPath) {
   return { data, loading, error };
 }
 
-export function FileViewerModal({ agentId, relPath, data, loading, error, viewMode, onToggleViewMode, onClose }) {
+// Sandboxed rendered preview of an agent-written HTML file (#2778). Two
+// independent layers keep it out of the console's origin: the iframe's
+// `sandbox` attribute (scripts only — NEVER allow-same-origin, pinned by
+// html-preview.test.js) and the `/html-preview` endpoint's own CSP `sandbox` +
+// network-off headers. Keyed by `openId`, so every confirmed opening is a fresh
+// document; unmounting (Raw, close, another file) tears the frame and its
+// scripts down (AC10). A second `load` means the page navigated its frame away
+// (a link, a meta refresh) — the preview is closed rather than showing it.
+function HtmlPreviewFrame({ agentId, relPath, external, openId, onNavigated }) {
+  const loadsRef = useRef(0);
+  const src = htmlPreviewUrl(agentId, relPath, { external, openId });
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+      <div
+        role="note"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--eb-space-2)',
+          padding: '6px var(--eb-space-3)',
+          flexShrink: 0,
+          fontSize: 'var(--eb-text-xs)',
+          color: 'var(--eb-status-warning-text)',
+          background: 'var(--eb-status-warning-bg)',
+          borderBottom: '1px solid var(--eb-status-warning)',
+        }}
+      >
+        <ShieldAlert size={13} style={{ flexShrink: 0 }} />
+        <span>{htmlPreviewBannerText(external)}</span>
+      </div>
+      <iframe
+        key={openId}
+        title={`Rendered preview of ${relPath}`}
+        src={src}
+        sandbox={HTML_PREVIEW_SANDBOX}
+        referrerPolicy="no-referrer"
+        onLoad={() => {
+          loadsRef.current += 1;
+          if (loadsRef.current > 1 && onNavigated) onNavigated();
+        }}
+        style={{ flex: 1, minHeight: 0, width: '100%', border: 'none', background: '#ffffff' }}
+      />
+    </div>
+  );
+}
+
+// The warning shown on EVERY switch to Rendered for an HTML file (AC2/AC3).
+// Mounted only while the view state is 'confirm', so the checkbox starts
+// unticked each time and nothing is remembered. Portaled to <body> so it opens
+// above the fullscreen viewer, which is portaled there too.
+function HtmlPreviewConfirm({ dispatch }) {
+  const [external, setExternal] = useState(false);
+  return createPortal(
+    <ConfirmDialog
+      open
+      title="Show rendered HTML preview?"
+      variant="warning"
+      maxWidth={480}
+      confirmLabel="Show preview"
+      cancelLabel="Cancel"
+      onConfirm={() => dispatch({ type: 'confirm', external })}
+      onCancel={() => dispatch({ type: 'cancel' })}
+      message={(
+        <>
+          <ul style={{ margin: 0, paddingLeft: '1.2em' }}>
+            <li>This file was generated by an agent and may contain harmful content.</li>
+            <li>It may not display correctly, particularly with external dependencies or heavy JavaScript.</li>
+            <li>The preview runs isolated from Agent Studio: it cannot use your session or read console data.</li>
+          </ul>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-3)', color: 'var(--eb-text-primary)', cursor: 'pointer' }}>
+            <input type="checkbox" checked={external} onChange={e => setExternal(e.target.checked)} />
+            Also load external resources
+          </label>
+          <div style={{ marginTop: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            Fonts, scripts and images from other hosts. Off by default — the page then cannot send or load anything over the network.
+          </div>
+        </>
+      )}
+    />,
+    document.body,
+  );
+}
+
+// Raw/Rendered state of one open file, incl. the HTML confirm-every-time flow
+// (pure reducer in html-preview.js). Resets on every file change; until the
+// reset lands, `viewStateFor` already answers the new file's initial state.
+function useFileViewState(relPath) {
+  const [state, dispatch] = useReducer(viewStateReducer, relPath, initialViewState);
+  useEffect(() => { dispatch({ type: 'reset', relPath }); }, [relPath]);
+  return [viewStateFor(state, relPath), dispatch];
+}
+
+function toggleAction(relPath, data) {
+  return { type: 'toggle', html: isHtmlFile(relPath), tooLarge: isHtmlTooLarge(data) };
+}
+
+// `viewState`/`dispatch` come from the owner (the Workspace tab's FileViewer)
+// when it has them; otherwise (the chat `@<path>` preview, #2146) the modal
+// owns its own state, so the HTML preview works the same there (AC12).
+export function FileViewerModal({ agentId, relPath, data, loading, error, viewState: ownerState, dispatch: ownerDispatch, onClose }) {
   const isMarkdown = isMarkdownFile(relPath);
+  const [ownState, ownDispatch] = useFileViewState(relPath);
+  const viewState = ownerState || ownState;
+  const dispatch = ownerDispatch || ownDispatch;
+  const confirmOpen = viewState.mode === 'confirm';
 
   useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    // Escape belongs to the confirm dialog while it is open.
+    const onKey = (e) => { if (e.key === 'Escape' && !confirmOpen) onClose(); };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, confirmOpen]);
 
-  return createPortal(
-    <div
-      role="dialog"
-      aria-modal="true"
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 9999,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'rgba(0,0,0,0.55)',
-        padding: 'var(--eb-space-4)',
-      }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <div style={{
-        display: 'flex',
-        flexDirection: 'column',
-        width: '90vw',
-        height: '90vh',
-        background: 'var(--eb-bg-surface)',
-        borderRadius: 'var(--eb-radius-lg)',
-        border: '1px solid var(--eb-border-default)',
-        boxShadow: '0 24px 64px rgba(0,0,0,0.4)',
-        overflow: 'hidden',
-      }}>
-        <FileViewerHeader
-          relPath={relPath}
-          data={data}
-          isMarkdown={isMarkdown}
-          viewMode={viewMode}
-          onToggleViewMode={onToggleViewMode}
-          expanded
-          onToggleExpand={onClose}
-          onClose={onClose}
-        />
-        <FileViewerBody agentId={agentId} relPath={relPath} loading={loading} error={error} data={data} viewMode={viewMode} />
-      </div>
-    </div>,
-    document.body,
+  return (
+    <>
+      {createPortal(
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 9999,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: 'rgba(0,0,0,0.55)',
+            padding: 'var(--eb-space-4)',
+          }}
+          onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+        >
+          <div style={{
+            display: 'flex',
+            flexDirection: 'column',
+            width: '90vw',
+            height: '90vh',
+            background: 'var(--eb-bg-surface)',
+            borderRadius: 'var(--eb-radius-lg)',
+            border: '1px solid var(--eb-border-default)',
+            boxShadow: '0 24px 64px rgba(0,0,0,0.4)',
+            overflow: 'hidden',
+          }}>
+            <FileViewerHeader
+              relPath={relPath}
+              data={data}
+              isMarkdown={isMarkdown}
+              isHtml={canOfferHtmlPreview(relPath, data)}
+              viewMode={bodyViewMode(viewState)}
+              onToggleViewMode={() => dispatch(toggleAction(relPath, data))}
+              expanded
+              onToggleExpand={onClose}
+              onClose={onClose}
+            />
+            <FileViewerBody
+              agentId={agentId}
+              relPath={relPath}
+              loading={loading}
+              error={error}
+              data={data}
+              viewMode={bodyViewMode(viewState)}
+              htmlPreview={viewState}
+              onHtmlNavigated={() => dispatch({ type: 'navigated' })}
+            />
+          </div>
+        </div>,
+        document.body,
+      )}
+      {!ownerDispatch && confirmOpen && <HtmlPreviewConfirm dispatch={dispatch} />}
+    </>
   );
 }
 
 function FileViewer({ agentId, path: relPath, onClose }) {
   const { data, loading, error } = useWorkspaceFileData(agentId, relPath);
   const [expanded, setExpanded] = useState(false);
-  const [viewMode, setViewMode] = useState(() => isMarkdownFile(relPath) ? 'rendered' : 'raw');
-
-  // Reset view mode when file changes.
-  useEffect(() => {
-    setViewMode(isMarkdownFile(relPath) ? 'rendered' : 'raw');
-  }, [relPath]);
+  const [viewState, dispatch] = useFileViewState(relPath);
 
   const isMarkdown = isMarkdownFile(relPath);
-  const toggleViewMode = () => setViewMode(m => m === 'rendered' ? 'raw' : 'rendered');
+  const toggleViewMode = () => dispatch(toggleAction(relPath, data));
 
   return (
     <>
@@ -1672,13 +1827,26 @@ function FileViewer({ agentId, path: relPath, onClose }) {
           relPath={relPath}
           data={data}
           isMarkdown={isMarkdown}
-          viewMode={viewMode}
+          isHtml={canOfferHtmlPreview(relPath, data)}
+          viewMode={bodyViewMode(viewState)}
           onToggleViewMode={toggleViewMode}
           expanded={false}
           onToggleExpand={() => setExpanded(true)}
           onClose={onClose}
         />
-        <FileViewerBody agentId={agentId} relPath={relPath} loading={loading} error={error} data={data} viewMode={viewMode} />
+        {/* While expanded, only the modal runs the HTML frame — never two
+            copies of the same untrusted page at once. */}
+        <FileViewerBody
+          agentId={agentId}
+          relPath={relPath}
+          loading={loading}
+          error={error}
+          data={data}
+          viewMode={bodyViewMode(viewState)}
+          htmlPreview={viewState}
+          onHtmlNavigated={() => dispatch({ type: 'navigated' })}
+          frameSuppressed={expanded}
+        />
       </div>
       {expanded && (
         <FileViewerModal
@@ -1687,11 +1855,12 @@ function FileViewer({ agentId, path: relPath, onClose }) {
           data={data}
           loading={loading}
           error={error}
-          viewMode={viewMode}
-          onToggleViewMode={toggleViewMode}
+          viewState={viewState}
+          dispatch={dispatch}
           onClose={() => setExpanded(false)}
         />
       )}
+      {viewState.mode === 'confirm' && <HtmlPreviewConfirm dispatch={dispatch} />}
     </>
   );
 }

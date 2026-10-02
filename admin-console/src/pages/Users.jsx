@@ -16,6 +16,7 @@ import PasswordField from '../components/PasswordField';
 import IconButton from '../components/IconButton';
 import {
   usersToRows, chatIdentityDetail, isSelf, selfActionWarning, validateUserForm, lastSystemAdminGuard,
+  INVALID_EMAIL_REASON,
 } from './users-view';
 import {
   ADMIN_TABS, resolveAdminTab,
@@ -156,7 +157,8 @@ function CreateUserPanel({ onSave, onCancel, saving, error }) {
   const [email, setEmail] = useState('');
   const [systemAdmin, setSystemAdmin] = useState(false);
 
-  const validation = validateUserForm({ subject, displayName }, 'create');
+  const validation = validateUserForm({ subject, displayName, email }, 'create');
+  const emailError = validation === INVALID_EMAIL_REASON ? validation : null;
   const canSave = !validation && !saving;
 
   return (
@@ -164,7 +166,7 @@ function CreateUserPanel({ onSave, onCancel, saving, error }) {
       <ErrorBar error={error} />
       <FormInput label="Subject (stable identity)" required value={subject} onChange={setSubject} placeholder="e.g. jane.doe@corp.com or OIDC subject" />
       <FormInput label="Display name" value={displayName} onChange={setDisplayName} placeholder="e.g. Jane Doe" />
-      <FormInput label="Email" type="email" value={email} onChange={setEmail} placeholder="jane.doe@corp.com" />
+      <FormInput label="Email" type="email" value={email} onChange={setEmail} placeholder="jane.doe@corp.com" error={emailError || undefined} />
       <SysAdminField checked={systemAdmin} onChange={setSystemAdmin} />
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
         The <strong>subject</strong> is the stable identifier a future SSO login maps onto (OIDC subject claim or corporate email) and cannot be changed later. To let a user log in today, set a login password after creating them.
@@ -195,7 +197,8 @@ function EditUserPanel({ user, me, users, onSave, saving, error, onError, onRefr
   const [pwSaving, setPwSaving] = useState(false);
   const [pwMsg, setPwMsg] = useState(null);
 
-  const validation = validateUserForm({ subject: user.subject, displayName }, 'edit');
+  const validation = validateUserForm({ subject: user.subject, displayName, email }, 'edit');
+  const emailError = validation === INVALID_EMAIL_REASON ? validation : null;
   const canSave = !validation && !saving;
   const lockoutWarn = selfActionWarning({ me, target: user, action: 'edit', nextSystemAdmin: systemAdmin });
   // The server refuses to demote the last System Admin (#2059 AC7); mirror it
@@ -252,8 +255,8 @@ function EditUserPanel({ user, me, users, onSave, saving, error, onError, onRefr
             section={ADMINISTRATION_HELP_SECTIONS.edit}
           />
         </div>
-        <FormInput label="Display name" required value={displayName} onChange={setDisplayName} error={validation || undefined} />
-        <FormInput label="Email" type="email" value={email} onChange={setEmail} placeholder="jane.doe@corp.com" />
+        <FormInput label="Display name" required value={displayName} onChange={setDisplayName} error={(!emailError && validation) || undefined} />
+        <FormInput label="Email" type="email" value={email} onChange={setEmail} placeholder="jane.doe@corp.com" error={emailError || undefined} />
         <SysAdminField
           checked={systemAdmin}
           onChange={setSystemAdmin}

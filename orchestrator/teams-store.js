@@ -65,6 +65,28 @@ function isLastSystemAdmin(users, id) {
   return admins.length === 1 && admins[0].id === id;
 }
 
+// A user's optional email (#2695 finding 88). Before this the store kept any
+// string, so "not-an-email" was accepted and stored — the console's button
+// submits by onClick, which bypasses the browser's native `type=email` check.
+// Deliberately a plausibility check (one `@`, no whitespace, a dot in the
+// domain), not RFC 5322: the field is contact metadata, never an identity —
+// the `subject` is. The Users page mirrors this rule and sentence
+// (`admin-console/src/pages/users-view.js`); its test proves they agree.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const INVALID_EMAIL_REASON = 'Email must be a valid address, e.g. jane.doe@corp.com';
+
+function isValidEmail(v) {
+  return typeof v === 'string' && EMAIL_RE.test(v.trim());
+}
+
+// The stored form of an optional email: '' when blank, the trimmed value when
+// plausible, a 400 otherwise.
+function normalizeEmail(v) {
+  if (!isNonEmptyString(v)) return '';
+  if (!isValidEmail(v)) throw badRequest(INVALID_EMAIL_REASON, 'invalid-email');
+  return v.trim();
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -306,11 +328,12 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
     if (getUserBySubject(subject)) {
       throw conflict(`User with subject '${subject}' already exists`);
     }
+    const normalizedEmail = normalizeEmail(email);
     const users = listUsers();
     const user = {
       id: crypto.randomUUID(),
       subject: subject.trim(),
-      email: isNonEmptyString(email) ? email.trim() : '',
+      email: normalizedEmail,
       displayName: isNonEmptyString(displayName) ? displayName.trim() : subject.trim(),
       systemAdmin: systemAdmin === true,
       githubHandle: coerceGithubHandle(githubHandle),
@@ -336,7 +359,7 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
     if (idx === -1) throw notFound(`User '${id}' not found`);
     const user = users[idx];
     if (patch.email !== undefined) {
-      user.email = isNonEmptyString(patch.email) ? patch.email.trim() : '';
+      user.email = normalizeEmail(patch.email);
     }
     if (patch.displayName !== undefined) {
       if (!isNonEmptyString(patch.displayName)) throw badRequest('displayName cannot be empty');
@@ -658,7 +681,9 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
       if (!existing.systemAdmin) return updateUser(existing.id, { systemAdmin: true });
       return existing;
     }
-    return createUser({ subject, email, displayName, systemAdmin: true });
+    // A malformed configured seed email must not block seeding the operator
+    // (#2695): the address is optional metadata, so it is dropped, not thrown.
+    return createUser({ subject, email: isValidEmail(email) ? email : '', displayName, systemAdmin: true });
   }
 
   // Seeds the very FIRST System Admin from the deployment's configured initial
@@ -780,4 +805,6 @@ module.exports = {
   isLastSystemAdmin,
   LAST_SYSTEM_ADMIN_DELETE_REASON,
   LAST_SYSTEM_ADMIN_DEMOTE_REASON,
+  isValidEmail,
+  INVALID_EMAIL_REASON,
 };

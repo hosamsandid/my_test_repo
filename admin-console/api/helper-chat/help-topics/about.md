@@ -101,7 +101,10 @@ Help is in the panel you are reading:
   header **Help** button or the small **?** next to a page's title.
 - **Ask** — free-text questions, answered with the current page's help topic and
   the platform documentation as grounding. Use it when the curated page has not
-  answered you.
+  answered you. If no answer can be produced, the reply says why — for example
+  that no model provider is configured — so you know whether to retry or to fix
+  the setup first. While an answer is running, **Send** turns into **Stop**,
+  which cancels it and frees the composer.
 - **Tour** — a guided walk-through of the console for a first-time user.
 - **← Overview** — the big picture of the core concepts, from any page.
 

@@ -5,6 +5,10 @@ import {
   MAX_TURNS,
   SUGGESTED_PROMPTS,
   STREAM_ERROR_TEXT,
+  STOPPED_TEXT,
+  errorMessageFromBody,
+  errorMessageFromEvent,
+  stopStreaming,
   newMessageId,
   appendUserMessage,
   appendAssistantPlaceholder,
@@ -65,6 +69,57 @@ test('failStreaming replaces the placeholder with the canned error', () => {
   assert.equal(row.content, STREAM_ERROR_TEXT);
   assert.equal(row.streaming, false);
   assert.equal(row.error, true);
+});
+
+test('failStreaming shows the server reason, generic text only as fallback (#2700)', () => {
+  const { id, messages } = appendAssistantPlaceholder([]);
+  const reason = 'No LLM endpoint configured. Add one on the Model Providers page or set ANTHROPIC_BASE_URL.';
+  assert.equal(failStreaming(messages, id, reason).find(m => m.id === id).content, reason);
+  assert.equal(failStreaming(messages, id, '  padded  ').find(m => m.id === id).content, 'padded');
+  for (const none of [undefined, null, '', '   ', 42]) {
+    const row = failStreaming(messages, id, none).find(m => m.id === id);
+    assert.equal(row.content, STREAM_ERROR_TEXT);
+    assert.equal(row.error, true);
+  }
+});
+
+test('errorMessageFromBody extracts the plain JSON error reason (#2700)', () => {
+  assert.equal(errorMessageFromBody({ error: 'No LLM endpoint configured…' }), 'No LLM endpoint configured…');
+  // Selection errors carry a code too — the text is still surfaced.
+  assert.equal(
+    errorMessageFromBody({ error: 'Pick a model first', code: 'assist-model-not-selected' }),
+    'Pick a model first',
+  );
+  assert.equal(errorMessageFromBody({ message: 'from message' }), 'from message');
+  assert.equal(errorMessageFromBody({ error: '  x  ' }), 'x');
+  for (const none of [null, undefined, 'text', 7, {}, { error: 5 }, { error: { nested: 1 } }, { code: 'c' }]) {
+    assert.equal(errorMessageFromBody(none), '');
+  }
+});
+
+test('errorMessageFromEvent extracts an NDJSON error event message (#2700)', () => {
+  assert.equal(
+    errorMessageFromEvent({ type: 'error', message: 'LLM request failed: 401 invalid API key' }),
+    'LLM request failed: 401 invalid API key',
+  );
+  assert.equal(errorMessageFromEvent({ type: 'error' }), '');
+  assert.equal(errorMessageFromEvent({ type: 'error', message: 7 }), '');
+  assert.equal(errorMessageFromEvent({ type: 'delta', message: 'not an error' }), '');
+  assert.equal(errorMessageFromEvent(null), '');
+});
+
+test('stopStreaming keeps a partial answer, or says Stopped when none (#2700)', () => {
+  const { id, messages } = appendAssistantPlaceholder([]);
+  const empty = stopStreaming(messages, id).find(m => m.id === id);
+  assert.equal(empty.content, STOPPED_TEXT);
+  assert.equal(empty.streaming, false);
+  assert.equal(empty.stopped, true);
+  assert.ok(!empty.error, 'a user stop is not an error');
+  const partial = stopStreaming(applyDelta(messages, id, 'Half an ans'), id).find(m => m.id === id);
+  assert.equal(partial.content, 'Half an ans');
+  assert.equal(partial.streaming, false);
+  // Settled rows are sendable history again.
+  assert.equal(toRequestMessages(stopStreaming(messages, id)).length, 1);
 });
 
 test('toRequestMessages drops streaming rows and trims to MAX_TURNS', () => {

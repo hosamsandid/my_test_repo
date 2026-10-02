@@ -16,7 +16,7 @@ newcomer misreads at least one of them.
 
 | Word | Meaning A | Meaning B |
 |---|---|---|
-| **Team** | **Access scope** — the older, coarser tenant every resource is *stamped* with. A System Admin re-assigns it on **Administration → Resources**; no new one can be minted. | **Agent Team** — a squad of *agents* working one repository (agent `role: team` + its members), created by the **Team-Setup wizard**. This is what a person is given access to, and what **Share…** shares. |
+| **Team** | **Access scope** — the older, coarser tenant every resource is *stamped* with. No new one can be minted, and **Administration → Resources** no longer offers it as an owner (#2695) — only Agent Teams. | **Agent Team** — a squad of *agents* working one repository (agent `role: team` + its members), created by the **Team-Setup wizard**. This is what a person is given access to, and what **Share…** shares. |
 | **Orchestrator** | **Orchestrator** (service) — the control-plane container that spawns and supervises every agent container. There is exactly one. | **Orchestrator** (agent role) — an agent bound to a Briefing-Pack directory that spawns one `bp-instance` per pack. |
 | **Memory** | **Memory** (per agent) — the private files an agent reads and writes about *its own* work and *its* user. Never shared. | **Knowledge** (per team) — the curated, shared, searchable knowledge base a whole team draws on. |
 | **Skill** | **Skill** (the files) — a folder of domain know-how in the skill pool. | **Skill grant** (the assignment) — which agent construct is actually allowed to use it. The grant lives on the *team agent*, never on an environment. |

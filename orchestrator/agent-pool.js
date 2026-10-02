@@ -144,6 +144,18 @@ function poolInstanceId(teamId, roleId, itemKey) {
   return `${teamId}-${roleId}-i${itemKey}`;
 }
 
+// The item key an instance id encodes (#2760), i.e. the inverse of
+// `poolInstanceId` given the role's own member id (`${teamId}-${roleId}`).
+// Lets a caller name the item of an instance that is still provisioning and
+// has no config (`poolItem`) to read yet. `null` for an id that is not an
+// instance of that role.
+function itemKeyFromInstanceId(instanceId, roleFullId) {
+  if (typeof instanceId !== 'string' || typeof roleFullId !== 'string') return null;
+  const prefix = `${roleFullId}-i`;
+  if (!instanceId.startsWith(prefix) || instanceId.length === prefix.length) return null;
+  return instanceId.slice(prefix.length);
+}
+
 // The role id a materialized team-member id encodes, i.e. the inverse of
 // `${teamId}-${roleId}` (the platform's own member-naming convention, #1665
 // §"Materialisation"). Falls back to the bare member id when it doesn't carry
@@ -378,6 +390,7 @@ module.exports = {
   settleDrain,
   normalizePausedHold,
   planPoolDispatch,
+  itemKeyFromInstanceId,
   isInstanceTimedOut,
   isInstanceIdle,
   isArchiveExpired,

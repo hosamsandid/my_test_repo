@@ -16,6 +16,7 @@ import { PrimaryBtn, SecondaryBtn, labelStyle, inputStyle, helpTextStyle } from 
 import {
   suggestCloneTeamId, isValidCloneTeamId, suggestCloneTeamName, credentialsNeededLines, cloneResultNotice,
 } from './clone-team-view.js';
+import { OWN_TEAM_OPTION_LABEL, importConflictSeed } from './import-agent-view.js';
 
 // Mirrors AGENT_ID_RE in admin-console/api/api.js — used only to give inline
 // feedback before the server round-trip; the server remains the source of
@@ -48,6 +49,7 @@ const footerStyle = {
 /* ── Import Agent Form ──────────────────────────────────────────────── */
 export function ImportAgentForm({ file, teams, onSubmit, onCancel }) {
   const [newId, setNewId] = useState('');
+  const [displayName, setDisplayName] = useState('');
   const [parentTeamId, setParentTeamId] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -59,13 +61,17 @@ export function ImportAgentForm({ file, teams, onSubmit, onCancel }) {
     try {
       const { ok, data } = await onSubmit({
         newId: newId.trim() || undefined,
+        displayName: (newId.trim() && displayName.trim()) || undefined,
         parentTeamId: parentTeamId || undefined,
       });
       if (!ok) {
         if (data?.code === 'id-conflict') {
           setConflict(true);
-          // Seed a non-colliding suggestion so the operator can just confirm.
-          if (!newId.trim() && data.agentId) setNewId(`${data.agentId}-2`);
+          // Seed a free id and a distinguishable name so the operator can
+          // just confirm (#2684).
+          const seed = importConflictSeed(data, newId, displayName);
+          setNewId(seed.newId);
+          setDisplayName(seed.displayName);
           setError(data.error || 'That id is already in use — choose a different one.');
         } else {
           setError(data?.error || 'Import failed.');
@@ -85,7 +91,7 @@ export function ImportAgentForm({ file, teams, onSubmit, onCancel }) {
       <div style={leadStyle}>
         Importing <strong style={{ color: 'var(--eb-text-primary)' }}>{file?.name}</strong>.
         The agent's memory, skills and repo clone are kept as-is; a fresh chat identity
-        is provisioned on import. Activate it from its card afterwards.
+        is provisioned on import, and the agent starts right away.
       </div>
 
       <div>
@@ -102,6 +108,20 @@ export function ImportAgentForm({ file, teams, onSubmit, onCancel }) {
         </div>
       </div>
 
+      {newId.trim() && (
+        <div>
+          <FormInput
+            label="New Display Name"
+            value={displayName}
+            onChange={setDisplayName}
+            placeholder="leave blank to keep the exported name"
+          />
+          <div style={helpTextStyle}>
+            Shown in the agent list — give the copy a name you can tell apart from its source.
+          </div>
+        </div>
+      )}
+
       <div>
         <div style={labelStyle}>
           Assign to Team
@@ -110,14 +130,14 @@ export function ImportAgentForm({ file, teams, onSubmit, onCancel }) {
         <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-1)' }}>
           Graft the imported agent into an existing team as a member. It inherits the
           team's working environment but keeps its own imported system prompt as an override.
-          Leave as <em>Standalone</em> to import it as an independent agent.
+          Leave as <em>Its own team</em> to import it as a team of one.
         </div>
         <select
           value={parentTeamId}
           onChange={e => setParentTeamId(e.target.value)}
           style={inputStyle}
         >
-          <option value="">Standalone agent (no team)</option>
+          <option value="">{OWN_TEAM_OPTION_LABEL}</option>
           {(teams || []).map(t => (
             <option key={t.id} value={t.id}>{t.displayName || t.id}</option>
           ))}
@@ -163,7 +183,9 @@ export function CloneAgentForm({ agent, teams, existingIds, onSubmit, onCancel }
       });
       if (!ok) {
         if (data?.code === 'id-conflict') {
-          setNewId(suggestCloneId(trimmedId, existingIds));
+          // The server's suggestion also accounts for the `<id>-team` a team
+          // of one claims and for agents this list cannot see (#2684).
+          setNewId(data.suggestedId || suggestCloneId(trimmedId, existingIds));
         }
         setError(data?.error || 'Clone failed.');
       }
@@ -204,15 +226,15 @@ export function CloneAgentForm({ agent, teams, existingIds, onSubmit, onCancel }
       <div>
         <div style={labelStyle}>Target Team</div>
         <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-1)' }}>
-          Defaults to the source's own team (if any). Choose a different team or
-          <em> Standalone</em> to place the clone elsewhere.
+          Defaults to the source's own team (if any). Choose a different team, or
+          <em> Its own team</em> to make the clone a team of one.
         </div>
         <select
           value={parentTeamId}
           onChange={e => setParentTeamId(e.target.value)}
           style={inputStyle}
         >
-          <option value="">Standalone agent (no team)</option>
+          <option value="">{OWN_TEAM_OPTION_LABEL}</option>
           {(teams || []).map(t => (
             <option key={t.id} value={t.id}>{t.displayName || t.id}</option>
           ))}

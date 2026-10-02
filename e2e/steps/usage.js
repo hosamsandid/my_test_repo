@@ -24,8 +24,10 @@ function teamSelect(page) {
 function rangeSelect(page) {
   return page.locator('select').filter({ has: page.getByRole('option', { name: 'All time' }) });
 }
+// The primary "Group by" select and the "Second grouping level" select both
+// carry a "Provider" option, so target the primary by its aria-label (#2137).
 function groupSelect(page) {
-  return page.locator('select').filter({ has: page.getByRole('option', { name: 'Provider' }) });
+  return page.locator('select[aria-label="Group by"]');
 }
 
 /**

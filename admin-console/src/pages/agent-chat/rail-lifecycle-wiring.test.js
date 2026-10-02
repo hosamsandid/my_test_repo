@@ -427,10 +427,11 @@ test('#2213 — the chevron is its own click target and is the only thing that t
   // The outer row activates (selects + opens settings), not the collapse.
   assert.match(header, /onClick=\{onActivate\}/);
   assert.doesNotMatch(header, /onClick=\{onToggle\}/);
-  // The chevron is a distinct `role="button"` element carrying `aria-expanded`
-  // and its own stopPropagation'd handler — the outer row's onClick must never
-  // call `onToggle` directly any more.
-  assert.match(header, /role="button"[\s\S]{0,200}aria-expanded=\{!collapsed\}/);
+  // The chevron is a distinct `<button>` (#2704: a sibling of the main
+  // button, no longer a `role="button"` span nested in it) carrying
+  // `aria-expanded` and its own stopPropagation'd handler — the outer row's
+  // onClick must never call `onToggle` directly any more.
+  assert.match(header, /<button\s+type="button"\s+aria-expanded=\{!collapsed\}/);
   assert.match(header, /onClick=\{e => \{ e\.stopPropagation\(\); onToggle\(\); \}\}/);
 });
 

@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { resolveCloneTarget } = require("./clone-target");
+const { resolveCloneTarget, teamOfOneIdConflict } = require("./clone-target");
 
 test("no target team → standalone agent, keeps the source's environment", () => {
   const sourceCfg = { environmentId: "env-1" };
@@ -33,4 +33,11 @@ test("target id resolves but isn't a team → throws", () => {
     () => resolveCloneTarget(sourceCfg, { parentTeamId: "some-agent" }, notATeam),
     /Agent 'some-agent' is not a team \(role=agent\)/,
   );
+});
+
+test("teamOfOneIdConflict names the derived team id only when it is taken (#2684)", () => {
+  assert.equal(teamOfOneIdConflict("solo", () => false), null);
+  assert.equal(teamOfOneIdConflict("solo", (id) => id === "solo-team"), "solo-team");
+  // The agent id itself being taken is a different refusal, not this one.
+  assert.equal(teamOfOneIdConflict("solo", (id) => id === "solo"), null);
 });

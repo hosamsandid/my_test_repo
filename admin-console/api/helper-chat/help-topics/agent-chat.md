@@ -280,7 +280,10 @@ is off.
 shows them nested directly under that role, in a collapsible **Instances (N)**
 sub-list — instead of scattering them through the team as flat, indistinguishable
 rows. It expands/collapses and remembers your choice the same way a team group
-does, and stays empty (no sub-list at all) while the role has nothing live. Each
+does, and stays empty (no sub-list at all) while the role has nothing live. When
+the role has a **Max parallel instances** cap, the count reads against it, e.g.
+**Instances (5 / 3)**; a warning icon marks a count over the cap (running
+instances are not stopped, no new one starts until the count is below it). Each
 instance row is an ordinary agent: its status dot follows the same activity poll,
 and clicking it opens its own chat/session log exactly like any other member —
 a row disappears once its instance is torn down. Its triggered runs and your chat
@@ -290,7 +293,10 @@ share one session.
 (top right) hands over to the create launcher, where *Configure an agent
 manually* — under **Advanced options** — opens the direct form; **Import Agent**
 next to it takes an exported agent ZIP and asks for an id and a team before it
-lands. The imported agent joins the list
+lands — leave the team on *Its own team* and the agent becomes a team of one,
+like any newly created agent. If the exported id is taken, the dialog suggests
+a free one and a display name ("<name> (Copy)") so the copy can be told apart
+from its source. The imported agent starts right away and joins the list
 without a reload — but if the list filter is narrowed at the time, the
 confirmation says so rather than letting it arrive out of sight. Both buttons
 are greyed out with the reason when you may not create agents.
@@ -468,6 +474,25 @@ work. A context folder is **read-only** unless it was mounted read-write; a
 read-write one also offers upload, delete and drag-to-move, and a read-only one
 simply offers no write action at all.
 
+**HTML files** (`.html`, `.htm`) open as source code. The **Rendered** toggle
+shows the page itself, but it asks first, **every time**: the page was written
+by an agent and may contain harmful content, so nothing runs until you click
+**Show preview**. The dialog also has an **Also load external resources**
+checkbox. It starts unticked and only applies to this one opening. Unticked,
+inline styles, scripts and embedded (`data:`) images work, but external
+scripts, stylesheets, fonts and images do not load, and scripts cannot fetch or
+send anything. Ticked, it may load from any
+host. Either way the page runs isolated from Agent Studio: it cannot read your
+session, the console or other agents' data. A banner above the preview says
+so, and also says whether external resources are on. Do not enter passwords
+or credentials into a preview. Relative links to other workspace files (images,
+stylesheets) do not load. A page that navigates away (a link or a redirect)
+closes the preview back to source, but the address it navigated to has
+already been requested, even with external resources off. A page stuck in an endless loop can freeze
+the tab until you reload. Files above **5 MB** offer **Download** instead of a
+preview. The same preview is available in the expanded viewer and when you
+open a file referenced in chat.
+
 ### Repositories: inherited, and this agent's own
 
 The Workspace toolbar's **repositories** button (and the same panel in
@@ -527,7 +552,7 @@ same question, "what wakes this agent", and every one of them delivers a
 |---|---|
 | **Cron (recurring)** | a 5-field schedule (`Minute Hour Day Month Weekday`) comes due. If the previous run of *this* trigger is still going, the tick is skipped rather than queued. |
 | **Once (one-shot)** | a specific date and time is reached. It then deletes itself — a reminder, not a schedule. |
-| **HTTP webhook** | something outside the platform sends `POST /hooks/<agentId>/<triggerId>` with the trigger's own `X-Hook-Secret`. Each trigger carries its own generated secret; there is no open mode. Used by CI pipelines, monitoring, GitHub webhooks. |
+| **HTTP webhook** | something outside the platform sends `POST /hooks/<agentId>/<triggerId>` with the trigger's own `X-Hook-Secret` — a GitHub webhook instead takes the secret as its **Secret** (verified via `X-Hub-Signature-256`). Each trigger carries its own generated secret; there is no open mode. Used by CI pipelines, monitoring, GitHub webhooks. |
 | **GitHub event** | the built-in poller sees a matching event on a repository of the agent's environment (about every 30 seconds). The full event payload is appended to the prompt as JSON. Needs a GitHub token on that environment. |
 | **Data flow (agent dependency)** | a teammate pushes to the team repository — the committed work *is* the hand-off. Under the hood this is a GitHub `push` subscription with a marker. |
 | **Plugin event** | a granted plugin's broker reports something (a Jira status change, say). Two filters narrow it — see *Which event vs. Only when* below. |
@@ -536,7 +561,8 @@ same question, "what wakes this agent", and every one of them delivers a
 ### Cron and once: time zone and status
 
 Cron runs in **Europe/Berlin** (your time is shown if it differs); a once time
-is your local time. Rows show next/last run, or a red warning if the agent
+is your local time; a past one is flagged and runs at the next sync (about a
+minute), then is removed. Rows show next/last run, or a red warning if the agent
 cannot schedule the trigger. The container clock can drift on a Podman VM; a
 forward correction fires whatever it skips.
 
@@ -608,7 +634,7 @@ A loop re-runs the same prompt until the goal is reached:
   that must pass, another agent that reviews each try, or the flow's downstream
   reviewers. A failed check is fed back into the next try's prompt. Team agents
   must not grade their own work — leave it blank and a sibling reviewer is
-  re-applied server-side. Pick *the flow checks the hand-off* when each try ends
+  re-applied server-side (with no teammate in the team, the agent checks itself). Pick *the flow checks the hand-off* when each try ends
   in a PR or a label that a wired QS chain already reviews, so the same reviewer
   does not check the work twice.
 

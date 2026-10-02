@@ -55,7 +55,7 @@ function fn(name) {
 }
 
 test("the guard is not vacuous: both functions survive the comment strip with their bodies intact", () => {
-  for (const name of ["routePooledDispatch", "poolReapSweepTeam", "_liveInstanceIdsForRole"]) {
+  for (const name of ["routePooledDispatch", "poolReapSweepTeam", "_liveInstanceIdsForRole", "_cappedInstanceIdsForRole"]) {
     assert.ok(fn(name).length > 100, `${name} came back empty — the comment strip or slice ran away`);
   }
 });
@@ -64,18 +64,28 @@ test("routePooledDispatch enumerates every live instance of the ROLE, not just t
   const src = fn("routePooledDispatch");
   assert.match(
     src,
-    /existingInstanceIds:\s*itemKey == null \? \[\] : _liveInstanceIdsForRole\(agentId\)/,
-    "existingInstanceIds must come from _liveInstanceIdsForRole(agentId) — a single-item array can never reach the refuse (maxInstances) branch",
+    /existingInstanceIds:\s*itemKey == null \? \[\] : _cappedInstanceIdsForRole\(agentId\)/,
+    "existingInstanceIds must come from _cappedInstanceIdsForRole(agentId) — a single-item array can never reach the refuse (maxInstances) branch",
   );
+  // #2760: …which is every live instance of the role PLUS every one still provisioning.
+  const capped = fn("_cappedInstanceIdsForRole");
+  assert.match(capped, /_liveInstanceIdsForRole\(roleFullId\)/);
+  assert.match(capped, /poolSpawns\.provisioningIds\(roleFullId\)/);
 });
 
 test("mutation-proved: the pre-fix single-item shape would fail the check above", () => {
   const buggy = fn("routePooledDispatch").replace(
-    "existingInstanceIds: itemKey == null ? [] : _liveInstanceIdsForRole(agentId),",
+    "existingInstanceIds: itemKey == null ? [] : _cappedInstanceIdsForRole(agentId),",
     "existingInstanceIds: itemKey == null ? [] : [agentPool.poolInstanceId(teamId, roleId, itemKey)]\n"
       + "      .filter((id) => loadAgentConfig(id) || agentTeardownRegistry.has(id)),",
   );
-  assert.doesNotMatch(buggy, /_liveInstanceIdsForRole\(agentId\)/);
+  assert.doesNotMatch(buggy, /_cappedInstanceIdsForRole\(agentId\)/);
+});
+
+test("#2760 review S2: pool-control's liveInstanceCount counts provisioning instances too, like the cap", () => {
+  const sites = SRC.match(/liveInstanceCount:[^\n]*/g) || [];
+  assert.equal(sites.length, 1, "exactly one liveInstanceCount site — re-point this guard if that changes");
+  assert.match(sites[0], /liveInstanceCount:\s*_cappedInstanceIdsForRole\(role\.id\)\.length/);
 });
 
 test("_liveInstanceIdsForRole scans by role prefix and poolOf, not by a single item key", () => {

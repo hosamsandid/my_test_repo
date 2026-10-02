@@ -53,6 +53,13 @@ export const INTERNAL_EVENT_LABELS = new Map([
   // `POST /internal/plugin-event`; the consumer's listener is a `plugin-event`
   // trigger, not a `github-event` one, so it is never a GITHUB_EVENT_OPTIONS key.
   ['plugin.event', 'plugin event'],
+  // #2754: a person released an orphaned `:wip` claim from the Flow Control
+  // board. Written by `orchestrator/flow-claim-release.js` (CLAIM_RELEASED_EVENT).
+  ['flow-control.claim-released', 'claim released (Flow Control)'],
+  // #2693: the provisioning sweep removed (or tried to remove) an orphaned
+  // instance. Written by `orchestrator/orchestrator.js` with
+  // `provisioning-sweep.js` PROVISIONING_SWEEP_KEY.
+  ['provisioning.reaped', 'orphaned instance cleaned up'],
 ]);
 
 // Display-only names for the remaining keys the GitHub poller can write to the

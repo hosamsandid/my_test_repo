@@ -429,7 +429,9 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   sub-grouping** (#2297): the same live instances, nested under their role as a
   collapsible **Instances (N)** sub-list in the left rail instead of scattered
   flat among the team's members — `poolInstance`/`poolOf`/`poolItem` surfaced on
-  `GET /api/matrix/agents`, nested by `agent-list-model.js` `buildGroups`. **The
+  `GET /api/matrix/agents`, nested by `agent-list-model.js` `buildGroups`; the
+  label reads against the role's cap (*Instances (5 / 3)*, `poolMaxInstances`,
+  #2760 — `pool-cap-view.js`, shared with the Scaling section). **The
   rail live-refreshes** (#2311): `AgentRosterContext` polls the same endpoint on
   its own ~5s beat (a shared singleton poll, mirroring `AgentStatusesContext`'s
   #1677 pattern; paused while the tab is hidden), diffed by `roster-diff.js` so
@@ -505,7 +507,8 @@ token (replaces webhooks for local stacks).
   undrained; the console locks every chat composer. Read via
   `GET /internal/maintenance-mode`.
 - **Webhook server** (`HOOK_PORT`): `POST /hooks/:agentId/:hookId` with matching
-  `X-Hook-Secret`; enqueues the trigger's `prompt` (body ignored). Only the
+  `X-Hook-Secret` or GitHub `X-Hub-Signature-256` (`hook-auth.js`); enqueues the
+  trigger's `prompt` (body only signature-checked). Only the
   Maintenance flag protects the queue — prefer `github-event` for must-not-drop.
 - **BP-event router** (`POST /internal/bp-events`): announces Briefing Pack
   changes; the orchestrator routes to affected bp-instances (`bp-event-router.js`).
@@ -534,7 +537,9 @@ in pure, unit-tested `*-view.js`/model modules per the #651 convention (JSX
 uncovered). Key pieces:
 - `AgentList` — left rail (drag-reorder, grouping, disabled/stub opt-ins,
   pool-instance sub-grouping (#2297), lifecycle context menu via
-  `RailLifecycleHost`). Multi-select team filter (#2740): `ListFilterControl` +
+  `RailLifecycleHost`). A list named "Agents" of listitems whose main
+  `<button>` has the kebab/grip/chevron as siblings, never nested (#2704);
+  e2e locates it via `e2e/steps/agent-rail.js`. Multi-select team filter (#2740): `ListFilterControl` +
   pure `list-selection.js`; the hidden-entry set is saved per user as
   `chatListFilter` via `PUT /api/me/preferences`.
 - `ChatPanel` — backfill/pagination/optimistic-send/SSE tail; transcript
@@ -610,7 +615,7 @@ Process step lands on the template/draft gallery; role templates under
 | `orchestrator/spawn-container.js` | Spawns/kills per-agent Podman container over libpod; network + FS + volume + host-folder isolation |
 | `orchestrator/spawn-kubernetes-*.js` | Kubernetes pod / plugin runtimes behind the `container-runtime.js` seam |
 | `orchestrator/prompt-assembly.js` | Pure single source for system-prompt composition (ordering, gating, memory hint) |
-| `orchestrator/agent-id-resolution.js` | Pure collision-free agent id resolution (`nextAvailableAgentId`, `suggestFreeAgentId`) |
+| `orchestrator/agent-id-resolution.js` | Pure collision-free agent id resolution (`nextAvailableAgentId`, `suggestFreeAgentId`; byte-identical in admin-console) |
 | `orchestrator/team-conversion.js` / `team-of-one-migration.js` | Convert/migrate a standalone agent into a team of one |
 | `orchestrator/agent-delete-plan.js` / `agent-orphans.js` | Fast/background delete + cascade; orphan detection |
 | `orchestrator/teams-store.js` | Source of truth for the human Team data model (pure factory) |
@@ -678,7 +683,9 @@ Resolved **team-first then global** at seeding (`orchestrator/skill-source.js`).
 System Admin or Team Admin of any team — promote, publish, import, merge,
 create and edit all apply that one rule (#2178/#2180/#2307;
 `skill-transfer.js`'s `requiredPoolWritePermission`). **Team**:
-`/workspace/teams/<teamId>/skills/` (RW), Team-Admin-of-that-team-managed.
+`/workspace/teams/<teamId>/skills/` (RW), Team-Admin-of-that-team-managed;
+`<teamId>` = Agent Team id (`api/skill-pool-team.js` `agentPoolTeamId`, mirrors
+`agentKnowledgeTeamId`), never the legacy `cfg.teamId` (#2689).
 `/api/skills` tags `source` = `pool`/`team`/`agent`; `POST
 /api/skills/promote-to-global` lifts a team skill into the global pool.
 

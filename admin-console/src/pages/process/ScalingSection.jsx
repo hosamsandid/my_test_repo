@@ -1,9 +1,11 @@
 import React from 'react';
+import { AlertTriangle } from 'lucide-react';
 import {
   parseMaxInstancesInput,
   parseMinutesInput,
   scalingPrerequisite,
 } from './scaling-view.js';
+import { poolCapView } from './pool-cap-view.js';
 
 // Role-axis config surface for agent pools (#2271, Amendment 2 A2.2 of
 // `docs/parallel-workers-concept.md`): "This role auto-scales" (pool.enabled),
@@ -32,7 +34,12 @@ import {
 // draft but block every input, so the section stays visible ("Coming Soon",
 // the badge lives with the caller's "Scaling" label) without letting anyone
 // half-configure a pool the platform won't actually spawn.
-export default function ScalingSection({ draft, onChange, parentWipLimit, error, disabled = false }) {
+//
+// `live` (#2760 AC5): `{ count, cap }` from the team's pool-control read
+// (`pool-cap-view.js` `livePoolCount`) — the role's live + provisioning
+// instances against its SAVED cap, marked when over it. `null` hides the line
+// (role not pooled yet, or the read failed).
+export default function ScalingSection({ draft, onChange, parentWipLimit, error, disabled = false, live = null }) {
   const maxInstances = parseMaxInstancesInput(draft.maxInstancesText);
   const idle = parseMinutesInput(draft.idleText);
   const hard = parseMinutesInput(draft.hardText);
@@ -72,6 +79,7 @@ export default function ScalingSection({ draft, onChange, parentWipLimit, error,
             />
           </Field>
           {maxInstances.error && <FieldError text={maxInstances.error} />}
+          {live && <LiveInstances count={live.count} cap={live.cap} />}
 
           <div style={{ display: 'flex', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
             <Field label="Idle timeout (min)">
@@ -97,6 +105,24 @@ export default function ScalingSection({ draft, onChange, parentWipLimit, error,
       )}
 
       {error && <FieldError text={error} />}
+    </div>
+  );
+}
+
+function LiveInstances({ count, cap }) {
+  const view = poolCapView(count, cap);
+  return (
+    <div
+      title={view.title}
+      style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}
+    >
+      <span>Live instances: {view.text}</span>
+      {view.over && (
+        <>
+          <AlertTriangle size={12} aria-hidden="true" style={{ flexShrink: 0, color: 'var(--eb-status-warning)' }} />
+          <span>over the limit — no new instance starts until the count is below the cap</span>
+        </>
+      )}
     </div>
   );
 }

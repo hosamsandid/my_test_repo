@@ -159,7 +159,9 @@ rate-limited, and a signed-in session lasts about a week.
 
 **New User** creates the record. The only required field is the **Subject**;
 pick the identity the person will actually sign in with, because it cannot be
-changed later. Everything else can be filled in now or edited afterwards.
+changed later. Everything else can be filled in now or edited afterwards. The
+e-mail is optional, but if you give one it must be a valid address — both the
+panel and the server refuse anything else.
 
 Clicking a row (or the pencil) opens the edit panel, which has two independent
 halves:
@@ -303,46 +305,39 @@ another group of people, so it is reserved for System Admins.
 
 ### An access scope is not an Agent Team
 
-The teams in the ownership dropdowns here are **access scopes** — the older,
-coarser tenant that a resource's `teamId` still names. They share a word with
-Agent Teams and nothing else:
+The teams this tab offers as owners are the **Agent Teams** from the All Teams
+tab — the same ids a membership points at, so the owner you pick is exactly the
+group of people who will see the resource. They are not the older **access
+scopes** (such as the legacy *Default Team*), the coarser tenant some records are
+still stamped with: no new access scope can be minted, and none is offered here.
 
-| | **Access scope** (the dropdowns here) | **Agent Team** (the All Teams tab) |
-|---|---|---|
-| What it is | A tenant a resource is stamped with | A squad of agents working a repository |
-| Created on | Nowhere any more — the ones that exist are the ones that exist | **+ Create**, self-service, by anyone |
-| Relationship | Owns Agent Teams, among everything else | Sits inside exactly one access scope |
-
-**No new access scope can be minted**, and none can be deleted from the console:
-the surface for that retired with the Access page, and the two tenancies are
-being collapsed into one in a later step. Until then a resource is still stamped
-with a scope, and this tab is where that stamp is changed.
+An environment still stamped with an id that is not an Agent Team shows that id
+as its own entry, marked *not an Agent Team*, instead of quietly displaying a
+different team; pick an Agent Team to move it.
 
 ### Agents
 
-An agent belongs to exactly **one** tenant — there is no shared tier for an
-agent — so each row carries a plain dropdown.
+The section heading counts both levels — for example *Agent Teams (3) · 10
+agents*.
 
-**An Agent Team moves as one unit.** It gets a single dropdown for the whole
-squad and its members are listed beneath it read-only, because they inherit the
-tenant from their parent rather than carrying one of their own. If the parent
-moves but a member cannot, the error says so and names how many were left behind:
-the squad is briefly split across two tenants, and retrying is what resolves it.
-
-Reassigning changes **who may see and manage** the resource. It does not restart
-an agent, move a repository, or alter what the resource does.
+**An agent belongs to exactly one Agent Team, and that is not editable here.** A team
+member is bounded by its parent team, and an Agent Team is its own boundary, so
+each row states the access it has — *Access: members of this Agent Team*, with
+the human owner — rather than offering a dropdown. To give other people access,
+share the team from the Agent Chat. A member whose parent team no longer exists
+is flagged as **orphaned**.
 
 ### Environments, and the shared tier
 
 An environment is **tiered**, not simply owned, so its row states the tier first
 and **Change ownership** edits it as one:
 
-- **Team** — owned by a single access scope, exactly like an agent.
-- **Shared** — reachable by every scope you assign it to. This is what lets one
-  repository, key and provider serve several teams instead of each team wiring up
-  its own infrastructure before it can start. A shared environment assigned to
-  **no** scope is reachable by no team at all, only by System Admins; the row
-  says so rather than looking owned.
+- **Team** — owned by a single Agent Team.
+- **Shared** — reachable by every Agent Team you assign it to. This is what lets
+  one repository, key and provider serve several teams instead of each team
+  wiring up its own infrastructure before it can start. A shared environment
+  assigned to **no** team is reachable by no team at all, only by System Admins;
+  the row says so rather than looking owned.
 
 The tier is why this is not a one-click dropdown any more. Picking a team for a
 **shared** environment does not just move it — it *un-shares* it, taking it away

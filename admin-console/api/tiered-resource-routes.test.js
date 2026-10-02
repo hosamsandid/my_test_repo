@@ -375,8 +375,63 @@ test('an ownership-less create body resolves to an unassigned system tier, not t
   assert.match(body, /scope: 'system', teamId: null, assignedTeamIds: \[\] \};/);
   // That early return must come BEFORE the fall-through call, not after.
   const guardAt = body.search(/scope === undefined && b\.teamId === undefined/);
-  const fallThroughAt = body.search(/return resolveCredentialOwnership\(b\);/);
+  const fallThroughAt = body.search(/return resolveCredentialOwnership\(b, undefined, \{ teamExists: tieredOwnerTeamExists \}\);/);
   assert.ok(guardAt > 0 && fallThroughAt > guardAt, 'the no-ownership guard must be checked before the generic resolver');
+});
+
+// ── #2695: a tiered resource may be owned by / assigned to an Agent Team ────
+
+function fnBody(src, name) {
+  const at = src.indexOf(`function ${name}(`);
+  assert.ok(at > 0, `${name} must exist`);
+  return src.slice(at, src.indexOf('\nfunction ', at + 1));
+}
+
+const OWNER_CHECKS = {
+  // The tiered resolver hands the Agent-Team-aware predicate down.
+  'tiered-passes-agent-team-predicate'(src) {
+    return has(fnBody(src, 'resolveTieredOwnership'), 'return resolveCredentialOwnership(b, undefined, { teamExists: tieredOwnerTeamExists });');
+  },
+  // The predicate admits an Agent Team (and still a legacy scope).
+  'predicate-admits-agent-teams'(src) {
+    return has(fnBody(src, 'tieredOwnerTeamExists'), 'return agentTeamExists(id) || legacyTeamExists(id);');
+  },
+  // The owner AND every assigned team are checked with the passed predicate,
+  // not a hard-wired teams/index.json read.
+  'credential-resolver-uses-predicate'(src) {
+    const body = fnBody(src, 'resolveCredentialOwnership');
+    return has(body, 'if (!teamExists(id)) {')
+      && has(body, 'resolveOwnerTeamId(b.teamId, teamExists)')
+      && !body.includes('TEAMS_INDEX');
+  },
+  'owner-team-id-uses-predicate'(src) {
+    const body = fnBody(src, 'resolveOwnerTeamId');
+    return has(body, 'if (!teamExists(teamId)) {') && !body.includes('TEAMS_INDEX');
+  },
+};
+
+function runOwnerChecks(src) {
+  const failed = [];
+  for (const [name, fn] of Object.entries(OWNER_CHECKS)) if (!fn(src)) failed.push(name);
+  return failed;
+}
+
+test('#2695: environment / MCP-server ownership accepts Agent Team ids', () => {
+  assert.deepEqual(runOwnerChecks(stripComments(API_SRC)), []);
+});
+
+test('#2695: each owner check is proven by a mutation that makes exactly it fire', () => {
+  const src = stripComments(API_SRC);
+  const MUTATIONS = [
+    ['tiered-passes-agent-team-predicate', '{ teamExists: tieredOwnerTeamExists }', '{}'],
+    ['predicate-admits-agent-teams', 'return agentTeamExists(id) || legacyTeamExists(id);', 'return legacyTeamExists(id);'],
+    ['credential-resolver-uses-predicate', 'if (!teamExists(id)) {', 'if (!legacyTeamExists(id)) {'],
+    ['owner-team-id-uses-predicate', 'if (!teamExists(teamId)) {', 'if (!legacyTeamExists(teamId)) {'],
+  ];
+  for (const [expected, find, replace] of MUTATIONS) {
+    assert.equal(src.split(find).length - 1, 1, `anchor for ${expected} must match exactly once`);
+    assert.deepEqual(runOwnerChecks(src.replace(find, replace)), [expected], expected);
+  }
 });
 
 // ── #2158: the global rule lives ONLY in global-resource.js, composed at the

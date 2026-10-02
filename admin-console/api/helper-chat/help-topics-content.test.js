@@ -711,8 +711,8 @@ const TOPIC_CONTENT = [
       // one from creation since Phase B, and a one-time sweep brought every
       // agent that predated it up to the same shape. The chapter now
       // documents growing via Add member instead of a conversion action, plus
-      // the honest Clone/Import edge case and the re-runnable migration sweep
-      // that covers it.
+      // the re-runnable migration sweep that covers Clone/Import leftovers from
+      // before #2684 made those two paths mint a team of one as well.
       'Add member',
       'team-of-one migration sweep',
       'default branch',

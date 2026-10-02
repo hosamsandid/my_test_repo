@@ -66,7 +66,7 @@ export function allTeamRows(agents, memberships, users) {
   const grants = Array.isArray(memberships) ? memberships.filter(Boolean) : [];
   const people = Array.isArray(users) ? users.filter(Boolean) : [];
 
-  const nameByUserId = new Map(people.map(u => [u.id, u.displayName || u.subject || u.id]));
+  const nameByUserId = userNameIndex(people);
 
   const agentCount = new Map();
   for (const a of list) {
@@ -95,7 +95,7 @@ export function allTeamRows(agents, memberships, users) {
         // An unowned team is reported as such rather than blank: D6's own rule
         // ends in "else unset", so `ownerId` is legitimately absent on a team
         // whose access scope had no member at migration time (#2077 Amendment 1).
-        owner: team.ownerId ? (nameByUserId.get(team.ownerId) || team.ownerId) : '—',
+        owner: team.ownerId ? ownerLabel(team.ownerId, nameByUserId) : '—',
         agents: agentCount.get(team.id) || 0,
         people: humans,
         // The number that matters for D4: a team with no admin left is one only
@@ -106,6 +106,24 @@ export function allTeamRows(agents, memberships, users) {
         _team: team,
       };
     });
+}
+
+// How a user id reads: display name, else subject, else the id itself. One
+// index for every owner shown on this page — the All Teams owner column and the
+// Resources tab's personal-resource rows and delete confirmation (#2695) — so a
+// raw UUID never stands in for a person while a record for them exists.
+export function userNameIndex(users) {
+  const byId = new Map();
+  for (const u of Array.isArray(users) ? users : []) {
+    if (u && u.id) byId.set(u.id, u.displayName || u.subject || u.id);
+  }
+  return byId;
+}
+
+// The owner label for `ownerId`; 'unknown' when there is none at all.
+export function ownerLabel(ownerId, nameIndex) {
+  if (!ownerId) return 'unknown';
+  return (nameIndex && nameIndex.get(ownerId)) || ownerId;
 }
 
 // Whether this team is currently un-administrable — nobody but a System Admin
@@ -182,6 +200,45 @@ export function groupAgentsForOwnership(agents) {
     }));
 
   return { agentTeams, standaloneAgents: standaloneAgents.sort(byLabel) };
+}
+
+// The Agents section heading (#2695). The section lists Agent Teams with their
+// member agents beneath (plus any orphan rows); a `team` agent hosts no agent
+// itself, so counting the groups and calling them "Agents" under-reported the
+// list (3 above 10 agents). The heading now names both numbers.
+export function agentsSectionTitle({ agentTeams = [], standaloneAgents = [] } = {}) {
+  const teams = agentTeams.length;
+  const agents = agentTeams.reduce((n, g) => n + ((g && g.members) || []).length, 0) + standaloneAgents.length;
+  return `Agent Teams (${teams}) · ${agents} agent${agents === 1 ? '' : 's'}`;
+}
+
+// What an agent row says about who it belongs to (#2695). An agent's access
+// boundary is DERIVED, not chosen (#2078 `resolveAgentTeam`; the #2169 rule
+// that ownership follows the team): a `team` agent is its own boundary, a
+// `team-member` is bounded by its parent. The old per-row select offered the
+// legacy access scopes and wrote the credential-tenant `teamId` — it could
+// neither show nor change the boundary — so the row is read-only now.
+export function agentOwnershipNote(agent, nameIndex) {
+  const a = agent || {};
+  const owner = a.ownerId ? `owner ${ownerLabel(a.ownerId, nameIndex)}` : 'no owner recorded';
+  if (a.role === TEAM_ROLE) return `Access: members of this Agent Team · ${owner}`;
+  if (a.role === MEMBER_ROLE && a.parentTeamId) return `Orphaned: parent Agent Team '${a.parentTeamId}' not found`;
+  return `No Agent Team · ${owner}`;
+}
+
+// The team options for an environment's ownership editor (#2695): the Agent
+// Teams (`role: 'team'` agents), which is what a membership names since #2078 —
+// never the legacy access-scope collection (`GET /api/admin/teams`, only
+// `default`). Shape `{ id, name }` so `EnvironmentOwnership` and `teamsById`
+// read it unchanged; sorted by name.
+export function agentTeamOwnerOptions(agents) {
+  const byId = new Map();
+  for (const a of Array.isArray(agents) ? agents : []) {
+    if (!a || a.role !== TEAM_ROLE || typeof a.id !== 'string' || !a.id) continue;
+    const name = typeof a.displayName === 'string' && a.displayName.trim() ? a.displayName.trim() : a.id;
+    byId.set(a.id, { id: a.id, name });
+  }
+  return [...byId.values()].sort((x, y) => x.name.localeCompare(y.name, undefined, { sensitivity: 'base' }) || x.id.localeCompare(y.id));
 }
 
 // The one-line tier summary for a Working Environment.

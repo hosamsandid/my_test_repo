@@ -32,6 +32,9 @@ const { buildWorkItems, workItemDetail } = require('./work-items');
 const usageExport = require('./usage-export');
 const maintenanceMode = require('./maintenance-mode');
 const { detectRasterImageType, imageContentType } = require('./image-type');
+const {
+  HTML_PREVIEW_MAX_BYTES, wantsExternalResources, htmlPreviewHeaders, htmlPreviewRefusal,
+} = require('./html-preview');
 const { discoverBoundAgents, hiddenBlastRadius, projectRespawnOutcome, respawnWithConcurrency } = require('./respawn-agents');
 const { githubApiBase } = require('./github-api-base');
 const { createTtlCache } = require('./ttl-cache');
@@ -42,6 +45,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, isTeamAdminOfAny
         canReassignCredential, credentialVisibleToTeam, personalLendToTeam, canViewUsageStatistics,
         resolveAgentTenant, canChatAgent } = require('./scope');
 const { resolveAgentTeam } = require('./agent-team');
+const { lifecycleIdConflict } = require('./lifecycle-id-conflict');
 const { ownerRespawnNeeded, markActivePersonal } = require('./personal-credential-active');
 const { createAgentManageGate } = require('./team-member-boundary');
 // Layered resource ownership (#2083, P5) — the shared tier shape for
@@ -168,6 +172,7 @@ const skillDeletion = require('./skill-deletion');
 const skillMerge = require('./skill-merge');
 const skillImport = require('./skill-import');
 const skillGrantValidate = require('./skill-grant-validate');
+const skillPoolTeam = require('./skill-pool-team');
 const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archives');
 const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix, stampLiveLabels } = require('./label-suffix');
@@ -1077,13 +1082,29 @@ function readJsonFile(filePath, fallback = null) {
   }
 }
 
+// Does `id` name a legacy human Team (access scope) in teams/index.json?
+function legacyTeamExists(id) {
+  const teams = readJsonFile(TEAMS_INDEX, []);
+  return Array.isArray(teams) && teams.some(t => t.id === id);
+}
+
+// The owner-team check for a TIERED CONFIGURATION resource (environment / MCP
+// server, #2695). Since #2078 a membership's `teamId` is an Agent Team id, so an
+// Agent Team is the referent that makes a team-tier environment reachable —
+// the Administration → Resources picker offers Agent Teams. A legacy access
+// scope is still accepted so a record already owned by one stays savable.
+function tieredOwnerTeamExists(id) {
+  return agentTeamExists(id) || legacyTeamExists(id);
+}
+
 // Resolve the owning (human) Team for a newly created resource (#299). An
 // explicit id must reference an existing team; absence falls back to the
-// default team. Throws a 400-tagged error for an unknown team.
-function resolveOwnerTeamId(teamId) {
+// default team. Throws a 400-tagged error for an unknown team. `teamExists`
+// defaults to the legacy access-scope check; tiered resources pass
+// `tieredOwnerTeamExists` (#2695).
+function resolveOwnerTeamId(teamId, teamExists = legacyTeamExists) {
   if (!teamId) return DEFAULT_TEAM_ID;
-  const teams = readJsonFile(TEAMS_INDEX, []);
-  if (!Array.isArray(teams) || !teams.some(t => t.id === teamId)) {
+  if (!teamExists(teamId)) {
     const err = new Error(`Owning team '${teamId}' not found`);
     err.status = 400;
     throw err;
@@ -1101,7 +1122,7 @@ function resolveOwnerTeamId(teamId) {
 // body that omits it is filled in, a body that names a DIFFERENT owner is
 // rejected 403 (an agent/human may never register a credential under a foreign
 // identity, edge case + AC2). The owner is validated against a known user record.
-function resolveCredentialOwnership(body, actingUserId) {
+function resolveCredentialOwnership(body, actingUserId, { teamExists = legacyTeamExists } = {}) {
   const b = body || {};
   if (b.scope === 'personal') {
     if (!actingUserId) {
@@ -1120,19 +1141,16 @@ function resolveCredentialOwnership(body, actingUserId) {
   if (reqScope === 'system') {
     const raw = Array.isArray(b.assignedTeamIds) ? b.assignedTeamIds : [];
     const ids = [...new Set(raw.map(String))];
-    if (ids.length) {
-      const teams = readJsonFile(TEAMS_INDEX, []);
-      for (const id of ids) {
-        if (!Array.isArray(teams) || !teams.some(t => t.id === id)) {
-          const err = new Error(`Assigned team '${id}' not found`);
-          err.status = 400;
-          throw err;
-        }
+    for (const id of ids) {
+      if (!teamExists(id)) {
+        const err = new Error(`Assigned team '${id}' not found`);
+        err.status = 400;
+        throw err;
       }
     }
     return { scope: 'system', teamId: null, assignedTeamIds: ids };
   }
-  const teamId = resolveOwnerTeamId(b.teamId);
+  const teamId = resolveOwnerTeamId(b.teamId, teamExists);
   return { scope: 'team', teamId, assignedTeamIds: [] };
 }
 
@@ -1179,8 +1197,8 @@ function resolveTieredOwnership(body) {
   }
   // No `actingUserId`: without it `resolveCredentialOwnership` refuses a
   // personal request anyway, so the explicit 400 above is the message and this
-  // is the backstop.
-  return resolveCredentialOwnership(b);
+  // is the backstop. Owner/assigned teams may be Agent Teams (#2695).
+  return resolveCredentialOwnership(b, undefined, { teamExists: tieredOwnerTeamExists });
 }
 
 // Apply a rename/reassign patch to a credential entry (#798), enforcing the
@@ -3070,7 +3088,10 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // construct's prior grant are preserved (flagged in the UI, never dropped).
   // Validate before any mutation so a bad grant can't half-apply.
   {
-    const known = knownSkillNamesFor(cfg.teamId);
+    // Known names = global pool + the team pool this construct seeds from — the
+    // Agent Team's (#2689), not the legacy human `teamId`, which rejected every
+    // team-only skill as unknown.
+    const known = knownSkillNamesFor(skillPoolTeam.agentPoolTeamId({ ...cfg, id: cfg.id || id }));
     if (Array.isArray(skills) && cfg.role !== 'team-member') {
       const v = skillGrantValidate.validateGrantNames(skills, known, cfg.skills);
       if (!v.ok) return res.status(400).json({ error: `Unknown skill(s): ${v.unknown.join(', ')} — pick from the list or create them first.` });
@@ -4630,12 +4651,19 @@ app.delete('/api/agents/:id', heavyLimiter, async (req, res) => {
 
 /* ─── Agent Clone ───────────────────────────────────────────────────── */
 
+// #2684 — a clone/import with no target team becomes a team of one, which also
+// claims `<id>-team`; `lifecycleIdConflict` refuses (and suggests) by that rule.
+function agentDirExists(agentsBaseDir) {
+  return (id) => fs.existsSync(path.join(agentsBaseDir, id));
+}
+
 // Optional body field:
 //   - parentTeamId — graft the clone into an existing team as a member,
 //     mirroring /api/agents/import's team-assignment field. Absent → the
-//     clone is created as a standalone agent, even when the source itself
+//     clone becomes its own team of one (#2684), even when the source itself
 //     is a team member.
-// On id conflict the response is 409 with `{ code: 'id-conflict', agentId }`,
+// On id conflict the response is 409 with `{ code: 'id-conflict', agentId,
+// suggestedId? }`,
 // same shape as /api/agents/import, so the UI can prompt for a new id inline.
 app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
   const { id } = req.params;
@@ -4671,13 +4699,8 @@ app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
   if (rel.startsWith('..') || path.isAbsolute(rel) || !rel) {
     return res.status(400).json({ error: 'Invalid agent id path' });
   }
-  if (fs.existsSync(targetDir)) {
-    return res.status(409).json({
-      error: `Agent '${newId}' already exists — choose a different id.`,
-      code: 'id-conflict',
-      agentId: newId,
-    });
-  }
+  const cloneConflict = lifecycleIdConflict(newId, { standalone: parentTeamId == null, exists: agentDirExists(agentsBaseDir) });
+  if (cloneConflict) return res.status(409).json(cloneConflict);
   // Config-write authorization (#989): cloning creates an agent — require
   // management rights over the source agent's owning team, and (when grafting
   // the clone into a team) over the destination team too.
@@ -5036,9 +5059,13 @@ const _importUpload = multer({
 
 // Optional form fields (multipart text parts, alongside `file`):
 //   - newId        — assign a different id (e.g. when the exported id is taken).
+//   - displayName  — override the exported display name (#2684), so a copy
+//                    imported under a new id is told apart from its source.
 //   - parentTeamId — graft the imported agent into an existing team as a member.
-// On id conflict the response is 409 with `{ code: 'id-conflict', agentId }`
-// so the UI can prompt for a new id and resubmit.
+//                    Absent → imported as its own team of one (#2684).
+// On id conflict the response is 409 with `{ code: 'id-conflict', agentId,
+// suggestedId?, displayName? }` so the UI can prompt for a new id (and name)
+// and resubmit.
 app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file provided (field name: file)' });
 
@@ -5101,6 +5128,8 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
     const agentId = newIdRaw || exportedId;
     const parentTeamId = typeof req.body.parentTeamId === 'string' && req.body.parentTeamId.trim()
       ? req.body.parentTeamId.trim() : null;
+    const displayName = typeof req.body.displayName === 'string' && req.body.displayName.trim()
+      ? req.body.displayName.trim().slice(0, 200) : null;
 
     // Config-write authorization (#989): importing creates an agent. When
     // grafting into a team, require management rights over that team; a
@@ -5131,12 +5160,21 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
       return res.status(400).json({ error: 'Invalid agent id path' });
     }
 
-    // Conflict check — structured so the UI can offer a new id.
-    if (fs.existsSync(targetDir)) {
+    // Conflict check — structured so the UI can offer a new id. The export's
+    // own display name rides along so the dialog can seed a distinguishable
+    // name for the copy instead of a second agent with the same label.
+    const importConflict = lifecycleIdConflict(agentId, {
+      standalone: parentTeamId == null, exists: agentDirExists(agentsBaseDir), what: ' to import it under',
+    });
+    if (importConflict) {
+      // Not readJsonFile: the extract dir lives under /tmp, outside its roots.
+      let exportedName;
+      try {
+        exportedName = JSON.parse(fs.readFileSync(path.join(extractDir, 'workspace', 'config.json'), 'utf8')).displayName;
+      } catch { /* no usable name — the dialog falls back to the id */ }
       return res.status(409).json({
-        error: `Agent '${agentId}' already exists — choose a different id to import it under.`,
-        code: 'id-conflict',
-        agentId,
+        ...importConflict,
+        ...(typeof exportedName === 'string' && exportedName.trim() ? { displayName: exportedName.trim().slice(0, 200) } : {}),
       });
     }
 
@@ -5158,7 +5196,7 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
     const orchResp = await fetch(`${ORCH_URL()}/internal/agents/import`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ stagingDir, agentId, parentTeamId }),
+      body: JSON.stringify({ stagingDir, agentId, parentTeamId, ...(displayName ? { displayName } : {}) }),
     });
     const data = await orchResp.json().catch(() => ({}));
     if (!orchResp.ok) {
@@ -5175,6 +5213,8 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
       agentId: data.id || agentId,
       role: data.role || null,
       parentTeamId: data.parentTeamId || null,
+      teamOfOne: !!data.teamOfOne,
+      ...(Array.isArray(data.warnings) && data.warnings.length ? { warnings: data.warnings } : {}),
       image: manifest.image || null,
     });
   } catch (err) {
@@ -6299,6 +6339,30 @@ app.get('/api/agents/:agentId/context/image', apiLimiter, async (req, res) => {
   res.end(buf);
 });
 
+// Sandboxed HTML preview (#2778) — same contract and headers as the workspace
+// `/html-preview` route. The bytes come through the orchestrator's download cap
+// (25 MB, above HTML_PREVIEW_MAX_BYTES); a truncated read is refused rather than
+// rendered half-way.
+app.get('/api/agents/:agentId/context/html-preview', apiLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  let status; let body;
+  try {
+    ({ status, body } = await fetchContextBrowse(agentId, 'download', relPath));
+  } catch (err) {
+    console.error(`[api] context html-preview ${agentId} failed: ${err.message}`);
+    return res.status(502).json({ error: 'Reading the context folder failed' });
+  }
+  if (status >= 300) return res.status(status).json(body);
+  const buf = Buffer.from(String(body.content || ''), 'base64');
+  const size = body.truncated ? Infinity : (typeof body.size === 'number' ? body.size : buf.length);
+  const refusal = htmlPreviewRefusal({ relPath: String(body.path || relPath), size, head: buf });
+  if (refusal) return res.status(refusal.status).json({ error: refusal.error, code: refusal.code });
+  res.set(htmlPreviewHeaders({ external: wantsExternalResources(req.query), size: buf.length }));
+  res.end(buf);
+});
+
 // Raw download. Capped by the orchestrator (the bytes travel base64 through an
 // exec pipe, not a file stream) — a file over the cap arrives truncated, so it
 // is refused outright rather than silently corrupted.
@@ -6815,6 +6879,8 @@ app.get('/api/process/graph', (req, res) => {
       emits: liftAgentEmits(cfg.emits, triggers),
       outcomes: cfg.outcomes || null, // structured OUTCOMES port (#827), supersedes emits
       github: cfg.github || null, channels: Array.isArray(cfg.channels) ? cfg.channels : [],
+      // A switched-off agent drives the `wake-label-no-live-consumer` lint (#2754).
+      ...(cfg.enabled === false ? { enabled: false } : {}),
     });
   }
   const teamHumans = teamHumansRegistry(team);
@@ -9129,6 +9195,8 @@ app.get('/api/flows/graph', async (req, res) => {
       // GitHub artifact ports (#380): produce flags + consumed channels.
       github: cfg.github || null,
       channels: Array.isArray(cfg.channels) ? cfg.channels : [],
+      // A switched-off agent drives the `wake-label-no-live-consumer` lint (#2754).
+      ...(cfg.enabled === false ? { enabled: false } : {}),
     });
   }
   // Ordered stage names persisted on the team agent (#stage-order) drive the
@@ -9242,6 +9310,33 @@ app.post('/api/teams/:teamId/flow-board-removed', apiLimiter, async (req, res) =
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, rowId }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/flow-board-release — "Release claim" on a row the
+// board flags as stuck on an orphaned `:wip` claim (#2754). Body `{ rowId }`.
+// Unlike Remove, this DOES change the GitHub item (swaps `<wake>:wip` back to
+// `<wake>` so the poller re-dispatches it), so it is gated like every other
+// board write and the actor — always the session user, never the body — is
+// stamped onto the Event Log line the orchestrator writes.
+app.post('/api/teams/:teamId/flow-board-release', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!canManageTeam(scope, teamId)) return denyAdmin(res, 'You may not manage this team');
+  const rowId = req.body && typeof req.body.rowId === 'string' ? req.body.rowId.trim() : '';
+  if (!rowId || rowId.length > 300) return res.status(400).json({ error: 'rowId is required' });
+  const actor = (req.user && (req.user.username || req.user.email || req.user.sub)) || null;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/flow-board-release`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rowId, actor }),
     });
     const data = await resp.json().catch(() => ({}));
     return res.status(resp.status).json(data);
@@ -11258,10 +11353,15 @@ function commitSkillWrite({ destDir, overwrite, copyFrom, skillMd, provenance, s
 // team pool; the global pool keeps its existing /pool/skills paths untouched.
 const POOL_TEAM_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
-// True when a human Team with this id exists in the teams index.
+// True when `teamId` names a team pool target: an Agent Team (the `team`
+// agent with that id — what the Skills page pickers offer, #2393/#2689) or a
+// legacy human Team in the teams index.
 function resolveTeamExists(teamId) {
-  const teams = readJsonFile(TEAMS_INDEX, []);
-  return Array.isArray(teams) && teams.some(t => t.id === teamId);
+  if (!POOL_TEAM_ID_RE.test(teamId || '')) return false;
+  return skillPoolTeam.poolTeamExists(teamId, {
+    agentConfig: readJsonFile(path.join(AGENTS_DIR, path.basename(teamId), 'config.json'), null),
+    legacyTeams: readJsonFile(TEAMS_INDEX, []),
+  });
 }
 
 // Resolve a team skill directory with a containment check, or null if invalid.
@@ -12234,7 +12334,9 @@ function blockingGrantsForDeletion(plan) {
     const hasOverride = Array.isArray(cfg.skillsOverride) && cfg.skillsOverride.includes(plan.name);
     const grants = hasOverride || (Array.isArray(cfg.skills) && cfg.skills.includes(plan.name));
     if (!grants) continue;
-    const teamId = cfg.teamId || DEFAULT_TEAM_ID;
+    // The pool the grant resolves against is the one seeding reads (#2689):
+    // the Agent Team id, not the legacy human `teamId` every team agent carries.
+    const teamId = skillPoolTeam.agentPoolTeamId({ ...cfg, id: cfg.id || id });
     const r = resolveGrantTier(cfg.id || id, teamId, plan.name);
     if (!r) continue;
     const hits = plan.tier === 'team' ? (r.tier === 'team' && r.teamId === plan.teamId)
@@ -12602,8 +12704,9 @@ function transferSkillExistsAt(toRef, name) {
   return fs.existsSync(path.join(r.dir, 'SKILL.md'));
 }
 
-// Agent constructs that grant `name` (skills[] or skillsOverride), each with its
-// owning human teamId — the basis for the move-would-strand-grants guard.
+// Agent constructs that grant `name` (skills[] or skillsOverride), each with the
+// team pool its grant resolves against (#2689: the Agent Team id, as seeding
+// reads it) — the basis for the move-would-strand-grants guard.
 function agentsGrantingSkill(name) {
   const out = [];
   let ids;
@@ -12613,7 +12716,7 @@ function agentsGrantingSkill(name) {
     if (!cfg) continue;
     const granted = (Array.isArray(cfg.skills) && cfg.skills.includes(name)) ||
       (Array.isArray(cfg.skillsOverride) && cfg.skillsOverride.includes(name));
-    if (granted) out.push({ id: cfg.id || id, teamId: cfg.teamId || DEFAULT_TEAM_ID });
+    if (granted) out.push({ id: cfg.id || id, teamId: skillPoolTeam.agentPoolTeamId({ ...cfg, id: cfg.id || id }) });
   }
   return out;
 }
@@ -12635,19 +12738,22 @@ function archiveSkillDir(srcDir, fromRef, name, hash) {
   } catch { return null; }
 }
 
-// Best-effort activation of a freshly-landed team skill on every squad (role
-// 'team' agent) of the owning human team. Activation is keyed by squad id, not
-// the human team id that keys the pool dir (see the two-keyspace note), so we
-// fan out to each squad. Never rolls the transfer back on failure.
-async function activateTransferredTeamSkill(humanTeamId, name) {
+// Best-effort activation of a freshly-landed team skill on the Agent Team(s)
+// that seed from that pool. The pool dir is keyed by the Agent Team id (#2689 —
+// not the legacy human `teamId` every team agent still carries, which matched
+// nothing and left `skills` empty). Never rolls the transfer back on failure;
+// the caller reports an empty / failed result so the UI can say so.
+async function activateTransferredTeamSkill(poolTeamId, name) {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   const results = [];
   let ids;
   try { ids = fs.readdirSync(AGENTS_DIR); } catch { return results; }
+  const configs = [];
   for (const id of ids) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
-    if (!cfg || cfg.role !== 'team' || (cfg.teamId || DEFAULT_TEAM_ID) !== humanTeamId) continue;
-    const squadId = cfg.id || id;
+    if (cfg) configs.push({ ...cfg, id: cfg.id || id });
+  }
+  for (const squadId of skillPoolTeam.squadsForPoolTeam(configs, poolTeamId)) {
     try {
       const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(squadId)}/skills/activate`, {
         method: 'POST',
@@ -19339,6 +19445,12 @@ app.get('/api/matrix/agents', (req, res) => {
         poolItem: cfg.poolItem != null ? cfg.poolItem : null,
         poolSpawnedAt: cfg.poolSpawnedAt || null,
       } : {}),
+      // #2760 AC5: a pooled role TEMPLATE's "Max parallel instances" cap, so
+      // the rail can show its "Instances (n)" count against it ("5 / 3").
+      // `null` = no per-role cap; absent on every non-pooled row.
+      ...(!cfg.poolInstance && cfg.pool && typeof cfg.pool === 'object' && cfg.pool.enabled === true ? {
+        poolMaxInstances: Number.isInteger(cfg.pool.maxInstances) && cfg.pool.maxInstances >= 1 ? cfg.pool.maxInstances : null,
+      } : {}),
     });
   }
   res.json(out);
@@ -20568,6 +20680,42 @@ app.get('/api/agents/:agentId/workspace/image', apiLimiter, (req, res) => {
   const stream = fs.createReadStream(target);
   stream.on('error', () => res.end());
   stream.pipe(res);
+});
+
+// Sandboxed rendered preview of an agent-written HTML file (#2778). Serves the
+// FULL file (up to HTML_PREVIEW_MAX_BYTES, not the 512 KB /file cap — AC9) as
+// text/html, but ONLY with the html-preview.js headers: a CSP `sandbox` (opaque
+// origin, scripts only) plus network-off fetch directives unless `?external=1`.
+// The headers are the security boundary, not the viewer's iframe attribute, so
+// opening this URL directly in a tab is equally safe (S4). Read-class like
+// /file (team-member-boundary.js) behind the same work-plane tenant gate.
+app.get('/api/agents/:agentId/workspace/html-preview', apiLimiter, (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  const target = safeAgentPath(agentId, relPath);
+  if (!target) return res.status(400).json({ error: 'invalid path' });
+
+  let st;
+  try {
+    st = fs.statSync(target);
+  } catch (err) {
+    if (err.code === 'ENOENT') return res.status(404).json({ error: 'not found' });
+    return res.status(500).json({ error: err.message });
+  }
+  if (!st.isFile()) return res.status(400).json({ error: 'not a file' });
+
+  let buf;
+  try {
+    buf = st.size > 0 && st.size <= HTML_PREVIEW_MAX_BYTES ? fs.readFileSync(target) : Buffer.alloc(0);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  const refusal = htmlPreviewRefusal({ relPath: target, size: st.size, head: buf });
+  if (refusal) return res.status(refusal.status).json({ error: refusal.error, code: refusal.code });
+
+  res.set(htmlPreviewHeaders({ external: wantsExternalResources(req.query), size: buf.length }));
+  res.end(buf);
 });
 
 // Raw file download — streams the full file with Content-Disposition: attachment

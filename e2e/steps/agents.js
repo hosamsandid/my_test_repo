@@ -9,6 +9,7 @@
 // assertion moved with it — see expectTeamInRail below.
 const { expect } = require('@playwright/test');
 const { resolveMemberIds } = require('./member-ids');
+const { agentRail, railRowButton } = require('./agent-rail');
 
 /**
  * Resolve each member's rail LABEL from the very payload the rail is built from
@@ -72,15 +73,15 @@ async function memberRowLabels(ctx, memberIds) {
 //    no team agent row is present to name it. A wizard-materialised team has
 //    that row, so the team NAME is the group header's own text — assert on the
 //    display name (`teamName`) when the caller gives one, else the id.
-//  - Member rows are `role="option"` buttons inside the rail's `role="listbox"`,
-//    labelled `displayName || id`. Wizard-created members carry the role
-//    template's display name, so we resolve each id's label from the list
-//    payload instead of asserting on the id (see memberRowLabels above).
+//  - Member rows are `listitem`s inside the rail's "Agents" `list` (#2704),
+//    whose main button is labelled `displayName || id` (agent-rail.js).
+//    Wizard-created members carry the role template's display name, so we
+//    resolve each id's label from the list payload instead of asserting on the
+//    id (see memberRowLabels above).
 //
-// `.first()` on both assertions: the rail is ONE flat listbox (a group is a
-// React fragment, not a DOM container), so a member row cannot be scoped to its
-// group, and a role display name is only unique within a team. Presence is what
-// this step verifies; per-member identity is covered by the two API asserts.
+// `.first()` on both assertions: a role display name is only unique within a
+// team. Presence is what this step verifies; per-member identity is covered by
+// the two API asserts.
 async function expectTeamInRail(ctx, params) {
   const { page } = ctx;
   const { teamId, teamName } = params;
@@ -89,13 +90,9 @@ async function expectTeamInRail(ctx, params) {
 
   await page.goto('/chats');
 
-  // Scope every lookup to the rail's own `role="listbox"` (AgentList.jsx). The
-  // filter <select> sitting above it renders one <option> per team/agent, and a
-  // native <option> carries the implicit ARIA role "option" as well — it is
-  // never visible, so an unscoped match could resolve to it and then fail on
-  // visibility. `.first()`: the only other listbox in the page is the
-  // composer's slash-command palette, which is mounted only while open.
-  const rail = page.locator('[role="listbox"]').first();
+  // Scope every lookup to the rail's own "Agents" list (AgentList.jsx), so
+  // nothing outside it — a header, the open chat's title — can match a label.
+  const rail = agentRail(page);
 
   // The group header shows the team's display NAME — the team agent's
   // displayName (agent-list-model.js buildGroups), which a materialised team
@@ -107,7 +104,7 @@ async function expectTeamInRail(ctx, params) {
   // Teams default to expanded (DEFAULT_COLLAPSED.team === false), so the member
   // rows are mounted without a click.
   for (const label of labels) {
-    await expect(rail.getByRole('option', { name: label }).first()).toBeVisible();
+    await expect(railRowButton(rail, label).first()).toBeVisible();
   }
 }
 

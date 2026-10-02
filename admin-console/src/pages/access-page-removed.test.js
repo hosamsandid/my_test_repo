@@ -136,11 +136,14 @@ test('nothing anywhere in src POSTs to the retired scope-create route (#2081 AC3
   }
 });
 
-test('the scope LIST read survives — it still backs the Resources tab and five dropdowns', () => {
-  // A3.3 has not retired `teams/index.json` yet, so removing the read would be
-  // a different (and premature) change.
+test('the Resources tab sources its owners from Agent Teams, not the scope LIST', () => {
+  // #2695: the legacy `teams/index.json` list only ever held "Default Team", so
+  // the Resources tab's pickers now read the Agent Teams from /api/agents. The
+  // endpoint itself survives for its other consumers (A3.3 has not retired it);
+  // administration-resources-wiring.test.js pins the replacement in detail.
   const admin = SOURCES.find(([name]) => name === 'pages/Users.jsx')[1];
-  assert.match(admin, /useApi\('\/api\/admin\/teams'\)/);
+  assert.match(admin, /useApi\('\/api\/agents'\)/);
+  assert.doesNotMatch(admin, /useApi\('\/api\/admin\/teams'\)/);
 });
 
 /* ── the mutation proof ──────────────────────────────────────────────────

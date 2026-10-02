@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 
 import {
   systemAdminLabel, passwordLabel, chatIdentityLabel, chatIdentityDetail, usersToRows, isSelf, selfActionWarning, validateUserForm,
-  isLastSystemAdmin, lastSystemAdminGuard,
+  isLastSystemAdmin, lastSystemAdminGuard, isValidEmail, INVALID_EMAIL_REASON,
 } from './users-view.js';
 
 test('systemAdminLabel / passwordLabel reflect the record flags', () => {
@@ -80,6 +80,30 @@ test('validateUserForm mirrors backend create/edit rules', () => {
   // Edit: display name required (subject is immutable, not validated here).
   assert.match(validateUserForm({ subject: 'jane@corp.com', displayName: '   ' }, 'edit'), /cannot be empty/);
   assert.equal(validateUserForm({ subject: 'jane@corp.com', displayName: 'Jane' }, 'edit'), null);
+});
+
+// ── email format (#2695 finding 88) ────────────────────────────────────────
+
+test('validateUserForm rejects a malformed email in both modes; blank stays optional', () => {
+  for (const mode of ['create', 'edit']) {
+    const base = { subject: 'jane', displayName: 'Jane' };
+    assert.equal(validateUserForm({ ...base, email: 'not-an-email' }, mode), INVALID_EMAIL_REASON, mode);
+    assert.equal(validateUserForm({ ...base, email: 'jane@corp' }, mode), INVALID_EMAIL_REASON, mode);
+    assert.equal(validateUserForm({ ...base, email: ' jane.doe@corp.com ' }, mode), null, mode);
+    assert.equal(validateUserForm({ ...base, email: '' }, mode), null, mode);
+    assert.equal(validateUserForm({ ...base, email: undefined }, mode), null, mode);
+  }
+  // The required-field message still wins over the email one.
+  assert.match(validateUserForm({ subject: '', email: 'x' }, 'create'), /Subject is required/);
+});
+
+test('the email rule and sentence match the store exactly (two containers, one rule)', () => {
+  const require_ = createRequire(import.meta.url);
+  const store = require_('../../../orchestrator/teams-store.js');
+  assert.equal(INVALID_EMAIL_REASON, store.INVALID_EMAIL_REASON);
+  for (const v of ['a@b.co', 'jane.doe+x@corp.example.com', ' a@b.co ', '', 'x', 'a@b', 'a b@c.d', '@b.co', 'a@@b.co', 'a@b.', null]) {
+    assert.equal(isValidEmail(v), store.isValidEmail(v), `disagree on ${JSON.stringify(v)}`);
+  }
 });
 
 

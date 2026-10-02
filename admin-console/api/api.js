@@ -42,6 +42,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, isTeamAdminOfAny
         canReassignCredential, credentialVisibleToTeam, personalLendToTeam, canViewUsageStatistics,
         resolveAgentTenant, canChatAgent } = require('./scope');
 const { resolveAgentTeam } = require('./agent-team');
+const { lifecycleIdConflict } = require('./lifecycle-id-conflict');
 const { ownerRespawnNeeded, markActivePersonal } = require('./personal-credential-active');
 const { createAgentManageGate } = require('./team-member-boundary');
 // Layered resource ownership (#2083, P5) — the shared tier shape for
@@ -4647,12 +4648,19 @@ app.delete('/api/agents/:id', heavyLimiter, async (req, res) => {
 
 /* ─── Agent Clone ───────────────────────────────────────────────────── */
 
+// #2684 — a clone/import with no target team becomes a team of one, which also
+// claims `<id>-team`; `lifecycleIdConflict` refuses (and suggests) by that rule.
+function agentDirExists(agentsBaseDir) {
+  return (id) => fs.existsSync(path.join(agentsBaseDir, id));
+}
+
 // Optional body field:
 //   - parentTeamId — graft the clone into an existing team as a member,
 //     mirroring /api/agents/import's team-assignment field. Absent → the
-//     clone is created as a standalone agent, even when the source itself
+//     clone becomes its own team of one (#2684), even when the source itself
 //     is a team member.
-// On id conflict the response is 409 with `{ code: 'id-conflict', agentId }`,
+// On id conflict the response is 409 with `{ code: 'id-conflict', agentId,
+// suggestedId? }`,
 // same shape as /api/agents/import, so the UI can prompt for a new id inline.
 app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
   const { id } = req.params;
@@ -4688,13 +4696,8 @@ app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
   if (rel.startsWith('..') || path.isAbsolute(rel) || !rel) {
     return res.status(400).json({ error: 'Invalid agent id path' });
   }
-  if (fs.existsSync(targetDir)) {
-    return res.status(409).json({
-      error: `Agent '${newId}' already exists — choose a different id.`,
-      code: 'id-conflict',
-      agentId: newId,
-    });
-  }
+  const cloneConflict = lifecycleIdConflict(newId, { standalone: parentTeamId == null, exists: agentDirExists(agentsBaseDir) });
+  if (cloneConflict) return res.status(409).json(cloneConflict);
   // Config-write authorization (#989): cloning creates an agent — require
   // management rights over the source agent's owning team, and (when grafting
   // the clone into a team) over the destination team too.
@@ -5053,9 +5056,13 @@ const _importUpload = multer({
 
 // Optional form fields (multipart text parts, alongside `file`):
 //   - newId        — assign a different id (e.g. when the exported id is taken).
+//   - displayName  — override the exported display name (#2684), so a copy
+//                    imported under a new id is told apart from its source.
 //   - parentTeamId — graft the imported agent into an existing team as a member.
-// On id conflict the response is 409 with `{ code: 'id-conflict', agentId }`
-// so the UI can prompt for a new id and resubmit.
+//                    Absent → imported as its own team of one (#2684).
+// On id conflict the response is 409 with `{ code: 'id-conflict', agentId,
+// suggestedId?, displayName? }` so the UI can prompt for a new id (and name)
+// and resubmit.
 app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file provided (field name: file)' });
 
@@ -5118,6 +5125,8 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
     const agentId = newIdRaw || exportedId;
     const parentTeamId = typeof req.body.parentTeamId === 'string' && req.body.parentTeamId.trim()
       ? req.body.parentTeamId.trim() : null;
+    const displayName = typeof req.body.displayName === 'string' && req.body.displayName.trim()
+      ? req.body.displayName.trim().slice(0, 200) : null;
 
     // Config-write authorization (#989): importing creates an agent. When
     // grafting into a team, require management rights over that team; a
@@ -5148,12 +5157,21 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
       return res.status(400).json({ error: 'Invalid agent id path' });
     }
 
-    // Conflict check — structured so the UI can offer a new id.
-    if (fs.existsSync(targetDir)) {
+    // Conflict check — structured so the UI can offer a new id. The export's
+    // own display name rides along so the dialog can seed a distinguishable
+    // name for the copy instead of a second agent with the same label.
+    const importConflict = lifecycleIdConflict(agentId, {
+      standalone: parentTeamId == null, exists: agentDirExists(agentsBaseDir), what: ' to import it under',
+    });
+    if (importConflict) {
+      // Not readJsonFile: the extract dir lives under /tmp, outside its roots.
+      let exportedName;
+      try {
+        exportedName = JSON.parse(fs.readFileSync(path.join(extractDir, 'workspace', 'config.json'), 'utf8')).displayName;
+      } catch { /* no usable name — the dialog falls back to the id */ }
       return res.status(409).json({
-        error: `Agent '${agentId}' already exists — choose a different id to import it under.`,
-        code: 'id-conflict',
-        agentId,
+        ...importConflict,
+        ...(typeof exportedName === 'string' && exportedName.trim() ? { displayName: exportedName.trim().slice(0, 200) } : {}),
       });
     }
 
@@ -5175,7 +5193,7 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
     const orchResp = await fetch(`${ORCH_URL()}/internal/agents/import`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ stagingDir, agentId, parentTeamId }),
+      body: JSON.stringify({ stagingDir, agentId, parentTeamId, ...(displayName ? { displayName } : {}) }),
     });
     const data = await orchResp.json().catch(() => ({}));
     if (!orchResp.ok) {
@@ -5192,6 +5210,8 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
       agentId: data.id || agentId,
       role: data.role || null,
       parentTeamId: data.parentTeamId || null,
+      teamOfOne: !!data.teamOfOne,
+      ...(Array.isArray(data.warnings) && data.warnings.length ? { warnings: data.warnings } : {}),
       image: manifest.image || null,
     });
   } catch (err) {

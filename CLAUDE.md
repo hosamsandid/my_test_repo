@@ -615,7 +615,7 @@ Process step lands on the template/draft gallery; role templates under
 | `orchestrator/spawn-container.js` | Spawns/kills per-agent Podman container over libpod; network + FS + volume + host-folder isolation |
 | `orchestrator/spawn-kubernetes-*.js` | Kubernetes pod / plugin runtimes behind the `container-runtime.js` seam |
 | `orchestrator/prompt-assembly.js` | Pure single source for system-prompt composition (ordering, gating, memory hint) |
-| `orchestrator/agent-id-resolution.js` | Pure collision-free agent id resolution (`nextAvailableAgentId`, `suggestFreeAgentId`) |
+| `orchestrator/agent-id-resolution.js` | Pure collision-free agent id resolution (`nextAvailableAgentId`, `suggestFreeAgentId`; byte-identical in admin-console) |
 | `orchestrator/team-conversion.js` / `team-of-one-migration.js` | Convert/migrate a standalone agent into a team of one |
 | `orchestrator/agent-delete-plan.js` / `agent-orphans.js` | Fast/background delete + cascade; orphan detection |
 | `orchestrator/teams-store.js` | Source of truth for the human Team data model (pure factory) |

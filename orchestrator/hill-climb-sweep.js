@@ -269,7 +269,9 @@ function wasteSignalsFromEventLog(entries, fromMs, toBound, teamAgentIds) {
     for (const o of Array.isArray(e && e.outcomes) ? e.outcomes : []) {
       if (scope && !(o && scope.has(o.agentId))) continue;
       if (o && o.status === 'dropped') throttleDrops += 1;
-      else if (o && o.status === 'digest') digestFolds += 1;
+      // #2693: the poller records a folded burst as `delivered` + `digest: true`;
+      // a literal `status: 'digest'` stays accepted.
+      else if (o && (o.status === 'digest' || (o.status === 'delivered' && o.digest === true))) digestFolds += 1;
     }
   }
   return { throttleDrops, digestFolds };

@@ -16,9 +16,31 @@ export const SUGGESTED_PROMPTS = [
   'My agent is not responding — help me troubleshoot.',
 ];
 
-// User-visible copy when a stream fails (network drop, terminal error event, or
-// a stream that ends without `done`).
+// User-visible copy when a stream fails and the server named no reason (network
+// drop, an error without a message, or a non-JSON error body). When the server
+// does say why (e.g. "No LLM endpoint configured…"), that text is shown instead
+// (#2700) — "try again" is the wrong advice for a configuration problem.
 export const STREAM_ERROR_TEXT = 'Something went wrong — please try again.';
+
+// Shown in the assistant bubble when the user stops a turn before anything
+// streamed (#2700). A turn stopped mid-answer keeps its partial text instead.
+export const STOPPED_TEXT = 'Stopped.';
+
+// The user-visible reason in a plain JSON error body (`{ error }`, as sent by
+// /api/helper/chat on a 400/403/503) — '' when the body carries none.
+export function errorMessageFromBody(body) {
+  if (!body || typeof body !== 'object') return '';
+  const msg = typeof body.error === 'string' ? body.error
+    : (typeof body.message === 'string' ? body.message : '');
+  return msg.trim();
+}
+
+// The user-visible reason in an NDJSON `{ type: 'error', message }` event — ''
+// when the event carries none.
+export function errorMessageFromEvent(ev) {
+  if (!ev || ev.type !== 'error' || typeof ev.message !== 'string') return '';
+  return ev.message.trim();
+}
 
 // Monotonic-ish id for a message row. crypto.randomUUID when available, else a
 // timestamp+counter fallback so ids stay unique in a jsdom/node test too.
@@ -59,12 +81,20 @@ export function finishStreaming(messages, id) {
   return messages.map(m => (m.id === id ? { ...m, content: m.content, streaming: false } : m));
 }
 
-// Replace the streaming placeholder with a user-visible error message. Uses the
-// accumulated partial only if nothing streamed — a failure always surfaces the
-// canned error so the user knows to retry.
-export function failStreaming(messages, id, text = STREAM_ERROR_TEXT) {
+// Replace the streaming placeholder with a user-visible error message: the
+// server's reason when there is one, else the generic STREAM_ERROR_TEXT.
+export function failStreaming(messages, id, text) {
+  const content = (typeof text === 'string' && text.trim()) ? text.trim() : STREAM_ERROR_TEXT;
   return messages.map(m => (m.id === id
-    ? { ...m, role: 'assistant', content: text, streaming: false, error: true }
+    ? { ...m, role: 'assistant', content, streaming: false, error: true }
+    : m));
+}
+
+// End a turn the user stopped (#2700): keep whatever already streamed, or show
+// STOPPED_TEXT when nothing did. Not an error — the user asked for it.
+export function stopStreaming(messages, id) {
+  return messages.map(m => (m.id === id
+    ? { ...m, content: m.content ? m.content : STOPPED_TEXT, streaming: false, stopped: true }
     : m));
 }
 

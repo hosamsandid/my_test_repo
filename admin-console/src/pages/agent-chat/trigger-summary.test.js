@@ -321,3 +321,10 @@ test('INTERNAL_EVENT_LABELS names a Flow Control claim release, byte-identical t
   assert.equal(INTERNAL_EVENT_LABELS.get('flow-control.claim-released'), 'claim released (Flow Control)');
   assert.equal(eventLabel('flow-control.claim-released'), 'claim released (Flow Control)');
 });
+
+test('INTERNAL_EVENT_LABELS names a provisioning-sweep reap, byte-identical to the orchestrator key (#2693)', async () => {
+  const fs = await import('node:fs');
+  const src = fs.readFileSync(new URL('../../../../orchestrator/provisioning-sweep.js', import.meta.url), 'utf8');
+  assert.match(src, /const PROVISIONING_SWEEP_KEY = 'provisioning\.reaped';/);
+  assert.equal(eventLabel('provisioning.reaped'), 'orphaned instance cleaned up');
+});

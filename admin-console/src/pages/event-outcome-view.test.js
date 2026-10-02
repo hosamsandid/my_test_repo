@@ -98,3 +98,23 @@ test('outcomeTooltip: a pool hold points at the role, a WIP hold is unchanged', 
   assert.match(outcomeTooltip({ status: 'held', reason: 'pool-paused' }), /auto-scaled role.*paused, draining or off/);
   assert.match(outcomeTooltip({ status: 'held', reason: 'wip' }), /Work-in-Progress limit/);
 });
+
+// #2693: the poller stores a burst digest as `delivered` + `digest: true`, and
+// the provisioning sweep writes `reaped` / `reap-failed` with `reason: null`.
+test('#2693: outcomeLegendKey maps a delivered+digest outcome to the digest legend entry', () => {
+  assert.equal(outcomeLegendKey({ status: 'delivered', digest: true }), 'digest');
+  assert.equal(outcomeLegendKey({ status: 'delivered', digest: false }), 'delivered');
+  assert.match(outcomeTooltip({ status: 'delivered', digest: true }), /folded into one summary wake/);
+});
+
+test('#2693: outcomeLegendKey maps sweep reaped / reap-failed to their own legend entries, never a drop', () => {
+  assert.equal(outcomeLegendKey({ status: 'reaped', reason: null }), 'reaped');
+  assert.equal(outcomeLegendKey({ status: 'reap-failed', reason: null }), 'reap-failed');
+  const keys = OUTCOME_LEGEND.map(e => e.key);
+  assert.ok(keys.includes('reaped') && keys.includes('reap-failed'));
+  for (const status of ['reaped', 'reap-failed']) {
+    const tip = outcomeTooltip({ status, reason: null });
+    assert.doesNotMatch(tip, /Dropped by a protection layer/);
+    assert.match(tip, /provisioning sweep/);
+  }
+});

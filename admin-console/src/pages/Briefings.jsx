@@ -14,6 +14,7 @@ import RowContextMenu from '../components/RowContextMenu.jsx';
 import { buildFlowsRailMenu, intentForMenuKey, parseFlowIntent } from './process/flows-rail-menu.js';
 import { downloadBundle } from './process/bundle-download.js';
 import { canSubmitRename, nextUntitledName, BLANK_RENAME_HINT } from './process/draft-names.js';
+import { flowScopeStatus, flowNotFoundCopy } from './process/flow-scope-status.js';
 import SidePanel from '../components/SidePanel';
 import { useHelpSubject } from '../context/HelperChatContext';
 import { OVERLAY_DRAFT_SHARE } from '../context/page-help-view.js';
@@ -401,6 +402,28 @@ function ShareDraftPanel({ draft, viewerId, onChanged, onGone }) {
   );
 }
 
+// The right pane for an unknown `?proc=` (#2696): names the id and offers a
+// way back, mirroring Agent Chat's "Agent … not found" empty state.
+function FlowNotFound({ proc, onBack }) {
+  const copy = flowNotFoundCopy(proc);
+  return (
+    <div role="status" style={{
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+      gap: 'var(--eb-space-2)', height: '100%', padding: 'var(--eb-space-4)', textAlign: 'center',
+    }}>
+      <div style={{ fontSize: 'var(--eb-text-base)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)', overflowWrap: 'anywhere' }}>
+        {copy.title}
+      </div>
+      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', maxWidth: 420 }}>
+        {copy.hint}
+      </div>
+      <button type="button" onClick={onBack} style={{ ...HEADER_SECONDARY_BTN, marginTop: 'var(--eb-space-2)' }}>
+        {copy.backLabel}
+      </button>
+    </div>
+  );
+}
+
 export default function Briefings() {
   const { user } = useAuth();
   const lastSelectedKey = user ? `${LAST_SELECTED_KEY_PREFIX}.${user.username}` : null;
@@ -524,6 +547,27 @@ export default function Briefings() {
   const teams = (agents || []).filter(a => a.role === 'team');
   const drafts = Array.isArray(draftsList) ? draftsList : [];
   const envNameById = new Map((environments || []).map(e => [e.id, e.name]));
+
+  // An unknown `?proc=` (old `/process/<team>` bookmark, deleted team/draft,
+  // shared link without access) gets a "not found" state instead of an empty
+  // canvas (#2696). Absent from the lists we hold may just mean stale — a draft
+  // or team created a moment ago — so refetch both once for that scope and only
+  // then call it not found; until then the panel renders as before.
+  const [verifiedScope, setVerifiedScope] = useState(null);
+  const scopeStatus = flowScopeStatus({
+    proc,
+    teams: agents ? teams : null,
+    drafts: draftsList ? drafts : null,
+    verifiedScope,
+  });
+  useEffect(() => {
+    if (scopeStatus !== 'verify') return;
+    let cancelled = false;
+    Promise.all([refetchAgents(), refetchDrafts()]).then(() => {
+      if (!cancelled) setVerifiedScope(proc);
+    });
+    return () => { cancelled = true; };
+  }, [scopeStatus, proc, refetchAgents, refetchDrafts]);
 
   function persistLastSelected(kind, value) {
     if (!lastSelectedKey) return;
@@ -1114,7 +1158,9 @@ export default function Briefings() {
       {/* Right pane: the graph */}
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative', display: 'flex', flexDirection: 'column' }}>
         <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
-          {proc ? (
+          {scopeStatus === 'not-found' ? (
+            <FlowNotFound proc={proc} onBack={() => setSearchParams({})} />
+          ) : proc ? (
             <Suspense fallback={
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
                 Loading…

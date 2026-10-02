@@ -90,6 +90,12 @@ bookmark pointing at either falls back silently to no selection rather than to
 an empty pane. The shipped role templates are still browsable — on the
 **Agent Templates** page, not here.
 
+A link to a team or draft that does not exist — an old `/process/<team>`
+bookmark, a deleted flow, or a draft that was never shared with you — opens
+the Flows page with **Flow "…" not found** (or **Draft "…" not found**) in
+place of the canvas, naming the id from the link. **Back to Flows** returns to
+the empty selection; the list on the left works as usual.
+
 The actions that *create* something live in the page header at the top right,
 not in the list, so they stay reachable while the list is collapsed:
 

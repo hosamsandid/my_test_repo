@@ -47,6 +47,7 @@ test('AC3: every required drop reason reads as plain language, naming the ignore
   }
   assert.match(dropReasonText(drop('label-filter', { label: 'next-wave', wakeLabel: null })), /'next-wave'/);
   assert.match(dropReasonText(drop('self-claim-label', { label: 'ready:wip', wakeLabel: null })), /'ready:wip'/);
+  assert.match(dropReasonText(drop('self-claim-label', { label: 'ready-for-review:completed', wakeLabel: null })), /'ready-for-review:completed'.*':completed'/);
   assert.match(dropReasonText(drop('wake-already-armed')), /'ready-for-review'/);
   assert.equal(dropReasonText(drop('meteor')), 'Dropped (meteor).');
 });

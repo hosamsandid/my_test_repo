@@ -69,7 +69,7 @@ export function dropReasonText(row) {
     case 'internal-dedup':
       return `Already delivered once for ${q(wake)} (the console or supervisor woke the agent directly) — the poller's copy was skipped.`;
     case 'self-claim-label':
-      return `Label ${q(label)} is the agent's own claim label (':wip'), not a hand-off, so it was ignored.`;
+      return `Label ${q(label)} is the agent's own claim label (':wip') or end-of-run label (':completed'), not a hand-off, so it was ignored.`;
     case 'history-horizon':
       return 'The event is older than this trigger — it happened before the trigger was activated.';
     case 'push-duplicate':

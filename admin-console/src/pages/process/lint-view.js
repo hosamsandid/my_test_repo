@@ -26,6 +26,10 @@ const LINT_INFO = {
   'duplicate-listener': { title: 'Redundant inputs', fix: 'Remove the duplicate trigger so the agent wakes once per event.' },
   'raw-trigger-nonconformant': { title: 'Trigger bends the wiring rules', fix: 'Edit the trigger to match the wiring rules — it still runs meanwhile.' },
   'unclaimed-listener': { title: 'Listener without a claim', fix: 'Add a claim so a stalled run stays distinguishable from a wake that never arrived.' },
+  // Outcome-switch shape checks (#2711).
+  'human-label-as-outcome': { title: 'Agent outcome sets a human-only gate', fix: 'Remove the label from the outcome, or make it a brake/agent label in Labels.' },
+  'same-label-multiple-outcomes': { title: 'Branches set the same label', fix: 'Give each switch option its own label so consumers can tell the branches apart.' },
+  'switch-with-one-option': { title: 'Switch with a single option', fix: 'Add a second option to make it a real branch, or set the outcomes to “any of”.' },
   // Issue vs PR label hand-off (#2629).
   'label-target-mismatch': { title: 'Label lands on the wrong kind of item', fix: "Make the consumer's input listen on the event for where the label lands (PR labeled vs issue labeled), or set the outcome's “on:” to match." },
   // Direct hand-off (#2032, docs/direct-agent-handoff-concept.md §12 P3).

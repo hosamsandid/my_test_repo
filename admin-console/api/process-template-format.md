@@ -58,7 +58,8 @@ role's `{{vars}}` and the target repositories are applied per member.
         { "artifact": "pr", "from": "developer", "label": "approved", "gate": "human",
           "wakePrompt": "…",               // optional authored wake-prompt override (#868)
           "autoClaim": false,              // opt out of auto-derived claim (#958); default ON for labelled channels
-          "postcondition": "merged" }      // optional (#2113): 'merged' | 'review-submitted' | 'pr-exists'
+          "postcondition": "merged",       // optional (#2113): 'merged' | 'review-submitted' | 'pr-exists'
+          "readiness": { "ci": true, "conflict": true } } // optional (#2795): PR channels only — hold the wake until green / conflict-free
       ],
       "triggers": [
         {
@@ -69,6 +70,8 @@ role's `{{vars}}` and the target repositories are applied per member.
           "labelFilter": "assigned:{{agentId}}",
           "claim": { "remove": "assigned:{{agentId}}", "add": "assigned:{{agentId}}:wip",
                      "postcondition": "merged" }, // optional; add MUST be <labelFilter>:wip (#958); postcondition (#2113) gates the :completed swap
+          "readinessGate": { "ci": true, "conflict": true, // optional (#2795); PR hand-off events only
+                             "failureLabel": "revisions-required", "timeoutMinutes": 60 },
           "cron": "5 3 * * 1",            // cron
           "at": "2026-01-01T00:00:00Z",   // once
           "description": "…",
@@ -391,6 +394,19 @@ the same option.
   runner action and is deliberately absent from the generated `## Outcomes`
   prose (#957): an agent *asked* to verify its own outcome just moves "the agent
   forgot" one step earlier.
+
+- **Optional hand-off readiness gate (#2795).** A PR channel's `readiness`
+  (`{ci, conflict, failureLabel?, timeoutMinutes?}`) is carried onto the derived
+  listener as `readinessGate`; a hand-authored `github-event` trigger on
+  `pull_request.labeled` / `opened` / `reopened` may set `readinessGate`
+  directly. The poller then holds the wake until the PR's head is green and/or
+  mergeable; a failure swaps the wake label for `failureLabel` (default
+  `revisions-required`, must differ from the wake label), a timeout (default
+  60, 1–10080 minutes) for `needs-human`. Absent, or both toggles off, means no
+  gate; defaults are not written. When several channels consolidate onto one
+  listener their gates are OR-merged (first explicit failure label / timeout
+  wins). The bundle validator rejects a gate on an issue channel or on a
+  trigger without a PR hand-off event. Runtime semantics: [triggers.md](triggers.md#hand-off-readiness-gate-wait-for-ci-block-on-merge-conflict).
 
 - **Preset conventions are enforced (#1008).** Shipped presets (the registry
   bundles here and the agent-template catalog) carry the same wiring conventions

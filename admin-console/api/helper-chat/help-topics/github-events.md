@@ -145,6 +145,7 @@ legend — this is the longer version.
 | **dropped (knowledge-branch)** | Push to a knowledge-base branch (`agent-knowledge`); never wakes push triggers. | No; built in. |
 | **dropped (internal-dedup)** | The wake was already delivered on the internal fast path; this is GitHub telling us about the same label a second time. | No. |
 | **dropped (wake-already-armed)** | Already woken for this label on this item; a repeat does not wake it again until the label is removed and re-added. | Usually no. Re-fire a lost hand-off from the agent's Events tab. |
+| **dropped (self-claim-label)** | The label is one the agent's own run set: its `:wip` claim or the `:completed` label at the end of the run. It is not a hand-off. It also counts as the wake label being removed, so the next re-add of the wake label wakes the agent again. | No. |
 | **reaped → agent** | Not a GitHub event: the provisioning sweep removed an agent or pool instance whose setup failed and was left half-created. The row's event reads *orphaned instance cleaned up*. | No. |
 | **reap failed → agent** | The sweep tried to remove such an instance, but the removal did not go through. | Only if it repeats — the sweep retries on its next run. |
 | **nobody's listening** | No trigger subscribed to this event **type** at all. | Maybe. If something should have reacted, the wiring is missing — add or fix the `github-event` trigger on the target agent. |

@@ -97,7 +97,7 @@ test('parseOpenPrs keeps well-formed nodes and reports truncation', () => {
   } } });
   assert.equal(out.truncated, true);
   assert.equal(out.prs.length, 1);
-  assert.deepEqual(out.prs[0], { number: 7, sha: SHA_A, title: 'T', url: 'https://github.com/o/r/pull/7', headRef: 'f', baseRef: 'main', mergeable: 'UNKNOWN', fromFork: true });
+  assert.deepEqual(out.prs[0], { number: 7, sha: SHA_A, title: 'T', url: 'https://github.com/o/r/pull/7', body: null, headRef: 'f', baseRef: 'main', mergeable: 'UNKNOWN', fromFork: true });
   assert.deepEqual(r.parseOpenPrs(null), { prs: [], truncated: false });
 });
 
@@ -135,6 +135,16 @@ test('the open-PR query reads each PR\'s labels; parseOpenPrs keeps their names 
   const out = r.parseOpenPrs({ repository: { pullRequests: { nodes: [node, { number: 8, headRefOid: SHA_B }] } } });
   assert.deepEqual(out.prs[0].labels, ['ready-for-review', 'docs']);
   assert.equal('labels' in out.prs[1], false);
+});
+
+test('the open-PR query reads each PR\'s body; parseOpenPrs keeps it as a string or null (#2799)', () => {
+  assert.match(r.OPEN_PRS_QUERY, /nodes\{number title url body /);
+  const out = r.parseOpenPrs({ repository: { pullRequests: { nodes: [
+    { number: 7, headRefOid: SHA_A, body: 'Closes #12' },
+    { number: 8, headRefOid: SHA_B, body: 42 },
+  ] } } });
+  assert.equal(out.prs[0].body, 'Closes #12');
+  assert.equal(out.prs[1].body, null);
 });
 
 // ── state machine ──────────────────────────────────────────────────────────
@@ -315,4 +325,23 @@ test('readinessEvent: PullRequestEvent shape with number, head SHA, verdict and 
   assert.deepEqual(ev.payload.readiness, {
     headSha: SHA_A, verdict: 'failed', ci: 'failed', merge: 'clean', failingChecks: ['CodeQL'], fromFork: true,
   });
+});
+
+test('readinessEvent: closesIssues from the PR body and an issue-N branch, ascending; the body is not carried (#2799)', () => {
+  const ev = r.readinessEvent('o/r', {
+    key: 'pull_request.checks_passed', pr: pr(12, SHA_A, 'MERGEABLE', { body: 'Fixes #40. Closes #7', headRef: 'issue-40-x' }), sha: SHA_A,
+    verdict: 'passed', ci: 'passed', merge: 'clean', failingChecks: [],
+  }, T0);
+  assert.deepEqual(ev.payload.pull_request.closesIssues, [7, 40]);
+  assert.equal('body' in ev.payload.pull_request, false);
+});
+
+test('readinessEvent: no closesIssues key when the PR links no issue (#2799)', () => {
+  for (const body of [null, '', 'refactor only']) {
+    const ev = r.readinessEvent('o/r', {
+      key: 'pull_request.merge_conflict', pr: pr(12, SHA_A, 'CONFLICTING', { body }), sha: SHA_A,
+      verdict: 'conflict', ci: 'pending', merge: 'conflict', failingChecks: [],
+    }, T0);
+    assert.equal('closesIssues' in ev.payload.pull_request, false);
+  }
 });

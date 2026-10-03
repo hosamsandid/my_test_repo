@@ -1744,7 +1744,7 @@ class GitHubPoller {
             );
           }
           const linked = enrichedPayloads.get(it.ghEvent.id)?.pull_request?.closesIssues;
-          if (Array.isArray(linked)) for (const n of linked) closes.add(n);
+          if (Array.isArray(linked)) for (const n of linked) if (Number.isInteger(n) && n > 0) closes.add(n);
         }
         this._enqueueDigest(plan.agentId, plan.convKey, plan.items, [...closes].sort((a, b) => a - b));
         for (const it of plan.items) {
@@ -2051,7 +2051,10 @@ class GitHubPoller {
     const additions = {
       ...(htmlUrl && !pr.html_url ? { html_url: htmlUrl } : {}),
       ...(title && !pr.title ? { title } : {}),
-      ...(closesIssues.length ? { closesIssues } : {}),
+      // #2799: a payload that already carries its link (the readiness events
+      // derive it from the full body) keeps it — re-deriving here from the
+      // branch alone could only narrow it.
+      ...(closesIssues.length && !Array.isArray(pr.closesIssues) ? { closesIssues } : {}),
     };
     if (Object.keys(additions).length === 0) return payload;
     return { ...payload, pull_request: { ...pr, ...additions } };

@@ -610,6 +610,20 @@ test("_enrichPullRequestPayload: a fetch failure still parses closes from the br
   assert.equal(out.pull_request.html_url, "https://github.com/o/r/pull/500");
 });
 
+test("_enrichPullRequestPayload: a closesIssues already on the payload is kept, not narrowed to the branch (#2799)", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => { throw new Error("must not fetch"); };
+  const payload = {
+    pull_request: {
+      number: 12, title: "T", html_url: "https://github.com/o/r/pull/12",
+      head: { ref: "issue-40-x" }, closesIssues: [7, 40],
+    },
+  };
+  const out = await poller._enrichPullRequestPayload("pull_request.checks_passed", payload, "tok");
+  assert.equal(out, payload, "nothing to add → identity");
+  assert.deepEqual(out.pull_request.closesIssues, [7, 40]);
+});
+
 // ── pollerSubscribes ─────────────────────────────────────────────────────────
 //
 // Every well-formed, enabled github-event trigger is poller-subscribed. The

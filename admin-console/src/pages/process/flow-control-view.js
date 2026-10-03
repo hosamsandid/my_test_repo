@@ -62,13 +62,35 @@ export function itemRef(repo, number, singleRepo) {
   return singleRepo || !repo ? `#${number}` : `${repo}#${number}`;
 }
 
-function prLinks(prs, singleRepo) {
-  return (Array.isArray(prs) ? prs : []).map((p) => ({
-    key: `${p.repo}#${p.number}`,
-    label: `PR ${itemRef(p.repo, p.number, singleRepo)}`,
-    url: p.url || null,
-    state: p.state || 'open',
-  }));
+// The board's leading Issue and Pull request columns (#2800). An empty cell
+// is a placeholder with an explanation: neutral for "no PR yet" (the work is
+// still at issue level), warning-toned for "no linked issue" (a PR an agent
+// opened on its own), so the two never read alike.
+export const NO_PR_TEXT = 'No pull request yet';
+export const NO_ISSUE_TEXT = 'No linked issue';
+
+export function issueCell(issue, fallbackUrl, singleRepo) {
+  if (!issue) return { text: '—', url: null, title: NO_ISSUE_TEXT, empty: 'missing' };
+  return { text: itemRef(issue.repo, issue.number, singleRepo), url: issue.url || fallbackUrl || null, title: '', empty: null };
+}
+
+// One entry per PR, in the order the backend delivers them. The number has no
+// `PR` prefix — the column header says it.
+function prCells(prs, singleRepo) {
+  return (Array.isArray(prs) ? prs : []).map((p) => {
+    const state = p.state || 'open';
+    return {
+      key: `${p.repo}#${p.number}`,
+      text: `${itemRef(p.repo, p.number, singleRepo)}${state === 'merged' ? ' (merged)' : ''}`,
+      url: p.url || null,
+      state,
+      struck: state === 'closed',
+    };
+  });
+}
+
+export function prEmptyCell(prs) {
+  return Array.isArray(prs) && prs.length ? null : { text: '—', title: NO_PR_TEXT, empty: 'pending' };
 }
 
 // `draft` is stage 0: nobody released the item yet and no agent is on it, so
@@ -156,8 +178,9 @@ export function rowView(row, stages, { now = Date.now(), singleRepo = true } = {
     title: row.title || '(untitled)',
     url: row.url || null,
     ref: row.issue ? itemRef(row.issue.repo, row.issue.number, singleRepo) : '',
-    issueUrl: row.issue ? row.issue.url || row.url || null : null,
-    prs: prLinks(row.prs, singleRepo),
+    issue: issueCell(row.issue, row.url, singleRepo),
+    prs: prCells(row.prs, singleRepo),
+    prEmpty: prEmptyCell(row.prs),
     steps,
     stageLabel: stage ? stage.label : '',
     status: row.status,

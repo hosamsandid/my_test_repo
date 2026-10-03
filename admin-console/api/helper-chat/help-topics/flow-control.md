@@ -158,6 +158,23 @@ An issue and the pull requests its agents opened form **one row** — no
 advanced open one. A pull request an agent opened without an issue gets its
 own row.
 
+### Issue and Pull request columns
+
+The **In progress** and **Recently completed** tables start with two columns,
+**Issue** and **Pull request**, so you can see at a glance how far an item has
+got. The Issue column shows the item's issue number; the Pull request column
+lists every pull request of the row, one per line, in the order the board
+knows them — *(merged)* marks a merged one, a closed one is struck through. On
+a board that spans several repositories both show the full `owner/repo#N`.
+Each number links to GitHub; the **Work item** column shows only the title.
+
+An empty cell says something too:
+
+- A muted **—** under **Pull request** (*No pull request yet*): the work is
+  still at issue level.
+- A highlighted **—** under **Issue** (*No linked issue*): an agent opened the
+  pull request without an issue.
+
 Each row shows its **current stage**, whether an agent is **working** on it or
 it is **up next**, and the **time in that stage** — not the item's total age.
 For a finished item it shows the **time since completion** (hover it for the

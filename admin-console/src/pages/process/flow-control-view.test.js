@@ -10,6 +10,10 @@ import {
   since,
   updatedAgo,
   itemRef,
+  issueCell,
+  prEmptyCell,
+  NO_PR_TEXT,
+  NO_ISSUE_TEXT,
   rowView,
   doneTitle,
   sessionView,
@@ -99,7 +103,7 @@ test('itemRef: short on a single-repo board, qualified across repos', () => {
 test('rowView: one row carries the issue and its PRs, the current stage and time in stage', () => {
   const v = rowView(row(), STAGES, { now: NOW });
   assert.equal(v.ref, '#7');
-  assert.deepEqual(v.prs.map((p) => p.label), ['PR #70']);
+  assert.deepEqual(v.prs.map((p) => p.text), ['#70']);
   assert.equal(v.stageLabel, 'Code Reviewer');
   assert.equal(v.inStage, '1h 15m');
   assert.deepEqual(v.steps.map((s) => s.state), ['past', 'past', 'current', 'future']);
@@ -109,8 +113,76 @@ test('rowView: one row carries the issue and its PRs, the current stage and time
 test('rowView: a PR-only row has no issue ref; a done row marks every step past', () => {
   const pr = rowView(row({ issue: null, stageId: 'done', stageIndex: 3, status: 'done', done: true }), STAGES, { now: NOW });
   assert.equal(pr.ref, '');
-  assert.equal(pr.issueUrl, null);
+  assert.equal(pr.issue.url, null);
   assert.ok(pr.steps.every((s) => s.state === 'past'));
+});
+
+// ── #2800: leading Issue and Pull request columns ──────────────────────────
+
+test('rowView #2800: issue only — issue linked, neutral "no PR yet" placeholder (AC2, AC5)', () => {
+  const v = rowView(row({ prs: [] }), STAGES, { now: NOW });
+  assert.deepEqual(v.issue, { text: '#7', url: 'https://gh/o/r/issues/7', title: '', empty: null });
+  assert.deepEqual(v.prs, []);
+  assert.deepEqual(v.prEmpty, { text: '—', title: 'No pull request yet', empty: 'pending' });
+  assert.equal(NO_PR_TEXT, 'No pull request yet');
+});
+
+test('rowView #2800: issue + one PR — bare number without the "PR" prefix, linked (AC3)', () => {
+  const v = rowView(row(), STAGES, { now: NOW });
+  assert.equal(v.issue.text, '#7');
+  assert.equal(v.prEmpty, null);
+  assert.deepEqual(v.prs, [{ key: 'o/r#70', text: '#70', url: 'https://gh/o/r/pull/70', state: 'open', struck: false }]);
+});
+
+test('rowView #2800: several PRs — one entry each, backend order, merged/closed cues kept (AC3)', () => {
+  const v = rowView(row({
+    prs: [
+      { repo: 'o/r', number: 72, url: 'u72', state: 'open' },
+      { repo: 'o/r', number: 70, url: 'u70', state: 'closed' },
+      { repo: 'o/r', number: 71, url: 'u71', state: 'merged' },
+      { repo: 'o/r', number: 73 },
+    ],
+  }), STAGES, { now: NOW });
+  assert.deepEqual(v.prs.map((p) => p.text), ['#72', '#70', '#71 (merged)', '#73']);
+  assert.deepEqual(v.prs.map((p) => p.struck), [false, true, false, false]);
+  assert.deepEqual(v.prs.map((p) => p.state), ['open', 'closed', 'merged', 'open']);
+  assert.equal(v.prs[3].url, null);
+  assert.ok(v.prs.every((p) => !p.text.startsWith('PR')));
+});
+
+test('rowView #2800: PR only — warning placeholder "No linked issue", distinct from the empty-PR one (AC6)', () => {
+  const v = rowView(row({ issue: null }), STAGES, { now: NOW });
+  assert.deepEqual(v.issue, { text: '—', url: null, title: 'No linked issue', empty: 'missing' });
+  assert.equal(NO_ISSUE_TEXT, 'No linked issue');
+  assert.deepEqual(v.prs.map((p) => p.text), ['#70']);
+  assert.notEqual(v.issue.empty, prEmptyCell([]).empty);
+  assert.notEqual(v.issue.title, prEmptyCell([]).title);
+});
+
+test('rowView #2800: multi-repo board — full owner/repo#N refs in both columns (AC2, AC3)', () => {
+  const v = rowView(row({
+    prs: [{ repo: 'o/other', number: 9, url: 'u9', state: 'merged' }],
+  }), STAGES, { now: NOW, singleRepo: false });
+  assert.equal(v.issue.text, 'o/r#7');
+  assert.deepEqual(v.prs.map((p) => p.text), ['o/other#9 (merged)']);
+  assert.equal(v.ref, 'o/r#7');
+});
+
+test('issueCell #2800: falls back to the row url when the issue carries none', () => {
+  assert.equal(issueCell({ repo: 'o/r', number: 7 }, 'https://row', true).url, 'https://row');
+  assert.equal(issueCell({ repo: 'o/r', number: 7 }, null, true).url, null);
+  assert.equal(prEmptyCell(undefined).title, 'No pull request yet');
+});
+
+test('BoardTable #2800: Issue · Pull request lead the columns; the title cell carries no number line (#651 source guard)', () => {
+  const jsx = fs.readFileSync(path.join(here, '..', 'FlowControl.jsx'), 'utf8');
+  const head = jsx.slice(jsx.indexOf('function BoardTable'), jsx.indexOf('function BoardRow'));
+  const order = ['>Issue<', '>Pull request<', '>Work item<', '>Progress<', '>Stage<', '>In stage<'].map((h) => head.indexOf(h));
+  assert.ok(order.every((i) => i > 0), `all headers present: ${order}`);
+  assert.deepEqual([...order].sort((a, b) => a - b), order);
+  const body = jsx.slice(jsx.indexOf('function BoardRow'), jsx.indexOf('function StageProgress'));
+  assert.doesNotMatch(body, /row\.ref|issueUrl|p\.label/);
+  assert.match(jsx, /const numberCellStyle = \{ \.\.\.cellStyle, whiteSpace: 'nowrap'/);
 });
 
 // ── #2643: time since completion on done rows ─────────────────────────────────

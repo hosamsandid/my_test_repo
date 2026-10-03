@@ -5963,6 +5963,33 @@ async function rebuildAgentPromptBestEffort(id, reason) {
   }
 }
 
+// After an environment's Additional context changed (#2688), ask the
+// orchestrator to rebuild the CLAUDE.md of every agent bound to it. Awaited so
+// the console can say which agents got the new text; never fails the save,
+// which has already been committed — an unreachable orchestrator comes back as
+// `{ ok: false, error }` for the console to show.
+async function rebuildEnvironmentPrompts(envId, reason) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/environments/${encodeURIComponent(envId)}/prompt-rebuild`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || !body.ok) return { ok: false, error: body.error || `orchestrator returned ${r.status}` };
+    return {
+      ok: true,
+      rebuilt: body.rebuilt || [],
+      pending: body.pending || [],
+      failed: body.failed || [],
+    };
+  } catch (err) {
+    return { ok: false, error: `could not reach the orchestrator (${err.message})` };
+  }
+}
+
 /* ─── Read-only host-folder context mount (#1283) ───────────────────────── */
 
 // The mount is a LOCAL/self-hosted-only feature: a host bind-mount has no
@@ -16114,6 +16141,7 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
       return res.status(400).json({ error: err.message });
     }
   }
+  const prevAdditionalContext = env.additionalContext || '';
   if (additionalContext !== undefined) env.additionalContext = additionalContext;
   if (toolchainId !== undefined) {
     const toolchain = resolveToolchainSelection(toolchainId);
@@ -16145,6 +16173,11 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
   // on the new set; the per-agent outcome goes back in the response.
   const mcpApply = JSON.stringify(env.mcpServers || []) !== prevMcpServers
     ? await applyMcpChange('environments', env.id)
+    : undefined;
+  // #2688: same for the Additional context — it lives in each bound agent's
+  // CLAUDE.md, which is otherwise only assembled when the agent is created.
+  const promptRebuild = (env.additionalContext || '') !== prevAdditionalContext
+    ? await rebuildEnvironmentPrompts(env.id, 'environment-additional-context-changed')
     : undefined;
   // Spawn-time bindings (GitHub PAT, LLM provider/model, the container image) are
   // baked into each agent container at start, so a change only takes effect on
@@ -16178,7 +16211,12 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
   // AC7: the save is already committed at this point. Whatever the caller does
   // with `previousRepositories` — offer, decline, crash — the environment stays
   // persisted exactly as submitted; no path here rolls it back.
-  res.json({ ...env, previousRepositories: prevRepositories, ...(mcpApply ? { mcpApply } : {}) });
+  res.json({
+    ...env,
+    previousRepositories: prevRepositories,
+    ...(mcpApply ? { mcpApply } : {}),
+    ...(promptRebuild ? { promptRebuild } : {}),
+  });
 });
 
 app.delete('/api/environments/:id', apiLimiter, (req, res) => {

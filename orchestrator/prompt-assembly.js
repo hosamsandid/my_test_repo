@@ -494,7 +494,9 @@ function skillsSection(baseSkillsText, skills, skillDescriptions = {}) {
 // wait-for-an-external-event advice is autonomous-only, since only an autonomous
 // agent has the triggers/loops that are the real answer. With a repository the
 // section also steers an in-turn CI wait to the foreground `aee-wait-ci` CLI
-// (#2796) instead of a background shell or a hand-rolled `gh pr checks` loop.
+// (#2796) instead of a background shell or a hand-rolled `gh pr checks` loop,
+// with an explicit Bash tool timeout: the runtime raises only the tool's
+// maximum, never its 2-minute default (#2815).
 // Only events the platform can actually deliver may be named here (#2797): the
 // Events API never emits check_suite / check_run / workflow_run / status, so a
 // trigger on those keys never fires — steering-dead-events.test.js guards that.
@@ -528,8 +530,10 @@ function backgroundTasksSection(autonomous, hasRepository = false) {
     '(`--repo <clone-dir>` for a non-default clone). It waits up to 20 minutes ' +
     '(always capped to your run\'s time), applies the platform\'s own CI rules ' +
     'and prints JSON plus an exit code: `0` passed / no CI, `4` failed, ' +
-    '`5` conflict, `6` timeout, `1`/`3` error. With `--timeout` above 20, ' +
-    'also set the Bash tool timeout to at least that long. Never wait for CI in a ' +
+    '`5` conflict, `6` timeout, `1`/`3` error. Always pass the Bash tool ' +
+    '`timeout` explicitly — `1500000` (25 min) for the default wait, or the ' +
+    '`--timeout` minutes plus 5 — because the tool\'s 2-minute default would ' +
+    'move the wait to the background. Never wait for CI in a ' +
     'background shell, `Monitor` or `Task`, and never hand-roll a ' +
     '`gh pr checks` polling loop. On timeout, end your turn and continue via ' +
     'the hand-off gate or a trigger instead of waiting longer.';

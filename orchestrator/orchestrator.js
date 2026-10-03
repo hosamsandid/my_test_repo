@@ -20500,6 +20500,13 @@ async function main() {
             liveInstanceCount: _cappedInstanceIdsForRole(role.id).filter((id) => !waitingIds.has(id)).length,
             waitingInstanceCount: waiting.length,
             waitingInstances: waiting.map((w) => ({ instanceId: w.instanceId, prs: w.prs })),
+            // #2814: one row per live instance (running / waiting / timed-out)
+            // for the Flow Editor's role-node hint — the lane view's own
+            // instance read and status rule (`pool-instance-lanes.js`).
+            instances: poolInstanceLanes.liveInstanceRows({
+              role: { maxRuntimeMs: role.pool.teardown.maxRuntimeMs },
+              instances: _liveInstancesForWithWaiting(role.id, poolWaiting),
+            }),
             state: agentPool.poolControlState(control, roleId),
           };
         });

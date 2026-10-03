@@ -50,6 +50,40 @@ function ticketKey(repo, number) {
   return `${repo}#${Number(number)}`;
 }
 
+// One live instance's tag — `waiting`, `timed-out` or `running` — shared by the
+// lanes below and `liveInstanceRows` (#2814), so the Flow Editor's role-node
+// hint can never disagree with the lane view or the hard-timeout reaper.
+function instanceStatus(inst, maxRuntimeMs, now) {
+  if (inst && inst.waiting) return 'waiting';
+  const waitedMs = Number.isFinite(inst && inst.waitedMs) ? inst.waitedMs : 0;
+  return isInstanceTimedOut({ spawnedAt: inst && inst.spawnedAt, maxRuntimeMs, waitedMs }, now)
+    ? 'timed-out' : 'running';
+}
+
+/**
+ * Every live instance of ONE pooled role as `{instanceId, item, status}`
+ * (#2814) — the Flow Editor's per-role instance list. Unlike the lanes, an
+ * instance without a repo/item is still listed (it is still live capacity);
+ * no ticket ledger is needed, so the cheap `pool-control` read can carry it.
+ * Sorted by item number, then id, for a stable list.
+ *
+ * @param {object} args
+ * @param {{maxRuntimeMs:number|null}} args.role
+ * @param {Array<object>} [args.instances] - same shape as `buildPoolInstanceLanes`.
+ * @param {number} [args.now]
+ */
+function liveInstanceRows({ role, instances = [], now = Date.now() }) {
+  const maxRuntimeMs = role && Number.isFinite(role.maxRuntimeMs) && role.maxRuntimeMs > 0 ? role.maxRuntimeMs : null;
+  return (Array.isArray(instances) ? instances : [])
+    .filter((inst) => inst && typeof inst === 'object' && inst.instanceId)
+    .map((inst) => ({
+      instanceId: inst.instanceId,
+      item: inst.itemKey != null && Number.isFinite(Number(inst.itemKey)) ? Number(inst.itemKey) : null,
+      status: instanceStatus(inst, maxRuntimeMs, now),
+    }))
+    .sort((a, b) => ((a.item ?? Infinity) - (b.item ?? Infinity)) || String(a.instanceId).localeCompare(String(b.instanceId)));
+}
+
 /**
  * Build the lane list for ONE pooled role (#2273).
  *
@@ -94,8 +128,6 @@ function buildPoolInstanceLanes({ role, instances = [], tickets = [], now = Date
     if (!inst || typeof inst !== 'object' || !inst.repo || inst.itemKey == null) continue;
     const key = ticketKey(inst.repo, inst.itemKey);
     const ticket = ticketByKey.get(key) || null;
-    const waitedMs = Number.isFinite(inst.waitedMs) ? inst.waitedMs : 0;
-    const timedOut = isInstanceTimedOut({ spawnedAt: inst.spawnedAt, maxRuntimeMs, waitedMs }, now);
     runningKeys.add(key);
     if (ticket && ticket.epicId != null && !runningEpicOwner.has(ticket.epicId)) {
       runningEpicOwner.set(ticket.epicId, ticket.ticketId || key);
@@ -106,7 +138,7 @@ function buildPoolInstanceLanes({ role, instances = [], tickets = [], now = Date
       repo: inst.repo,
       number: Number(inst.itemKey),
       epicId: ticket ? (ticket.epicId ?? null) : null,
-      status: inst.waiting ? 'waiting' : (timedOut ? 'timed-out' : 'running'),
+      status: instanceStatus(inst, maxRuntimeMs, now),
       spawnedAt: inst.spawnedAt || null,
       sameEpicAs: null,
       ...(inst.waiting ? { prs: Array.isArray(inst.prs) ? inst.prs.slice() : [] } : {}),
@@ -163,6 +195,8 @@ module.exports = {
   ACTIVE_TICKET_STATES,
   ticketKey,
   isInstanceTimedOut,
+  instanceStatus,
+  liveInstanceRows,
   buildPoolInstanceLanes,
   buildTeamPoolLanes,
 };

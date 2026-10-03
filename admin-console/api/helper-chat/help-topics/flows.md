@@ -37,6 +37,13 @@ There are two kinds of thing in the left list, and the difference matters:
   **Edit as draft** exists: it copies the team into a draft you can experiment
   in safely.
 
+On a live team, a role that auto-scales (an Agent Pool) is still one box: the
+temporary copies it starts per item are not drawn as boxes of their own, and
+Export, Edit as draft, lints and Copilot see only the roles. While copies are
+live, the role's box carries a small **n running** badge (hover lists them) and
+its details panel lists each one, e.g. *#71 · running*, *#72 · waiting for PR*,
+*#73 · timed out*.
+
 **Create team…** is the one-way step between them, and it is the accent-coloured
 button set apart at the end of the draft toolbar — the design → team step, so it
 is the one thing on that row that is not an editing action. It was
@@ -450,7 +457,8 @@ separates *working* from *stuck* — the thresholds default to about 15 minutes,
 
 **It is observe-only. Nothing here repairs anything**, and nothing is changed by
 opening it. **Refresh** re-runs the sweep on demand; affected agents also carry
-a count badge on the canvas.
+a count badge on the canvas (an anomaly of an auto-scaled copy counts on its
+role's box).
 
 Two honest limits: the sweep is paused while platform Maintenance Mode is
 active, and a team whose environment has no GitHub repository has nothing to

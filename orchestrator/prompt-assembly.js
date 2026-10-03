@@ -495,6 +495,9 @@ function skillsSection(baseSkillsText, skills, skillDescriptions = {}) {
 // agent has the triggers/loops that are the real answer. With a repository the
 // section also steers an in-turn CI wait to the foreground `aee-wait-ci` CLI
 // (#2796) instead of a background shell or a hand-rolled `gh pr checks` loop.
+// Only events the platform can actually deliver may be named here (#2797): the
+// Events API never emits check_suite / check_run / workflow_run / status, so a
+// trigger on those keys never fires — steering-dead-events.test.js guards that.
 function backgroundTasksSection(autonomous, hasRepository = false) {
   const base =
     '## Background tasks\n\n' +
@@ -511,11 +514,14 @@ function backgroundTasksSection(autonomous, hasRepository = false) {
     "another agent's pull request, a long external job — do **not** poll it in a " +
     'background task. End your turn and let an event re-wake you: add a ' +
     '`github-event` trigger (e.g. on `pull_request.checks_passed` / ' +
-    '`pull_request.checks_failed` for CI, or the pull-request status) or use a ' +
-    '`loop`. That is the only reliable way to continue after an ' +
+    '`pull_request.checks_failed` for CI, or `pull_request.merge_conflict`) or ' +
+    'use a `loop`. That is the only reliable way to continue after an ' +
     'external event. For unattended flows, rely on the hand-off gate: a PR ' +
     'hand-off with a `readinessGate` holds the next agent\'s wake until CI is ' +
-    'green and the PR merges cleanly, so you never have to block a run on CI.';
+    'green and the PR merges cleanly, so you never have to block a run on CI. ' +
+    'If a PR you were handed is still pending, end your turn with a short ' +
+    'status and re-apply its hand-off label: the gate holds that wake until CI ' +
+    'settles. Never count on a later wake that nothing schedules.';
   const ciWait =
     '\n\nTo know **within this turn** whether a pull request\'s CI is green or ' +
     'it has a merge conflict, run `aee-wait-ci <pr>` in the **foreground** ' +

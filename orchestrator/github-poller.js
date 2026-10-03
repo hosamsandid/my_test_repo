@@ -302,6 +302,23 @@ function gcPushHeads(heads, now = Date.now()) {
   }
 }
 
+// #2776: the completion mirror the runner swaps a claimed `<wake>:wip` to on
+// normal run completion (#1163). A DOCUMENTED MIRROR of `CLAIM_COMPLETED_SUFFIX`
+// in agent-image/scripts/agent-entrypoint.py (and `COMPLETED_SUFFIX` in
+// flow-anomaly-detector.js) — keep in sync.
+const CLAIM_COMPLETED_SUFFIX = ':completed';
+
+// Whether `labelName` is one of the status labels the platform's own claim
+// lifecycle puts on the object for this subscriber: the claim label
+// (`sub.claimAdd`, `<wake>:wip`) or its completion mirror (`<wake>:completed`).
+// Only for a trigger that declares a claim — without one the runner never
+// swaps anything, so a `<wake>:completed` add is not ours to interpret.
+function isSelfClaimLabel(sub, labelName) {
+  if (!sub || !sub.claimAdd || typeof labelName !== 'string' || !labelName) return false;
+  if (labelName === sub.claimAdd) return true;
+  return !!sub.labelFilter && labelName === `${sub.labelFilter}${CLAIM_COMPLETED_SUFFIX}`;
+}
+
 // Does a `*.labeled`/`*.unlabeled` event satisfy a subscriber's `labelFilter`?
 //
 // The naive check — `payload.label.name === wanted` — is INSUFFICIENT on the
@@ -1127,10 +1144,16 @@ class GitHubPoller {
         // the exact `payload.label.name` (not the full set), so a genuine human
         // re-add of the wake label — whose attributed label IS the wake label —
         // is unaffected. Scoped to `*.labeled`.
+        //
+        // #2776: the same holds for the runner's completion swap (#1163,
+        // `<wake>:wip` → `<wake>:completed`). When the Events API collapses the
+        // claim swap away, this `<wake>:completed` add can be the ONLY event the
+        // poller sees from the run — and its stale snapshot may still name
+        // `<wake>`. Treat it like the claim label: drop it and disarm, so a
+        // later genuine human re-add of `<wake>` wakes the trigger again.
         if (
-          sub.claimAdd &&
           typeof key === 'string' && key.endsWith('.labeled') &&
-          ghEvent.payload?.label?.name === sub.claimAdd
+          isSelfClaimLabel(sub, ghEvent.payload?.label?.name)
         ) {
           // #2152 follow-up: the wake label's DISARM (wake-armory) keys on a
           // standalone `*.unlabeled(<wake>)` event — but the claim swap removes
@@ -1159,7 +1182,7 @@ class GitHubPoller {
           }
           console.log(
             `[GH-Poller] self-claim-label: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
-            `(claim label '${sub.claimAdd}' is agent-set, never a wake; disarmed '${sub.labelFilter}')`,
+            `(claim label '${ghEvent.payload.label.name}' is agent-set, never a wake; disarmed '${sub.labelFilter}')`,
           );
           outcome.status = 'dropped';
           outcome.reason = 'self-claim-label';
@@ -2010,6 +2033,7 @@ module.exports = {
   PUSH_HEADS_MAX,
   workItemNumber,
   labelFilterMatches,
+  isSelfClaimLabel,
   detectMergedPrs,
   effectiveHorizon,
   backfillHorizonStamps,

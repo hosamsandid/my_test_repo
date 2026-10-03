@@ -80,7 +80,7 @@ export const OUTCOME_LEGEND = [
   {
     key: 'self-claim-label',
     term: 'dropped (self-claim-label)',
-    meaning: "The label is an agent's own ':wip' claim label, not a hand-off.",
+    meaning: "The label is an agent's own claim label (':wip') or end-of-run label (':completed'), not a hand-off.",
     whatToDo: 'Nothing to do.',
   },
   {

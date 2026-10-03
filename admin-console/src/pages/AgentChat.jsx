@@ -209,6 +209,12 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   const handleBusyIdsChange = useCallback((ids) => {
     setRailBusyIds(prev => (prev.size === 0 && ids.size === 0 ? prev : ids));
   }, []);
+  // The Materialize subset of those (#2705 AC2): the routed agent's pane shows
+  // "Materializing…" until the host has re-read the roster with it enabled.
+  const [railMaterializingIds, setRailMaterializingIds] = useState(EMPTY_BUSY_IDS);
+  const handleMaterializingIdsChange = useCallback((ids) => {
+    setRailMaterializingIds(prev => (prev.size === 0 && ids.size === 0 ? prev : ids));
+  }, []);
 
   // The list-level create/import actions live in the Shell's page-action header
   // like every other page's (#1956) — Agent Chat used to be the one route with
@@ -678,7 +684,13 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   // the transcript/room/scroll position are all untouched since `ChatPanel`
   // never remounts (same `key={selectedAgent.id}` below).
   const effectiveRoutedAgent = routedAgent || (agentRemoved ? lastSeenAgentRef.current : null);
-  const selectedAgent = effectiveRoutedAgent && isChatOpenable(effectiveRoutedAgent) ? effectiveRoutedAgent : null;
+  // #2705 AC2: while a Materialize is in flight the pane holds its in-progress
+  // card even if a roster read already shows the agent enabled — the chat opens
+  // once, after the host has confirmed the enabled record, instead of flipping
+  // between the stub card, a half-provisioned chat and the disabled banner.
+  const materializingAgent = routedAgent && railMaterializingIds.has(routedAgent.id) ? routedAgent : null;
+  const selectedAgent = effectiveRoutedAgent && !materializingAgent && isChatOpenable(effectiveRoutedAgent)
+    ? effectiveRoutedAgent : null;
   // #2235: a routed `role: 'team'` subject gets the whole area right of the
   // agent list as one full-width configuration surface — see
   // `TeamConfigSurface` below — rather than the ordinary chat + right-rail
@@ -1037,6 +1049,7 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
                 // a just-created agent is awaited, or when the routed agent is
                 // a not-yet-provisioned stub (it has no chat to open).
                 waitingForNewAgent={awaitingReveal}
+                materializingAgent={materializingAgent}
                 stubAgent={routedAgent && agentState(routedAgent) === 'stub' ? routedAgent : null}
                 notFoundAgentId={notFoundAgentId}
               />
@@ -1112,6 +1125,7 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
         statuses={agentStatuses}
         listFilter={listFilter}
         onBusyIdsChange={handleBusyIdsChange}
+        onMaterializingIdsChange={handleMaterializingIdsChange}
       />
     </div>
     </>
@@ -1161,10 +1175,11 @@ function RailHeaderToggle({ on, onToggle }) {
  * primary line, secondary help text, all on a soft surface with a subtle
  * border so it doesn't feel like a 404 page. #2521 swaps the copy while a
  * just-created agent is awaited, or when the routed agent is a stub; #2619
- * when a deep link named an agent that isn't in the viewer's roster.
+ * when a deep link named an agent that isn't in the viewer's roster; #2705
+ * while the routed agent is being materialized (spinner instead of the icon).
  */
-function EmptyState({ waitingForNewAgent = false, stubAgent = null, notFoundAgentId = null }) {
-  const copy = revealEmptyStateCopy({ waiting: waitingForNewAgent, stubAgent })
+function EmptyState({ waitingForNewAgent = false, stubAgent = null, materializingAgent = null, notFoundAgentId = null }) {
+  const copy = revealEmptyStateCopy({ waiting: waitingForNewAgent, stubAgent, materializingAgent })
     || (notFoundAgentId ? agentNotFoundCopy(notFoundAgentId) : null);
   return (
     <div style={{
@@ -1195,7 +1210,9 @@ function EmptyState({ waitingForNewAgent = false, stubAgent = null, notFoundAgen
           color: 'var(--eb-accent-primary)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>
-          <MessageCircle size={22} />
+          {copy?.busy
+            ? <Loader2 size={22} style={{ animation: 'spin 1s linear infinite' }} aria-hidden="true" />
+            : <MessageCircle size={22} />}
         </div>
         <div style={{
           fontSize: 'var(--eb-text-md)',

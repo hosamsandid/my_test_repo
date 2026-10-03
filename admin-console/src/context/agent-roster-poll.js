@@ -21,3 +21,17 @@ export function shouldTickPoll(hidden) {
 export function shouldRefreshOnVisible(prevHidden, nextHidden) {
   return prevHidden === true && nextHidden === false;
 }
+
+/**
+ * Whether a roster response must be dropped because a fetch issued AFTER it
+ * has already been applied (#2705). The 5 s poll and an explicit `refetch()`
+ * overlap freely; a slow poll that left before a mutation (e.g. a Materialize
+ * flipping `enabled`) can land after the refetch that followed it, and applying
+ * it would roll the row back to its pre-mutation state for one poll cycle.
+ *
+ * @param {number} seq         the response's request sequence number
+ * @param {number} appliedSeq  the sequence number of the newest applied response
+ */
+export function isStaleRosterResponse(seq, appliedSeq) {
+  return seq < appliedSeq;
+}

@@ -30,5 +30,5 @@ test('the last-agent restore does not hop away from the notice', () => {
 
 test('the empty state shows the not-found copy, after the reveal/stub copy', () => {
   assert.match(chat, /notFoundAgentId=\{notFoundAgentId\}/);
-  assert.match(chat, /revealEmptyStateCopy\(\{ waiting: waitingForNewAgent, stubAgent \}\)\s*\|\| \(notFoundAgentId \? agentNotFoundCopy\(notFoundAgentId\) : null\)/);
+  assert.match(chat, /revealEmptyStateCopy\(\{ waiting: waitingForNewAgent, stubAgent, materializingAgent \}\)\s*\|\| \(notFoundAgentId \? agentNotFoundCopy\(notFoundAgentId\) : null\)/);
 });

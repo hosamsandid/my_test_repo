@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { shouldTickPoll, shouldRefreshOnVisible } from './agent-roster-poll.js';
+import { shouldTickPoll, shouldRefreshOnVisible, isStaleRosterResponse } from './agent-roster-poll.js';
 
 test('shouldTickPoll: fires while visible', () => {
   assert.equal(shouldTickPoll(false), true);
@@ -51,4 +51,11 @@ test('a hide/show sequence pauses ticks and refreshes exactly once on return', (
   tick(); // visible again: polls
 
   assert.deepEqual(actions, ['tick-poll', 'visible-refresh', 'tick-poll']);
+});
+
+test('#2705 isStaleRosterResponse: an older request landing after a newer one is dropped', () => {
+  // poll #1 leaves before a Materialize, refetch #2 after it; #2 lands first.
+  assert.equal(isStaleRosterResponse(1, 2), true);
+  assert.equal(isStaleRosterResponse(3, 2), false);
+  assert.equal(isStaleRosterResponse(1, 0), false, 'the first response is always applied');
 });

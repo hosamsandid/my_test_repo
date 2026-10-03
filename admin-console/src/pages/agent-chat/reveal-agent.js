@@ -78,14 +78,26 @@ export function revealPlan(agent, filter) {
  * @param {{waiting?: boolean, stubAgent?: {id:string, displayName?:string}|null}} o
  *   `waiting` — a reveal target is still awaited in the roster;
  *   `stubAgent` — the routed agent is a not-yet-provisioned stub (AC6): it is
- *   shown in its normal "Not initialised" state, with no chat to open and no error.
- * @returns {{title: string, hint: string}|null}
+ *   shown in its normal "Not initialised" state, with no chat to open and no error;
+ *   `materializingAgent` — the routed agent has a Materialize in flight
+ *   (#2705 AC2). Wins over `stubAgent`: from the click until the roster carries
+ *   the enabled record the row still reads as a stub, and "choose Materialize"
+ *   would tell the user to do what is already running.
+ * @returns {{title: string, hint: string, busy?: boolean}|null}
  */
-export function revealEmptyStateCopy({ waiting = false, stubAgent = null } = {}) {
+export function revealEmptyStateCopy({ waiting = false, stubAgent = null, materializingAgent = null } = {}) {
   if (waiting) {
     return {
       title: 'Opening your new team…',
       hint: 'Its agents appear in the list as soon as the team has finished loading.',
+    };
+  }
+  if (materializingAgent) {
+    const name = materializingAgent.displayName || materializingAgent.id;
+    return {
+      title: `Materializing ${name}…`,
+      hint: 'Setting up its workspace and cloning its repositories. The chat opens here as soon as it is running.',
+      busy: true,
     };
   }
   if (stubAgent) {

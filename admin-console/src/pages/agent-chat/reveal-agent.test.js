@@ -66,3 +66,17 @@ test('revealEmptyStateCopy: waiting, stub, or the ordinary card', () => {
   assert.equal(revealEmptyStateCopy({}), null);
   assert.equal(revealEmptyStateCopy(), null);
 });
+
+test('#2705 AC2 — revealEmptyStateCopy: a Materialize in flight replaces the stub prompt', () => {
+  const stub = { id: 'acme-qa', displayName: 'QA' };
+  const copy = revealEmptyStateCopy({ stubAgent: stub, materializingAgent: stub });
+  assert.equal(copy.title, 'Materializing QA…');
+  assert.equal(copy.busy, true);
+  // It must not keep telling the user to choose what is already running.
+  assert.doesNotMatch(`${copy.title} ${copy.hint}`, /choose Materialize|not initialised|disabled/i);
+  assert.match(revealEmptyStateCopy({ materializingAgent: { id: 'acme-qa' } }).title, /^Materializing acme-qa…$/);
+  // The plain stub card carries no busy flag.
+  assert.equal(revealEmptyStateCopy({ stubAgent: stub }).busy, undefined);
+  // Waiting for a new team still wins.
+  assert.match(revealEmptyStateCopy({ waiting: true, materializingAgent: stub }).title, /new team/);
+});

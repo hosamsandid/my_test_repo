@@ -327,6 +327,32 @@ test('readinessEvent: PullRequestEvent shape with number, head SHA, verdict and 
   });
 });
 
+// ---- shared rules with aee-wait-ci (#2796) ----------------------------------
+
+test('#2796: the verdict rules are one data file, vendored byte-identical into the agent image', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const canonical = fs.readFileSync(path.join(__dirname, 'pr-readiness-rules.json'));
+  const vendored = fs.readFileSync(path.join(__dirname, '..', 'agent-image', 'scripts', 'pr-readiness-rules.json'));
+  assert.ok(canonical.equals(vendored), 'cp orchestrator/pr-readiness-rules.json agent-image/scripts/');
+  const rules = JSON.parse(canonical);
+  assert.equal(r.DEFAULT_CI_GRACE_MS, rules.ciGraceMs);
+  assert.equal(r.MAX_CHECKS, rules.maxChecks);
+});
+
+test('#2796: shared verdict cases (also run by aee-wait-ci tests) hold for ciVerdict/mergeVerdict', () => {
+  const cases = require('./pr-readiness-cases.json');
+  assert.ok(cases.ci.length >= 10 && cases.merge.length >= 4);
+  for (const c of cases.ci) {
+    const got = r.ciVerdict({
+      checks: c.checks, truncated: !!c.truncated, headSeenAt: T0 - c.elapsedMs, now: T0,
+      graceMs: c.graceMs ?? r.DEFAULT_CI_GRACE_MS,
+    });
+    assert.deepEqual(got, c.expect, c.name);
+  }
+  for (const c of cases.merge) assert.equal(r.mergeVerdict(c.mergeable), c.expect, String(c.mergeable));
+});
+
 test('readinessEvent: closesIssues from the PR body and an issue-N branch, ascending; the body is not carried (#2799)', () => {
   const ev = r.readinessEvent('o/r', {
     key: 'pull_request.checks_passed', pr: pr(12, SHA_A, 'MERGEABLE', { body: 'Fixes #40. Closes #7', headRef: 'issue-40-x' }), sha: SHA_A,

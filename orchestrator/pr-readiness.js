@@ -29,6 +29,11 @@
 // GitHub-only: GitLab repositories are never polled.
 // ============================================================
 
+// The verdict rules themselves (which check conclusions pass / fail, what
+// `mergeable` means, the no-CI grace, the checks page size) live in ONE data
+// file shared with the in-container `aee-wait-ci` CLI (#2796), so the poller,
+// the hand-off gate and an agent's in-turn wait can never disagree.
+const RULES = require('./pr-readiness-rules.json');
 const { parseCloses } = require('./pr-events-log');
 
 const READINESS_EVENT_KEYS = Object.freeze([
@@ -44,7 +49,7 @@ const MERGE_EVENT = { conflict: 'pull_request.merge_conflict' };
 // How long a head commit may have no check at all before its CI verdict is
 // `none` (the repo or PR has no CI). Measured from when the poller first saw
 // the commit as the PR's head. Overridable via AEE_PR_READINESS_CI_GRACE_MS.
-const DEFAULT_CI_GRACE_MS = 3 * 60_000;
+const DEFAULT_CI_GRACE_MS = RULES.ciGraceMs;
 
 function ciGraceMs(env = process.env) {
   const raw = env.AEE_PR_READINESS_CI_GRACE_MS;
@@ -58,12 +63,14 @@ const MAX_OPEN_PRS = 100;
 // Upper bound on labels read per open PR (#2795, the hand-off gate's cancel check).
 const MAX_LABELS = 50;
 // Upper bound on checks read per head commit (one GraphQL page).
-const MAX_CHECKS = 100;
+const MAX_CHECKS = RULES.maxChecks;
 
-const CHECK_RUN_PASS = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
-const CHECK_RUN_FAIL = new Set(['FAILURE', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE', 'STALE']);
-const STATUS_PASS = new Set(['SUCCESS']);
-const STATUS_FAIL = new Set(['FAILURE', 'ERROR']);
+const CHECK_RUN_PASS = new Set(RULES.checkRun.pass);
+const CHECK_RUN_FAIL = new Set(RULES.checkRun.fail);
+const STATUS_PASS = new Set(RULES.statusContext.pass);
+const STATUS_FAIL = new Set(RULES.statusContext.fail);
+const MERGE_CLEAN = new Set(RULES.mergeable.clean);
+const MERGE_CONFLICT = new Set(RULES.mergeable.conflict);
 
 const OPEN_PRS_QUERY = 'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){'
   + `pullRequests(states:OPEN,first:${MAX_OPEN_PRS},orderBy:{field:UPDATED_AT,direction:DESC}){`
@@ -124,8 +131,8 @@ function ciVerdict({ checks, truncated = false, headSeenAt, now = Date.now(), gr
 // anything unexpected stay `pending` and are re-read next cycle.
 function mergeVerdict(mergeable) {
   const m = String(mergeable || '').toUpperCase();
-  if (m === 'MERGEABLE') return 'clean';
-  if (m === 'CONFLICTING') return 'conflict';
+  if (MERGE_CLEAN.has(m)) return 'clean';
+  if (MERGE_CONFLICT.has(m)) return 'conflict';
   return 'pending';
 }
 

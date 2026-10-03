@@ -105,6 +105,15 @@ Visible in the **GitHub Event Log** (`held — waiting for CI / conflict-free`, 
 
 Re-fire a dropped wake from Agent Chat → **Events** (#2525).
 
+### In-turn wait: `aee-wait-ci`
+
+The two mechanisms above wake an agent in a **later** run. An agent that needs the verdict **within its current turn** (e.g. in chat: "is my PR green?") runs the container CLI `aee-wait-ci <pr> [--repo <clone-dir>|owner/name] [--timeout <minutes>] [--no-conflict-check]` in the foreground (#2796). It applies the **same rules** as PR readiness — one shared definition, `orchestrator/pr-readiness-rules.json`, vendored into the agent image — re-reads the PR every ~20 s and prints one JSON object (`status`, `headSha`, `ci`, `merge`, `failingChecks`, `pendingChecks`, `supersededHeads`, …) plus an exit code: `0` passed / no CI, `4` failed, `5` conflict, `6` timeout, `1` error (no token, PR not found, closed or merged), `3` GitHub unreachable, `2` usage.
+
+- **Bounded**: default 20 minutes, never more than 50, and always capped to end two minutes before the run's own timeout (`AEE_RUN_DEADLINE`, set per turn by the runtime). The runtime also raises Claude Code's Bash tool timeout for each turn (`BASH_DEFAULT_TIMEOUT_MS` 25 min, `BASH_MAX_TIMEOUT_MS` 55 min, larger operator values kept), so the default wait fits one tool call; a longer `--timeout` needs the agent to pass a matching Bash tool timeout.
+- **Push during the wait**: the new head is evaluated from scratch; `headSha` names the commit the verdict belongs to.
+- **Rate limiting** is backed off and retried, never reported as a failure.
+- **Not for unattended flows**: on timeout it says so — continue via a gated hand-off or a `pull_request.checks_*` trigger, never via a background task (which is killed when the turn ends).
+
 ## Operational note: host clock skew (Podman machine)
 
 On macOS/Windows the stack runs inside a Podman VM, and containers inherit **that

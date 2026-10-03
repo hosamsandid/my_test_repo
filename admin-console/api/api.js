@@ -127,6 +127,7 @@ const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, 
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { applyPushedBy } = require('./push-producer-filter');
+const { isLiveGraphMember } = require('./live-graph-members');
 const { normalizeBranchFilter } = require('./branch-filter');
 const { newTriggerIdError, annotateTriggerList, stripTriggerAnnotations, resolveTriggerIndex } = require('./trigger-validate');
 const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext, normalizeReadinessGate, cleanReadiness, readinessError } = require('./process-template');
@@ -6908,9 +6909,9 @@ app.get('/api/process/graph', (req, res) => {
   const agents = [];
   for (const id of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    // Roles only: no team holder, no auto-scaled pool instance (#2814).
+    if (!isLiveGraphMember(cfg, team)) continue;
     const role = cfg.role || 'agent';
-    if (role === 'team') continue; // template holder — no triggers of its own
-    if (team && cfg.parentTeamId !== team) continue;
     const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
     agents.push({
       id, role, displayName: cfg.displayName || id,
@@ -9213,9 +9214,9 @@ app.get('/api/flows/graph', async (req, res) => {
   const nodes = [];
   for (const id of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    // Roles only: no team holder, no auto-scaled pool instance (#2814).
+    if (!isLiveGraphMember(cfg, team)) continue;
     const role = cfg.role || 'agent';
-    if (role === 'team') continue; // template holder — no triggers of its own
-    if (team && cfg.parentTeamId !== team) continue;
     const raw = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
     const triggers = Array.isArray(raw) ? raw : [];
     // Data-flow ports persisted at materialise time (#379) so the live graph
@@ -9908,9 +9909,9 @@ app.get('/api/process/template', (req, res) => {
   }
   for (const id of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    // Roles only: no team holder, no auto-scaled pool instance (#2814).
+    if (!isLiveGraphMember(cfg, team)) continue;
     const role = cfg.role || 'agent';
-    if (role === 'team') continue;
-    if (team && cfg.parentTeamId !== team) continue;
     const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
     const tlist = Array.isArray(triggers) ? triggers : [];
     // Effective prompt the agent actually runs (rendered AGENT-PROMPT.md),

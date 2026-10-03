@@ -38,7 +38,8 @@ import { poolCapView } from './pool-cap-view.js';
 // `live` (#2760 AC5): `{ count, cap }` from the team's pool-control read
 // (`pool-cap-view.js` `livePoolCount`) — the role's live + provisioning
 // instances against its SAVED cap, marked when over it. `null` hides the line
-// (role not pooled yet, or the read failed).
+// (role not pooled yet, or the read failed). `waiting` (#2789): instances kept
+// alive for an open PR, outside the cap — shown next to the active count.
 export default function ScalingSection({ draft, onChange, parentWipLimit, error, disabled = false, live = null }) {
   const maxInstances = parseMaxInstancesInput(draft.maxInstancesText);
   const idle = parseMinutesInput(draft.idleText);
@@ -79,7 +80,7 @@ export default function ScalingSection({ draft, onChange, parentWipLimit, error,
             />
           </Field>
           {maxInstances.error && <FieldError text={maxInstances.error} />}
-          {live && <LiveInstances count={live.count} cap={live.cap} />}
+          {live && <LiveInstances count={live.count} cap={live.cap} waiting={live.waiting} />}
 
           <div style={{ display: 'flex', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
             <Field label="Idle timeout (min)">
@@ -109,8 +110,8 @@ export default function ScalingSection({ draft, onChange, parentWipLimit, error,
   );
 }
 
-function LiveInstances({ count, cap }) {
-  const view = poolCapView(count, cap);
+function LiveInstances({ count, cap, waiting = 0 }) {
+  const view = poolCapView(count, cap, waiting);
   return (
     <div
       title={view.title}

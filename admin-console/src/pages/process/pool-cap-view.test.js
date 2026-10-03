@@ -48,9 +48,27 @@ test('livePoolCount: picks the role row by agentId; null when absent or malforme
     { agentId: 't-qa', maxInstances: null, liveInstanceCount: 1 },
     { agentId: 't-dev', maxInstances: 3, liveInstanceCount: 5 },
   ] };
-  assert.deepEqual(livePoolCount(data, 't-dev'), { count: 5, cap: 3 });
-  assert.deepEqual(livePoolCount(data, 't-qa'), { count: 1, cap: null });
+  assert.deepEqual(livePoolCount(data, 't-dev'), { count: 5, cap: 3, waiting: 0 });
+  assert.deepEqual(livePoolCount(data, 't-qa'), { count: 1, cap: null, waiting: 0 });
   assert.equal(livePoolCount(data, 't-other'), null);
   assert.equal(livePoolCount(null, 't-dev'), null);
   assert.equal(livePoolCount({ roles: [{ agentId: 't-dev' }] }, 't-dev'), null);
+});
+
+// #2789 AC9 — instances waiting on an open PR are named apart from the active count.
+
+test('poolCapView: waiting instances show apart — "2 / 3 active · 4 waiting", not over the cap', () => {
+  const v = poolCapView(2, 3, 4);
+  assert.equal(v.text, '2 / 3 active · 4 waiting');
+  assert.equal(v.over, false, 'waiting instances are outside the cap');
+  assert.match(v.title, /4 waiting on a PR/);
+  assert.match(v.title, /not counted against the limit/);
+  assert.equal(poolCapView(1, null, 2).text, '1 active · 2 waiting');
+  assert.equal(poolCapView(2, 3, 0).text, '2 / 3', 'no waiting suffix without waiting instances');
+  assert.equal(poolCapView(2, 3, -1).text, '2 / 3');
+});
+
+test('livePoolCount: carries the waiting count from the pool-control read', () => {
+  const data = { roles: [{ agentId: 't-dev', maxInstances: 3, liveInstanceCount: 2, waitingInstanceCount: 4 }] };
+  assert.deepEqual(livePoolCount(data, 't-dev'), { count: 2, cap: 3, waiting: 4 });
 });

@@ -337,6 +337,14 @@ test('poolView: Paused differs from Draining — it resumes, it never switches o
   assert.deepEqual(v.actions.map((a) => a.label), ['Resume']);
 });
 
+test('#2789 poolView: instances waiting on a PR are named apart — "on a PR", never confused with held work', () => {
+  const v = poolView({ roleId: 'developer', busy: 2, capacity: 3, state: 'running', waiting: 4 });
+  assert.equal(v.occupancy, '2 of 3 busy · 4 waiting on a PR');
+  const d = poolView({ roleId: 'developer', busy: 0, capacity: 3, state: 'draining', waiting: 1, held: 2 });
+  assert.equal(d.stateText, 'Draining, 0 still running · 1 waiting on a PR · 2 waiting');
+  assert.match(POOL_ACTION_TOOLTIPS.drain, /waiting on an open pull request/, 'AC8: the drain says it waits for them');
+});
+
 // ── AC14: tooltips a newcomer understands, and the help topic agrees ───────
 
 test('each Pause/Drain/Resume/Switch-on tooltip says what happens to running work, new work, and how to undo', () => {

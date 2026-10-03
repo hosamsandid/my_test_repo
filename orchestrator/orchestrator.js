@@ -2697,34 +2697,70 @@ function _flowBoardSessions(members) {
   return out;
 }
 
-// How many of a pooled role's instances are still doing something: a running
-// session, or a dispatch already queued to it. The drain → off test.
+// Is one pool instance still doing something: a running session, a busy
+// status, or a dispatch already queued to it.
+function _poolInstanceIsBusy(id) {
+  let reg = [];
+  try {
+    reg = JSON.parse(fs.readFileSync(agentStatePath(id, "running-sessions.json"), "utf8"));
+  } catch {
+    reg = [];
+  }
+  const status = _readInstanceStatus(id);
+  return !!((Array.isArray(reg) && reg.length) || (status && status.state === "busy") || readPendingEntries(id).length);
+}
+
+// How many of a pooled role's instances are still doing something. The
+// drain → off test.
 function _poolRoleBusyCount(roleFullId) {
   let busy = 0;
   for (const id of _liveInstanceIdsForRole(roleFullId)) {
-    let reg = [];
-    try {
-      reg = JSON.parse(fs.readFileSync(agentStatePath(id, "running-sessions.json"), "utf8"));
-    } catch {
-      reg = [];
-    }
-    const status = _readInstanceStatus(id);
-    if ((Array.isArray(reg) && reg.length) || (status && status.state === "busy") || readPendingEntries(id).length) busy++;
+    if (_poolInstanceIsBusy(id)) busy++;
   }
   return busy;
+}
+
+// #2789: the role's live instances that are WAITING on an open PR right now —
+// recorded as waiting by the last sweep (for this very instance, not an
+// earlier one under the same id) and not busy since. A waiting instance that
+// picked up work counts as active again at once (AC5). `waiting` is the
+// team's `loadPoolWaiting` map, passed in so a caller looping over roles
+// reads the file once.
+function _waitingInstancesForRole(roleFullId, waiting) {
+  const out = [];
+  for (const inst of _liveInstancesForRole(roleFullId)) {
+    const rec = agentPool.normalizeWaitRecord(waiting[inst.instanceId], inst.spawnedAt);
+    if (!rec || !rec.waiting) continue;
+    if (_poolInstanceIsBusy(inst.instanceId)) continue;
+    out.push({ instanceId: inst.instanceId, prs: rec.prs, unknown: rec.unknown, waitingSince: rec.waitingSince });
+  }
+  return out;
+}
+
+function _waitingInstanceIdsForRole(teamId, roleFullId) {
+  return _waitingInstancesForRole(roleFullId, loadPoolWaiting(teamId)).map((w) => w.instanceId);
 }
 
 // #2573 AC13: a `draining` role whose last instance has finished switches
 // itself `off`. Run by the periodic pool sweep and on every board/pool-control
 // read, so the board never shows a finished drain as still draining.
+//
+// #2789 AC8: an instance waiting on its open PR keeps the drain open too — a
+// drain finishes the work already started, review rounds included, and
+// settles to `off` only once the waiting instances are gone (their PRs merged
+// or closed). Reaping them on drain would throw away the very context this
+// keep-alive exists for.
 function settlePoolDrains(teamId) {
   const control = loadPoolControl(teamId);
   let changed = false;
+  let waiting = null;
   for (const role of _teamPooledRoles(teamId)) {
     const roleId = agentPool.roleIdFromMemberId(role.id, teamId);
     const state = agentPool.poolControlState(control, roleId);
     if (state !== "draining") continue;
-    if (agentPool.settleDrain(state, _poolRoleBusyCount(role.id)) === "off") {
+    if (!waiting) waiting = loadPoolWaiting(teamId);
+    const remaining = _poolRoleBusyCount(role.id) + _waitingInstancesForRole(role.id, waiting).length;
+    if (agentPool.settleDrain(state, remaining) === "off") {
       control[roleId] = { state: "off", changedAt: new Date().toISOString() };
       changed = true;
       console.log(`[AgentPool] ${teamId}: ${roleId} finished draining — switched off`);
@@ -2821,9 +2857,11 @@ async function computeTeamFlowBoard(teamId, { now = Date.now() } = {}) {
 
   const control = settlePoolDrains(teamId);
   const pausedHold = loadPausedHold(teamId);
+  const poolWaiting = loadPoolWaiting(teamId);
   const pools = _teamPooledRoles(teamId).map((role) => {
     const roleId = agentPool.roleIdFromMemberId(role.id, teamId);
     const c = control[roleId] || null;
+    const waiting = new Map(_waitingInstancesForRole(role.id, poolWaiting).map((w) => [w.instanceId, w.prs]));
     return {
       agentId: role.id,
       roleId,
@@ -2832,7 +2870,9 @@ async function computeTeamFlowBoard(teamId, { now = Date.now() } = {}) {
       state: agentPool.poolControlState(control, roleId),
       changedAt: c ? c.changedAt : null,
       held: (pausedHold[roleId] || []).length,
-      instances: _liveInstanceIdsForRole(role.id).map((instanceId) => ({ instanceId })),
+      instances: _liveInstanceIdsForRole(role.id).map((instanceId) => (
+        waiting.has(instanceId) ? { instanceId, waiting: true, prs: waiting.get(instanceId) } : { instanceId }
+      )),
     };
   });
 
@@ -3068,6 +3108,22 @@ function _liveInstancesForRole(roleFullId) {
   return out;
 }
 
+// The lane view's instances (#2273) plus, per #2789, whether each is waiting
+// on an open PR and how long it has waited — so a lane is tagged `waiting`
+// and its timed-out test leaves waiting time out, like the reaper.
+function _liveInstancesForWithWaiting(roleFullId, poolWaiting, now = Date.now()) {
+  const waiting = new Map(_waitingInstancesForRole(roleFullId, poolWaiting).map((w) => [w.instanceId, w]));
+  return _liveInstancesForRole(roleFullId).map((inst) => {
+    const rec = agentPool.normalizeWaitRecord(poolWaiting[inst.instanceId], inst.spawnedAt);
+    const w = waiting.get(inst.instanceId);
+    return {
+      ...inst,
+      waitedMs: agentPool.waitedMsSoFar(rec, now),
+      ...(w ? { waiting: true, prs: w.prs } : {}),
+    };
+  });
+}
+
 // A released ticket's lane key is `<repo>#<number>` (`admission-control.js`
 // `objectKey`) — the item id every pooled role's instance is keyed on.
 function _ticketItemKey(laneKey) {
@@ -3114,7 +3170,21 @@ function _readInstanceStatus(id) {
 // pool-reap precedent inside `admissionSweepTeam` (`_reapPooledInstancesForTicket`)
 // — clearing out finished/stuck/idle work is safe regardless of maintenance
 // mode, unlike STARTING a new dispatch.
+//
+// #2789: before either reaper looks at an instance, the sweep decides whether
+// it is WAITING — idle with an open PR on its item (one open-PR read per repo
+// per sweep, only when some instance is idle). A waiting instance is never
+// reaped, its waiting time is left out of the runtime budget, and once its
+// last PR is merged or closed an idle instance is reaped straight away (AC6).
+// The records land in `pool-waiting.json` for the cap check and the UI.
 async function poolReapSweepTeam(teamId, now = Date.now()) {
+  const prevWaiting = loadPoolWaiting(teamId);
+  const nextWaiting = {};
+  const openPrsByRepo = new Map(); // repo -> Promise<{ok, prs}>, one read per sweep
+  const openPrsFor = (repo) => {
+    if (!openPrsByRepo.has(repo)) openPrsByRepo.set(repo, _openPullsForRepo(repo));
+    return openPrsByRepo.get(repo);
+  };
   for (const role of _teamPooledRoles(teamId)) {
     const { maxRuntimeMs, idleTimeoutMs } = role.pool.teardown;
     const prefix = `${role.id}-i`;
@@ -3128,7 +3198,25 @@ async function poolReapSweepTeam(teamId, now = Date.now()) {
       }
       if (!cfg || !cfg.poolInstance || cfg.poolOf !== role.id) continue;
 
-      if (agentPool.isInstanceTimedOut({ spawnedAt: cfg.poolSpawnedAt, maxRuntimeMs }, now)) {
+      const spawnedAt = cfg.poolSpawnedAt || null;
+      const prev = agentPool.normalizeWaitRecord(prevWaiting[id], spawnedAt);
+      const idle = !_poolInstanceIsBusy(id);
+      let lookup = null;
+      if (idle && cfg.poolRepo && cfg.poolItem != null) {
+        const open = await openPrsFor(cfg.poolRepo);
+        lookup = open.ok
+          ? { ok: true, prs: agentPool.linkedOpenPrs(open.prs, cfg.poolItem) }
+          : { ok: false };
+        if (!open.ok) {
+          console.warn(`[AgentPool] ${teamId}: cannot tell whether ${id} has an open PR (${open.error}) — keeping it as waiting`);
+        }
+      }
+      const rec = agentPool.nextWaitRecord(prev, { spawnedAt, idle, lookup }, now);
+      nextWaiting[id] = rec;
+
+      if (rec.waiting) continue; // AC1/AC2: never reaped while waiting
+
+      if (agentPool.isInstanceTimedOut({ spawnedAt, maxRuntimeMs, waitedMs: agentPool.waitedMsSoFar(rec, now) }, now)) {
         console.warn(`[AgentPool] ${teamId}: ${id} exceeded its ${maxRuntimeMs}ms runtime budget — reaping`);
         // Code-review finding on #2246: this used to only console.warn "marking
         // item X needs-human" without ever actually doing it — a timed-out
@@ -3159,6 +3247,14 @@ async function poolReapSweepTeam(teamId, now = Date.now()) {
       // Gap 3: idle reap — instance-local, no GitHub call. Unlike the hard
       // timeout above, a quiet delete: an idle instance isn't stuck, its
       // ticket is just still open, so there is nothing for a human to see.
+      // #2789 AC6: its last PR was just merged or closed — no second full
+      // idle budget, it goes now.
+      if (agentPool.waitJustEnded(prev, rec, idle)) {
+        console.log(`[AgentPool] ${teamId}: ${id} no longer has an open PR — reaping`);
+        delete nextWaiting[id];
+        await _internalSelfDelete(id);
+        continue;
+      }
       const status = _readInstanceStatus(id);
       if (status && agentPool.isInstanceIdle({
         state: status.state,
@@ -3167,10 +3263,18 @@ async function poolReapSweepTeam(teamId, now = Date.now()) {
         idleTimeoutMs,
       }, now)) {
         console.log(`[AgentPool] ${teamId}: ${id} idle for over its ${idleTimeoutMs}ms budget — reaping`);
+        delete nextWaiting[id];
         await _internalSelfDelete(id);
       }
     }
   }
+  // Records of instances that are gone (reaped here, by the ticket-release
+  // reap, or deleted by hand) are dropped by not being carried over. A
+  // dispatch that lands while this sweep awaits GitHub may be overwritten
+  // with "waiting" here; harmless, since every reader also checks the
+  // instance is not busy (`_waitingInstancesForRole`) and the next sweep
+  // sees it working.
+  savePoolWaiting(teamId, nextWaiting);
   // #2573: a finished drain switches its role off.
   try {
     settlePoolDrains(teamId);
@@ -10951,6 +11055,34 @@ function savePoolControl(teamId, control) {
   }
 }
 
+// Waiting instances (#2789) — per instance, whether it is idle with an open
+// PR on its item, and its wait clock. Sibling file of `pool-control.json`,
+// written by the reap sweep (`poolReapSweepTeam`) and read by the cap check,
+// the drain settle and the pool UI reads. See `agentPool.nextWaitRecord`.
+function poolWaitingPath(teamId) {
+  return controlOrPoolPath(teamId, "pool-waiting.json");
+}
+
+function loadPoolWaiting(teamId) {
+  try {
+    return agentPool.normalizePoolWaiting(JSON.parse(fs.readFileSync(poolWaitingPath(teamId), "utf8")));
+  } catch {
+    return {};
+  }
+}
+
+function savePoolWaiting(teamId, waiting) {
+  const p = poolWaitingPath(teamId);
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(waiting, null, 2));
+    return true;
+  } catch (err) {
+    console.error(`[AgentPool] cannot persist pool-waiting for ${teamId}: ${err.message}`);
+    return false;
+  }
+}
+
 // Paused/draining hold queue (code-review finding on #2281's review of this
 // Phase) — sibling file, same convention as `poolControlPath` above. See
 // `agentPool.normalizePausedHold`'s doc comment for why this exists and why
@@ -11136,6 +11268,32 @@ async function _lookupPoolReworkRef(repoFullName, itemKey) {
   } catch (err) {
     console.warn(`[AgentPool] rework-branch lookup for ${repoFullName}#${itemKey} failed: ${err.message}`);
     return null;
+  }
+}
+
+// #2789: every open PR of a repo, for the waiting-instance check. Paged (a
+// linked PR past the first page must not look closed and get its instance
+// reaped). `{ ok: false }` on any failure — no token, a bad response, more
+// pages than the bound — which the caller treats as "still waiting" (AC10),
+// never as "no PR".
+const POOL_OPEN_PR_MAX_PAGES = 10;
+async function _openPullsForRepo(repoFullName) {
+  try {
+    const tokenId = resolveRepoGithubTokenId(repoFullName);
+    if (!tokenId) return { ok: false, error: "no environment with a GitHub token covers the repo" };
+    const token = fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), "utf8").trim();
+    const [owner, name] = repoFullName.split("/");
+    const seg = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+    const prs = [];
+    for (let page = 1; page <= POOL_OPEN_PR_MAX_PAGES; page++) {
+      const list = await _flowGithubGetJson(`${seg}/pulls?state=open&per_page=100&page=${page}`, token);
+      if (!Array.isArray(list)) return { ok: false, error: "unexpected response" };
+      prs.push(...list);
+      if (list.length < 100) return { ok: true, prs };
+    }
+    return { ok: false, error: `more than ${POOL_OPEN_PR_MAX_PAGES * 100} open PRs` };
+  } catch (err) {
+    return { ok: false, error: err.message };
   }
 }
 
@@ -11657,6 +11815,8 @@ function routePooledDispatch(agentId, entry, out = null) {
     // reaches `_liveInstanceIdsForRole` once its config exists, seconds after
     // this check, so concurrent dispatches for other items overshot the cap.
     existingInstanceIds: itemKey == null ? [] : _cappedInstanceIdsForRole(agentId),
+    // #2789 AC4: instances waiting on an open PR do not take a slot.
+    waitingInstanceIds: itemKey == null ? [] : _waitingInstanceIdsForRole(teamId, agentId),
   });
   if (decision.action === 'unpooled') return null;
   if (decision.action === 'refuse') {
@@ -11687,6 +11847,9 @@ function routePooledDispatch(agentId, entry, out = null) {
   }
   if (out) out.instanceId = decision.instanceId;
   if (decision.action === 'reuse') {
+    // #2789 AC3/AC5: feedback for a waiting instance lands on it (cap or no
+    // cap) and it counts as active again from this moment.
+    _endPoolInstanceWait(teamId, decision.instanceId);
     // #2760 AC4: the item's instance is still provisioning — land on it once
     // the spawn in flight finishes, instead of writing into a pending queue
     // of an agent that does not exist yet (or starting a second spawn).
@@ -11713,6 +11876,15 @@ function routePooledDispatch(agentId, entry, out = null) {
       _retryPooledDispatch(agentId, entry, decision.instanceId, spawn);
     });
   return { targetId: decision.instanceId, spawning: true };
+}
+
+// #2789: stop an instance's wait clock now that work was delivered to it, so
+// the cap and the UI count it as active before the next sweep looks again.
+function _endPoolInstanceWait(teamId, instanceId) {
+  const waiting = loadPoolWaiting(teamId);
+  if (!waiting[instanceId] || !waiting[instanceId].waiting) return;
+  waiting[instanceId] = agentPool.endWait(waiting[instanceId], Date.now());
+  savePoolWaiting(teamId, waiting);
 }
 
 // #2760 edge case "spawn failure mid-provisioning": the slot is already free
@@ -20285,15 +20457,21 @@ async function main() {
           return sendJson(res, 404, { error: 'agent team not found' });
         }
         const control = settlePoolDrains(teamId);
+        const poolWaiting = loadPoolWaiting(teamId);
         const roles = _teamPooledRoles(teamId).map((role) => {
           const roleId = agentPool.roleIdFromMemberId(role.id, teamId);
+          const waiting = _waitingInstancesForRole(role.id, poolWaiting);
+          const waitingIds = new Set(waiting.map((w) => w.instanceId));
           return {
             roleId,
             agentId: role.id,
             displayName: role.cfg.displayName || roleId,
             maxInstances: role.pool.maxInstances,
             // #2760: provisioning instances count too, same as the cap does.
-            liveInstanceCount: _cappedInstanceIdsForRole(role.id).length,
+            // #2789: waiting instances do not — they are listed apart.
+            liveInstanceCount: _cappedInstanceIdsForRole(role.id).filter((id) => !waitingIds.has(id)).length,
+            waitingInstanceCount: waiting.length,
+            waitingInstances: waiting.map((w) => ({ instanceId: w.instanceId, prs: w.prs })),
             state: agentPool.poolControlState(control, roleId),
           };
         });
@@ -20337,6 +20515,7 @@ async function main() {
           }
           const ledger = await computeTeamTicketLedger(teamId);
           const pooledRoles = _teamPooledRoles(teamId);
+          const poolWaiting = loadPoolWaiting(teamId);
           const roleInputs = pooledRoles.map((role) => ({
             role: {
               roleId: agentPool.roleIdFromMemberId(role.id, teamId),
@@ -20344,7 +20523,7 @@ async function main() {
               maxInstances: role.pool.maxInstances,
               maxRuntimeMs: role.pool.teardown.maxRuntimeMs,
             },
-            instances: _liveInstancesForRole(role.id),
+            instances: _liveInstancesForWithWaiting(role.id, poolWaiting),
           }));
           const roles = poolInstanceLanes.buildTeamPoolLanes(roleInputs, ledger.tickets || [])
             .map((r, i) => ({ ...r, displayName: pooledRoles[i].cfg.displayName || r.roleId }));

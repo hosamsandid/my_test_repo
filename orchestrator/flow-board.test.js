@@ -462,6 +462,20 @@ test('buildFlowBoard: pools report busy of capacity, state and held work', () =>
   assert.equal(b.sessions[0].issue.number, 12);
 });
 
+test('#2789 buildFlowBoard: pools count idle instances waiting on a PR apart from busy ones', () => {
+  const b = board({
+    github: { issues: [issue(12)] },
+    sessions: [{ agentId: 't-developer-i12', session: { id: 's', startedAt: iso(3) } }],
+    pools: [{ agentId: 't-developer', roleId: 'developer', maxInstances: 3,
+      instances: [
+        { instanceId: 't-developer-i12', waiting: true, prs: [40] }, // working again — active, not waiting
+        { instanceId: 't-developer-i13', waiting: true, prs: [41] },
+        { instanceId: 't-developer-i14' },
+      ] }],
+  });
+  assert.deepEqual({ busy: b.pools[0].busy, waiting: b.pools[0].waiting, live: b.pools[0].live }, { busy: 1, waiting: 1, live: 3 });
+});
+
 // ---------------------------------------------------------------------------
 // #2637 — Draft stage and "Remove from board".
 // ---------------------------------------------------------------------------

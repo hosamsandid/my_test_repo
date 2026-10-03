@@ -39,7 +39,7 @@ function issueEntry(n) {
   return { github: { repo: 'o/r', payload: { action: 'labeled', issue: { number: n } } } };
 }
 
-function harness({ maxInstances = 3, existing = [] } = {}) {
+function harness({ maxInstances = 3, existing = [], waiting = [] } = {}) {
   const configs = new Map();
   configs.set(ROLE, { id: ROLE, role: 'team-member', parentTeamId: TEAM, pool: { enabled: true, maxInstances } });
   const instanceCfg = (id, item) => ({ id, role: 'team-member', parentTeamId: TEAM, poolInstance: true, poolOf: ROLE, poolItem: item });
@@ -48,6 +48,8 @@ function harness({ maxInstances = 3, existing = [] } = {}) {
   const spawns = [];     // { instanceId, itemKey, resolve, reject }
   const delivered = [];  // [agentId, entry]
   const timers = [];
+  const waitingIds = new Set(waiting.map((item) => `${ROLE}-i${item}`)); // #2789
+  const endedWaits = [];
   const ctx = vm.createContext({
     agentPool, admissionControl, poolSpawnSlots,
     poolSpawns: poolSpawnSlots.createSpawnSlots(),
@@ -58,6 +60,8 @@ function harness({ maxInstances = 3, existing = [] } = {}) {
     loadPoolControl: () => ({}),
     loadPausedHold: () => ({}),
     savePausedHold: () => {},
+    _waitingInstanceIdsForRole: () => [...waitingIds],
+    _endPoolInstanceWait: (teamId, id) => { endedWaits.push(id); waitingIds.delete(id); },
     spawnPoolInstance: (teamId, cfg, instanceId, itemKey) => new Promise((resolve, reject) => {
       spawns.push({
         instanceId, itemKey,
@@ -76,7 +80,7 @@ function harness({ maxInstances = 3, existing = [] } = {}) {
     return true;
   };
   const flush = () => new Promise((r) => setImmediate(r));
-  return { ctx, configs, spawns, delivered, timers, flush, dispatch: (n) => ctx.enqueuePending(ROLE, issueEntry(n)) };
+  return { ctx, configs, spawns, delivered, timers, flush, endedWaits, dispatch: (n) => ctx.enqueuePending(ROLE, issueEntry(n)) };
 }
 
 test('AC1/AC7: five dispatches for distinct items before any spawn completes start only maxInstances spawns', async () => {
@@ -175,4 +179,29 @@ test('blank cap: no per-role limit applies (the team WIP limit governs upstream)
   const h = harness({ maxInstances: null });
   for (const n of [1, 2, 3, 4, 5]) h.dispatch(n);
   assert.equal(h.spawns.length, 5);
+});
+
+// #2789 — instances waiting on an open PR are outside the cap.
+
+test('#2789 AC4: cap 3 with 3 waiting instances — a dispatch for a new item spawns a 4th', () => {
+  const h = harness({ maxInstances: 3, existing: [10, 11, 12], waiting: [10, 11, 12] });
+  h.dispatch(1);
+  assert.deepEqual(h.spawns.map((s) => s.itemKey), [1]);
+});
+
+test('#2789 AC4: only waiting instances leave the cap — active ones still fill it', () => {
+  const h = harness({ maxInstances: 3, existing: [10, 11, 12], waiting: [10] });
+  h.dispatch(1);
+  h.dispatch(2);
+  assert.deepEqual(h.spawns.map((s) => s.itemKey), [1], 'two active + one new = cap; the next is refused');
+});
+
+test('#2789 AC3/AC5: a returning PR lands on its waiting instance at the cap, and its wait ends', () => {
+  const h = harness({ maxInstances: 1, existing: [10, 11], waiting: [10] });
+  h.dispatch(10);
+  assert.equal(h.spawns.length, 0, 'no new instance');
+  assert.equal(h.delivered.at(-1)[0], `${ROLE}-i10`, 'delivered to the same instance');
+  assert.deepEqual(h.endedWaits, [`${ROLE}-i10`], 'the instance now counts as active');
+  h.dispatch(3);
+  assert.equal(h.spawns.length, 0, 'over the cap only through returning work — never a new spawn');
 });

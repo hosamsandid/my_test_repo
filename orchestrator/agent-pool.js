@@ -19,6 +19,7 @@
 // the fs/spawn/reap half.
 
 const { normalizeWorkSource } = require('./recurring-pool-source');
+const { parseCloses } = require('./pr-events-log');
 
 const POOL_WORKSPACES = ['git-clean-base', 'input-copy', 'none'];
 
@@ -283,7 +284,7 @@ function normalizePausedHold(raw) {
  *           {action:'spawn',instanceId:string}|
  *           {action:'refuse',reason:string,instanceId:string}}
  */
-function planPoolDispatch({ teamId, roleId, pool, itemKey, existingInstanceIds = [], controlState = 'running' }) {
+function planPoolDispatch({ teamId, roleId, pool, itemKey, existingInstanceIds = [], waitingInstanceIds = [], controlState = 'running' }) {
   if (itemKey === null || itemKey === undefined) return { action: 'unpooled' };
   const instanceId = poolInstanceId(teamId, roleId, itemKey);
   // An `off` role has nothing running by definition (#2573: it only gets
@@ -298,7 +299,9 @@ function planPoolDispatch({ teamId, roleId, pool, itemKey, existingInstanceIds =
   if (POOL_CONTROL_STATES.includes(controlState)) {
     return { action: 'refuse', reason: controlState, instanceId };
   }
-  if (pool && pool.maxInstances != null && existingInstanceIds.length >= pool.maxInstances) {
+  // #2789 AC4: an instance waiting on its open PR does not take a slot.
+  const active = existingInstanceIds.filter((id) => !waitingInstanceIds.includes(id));
+  if (pool && pool.maxInstances != null && active.length >= pool.maxInstances) {
     return { action: 'refuse', reason: 'max-instances', instanceId };
   }
   return { action: 'spawn', instanceId };
@@ -314,11 +317,16 @@ function planPoolDispatch({ teamId, roleId, pool, itemKey, existingInstanceIds =
  * lacks today. `spawnedAt` is an ISO timestamp; an unset `maxRuntimeMs` (the
  * default) means "no hard timeout", matching a role that never configured one.
  */
-function isInstanceTimedOut({ spawnedAt, maxRuntimeMs }, now = Date.now()) {
+//
+// #2789: `waitedMs` is the time the instance spent WAITING on its open PR
+// (`waitedMsSoFar`) — left out of the budget, so only time outside the
+// waiting state counts and a busy run that really hangs is still caught.
+function isInstanceTimedOut({ spawnedAt, maxRuntimeMs, waitedMs = 0 }, now = Date.now()) {
   if (!Number.isFinite(maxRuntimeMs) || maxRuntimeMs <= 0) return false;
   const start = typeof spawnedAt === 'string' ? Date.parse(spawnedAt) : NaN;
   if (!Number.isFinite(start)) return false;
-  return (now - start) >= maxRuntimeMs;
+  const waited = Number.isFinite(waitedMs) && waitedMs > 0 ? waitedMs : 0;
+  return (now - start - waited) >= maxRuntimeMs;
 }
 
 /**
@@ -375,6 +383,144 @@ function isArchivableSessionPath(p) {
   return !(typeof p === 'string' && p.endsWith('.current.json'));
 }
 
+// ---------------------------------------------------------------------------
+// Waiting instances (#2789) — kept alive while the item's PR is open
+// ---------------------------------------------------------------------------
+//
+// An instance that opened a pull request and went idle is WAITING for review.
+// Reaping it (idle or hard timeout) would make the returning rework land on a
+// fresh instance with no session, so a waiting instance is never reaped, its
+// waiting time does not count toward `maxRuntimeMs`, and it does not take up
+// a `maxInstances` slot. The orchestrator persists one record per instance
+// (`pool-waiting.json` beside `pool-control.json`); everything that decides
+// on it is here.
+
+// The item a PR resolves to, exactly as today's routing keys it
+// (`admission-control.js` `entryTicketRef`: the first closed issue, else the
+// PR number). `closesIssues` comes from the same `parseCloses` the poller
+// stamps onto PR events.
+function prItemKey(pr) {
+  if (!pr || typeof pr !== 'object') return null;
+  const closes = parseCloses(pr.body, pr.head && pr.head.ref);
+  if (closes.length) return closes[0];
+  const n = Number(pr.number);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * The open PRs linked to `itemKey`, sorted: a PR whose routing item is this
+ * item, or whose own number is the item (an instance keyed on the PR itself).
+ * `openPrs` is GitHub's `GET /pulls?state=open` list.
+ */
+function linkedOpenPrs(openPrs, itemKey) {
+  const item = Number(itemKey);
+  if (!Number.isInteger(item)) return [];
+  const out = new Set();
+  for (const pr of Array.isArray(openPrs) ? openPrs : []) {
+    if (!pr || typeof pr !== 'object') continue;
+    if (pr.state && pr.state !== 'open') continue;
+    const n = Number(pr.number);
+    if (!Number.isInteger(n)) continue;
+    if (n === item || prItemKey(pr) === item) out.add(n);
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+// One instance's record, or null when it is unreadable or belongs to an
+// earlier instance under the same id (a reaped item that was respawned —
+// `spawnedAt` differs), so a stale record never makes a new instance wait.
+function normalizeWaitRecord(raw, spawnedAt) {
+  if (!raw || typeof raw !== 'object') return null;
+  if (spawnedAt != null && raw.spawnedAt !== spawnedAt) return null;
+  const waitedMs = Number.isFinite(raw.waitedMs) && raw.waitedMs > 0 ? raw.waitedMs : 0;
+  return {
+    spawnedAt: typeof raw.spawnedAt === 'string' ? raw.spawnedAt : null,
+    waiting: raw.waiting === true,
+    prs: Array.isArray(raw.prs) ? raw.prs.filter((n) => Number.isInteger(n) && n > 0) : [],
+    unknown: raw.unknown === true,
+    waitingSince: typeof raw.waitingSince === 'string' ? raw.waitingSince : null,
+    waitedMs,
+    checkedAt: typeof raw.checkedAt === 'string' ? raw.checkedAt : null,
+  };
+}
+
+// The team-wide `{ "<instanceId>": record }` map as stored on disk.
+function normalizePoolWaiting(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [id, rec] of Object.entries(raw)) {
+    const r = normalizeWaitRecord(rec, null);
+    if (typeof id === 'string' && id && r) out[id] = r;
+  }
+  return out;
+}
+
+// Total time spent waiting so far, including a wait still in progress.
+function waitedMsSoFar(record, now = Date.now()) {
+  if (!record) return 0;
+  const since = record.waitingSince ? Date.parse(record.waitingSince) : NaN;
+  const open = Number.isFinite(since) && now > since ? now - since : 0;
+  return (record.waitedMs || 0) + open;
+}
+
+/**
+ * The record after one sweep look at an instance.
+ *
+ * - `idle` — the instance has no run, no running session and nothing queued.
+ *   A busy instance is never waiting (it becomes waiting when its run ends).
+ * - `lookup` — the open-PR check for its item: `{ ok: true, prs }`, or
+ *   `{ ok: false }` when GitHub could not be asked (AC10: treated as waiting,
+ *   the previous PR list kept, the next successful check decides), or `null`
+ *   when there is nothing to ask about (no repo/item, e.g. a recurring-pool
+ *   instance) — never waiting.
+ *
+ * The wait clock (`waitingSince` + accumulated `waitedMs`) starts when the
+ * instance becomes waiting and stops when it stops, so `isInstanceTimedOut`
+ * can leave waiting time out of the runtime budget.
+ */
+function nextWaitRecord(prev, { spawnedAt = null, idle, lookup }, now = Date.now()) {
+  const p = normalizeWaitRecord(prev, spawnedAt) || {
+    spawnedAt, waiting: false, prs: [], unknown: false, waitingSince: null, waitedMs: 0, checkedAt: null,
+  };
+  let waiting = false;
+  let prs = [];
+  let unknown = false;
+  if (idle && lookup) {
+    if (lookup.ok) {
+      prs = Array.isArray(lookup.prs) ? lookup.prs.slice() : [];
+      waiting = prs.length > 0;
+    } else {
+      waiting = true;
+      unknown = true;
+      prs = p.prs;
+    }
+  }
+  return applyWaitClock({ ...p, spawnedAt, waiting, prs, unknown, checkedAt: new Date(now).toISOString() }, now);
+}
+
+// The instance is working again (a dispatch was delivered to it, AC5): stop
+// the wait clock and count it as active straight away, before the next sweep.
+function endWait(record, now = Date.now()) {
+  const r = normalizeWaitRecord(record, null);
+  if (!r) return null;
+  return applyWaitClock({ ...r, waiting: false, unknown: false }, now);
+}
+
+function applyWaitClock(r, now) {
+  if (r.waiting && !r.waitingSince) return { ...r, waitingSince: new Date(now).toISOString() };
+  if (!r.waiting && r.waitingSince) {
+    return { ...r, waitedMs: waitedMsSoFar(r, now), waitingSince: null };
+  }
+  return r;
+}
+
+// AC6: the wait just ended (every linked PR merged or closed) on an instance
+// that is idle — it is reaped now instead of getting another full
+// `idleTimeoutMs`. Only on a SUCCESSFUL check: an unknown state keeps waiting.
+function waitJustEnded(prev, next, idle) {
+  return !!(idle && prev && prev.waiting && next && !next.waiting && !next.unknown);
+}
+
 module.exports = {
   POOL_WORKSPACES,
   POOL_CONTROL_STATES,
@@ -395,4 +541,12 @@ module.exports = {
   isInstanceIdle,
   isArchiveExpired,
   isArchivableSessionPath,
+  prItemKey,
+  linkedOpenPrs,
+  normalizeWaitRecord,
+  normalizePoolWaiting,
+  waitedMsSoFar,
+  nextWaitRecord,
+  endWait,
+  waitJustEnded,
 };

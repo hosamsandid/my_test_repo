@@ -280,7 +280,13 @@ rows. It expands/collapses and remembers your choice the same way a team group
 does, and stays empty (no sub-list at all) while the role has nothing live. When
 the role has a **Max parallel instances** cap, the count reads against it, e.g.
 **Instances (5 / 3)**; a warning icon marks a count over the cap (running
-instances are not stopped, no new one starts until the count is below it). Each
+instances are not stopped, no new one starts until the count is below it). An
+instance that has finished its run but is kept alive because its pull request
+is still open reads **Waiting for PR #N** under its name; it is left out of
+that count and named apart, e.g. **Instances (2 / 3 active · 4 waiting)** — it
+does not use up the cap, but it does keep a container running until the PR is
+merged or closed (see the Flow Control help, *Instances waiting on a pull
+request*). Each
 instance row is an ordinary agent: its status dot follows the same activity poll,
 and clicking it opens its own chat/session log exactly like any other member —
 a row disappears once its instance is torn down. Its triggered runs and your chat

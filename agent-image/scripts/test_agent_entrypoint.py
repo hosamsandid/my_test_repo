@@ -14,6 +14,7 @@ or directly:
 import asyncio
 import inspect
 import types
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -393,7 +394,9 @@ sys.stdin.read()
 mode = os.environ.get("FAKE_CLAUDE_MODE", "obey")
 if os.environ.get("FAKE_ENV_DUMP"):
     with open(os.environ["FAKE_ENV_DUMP"], "w") as fh:
-        fh.write(os.environ.get("AEE_RUN_DEADLINE", ""))
+        fh.write(os.environ.get("AEE_RUN_DEADLINE", "") + "\n"
+                 + os.environ.get("BASH_DEFAULT_TIMEOUT_MS", "") + "\n"
+                 + os.environ.get("BASH_MAX_TIMEOUT_MS", ""))
 def out(obj):
     sys.stdout.write(json.dumps(obj) + "\n"); sys.stdout.flush()
 def tool_use(tid, cmd):
@@ -577,9 +580,32 @@ class AeeAskEndToEnd(unittest.TestCase):
             after = time.time()
         finally:
             os.environ.pop("FAKE_ENV_DUMP", None)
-        deadline = int(dump.read_text(encoding="utf-8"))
-        self.assertGreaterEqual(deadline, int(before + 60))
-        self.assertLessEqual(deadline, int(after + 60))
+        deadline, default_ms, max_ms = dump.read_text(encoding="utf-8").split("\n")
+        self.assertGreaterEqual(int(deadline), int(before + 60))
+        self.assertLessEqual(int(deadline), int(after + 60))
+        # Review B1: the Bash tool's own timeout must not cut the wait short —
+        # the default wait fits the default tool timeout, the cap the maximum.
+        self.assertEqual(int(default_ms), entrypoint._BASH_DEFAULT_TIMEOUT_MS)
+        self.assertEqual(int(max_ms), entrypoint._BASH_MAX_TIMEOUT_MS)
+
+    def test_bash_tool_timeouts_cover_aee_wait_ci_and_keep_larger_values(self):
+        loader = importlib.machinery.SourceFileLoader(
+            "aee_wait_ci", str(Path(_MODULE_PATH).parent / "aee-wait-ci"))
+        spec = importlib.util.spec_from_loader("aee_wait_ci", loader)
+        wait_ci = importlib.util.module_from_spec(spec)
+        loader.exec_module(wait_ci)
+        # Slack beyond the wait itself for the final poll and one 60 s gh call.
+        self.assertGreaterEqual(entrypoint._BASH_DEFAULT_TIMEOUT_MS,
+                                (wait_ci.DEFAULT_TIMEOUT_MIN * 60 + 120) * 1000)
+        self.assertGreaterEqual(entrypoint._BASH_MAX_TIMEOUT_MS,
+                                (wait_ci.MAX_TIMEOUT_MIN * 60 + 120) * 1000)
+        env = {"BASH_DEFAULT_TIMEOUT_MS": "120000", "BASH_MAX_TIMEOUT_MS": "99999999"}
+        entrypoint._raise_bash_tool_timeouts(env)
+        self.assertEqual(env["BASH_DEFAULT_TIMEOUT_MS"], str(entrypoint._BASH_DEFAULT_TIMEOUT_MS))
+        self.assertEqual(env["BASH_MAX_TIMEOUT_MS"], "99999999")
+        env = {"BASH_DEFAULT_TIMEOUT_MS": "garbage"}
+        entrypoint._raise_bash_tool_timeouts(env)
+        self.assertEqual(env["BASH_DEFAULT_TIMEOUT_MS"], str(entrypoint._BASH_DEFAULT_TIMEOUT_MS))
 
     def test_turn_is_hard_ended_before_any_follow_up_tool_runs(self):
         marker = self.workdir / "followup-ran"

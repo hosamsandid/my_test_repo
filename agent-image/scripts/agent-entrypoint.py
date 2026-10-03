@@ -1555,6 +1555,24 @@ _ASK_USER_QUESTION_TOOL = "AskUserQuestion"
 _ASK_FILE_ENV = "AEE_ASK_FILE"
 # Epoch seconds by which this invocation is killed (#2796, read by aee-wait-ci).
 _RUN_DEADLINE_ENV = "AEE_RUN_DEADLINE"
+# Claude Code's Bash tool stops a command after 2 min by default and never
+# allows more than 10 min, which would kill a foreground `aee-wait-ci` long
+# before its own wait ends (#2796). Raised per turn to the CLI's default /
+# maximum wait (20 / 50 min, see aee-wait-ci) plus slack for its last poll and
+# a 60 s `gh` call. An operator-set larger value is kept.
+_BASH_DEFAULT_TIMEOUT_MS = (20 + 5) * 60 * 1000
+_BASH_MAX_TIMEOUT_MS = (50 + 5) * 60 * 1000
+
+
+def _raise_bash_tool_timeouts(env: dict) -> None:
+    """Make sure the Bash tool lets a foreground `aee-wait-ci` run to its end."""
+    for key, floor in (("BASH_DEFAULT_TIMEOUT_MS", _BASH_DEFAULT_TIMEOUT_MS),
+                       ("BASH_MAX_TIMEOUT_MS", _BASH_MAX_TIMEOUT_MS)):
+        try:
+            current = int(env.get(key) or 0)
+        except ValueError:
+            current = 0
+        env[key] = str(max(current, floor))
 
 
 def _ask_sentinel_path(invocation_id: str) -> Path:
@@ -3570,6 +3588,7 @@ def _call_claude_once_inner(prompt: str, room_id: str, correlation_id: str,
     # Run deadline (#2796): `aee-wait-ci` caps its in-turn CI wait so it ends
     # before this invocation's own timeout, with room left to act on the verdict.
     env[_RUN_DEADLINE_ENV] = str(int(time.time() + timeout_sec))
+    _raise_bash_tool_timeouts(env)
 
     # Git context for the usage record (#654): capture HEAD before the run so the
     # record can show what this invocation moved. Best-effort — never blocks the run.

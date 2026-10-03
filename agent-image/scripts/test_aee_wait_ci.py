@@ -250,6 +250,11 @@ class Helpers(unittest.TestCase):
         self.assertEqual(c("You have exceeded a secondary rate limit"), "rate-limit")
         self.assertEqual(c("HTTP 401: Bad credentials"), "auth")
         self.assertEqual(c("Could not resolve to a Repository with the name 'x'"), "not-found")
+        self.assertEqual(c("HTTP 404: Not Found (https://api.github.com/graphql)"), "not-found")
+        self.assertEqual(c("Requires authentication"), "auth")
+        # Network noise that merely contains the words is retried (review S1).
+        self.assertEqual(c("dial tcp: lookup api.github.com: host not found"), "transient")
+        self.assertEqual(c("tls: authentication handshake failed"), "transient")
         self.assertEqual(c("dial tcp: lookup api.github.com: no such host"), "transient")
 
     def test_pr_argument(self):

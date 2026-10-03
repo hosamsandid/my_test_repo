@@ -220,10 +220,13 @@ def classify_gh_failure(text):
     t = (text or "").lower()
     if "rate limit" in t or "http 429" in t or "abuse detection" in t:
         return "rate-limit"
+    # Only GitHub's own wording / HTTP status: a bare "not found" or
+    # "authentication" also appears in network errors (DNS, TLS), which must be
+    # retried as transient rather than end the wait.
     if ("http 401" in t or "bad credentials" in t or "gh auth login" in t
-            or "authentication" in t or "requires authentication" in t):
+            or "requires authentication" in t):
         return "auth"
-    if "could not resolve to" in t or "http 404" in t or "not found" in t:
+    if "could not resolve to" in t or "http 404" in t:
         return "not-found"
     return "transient"
 

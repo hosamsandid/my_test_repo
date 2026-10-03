@@ -522,7 +522,8 @@ function backgroundTasksSection(autonomous, hasRepository = false) {
     '(`--repo <clone-dir>` for a non-default clone). It waits up to 20 minutes ' +
     '(always capped to your run\'s time), applies the platform\'s own CI rules ' +
     'and prints JSON plus an exit code: `0` passed / no CI, `4` failed, ' +
-    '`5` conflict, `6` timeout, `1`/`3` error. Never wait for CI in a ' +
+    '`5` conflict, `6` timeout, `1`/`3` error. With `--timeout` above 20, ' +
+    'also set the Bash tool timeout to at least that long. Never wait for CI in a ' +
     'background shell, `Monitor` or `Task`, and never hand-roll a ' +
     '`gh pr checks` polling loop. On timeout, end your turn and continue via ' +
     'the hand-off gate or a trigger instead of waiting longer.';

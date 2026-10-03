@@ -198,7 +198,9 @@ It waits (default 20 minutes, always capped to your run's time) using the
 platform's own CI rules — every check counts, one failure settles at once, no
 check after a grace period means no CI — and prints one JSON object plus an exit
 code: `0` passed / no CI, `4` failed (`failingChecks`), `5` conflict, `6`
-timeout, `1`/`3` error. Never wait for CI in a background shell or `Task`, and
+timeout, `1`/`3` error. The runtime raises the Bash tool's timeout so the
+default wait fits one call; with `--timeout` above 20, also give the Bash call a
+timeout of at least that long (up to 55 minutes). Never wait for CI in a background shell or `Task`, and
 do not hand-roll `gh pr checks` loops. On timeout, end your turn; unattended
 flows continue through the gated PR hand-off or a `pull_request.checks_*`
 trigger.

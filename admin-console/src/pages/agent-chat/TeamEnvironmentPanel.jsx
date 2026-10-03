@@ -9,6 +9,7 @@ import RepoPropagationDialog from '../../components/RepoPropagationDialog';
 import McpServerRows from '../../components/McpServerRows';
 import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning } from '../toolchain-select-view.js';
 import { mcpChangeNotice, mcpApplySummary } from '../working-env-mcp-view.js';
+import { promptRebuildSummary } from '../working-env-context-view.js';
 import { classifyRepositoryChanges, hasRepositoryChanges } from '../working-env-repo-diff.js';
 import { describeWorkingEnvSubmitState } from '../working-env-submit-state.js';
 import { providerOptionLabel } from '../provider-option-view.js';
@@ -185,6 +186,8 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
   const [notice, setNotice] = useState('');
   // #2289: what the save did to the agents' MCP servers (mcpApplySummary), or null.
   const [mcpReport, setMcpReport] = useState(null);
+  // #2688: what the save did to existing members' CLAUDE.md (promptRebuildSummary), or null.
+  const [contextReport, setContextReport] = useState(null);
   // #2323: set when a save is blocked for a repo-backed env with no GitHub token;
   // holds the server message and drives the reference-only opt-out prompt.
   const [tokenWarn, setTokenWarn] = useState(null);
@@ -279,7 +282,7 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
     // reference-only opt-out below — strict-check it so an `onClick={() => save()}`
     // (event) or any truthy leak can never silently acknowledge.
     const ack = acknowledgeNoToken === true;
-    setSaving(true); setSaveError(null); setNotice(''); setMcpReport(null);
+    setSaving(true); setSaveError(null); setNotice(''); setMcpReport(null); setContextReport(null);
     if (!ack) setTokenWarn(null);
     try {
       const body = teamEnvSubmitBody(baseline, form);
@@ -290,6 +293,7 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
       setForm(initialTeamEnvForm(saved));
       setNotice('Saved.');
       setMcpReport(mcpApplySummary(saved?.mcpApply));
+      setContextReport(promptRebuildSummary(saved?.promptRebuild));
       const agents = Array.isArray(saved?.agents) ? saved.agents : (Array.isArray(baseline?.agents) ? baseline.agents : []);
       const diff = classifyRepositoryChanges(saved?.previousRepositories, saved?.repositories);
       if (agents.length > 0 && hasRepositoryChanges(diff)) {
@@ -341,14 +345,14 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
       {notice && !saveError && (
         <div style={{ ...helpTextStyle, color: 'var(--eb-status-success)' }}>{notice}</div>
       )}
-      {mcpReport && !saveError && (
-        <div role={mcpReport.tone === 'warn' ? 'alert' : undefined} style={mcpReport.tone === 'warn' ? warnBoxStyle : helpTextStyle}>
-          {mcpReport.tone === 'warn' && (
+      {!saveError && [mcpReport, contextReport].filter(Boolean).map((report, idx) => (
+        <div key={idx} role={report.tone === 'warn' ? 'alert' : undefined} style={report.tone === 'warn' ? warnBoxStyle : helpTextStyle}>
+          {report.tone === 'warn' && (
             <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1, color: 'var(--eb-status-warning)' }} />
           )}
-          <div>{mcpReport.lines.map((line, i) => <div key={i}>{line}</div>)}</div>
+          <div>{report.lines.map((line, i) => <div key={i}>{line}</div>)}</div>
         </div>
-      )}
+      ))}
 
       {tab === 'repositories' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
@@ -588,7 +592,8 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
           <div style={labelStyle}>Additional instructions for agents (CLAUDE.md)</div>
           <div style={helpTextStyle}>
             Appended to every member's CLAUDE.md — project context, coding conventions, domain
-            terminology, or constraints the whole team should follow.
+            terminology, or constraints the whole team should follow. Saving a change also updates
+            the CLAUDE.md of existing members; it takes effect from their next run.
           </div>
           <textarea
             value={form.additionalContext}

@@ -175,6 +175,13 @@ or removing the primary repo now re-resolves it on the live agents, so the polle
 starts (or stops) polling within ~30s with no respawn. This runs on the save itself — independent of the
 propagation offer above, and never failing it.
 
+Changing the environment's **Additional context** rebuilds the `CLAUDE.md` of
+every agent bound to it on the save itself (#2688), so the new text reaches
+existing agents from their next run, not only agents created later. An agent
+that is not created yet gets the text when it is created. The save reports
+which agents were updated and names any whose `CLAUDE.md` could not be rebuilt;
+the environment stays saved either way.
+
 ## Editing from a team's Settings tab
 
 The general-purpose environments page described above is **retired**

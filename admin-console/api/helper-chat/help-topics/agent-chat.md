@@ -800,7 +800,7 @@ belongs to this team):
 | **Model provider** | Optional override — members start on this provider and its default model instead of the global `.env` fallback. |
 | **Toolchain** | Optional — which container image members are spawned from, picked from the System-Admin-registered list. Absent means the default image. |
 | **MCP servers** | Optional server + credential pairs from the MCP registry, applied to members on save, from their next turn. |
-| **Additional context** | Optional text appended to every member's `CLAUDE.md`. |
+| **Additional context** | Optional text appended to every member's `CLAUDE.md`; a change is written into existing members' `CLAUDE.md` on save, from their next run. |
 
 **Skills** and **Plugins** carry the team's own grant — the same fields the
 *What the form fields control* chapter describes for an ordinary agent —

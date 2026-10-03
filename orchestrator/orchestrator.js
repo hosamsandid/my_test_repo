@@ -168,6 +168,7 @@ const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantF
 const { planWorkspaceSync, withStoredCliNames, withStoredCommandNamespaces, uninstalledCommandRevokes, PLUGINS_DIR, planCliRefresh } = require("./plugin-sync");
 const { resolveAgentStateDir } = require("./agent-state-dir");
 const mcpSeed = require("./mcp-seed");
+const envPromptRebuild = require("./env-prompt-rebuild");
 const { resolveScopeId, scopeIdFromGrantScope } = require("./plugin-scope");
 const pluginRegistry = require("./plugin-registry");
 const pluginRuntime = require("./plugin-runtime");
@@ -1704,6 +1705,23 @@ async function rebuildAgentPrompt(id, reason) {
     console.warn(`[Orchestrator] prompt rebuild ${id}: ${err.message}`);
     return false;
   }
+}
+
+// #2688: rebuild the CLAUDE.md of every agent bound to an environment after a
+// change the prompt is built from (today: its Additional context). Sequential
+// and best-effort per agent — one failed rebuild never stops the rest, and the
+// per-agent outcome goes back to the console rather than being swallowed.
+async function rebuildEnvironmentPrompts(envId, reason) {
+  const plan = envPromptRebuild.planEnvironmentPromptRebuild(listAgentConfigs(), envId);
+  const outcomes = [];
+  for (const { id, action } of plan) {
+    if (action !== "rebuild") { outcomes.push({ id, status: action }); continue; }
+    const rebuilt = await rebuildAgentPrompt(id, reason);
+    outcomes.push(rebuilt
+      ? { id, status: "rebuilt" }
+      : { id, status: "failed", detail: "CLAUDE.md could not be rebuilt (see the orchestrator log)" });
+  }
+  return { envId, ...envPromptRebuild.summarizePromptRebuild(outcomes) };
 }
 
 // ============================================================
@@ -16106,6 +16124,31 @@ async function main() {
         try { reason = (JSON.parse(body || '{}').reason) || reason; } catch { /* keep default */ }
         const rebuilt = await rebuildAgentPrompt(id, reason);
         sendJson(res, 200, { rebuilt });
+      });
+      return;
+    }
+
+    // Environment-wide sibling of the route above (#2688): rebuild every bound
+    // agent's CLAUDE.md after the environment's Additional context changed.
+    const envPromptRebuildMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/environments\/([^/]+)\/prompt-rebuild$/);
+    if (envPromptRebuildMatch) {
+      const envId = decodeURIComponent(envPromptRebuildMatch[1]);
+      let body = '';
+      req.on('data', d => { body += d; });
+      req.on('end', async () => {
+        if (!isSafePathSeg(envId)) {
+          sendJson(res, 400, { ok: false, error: 'bad id' });
+          return;
+        }
+        let reason = 'environment change';
+        try { reason = (JSON.parse(body || '{}').reason) || reason; } catch { /* keep default */ }
+        try {
+          sendJson(res, 200, { ok: true, ...(await rebuildEnvironmentPrompts(envId, reason)) });
+        } catch (err) {
+          console.error(`[Orchestrator] prompt rebuild for environment ${envId} failed: ${err.message}`);
+          sendJson(res, 500, { ok: false, error: err.message });
+        }
       });
       return;
     }

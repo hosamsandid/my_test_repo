@@ -147,7 +147,7 @@ The left rail lists every agent you can see, and clicking one opens its room —
 except a team's own header row, which has no room to open (see below).
 
 **Grouping and order.** Agents that belong to an Agent Team are grouped under
-that team; standalone agents are collected under *Single agents*. When every row
+that team; standalone agents are collected under *Individual agents*. When every row
 in a group shares one environment, its member rows stay single-line and drop
 that environment from their own line; a member that deviates keeps its own
 environment line. The team header's second line no longer repeats that shared
@@ -171,8 +171,14 @@ a run you did not start (the hollow-green FYI) never roll up, so collapsing a te
 keeps reducing noise. Expand it and the marker gives way to the per-agent dots
 again.
 
-**Finding an agent.** The filter box above the list narrows it as you type. Next
-to it, the **eye** toggle is the *show disabled agents* opt-in: disabled agents
+**Finding an agent.** The team filter above the list (it reads *All agents*, a
+team's name, or *N of M teams*) opens a panel with one checkbox per team plus
+*Individual agents*: tick the ones to show. A search box narrows the entries,
+**Select all** / **Deselect all** act on the listed ones, and the quick filters
+(*Only my private teams*, *Teams I am a member of*, *… Team Admin*, *… regular
+member*) replace the selection in one click. Your selection is saved to your
+account; teams added later are shown by default. Reordering groups needs every
+team shown. Next to it, the **eye** toggle is the *show disabled agents* opt-in: disabled agents
 are hidden by default, because most of the time they are noise. Turning it on is
 the only thing that widens what the list asks the server for.
 
@@ -214,7 +220,14 @@ on hover, a right-click, or the **Menu** / **Shift+F10** keys. It carries:
   so it can be started again from scratch; a notice confirms the reset.
 - **Delete** — removes the agent's configuration entirely. Deleting an **Agent
   Team** additionally removes that team's locally cached and curated knowledge
-  (knowledge shared through its repository is untouched).
+  (knowledge shared through its repository is untouched). When the agent is
+  the **last member of its team** (e.g. a team of one), the confirm says so and
+  offers **Also delete the team** (ticked by default; this also removes the
+  team's knowledge); untick it to keep the empty team. Without the rights to
+  delete the team, the confirm says it stays. Before deleting the team, the
+  console re-reads every agent config; if the team still has another member
+  (for example a disabled one hidden from the list), only the agent is
+  deleted and a notice says the team was kept.
 - **Clone**, **Export (ZIP)** and **Save as template** — copy this agent, take a
   copy away, or turn it into a reusable template.
 - A group header carries the team-wide equivalents: **Enable/Disable** for the
@@ -272,7 +285,16 @@ is off.
 shows them nested directly under that role, in a collapsible **Instances (N)**
 sub-list — instead of scattering them through the team as flat, indistinguishable
 rows. It expands/collapses and remembers your choice the same way a team group
-does, and stays empty (no sub-list at all) while the role has nothing live. Each
+does, and stays empty (no sub-list at all) while the role has nothing live. When
+the role has a **Max parallel instances** cap, the count reads against it, e.g.
+**Instances (5 / 3)**; a warning icon marks a count over the cap (running
+instances are not stopped, no new one starts until the count is below it). An
+instance that has finished its run but is kept alive because its pull request
+is still open reads **Waiting for PR #N** under its name; it is left out of
+that count and named apart, e.g. **Instances (2 / 3 active · 4 waiting)** — it
+does not use up the cap, but it does keep a container running until the PR is
+merged or closed (see the Flow Control help, *Instances waiting on a pull
+request*). Each
 instance row is an ordinary agent: its status dot follows the same activity poll,
 and clicking it opens its own chat/session log exactly like any other member —
 a row disappears once its instance is torn down. Its triggered runs and your chat
@@ -282,7 +304,10 @@ share one session.
 (top right) hands over to the create launcher, where *Configure an agent
 manually* — under **Advanced options** — opens the direct form; **Import Agent**
 next to it takes an exported agent ZIP and asks for an id and a team before it
-lands. The imported agent joins the list
+lands — leave the team on *Its own team* and the agent becomes a team of one,
+like any newly created agent. If the exported id is taken, the dialog suggests
+a free one and a display name ("<name> (Copy)") so the copy can be told apart
+from its source. The imported agent starts right away and joins the list
 without a reload — but if the list filter is narrowed at the time, the
 confirmation says so rather than letting it arrive out of sight. Both buttons
 are greyed out with the reason when you may not create agents.
@@ -350,6 +375,11 @@ immediately.
 
 **Drafts.** Whatever you have typed is kept per agent, so switching to another
 agent and back does not lose it.
+
+**Read-only as a System Admin.** A System Admin sees every team's chats but
+writes only in teams they belong to. In any other team the composer is
+read-only (Stop still works); **Open team sharing** in the hint leads to the
+team's Sharing tab, where you can add yourself.
 
 **Slash commands.** Typing **/** as the first character of a message opens a
 filterable list of the slash commands this agent has been provisioned with,
@@ -455,6 +485,30 @@ work. A context folder is **read-only** unless it was mounted read-write; a
 read-write one also offers upload, delete and drag-to-move, and a read-only one
 simply offers no write action at all.
 
+**HTML files** (`.html`, `.htm`) open as source code. The **Rendered** toggle
+shows the page itself, but it asks first, **every time**: the page was written
+by an agent and may contain harmful content, so nothing runs until you click
+**Show preview**. The dialog also has an **Also load external resources**
+checkbox. It starts unticked and only applies to this one opening. Unticked,
+inline styles, scripts and embedded (`data:`) images work, but external
+scripts, stylesheets, fonts and images do not load, and scripts cannot fetch or
+send anything. Ticked, it may load from any
+host. Either way the page runs isolated from Agent Studio: it cannot read your
+session, the console or other agents' data. A banner above the preview says
+so, and also says whether external resources are on. Because of that
+isolation the page has no real browser storage; it gets a temporary in-memory
+stand-in instead (local and session storage, cookies), so pages that remember a
+setting such as a light/dark theme still render and work. That storage is
+empty every time you open the preview and is gone when you close it — nothing
+is kept between openings or shared between files. Do not enter passwords
+or credentials into a preview. Relative links to other workspace files (images,
+stylesheets) do not load. A page that navigates away (a link or a redirect)
+closes the preview back to source, but the address it navigated to has
+already been requested, even with external resources off. A page stuck in an endless loop can freeze
+the tab until you reload. Files above **5 MB** offer **Download** instead of a
+preview. The same preview is available in the expanded viewer and when you
+open a file referenced in chat.
+
 ### Repositories: inherited, and this agent's own
 
 The Workspace toolbar's **repositories** button (and the same panel in
@@ -514,7 +568,7 @@ same question, "what wakes this agent", and every one of them delivers a
 |---|---|
 | **Cron (recurring)** | a 5-field schedule (`Minute Hour Day Month Weekday`) comes due. If the previous run of *this* trigger is still going, the tick is skipped rather than queued. |
 | **Once (one-shot)** | a specific date and time is reached. It then deletes itself — a reminder, not a schedule. |
-| **HTTP webhook** | something outside the platform sends `POST /hooks/<agentId>/<triggerId>` with the trigger's own `X-Hook-Secret`. Each trigger carries its own generated secret; there is no open mode. Used by CI pipelines, monitoring, GitHub webhooks. |
+| **HTTP webhook** | something outside the platform sends `POST /hooks/<agentId>/<triggerId>` with the trigger's own `X-Hook-Secret` — a GitHub webhook instead takes the secret as its **Secret** (verified via `X-Hub-Signature-256`). Each trigger carries its own generated secret; there is no open mode. Used by CI pipelines, monitoring, GitHub webhooks. |
 | **GitHub event** | the built-in poller sees a matching event on a repository of the agent's environment (about every 30 seconds). The full event payload is appended to the prompt as JSON. Needs a GitHub token on that environment. |
 | **Data flow (agent dependency)** | a teammate pushes to the team repository — the committed work *is* the hand-off. Under the hood this is a GitHub `push` subscription with a marker. |
 | **Plugin event** | a granted plugin's broker reports something (a Jira status change, say). Two filters narrow it — see *Which event vs. Only when* below. |
@@ -523,7 +577,8 @@ same question, "what wakes this agent", and every one of them delivers a
 ### Cron and once: time zone and status
 
 Cron runs in **Europe/Berlin** (your time is shown if it differs); a once time
-is your local time. Rows show next/last run, or a red warning if the agent
+is your local time; a past one is flagged and runs at the next sync (about a
+minute), then is removed. Rows show next/last run, or a red warning if the agent
 cannot schedule the trigger. The container clock can drift on a Podman VM; a
 forward correction fires whatever it skips.
 
@@ -595,7 +650,7 @@ A loop re-runs the same prompt until the goal is reached:
   that must pass, another agent that reviews each try, or the flow's downstream
   reviewers. A failed check is fed back into the next try's prompt. Team agents
   must not grade their own work — leave it blank and a sibling reviewer is
-  re-applied server-side. Pick *the flow checks the hand-off* when each try ends
+  re-applied server-side (with no teammate in the team, the agent checks itself). Pick *the flow checks the hand-off* when each try ends
   in a PR or a label that a wired QS chain already reviews, so the same reviewer
   does not check the work twice.
 
@@ -619,6 +674,10 @@ dropped with the reason. On a *wake-already-armed*, *throttle* or
 *internal-dedup* drop an agent manager can **Fire again**: the agent is woken
 now with the same prompt. Refused if the item is merged/closed, the wake label
 is gone, or it was already re-fired.
+
+A pull request linked to an issue reads `#2798 → closes #2794 <title>` here and
+in the **Fire again** dialog — the same `→ closes #N` the chat's
+`⚡ Trigger fired — …` notice carries — so you can search by the issue number.
 
 ## Outcomes — what the agent signals when a run ends
 
@@ -759,7 +818,7 @@ belongs to this team):
 | **Model provider** | Optional override — members start on this provider and its default model instead of the global `.env` fallback. |
 | **Toolchain** | Optional — which container image members are spawned from, picked from the System-Admin-registered list. Absent means the default image. |
 | **MCP servers** | Optional server + credential pairs from the MCP registry, applied to members on save, from their next turn. |
-| **Additional context** | Optional text appended to every member's `CLAUDE.md`. |
+| **Additional context** | Optional text appended to every member's `CLAUDE.md`; a change is written into existing members' `CLAUDE.md` on save, from their next run. |
 
 **Skills** and **Plugins** carry the team's own grant — the same fields the
 *What the form fields control* chapter describes for an ordinary agent —

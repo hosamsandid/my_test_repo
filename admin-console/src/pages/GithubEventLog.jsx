@@ -13,7 +13,7 @@ import {
   pendingRowMenu, reassignPickerState, reassignTargetLabel, pendingReassignError, pendingReassignSuccess,
 } from './pending-queue-view';
 import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip, refireNote } from './event-outcome-view';
-import { OUTCOME_TONES, NO_MATCH_LABEL, outcomePresentation } from './event-outcome-presentation';
+import { OUTCOME_TONES, NO_MATCH_LABEL, outcomePresentation, outcomesFilterText } from './event-outcome-presentation';
 import { eventLabel, eventFilterText } from './agent-chat/trigger-summary';
 import { workItemTypeLabel } from './github-event-log-type';
 import { isHandoffRow, handoffNote, handoffNoteDisplay, handoffTitleHint } from './github-event-handoff-view';
@@ -491,7 +491,11 @@ function ProcessedEventsView() {
           ))}
         </div>
       );
-    } },
+    },
+      // #2693: search what the column shows (outcome lines) plus the raw agent /
+      // instance ids and drop reasons, so "which events woke or dropped agent X?"
+      // is a filter away.
+      filterValue: outcomesFilterText },
   ];
 
   return (
@@ -881,7 +885,7 @@ function HeldByWipGroup({ group, onOpenBoard }) {
         <button
           type="button"
           onClick={onOpenBoard}
-          style={{ background: 'none', border: 'none', padding: 0, color: 'var(--eb-accent, #2563eb)', cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}
+          style={{ background: 'none', border: 'none', padding: 0, color: 'var(--eb-accent-primary)', cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}
         >
           force-dispatch it on the Flow Control board
         </button>.
@@ -1086,7 +1090,7 @@ export default function GithubEventLog() {
               padding: 'var(--eb-space-2) var(--eb-space-3)',
               background: 'transparent',
               border: 'none',
-              borderBottom: `2px solid ${tab === t.key ? 'var(--eb-accent, var(--eb-text-primary))' : 'transparent'}`,
+              borderBottom: `2px solid ${tab === t.key ? 'var(--eb-accent-primary)' : 'transparent'}`,
               color: tab === t.key ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
               fontSize: 'var(--eb-text-sm)',
               fontWeight: tab === t.key ? 'var(--eb-font-semibold)' : 'var(--eb-font-medium)',

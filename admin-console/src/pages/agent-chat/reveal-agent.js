@@ -12,13 +12,14 @@
 //      another one. Past the bound it falls back exactly like a bad deep link
 //      (the `/chats` overview) — never an error page.
 //   2. Visibility. The target's row must be on screen without manual search or
-//      scrolling: a persisted list filter that hides it is dropped, its team
+//      scrolling: a persisted team selection that hides it gets the target's
+//      team (or the Individual agents block) ticked back in (#2740), its team
 //      group and (for a not-yet-provisioned member) its stub section are
 //      expanded, and the row scrolls itself into view.
 //
 // Pure decisions only; the component wiring lives in AgentChat/AgentList.
 
-import { matchesFilter } from './agent-list-model.js';
+import { revealEntryKey } from './list-selection.js';
 
 /** How long a reveal target is waited for before falling back to `/chats`. */
 export const REVEAL_WAIT_MS = 20000;
@@ -56,15 +57,16 @@ export function isAwaitingReveal(revealId, agents, expiredFor) {
  * What to change so the target's row is visible in the left list.
  *
  * @param {object|null} agent  the target's roster row
- * @param {object} filter      the list filter (`{kind:'all'|'team'|'agent', id?}`)
- * @returns {{resetFilter: boolean, groupKey: string|null}}
- *   `resetFilter` — the current filter hides the row, so drop it to "all";
+ * @param {object} filter      the rail team selection (`{hidden: string[]}`, list-selection.js)
+ * @returns {{showKey: string|null, groupKey: string|null}}
+ *   `showKey` — the selection hides the row, so tick this entry back in
+ *   (only this one — the rest of the user's selection is kept, #2740 AC10);
  *   `groupKey` — the team group (`team:<id>`, `groupKey`'s namespace) to expand.
  */
 export function revealPlan(agent, filter) {
-  if (!agent) return { resetFilter: false, groupKey: null };
+  if (!agent) return { showKey: null, groupKey: null };
   return {
-    resetFilter: !matchesFilter(agent, filter),
+    showKey: revealEntryKey(agent, filter),
     groupKey: agent.parentTeamId ? `team:${agent.parentTeamId}` : null,
   };
 }

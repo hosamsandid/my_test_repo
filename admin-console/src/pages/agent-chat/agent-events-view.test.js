@@ -47,6 +47,7 @@ test('AC3: every required drop reason reads as plain language, naming the ignore
   }
   assert.match(dropReasonText(drop('label-filter', { label: 'next-wave', wakeLabel: null })), /'next-wave'/);
   assert.match(dropReasonText(drop('self-claim-label', { label: 'ready:wip', wakeLabel: null })), /'ready:wip'/);
+  assert.match(dropReasonText(drop('self-claim-label', { label: 'ready-for-review:completed', wakeLabel: null })), /'ready-for-review:completed'.*':completed'/);
   assert.match(dropReasonText(drop('wake-already-armed')), /'ready-for-review'/);
   assert.equal(dropReasonText(drop('meteor')), 'Dropped (meteor).');
 });
@@ -95,6 +96,21 @@ test('AC6: a re-fired row says who and when', () => {
   assert.equal(workItemText({ workItem: { number: 3 } }), '#3');
 });
 
+test('#2799 AC8: a linked PR row and its re-fire dialog name the closing issue(s)', () => {
+  const pr = (closesIssues, extra = {}) => drop('throttle', {
+    workItem: { kind: 'pr', number: 2798, title: 'PR readiness', url: 'u', closesIssues }, ...extra,
+  });
+  assert.equal(workItemText(pr([2794])), '#2798 → closes #2794 PR readiness');
+  assert.equal(workItemText(pr([15, 12, 15])), '#2798 → closes #12, #15 PR readiness');
+  assert.equal(workItemText({ workItem: { kind: 'pr', number: 7, closesIssues: [3] } }), '#7 → closes #3');
+  assert.match(refireDialog(pr([2794])).why, /#2798 → closes #2794 PR readiness had too many events/);
+  // Unlinked / malformed PR rows and issue rows are unchanged.
+  for (const bad of [undefined, [], '2794', [0, -1, 'x']]) {
+    assert.equal(workItemText(pr(bad)), '#2798 PR readiness');
+  }
+  assert.equal(workItemText({ workItem: { kind: 'issue', number: 5, title: 'T', closesIssues: [9] } }), '#5 T');
+});
+
 // ── Drift guard: JSX wiring (JSX itself is not executed under node:test) ────
 
 const RAIL = fs.readFileSync(path.join(HERE, 'RightRail.jsx'), 'utf8');
@@ -135,4 +151,24 @@ test('#2602 AC4: a knowledge-branch drop names the KB branch and is never re-fir
     "Branch 'agent-knowledge' is a knowledge-base branch — pushes to it never wake push triggers.");
   assert.doesNotMatch(dropReasonText(drop('knowledge-branch', {})), /branch filter/);
   assert.equal(canRefire(drop('knowledge-branch'), { canManage: true }), false);
+});
+
+test('#2693: outcomeView reads the digest flag and shows sweep rows as reaped, not dropped', () => {
+  assert.deepEqual(outcomeView({ status: 'delivered', digest: true }), { tone: 'info', text: 'digested' });
+  assert.equal(outcomeView({ status: 'reaped', reason: null }).text, 'reaped (orphaned instance cleaned up)');
+  assert.deepEqual(outcomeView({ status: 'reap-failed', reason: null }), { tone: 'warning', text: 'reap failed' });
+  assert.equal(sessionCorrelationId({ status: 'delivered', digest: true, triggerId: 't', eventId: 'e' }), null);
+  assert.equal(sessionCorrelationId(null), null);
+});
+
+test('#2795: readiness-gate rows read as held / cleared, and gate drops explain what happened on the PR', () => {
+  assert.deepEqual(outcomeView({ ...drop('readiness-gate'), status: 'held', gates: ['ci', 'conflict'] }),
+    { tone: 'info', text: 'held — waiting for CI / conflict-free' });
+  assert.deepEqual(outcomeView({ ...drop('gate-released'), status: 'delivered' }),
+    { tone: 'success', text: 'delivered (gate cleared)' });
+  assert.match(dropReasonText(drop('gate-failed', { gates: ['ci'] })), /its checks failed — 'ready-for-review' was removed, the failure label set/);
+  assert.match(dropReasonText(drop('gate-failed', { gates: ['conflict'] })), /merge conflict/);
+  assert.match(dropReasonText(drop('gate-timeout', { gates: ['ci'] })), /not CI within the gate timeout.*'needs-human'/);
+  assert.match(dropReasonText(drop('gate-cancelled', { cancelReason: 'closed' })), /the PR was closed first/);
+  assert.match(dropReasonText(drop('gate-cancelled', { cancelReason: 'label-removed' })), /'ready-for-review' was removed first/);
 });

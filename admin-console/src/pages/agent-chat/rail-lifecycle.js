@@ -14,6 +14,7 @@
  */
 
 import { buildAgentMenu, buildTeamMenu, isChatOpenable } from '../agent-lifecycle/agent-lifecycle-menu.js';
+import { isEntryShown, INDIVIDUAL_KEY } from './list-selection.js';
 
 /**
  * Per-user opt-in to seeing disabled agents in the rail (AC6/AC7). Stored under
@@ -112,14 +113,79 @@ export function existingIds(agents) {
  * The shape `renderDeleteMessage` / the delete confirm expect: the agent plus
  * its `children` (a team's members), so deleting a team says how many members
  * go with it.
+ *
+ * A member that is the LAST one in its team (every agent is minted as a team
+ * of one since #2231) also carries `lastMemberOf` — `{ id, displayName,
+ * canManage }` of that team — so the confirm can say the team would be left
+ * empty and offer to delete it too (#2685). Stubs count as members: a team
+ * with a stub left is not empty.
  */
 export function deleteTargetFor(agent, agents) {
   if (!agent) return null;
-  const list = agents || [];
+  const list = (agents || []).filter(Boolean);
   const children = agent.role === 'team'
     ? list.filter(a => a.parentTeamId === agent.id)
     : [];
-  return { ...agent, children };
+  const target = { ...agent, children };
+  if (agent.role === 'team-member' && agent.parentTeamId) {
+    const team = list.find(a => a.id === agent.parentTeamId && a.role === 'team');
+    const others = list.filter(a => a.parentTeamId === agent.parentTeamId && a.id !== agent.id);
+    if (team && others.length === 0) {
+      target.lastMemberOf = {
+        id: team.id,
+        displayName: team.displayName || team.id,
+        canManage: team.canManage !== false,
+      };
+    }
+  }
+  return target;
+}
+
+/**
+ * Which id the delete confirm actually sends `DELETE /api/agents/:id` for
+ * (#2685). Deleting the last member together with its team is ONE team delete
+ * — the server's cascade removes the member with it — so nothing is left
+ * half-done if the second of two requests failed.
+ */
+export function deleteRequestId(target, deleteTeamToo) {
+  if (!target) return null;
+  if (deleteTeamToo && target.lastMemberOf && target.lastMemberOf.canManage) return target.lastMemberOf.id;
+  return target.id;
+}
+
+/**
+ * What the delete confirm finally sends, re-checked against a FRESH full
+ * config list (`GET /api/agents`, read right before the delete) — #2685
+ * review B1. The target was computed from the rail's list, which can be the
+ * chat payload alone (configs not loaded yet, or the load failed) and then
+ * leaves out disabled members and members without a token. A team delete
+ * cascades on the server, so it is sent only when the fresh list confirms the
+ * member is still the team's last one; otherwise only the member is deleted
+ * and `keptTeam` says why the team stayed (`'members'`: it has other members;
+ * `'unverified'`: the list could not be read).
+ */
+export function resolveDeleteRequest(target, deleteTeamToo, freshAgents) {
+  if (!target) return null;
+  const id = deleteRequestId(target, deleteTeamToo);
+  if (id === target.id) return { id, keptTeam: null };
+  // Recompute from the bare agent: spreading `target` would carry its stale `lastMemberOf` over.
+  const { lastMemberOf: _stale, children: _children, ...agent } = target;
+  const fresh = Array.isArray(freshAgents) ? deleteTargetFor(agent, freshAgents) : null;
+  if (fresh && fresh.lastMemberOf && fresh.lastMemberOf.id === id) return { id, keptTeam: null };
+  return {
+    id: target.id,
+    keptTeam: { id, displayName: target.lastMemberOf.displayName, reason: fresh ? 'members' : 'unverified' },
+  };
+}
+
+/** The sentence shown after the member was deleted but its team was kept by `resolveDeleteRequest`. */
+export function teamKeptNotice(keptTeam) {
+  if (!keptTeam) return null;
+  const name = `"${keptTeam.displayName ?? keptTeam.id}"`;
+  if (keptTeam.reason === 'members') {
+    return `The team ${name} was kept: it still has other members (for example disabled ones not shown in the list).`;
+  }
+  return `The team ${name} was kept: its members could not be checked. Delete it with "Delete team…" if it is empty.`;
 }
 
 /**
@@ -154,12 +220,12 @@ export function isTeamLocked(agent, agents) {
  * @returns {string|null} the note to append to the success message, or null
  */
 export function importedAgentFilterNote(filter, agentId, parentTeamId) {
-  const kind = filter && filter.kind;
-  if (!kind || kind === 'all') return null;
-  // Names the option verbatim as the filter's <select> renders it.
-  const HIDDEN = ' The list filter is hiding it — switch it to "All agents" to see it.';
-  if (kind === 'agent') return filter.id === agentId ? null : HIDDEN;
-  if (kind === 'team') return filter.id === parentTeamId ? null : HIDDEN;
+  // Names the control and its entries as the filter panel renders them (#2740).
+  const HIDDEN = ' The team filter is hiding it — tick its team (or "Select all") in the filter above the list to see it.';
+  if (parentTeamId) return isEntryShown(filter, `team:${parentTeamId}`) ? null : HIDDEN;
+  // Without a team the import response cannot say whether the agent lands as
+  // its own team or as an ungrouped row — report it hidden only when both are.
+  if (!isEntryShown(filter, INDIVIDUAL_KEY) && !isEntryShown(filter, `team:${agentId}`)) return HIDDEN;
   return null;
 }
 

@@ -101,13 +101,13 @@ export function isReviewGateEdge(edge, graph) {
  * and a NAMED person → the full triangle in one call. Without a person the
  * spec degrades to a plain (optionally anonymously gated) channel.
  */
-export async function submitChannelWithApproval(ctx, { from, to, artifact, label, human, gate }) {
+export async function submitChannelWithApproval(ctx, { from, to, artifact, label, human, gate, readiness }) {
   const l = String(label || '').trim();
   if (human && l) {
     await wireReviewGate(ctx, { from, human, to, artifact, gateLabel: l });
     return { kind: 'review-gate' };
   }
-  await wireChannel(ctx, { from, to, artifact, label: l, ...(gate ? { gate: 'human' } : {}) });
+  await wireChannel(ctx, { from, to, artifact, label: l, ...(gate ? { gate: 'human' } : {}), ...(readiness ? { readiness } : {}) });
   return { kind: 'channel' };
 }
 

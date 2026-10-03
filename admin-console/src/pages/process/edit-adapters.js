@@ -13,7 +13,7 @@ import { upsertChannel, removeChannelFrom, editChannel } from './channel-ops';
 import {
   stagesAfterAdd, stagesAfterRename, stagesAfterRemove, stagesAfterReorder, membersToCascade,
 } from './stage-list-ops';
-import { labelsAfterSet } from './label-registry-ops';
+import { labelsAfterSet, labelsAfterRemove, assertLabelsUnused } from './label-registry-ops';
 import {
   humansAfterUpsert, humansAfterRemove,
   humanAfterConsumeAdd, humanAfterConsumeRemove, humanAfterEmitAdd, humanAfterEmitRemove,
@@ -263,6 +263,15 @@ export const liveOps = {
     const cur = await liveOps.listLabels(teamId);
     await apiCall('PUT', `/api/agents/${teamId}`, { labels: labelsAfterSet(cur, name, flags) });
   },
+  // Delete UNUSED registry entries (#2716) in one PUT of the team's `labels[]`
+  // only — no agent/trigger/channel config is touched. Re-checks usage against
+  // a fresh server graph first so a label referenced meanwhile is never dropped.
+  removeLabels: async (teamId, names) => {
+    const g = await apiCall('GET', `/api/flows/graph?team=${encodeURIComponent(teamId)}`);
+    assertLabelsUnused(names, g?.unusedLabels);
+    const cur = await liveOps.listLabels(teamId);
+    await apiCall('PUT', `/api/agents/${teamId}`, { labels: labelsAfterRemove(cur, names) });
+  },
 
   // ── named human roles (#987): first-class human flow nodes, TEAM-agent only ──
   // Same binding pattern as stages/labels: teamId first, ProcessCanvas wraps.
@@ -320,12 +329,12 @@ export const liveOps = {
   },
   // Channels live on the *consumer*; the backend re-derives the github-event
   // triggers from them (reconcileTeamGithubChannels). Upsert keyed on (artifact, from).
-  addChannel: async (roleId, { artifact, from, label, gate, wakePrompt, autoClaim }) => {
+  addChannel: async (roleId, { artifact, from, label, gate, wakePrompt, autoClaim, readiness }) => {
     if (!from || from === roleId) return;
     const a = await apiCall('GET', `/api/agents/${roleId}`);
     // `autoClaim` (#958) rides along so the claim opt-out survives the live port
     // write — otherwise the reconciler re-stamps the claim.
-    const channels = upsertChannel(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label, gate, wakePrompt, autoClaim });
+    const channels = upsertChannel(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label, gate, wakePrompt, autoClaim, readiness });
     await apiCall('PUT', `/api/agents/${roleId}`, { channels });
   },
   // Edit an existing channel (#2717): `prevLabel` is its label when the editor
@@ -457,6 +466,9 @@ export function makeDraftOps(getBundle, persist) {
       const b = clone(getBundle());
       const t = (role(b, roleId)?.triggers || []).find(x => x.id === tid);
       if (t) Object.assign(t, patch);
+      // A switched-off readiness gate (#2795) is sent as null — drop the key,
+      // as the live trigger PUT does.
+      if (t && t.readinessGate === null) delete t.readinessGate;
       await persist(b);
     },
     deleteTrigger: async (roleId, tid) => {
@@ -603,6 +615,16 @@ export function makeDraftOps(getBundle, persist) {
     setLabelFlags: async (name, flags) => {
       const b = clone(getBundle());
       const next = labelsAfterSet(b.labels, name, flags);
+      if (next.length) b.labels = next; else delete b.labels;
+      await persist(b);
+    },
+    // Delete UNUSED entries from the bundle's `labels[]` (#2716) — same
+    // server-side usage re-check as the live op, against the current bundle.
+    removeLabels: async (names) => {
+      const b = clone(getBundle());
+      const g = await apiCall('POST', '/api/flows/graph', { processTemplate: b });
+      assertLabelsUnused(names, g?.unusedLabels);
+      const next = labelsAfterRemove(b.labels, names);
       if (next.length) b.labels = next; else delete b.labels;
       await persist(b);
     },

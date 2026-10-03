@@ -24,6 +24,7 @@
 import { deriveClaim, defaultGateKind, buildGateListener } from './human-gate-ops.js';
 import { isGateLabel, isBrakeLabel } from './label-flags.js';
 import { defaultListenerPrompt, handoffVerb, handoffTargetNoun } from './handoff-prompt.js';
+import { labelNameError } from './handoff-validation.js';
 
 export { deriveClaim, defaultGateKind };
 
@@ -102,7 +103,7 @@ async function ensureArtifactOutcome(ops, roleId, artifact) {
  * the outcome (outcome-port drags already declare the emit, #828). Idempotent:
  * an existing matching listener/outcome is reused, never duplicated.
  */
-export async function wireLabelHandoff({ ops }, { from, to, label, target: explicitTarget, action = 'labeled', prompt, labels, emitSource = true, autoClaim, repo, fromName, toName }) {
+export async function wireLabelHandoff({ ops }, { from, to, label, target: explicitTarget, action = 'labeled', prompt, labels, emitSource = true, autoClaim, readinessGate, repo, fromName, toName }) {
   const l = String(label || '').trim();
   if (!l) throw new Error('label is required');
   // No target given → the historical `issues` default for the listener, but the
@@ -121,6 +122,8 @@ export async function wireLabelHandoff({ ops }, { from, to, label, target: expli
       labelFilter: l,
       enabled: true,
       ...(claim ? { claim } : {}),
+      // Readiness gate (#2795) — PR hand-offs only; the poller holds the wake.
+      ...(event === 'pull_request.labeled' && readinessGate ? { readinessGate } : {}),
       description: humanLabel
         ? `Wait for human gate \`${l}\``
         : `Wake when \`${l}\` is ${handoffVerb(action)} ${handoffTargetNoun(target)} (from ${fromName || from})`,
@@ -141,11 +144,16 @@ export async function wireLabelHandoff({ ops }, { from, to, label, target: expli
  * source's outcomes in sync on a label rename. `humanSource` marks a human-set
  * label — there is no emitter to rewrite.
  */
-export async function updateLabelHandoff({ ops }, { from, to, triggerId, label, newLabel, target = 'issues', action = 'labeled', prompt, humanSource }) {
+export async function updateLabelHandoff({ ops }, { from, to, triggerId, label, newLabel, target = 'issues', action = 'labeled', prompt, humanSource, readinessGate }) {
   const next = String(newLabel || '').trim();
   if (!next) throw new Error('label is required');
   const event = `${target}.${action}`;
-  await ops.updateTrigger(to, triggerId, { events: [event], labelFilter: next, prompt });
+  // Readiness gate (#2795): only written when the dialog passes the key, so a
+  // caller that does not edit it leaves the stored gate alone; `null` clears it
+  // (the server drops a cleared or non-PR gate).
+  const gate = readinessGate === undefined ? {}
+    : { readinessGate: event === 'pull_request.labeled' ? readinessGate : null };
+  await ops.updateTrigger(to, triggerId, { events: [event], labelFilter: next, prompt, ...gate });
   if (next !== label && !humanSource && ops.getRoleOutcomes && ops.setRoleOutcomes) {
     const cur = await ops.getRoleOutcomes(from);
     if (cur) {
@@ -320,7 +328,7 @@ export async function unwireWakeHandoff({ ops }, { from, to, outcome }) {
  * the channel port upserts on its (artifact, from, label) key and the outcome
  * is reused when one already carries the action.
  */
-export async function wireChannel({ ops }, { from, to, artifact, label, gate, autoClaim, wakePrompt }) {
+export async function wireChannel({ ops }, { from, to, artifact, label, gate, autoClaim, wakePrompt, readiness }) {
   const art = artifact === 'issue' ? 'issue' : 'pr';
   await ensureArtifactOutcome(ops, from, art);
   await ops.addChannel(to, {
@@ -329,6 +337,8 @@ export async function wireChannel({ ops }, { from, to, artifact, label, gate, au
     ...(gate === 'human' ? { gate: 'human' } : {}),
     ...(typeof wakePrompt === 'string' && wakePrompt.trim() ? { wakePrompt: wakePrompt.trim() } : {}),
     ...(autoClaim === false ? { autoClaim: false } : {}),
+    // Readiness gate (#2795) — PR channels only.
+    ...(art === 'pr' && readiness ? { readiness } : {}),
   });
 }
 
@@ -415,6 +425,11 @@ export async function wireHumanGate({ ops, humanOps }, { human, to, label, kind 
  * engine ops, so it converges with wiring the legs individually (§4.5).
  */
 export async function wireReviewGate(ctx, { from, human, to, artifact, gateLabel, rejectLabel }) {
+  // #2706: refuse an unusable label before the first write, so a bad name
+  // never lands half-wired in emits / labelFilter / claim.
+  const invalid = labelNameError(gateLabel)
+    || (String(rejectLabel || '').trim() ? labelNameError(rejectLabel) : null);
+  if (invalid) throw new Error(invalid);
   const art = artifact === 'issue' ? 'issue' : 'pr';
   const kind = art === 'pr' ? 'pull_request' : 'issues';
   await ensureArtifactOutcome(ctx.ops, from, art);

@@ -327,7 +327,8 @@ flag, which #2445 removed — this model is now the only behaviour):
 the **#2360 re-key** made a provider's `team` scope mean a **set of Agent Teams**
 (`scope:'team'`, `teamId` = primary, `teamIds[]` = the co-owned set — usable by
 any agent in any team in the set, manageable by any set-team admin, a clone
-auto-appends). Provider **identity** is fixed by auth type (api-key → `service`;
+auto-appends — and a deleted team is removed again, §15). Provider **identity**
+is fixed by auth type (api-key → `service`;
 oauth/subscription → `human`), so the identity axis is not a separate control for
 providers. Since #2229 every ordinary agent is a **team of one**.
 
@@ -407,3 +408,26 @@ deliberate manual act.)
   the Agent-Chat composer (`ChatPanel.jsx`, beside the health warning) and under the
   team-settings Provider dropdown (`TeamEnvironmentPanel.jsx`) — 'warn' (fragile
   api-key lend) vs 'error' (a subscription seat backing a multi-member team).
+
+## 15. Amendment (2026-10-01): a deleted Agent Team leaves provider team sets (#2691)
+
+Narrows §14's "a clone auto-appends": the append (`ensureTeamOnEnvProvider`) now
+has a counterpart. **E11 — an Agent Team is deleted (or its creation rolls back).**
+`DELETE /api/agents/:id` for a `role:'team'` agent and the `POST /api/teams`
+rollback drop the team's id from every **team** provider's `teamIds` set it shares
+with other teams; a `teamId` (primary) that named it is re-pointed to the first
+remaining team. A provider whose **only** team was the deleted one is left as is —
+a provider never becomes ownerless, and refusing the team delete instead could
+dead-lock against the E6 "detach first" guard. Best-effort: a failure is logged
+and never fails the delete. Global/personal providers are untouched.
+
+`GET /api/llm-endpoints` reports the set ids that name no current Agent Team as
+`deletedTeamIds` (omitted when empty); the Models table and the Ownership control
+label them `<id> (deleted team)` (formerly `(legacy)` in the editor) so a
+System Admin can reassign or delete the provider.
+
+**Implemented touchpoints:** `admin-console/api/provider-team-prune.js`
+`pruneTeamFromProviders` (pure decision core) + `removeTeamFromProviders` /
+`deletedTeamIdsView` in `api.js`; UI label `providerTeamName` in
+`src/pages/provider-ownership-view.js`, shared by the table and
+`ProviderOwnership.jsx`.

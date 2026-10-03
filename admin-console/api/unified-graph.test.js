@@ -937,3 +937,13 @@ test('Edit-as-draft parity: a live team → bundle → draft graph keeps every c
   assert.ok([...D].some(e => e === 'github|analyst->human-reviewer|issue'), 'issue edge present');
   assert.ok([...D].some(e => e === 'github|dev->reviewer|pr'), 'PR channel edge present');
 });
+
+test('#2716 unusedLabels passes through from a draft bundle (POST /api/flows/graph path)', () => {
+  const flow = processTemplateToUnified({
+    name: 'x',
+    roles: [{ id: 'dev', emits: ['ready-for-review'], triggers: [] }],
+    labels: [{ name: 'ready-for-review', humanGate: false, brake: true }, { name: 'plan-approved-jvc', humanGate: true }],
+  });
+  const g = buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels });
+  assert.deepEqual(g.unusedLabels, ['plan-approved-jvc']);
+});

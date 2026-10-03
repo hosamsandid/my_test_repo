@@ -39,6 +39,6 @@
 
 **React to GitHub events:** Add a GitHub token, attach it to a Working Environment, add a `github-event` trigger to an autonomous agent.
 
-**Add a webhook trigger:** Add an `http` trigger in the console; it generates a secret automatically. POST to the webhook endpoint with the `X-Hook-Secret` header.
+**Add a webhook trigger:** Add an `http` trigger in the console; it generates a secret automatically. POST to the webhook endpoint with the `X-Hook-Secret` header, or point a GitHub webhook at it with the secret as its **Secret** (`X-Hub-Signature-256`).
 
 **Add or switch a model provider:** Model Providers → New provider → Test Connection → Discover Models. See [docs/model-providers.md](./model-providers.md).

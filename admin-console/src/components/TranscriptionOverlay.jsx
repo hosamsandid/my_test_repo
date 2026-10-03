@@ -64,7 +64,7 @@ export default function TranscriptionOverlay() {
 
   const dotColor = status === 'paused'
     ? 'var(--eb-status-warning, #b45309)'
-    : 'var(--eb-status-error-text, #dc2626)';
+    : 'var(--eb-status-error-text)';
 
   const overlay = (
     <div>
@@ -94,7 +94,7 @@ export default function TranscriptionOverlay() {
       {/* Transient microphone error (no session held). */}
       {status === 'error' && (
         <div style={CARD_STYLE}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--eb-status-error-text, #dc2626)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--eb-status-error-text)' }}>
             <AlertTriangle size={15} /> {session.error || 'Microphone error'}
           </div>
         </div>
@@ -141,7 +141,7 @@ export default function TranscriptionOverlay() {
               <div>
                 <div style={{ color: 'var(--eb-text-secondary)', marginBottom: 8 }}>Discard this recording? Nothing will be sent.</div>
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <button onClick={() => { setConfirmCancel(false); cancel(); }} style={iconBtn('var(--eb-status-error-bg, #fef2f2)', 'var(--eb-status-error-text, #dc2626)')}>
+                  <button onClick={() => { setConfirmCancel(false); cancel(); }} style={iconBtn('var(--eb-status-error-bg, #fef2f2)', 'var(--eb-status-error-text)')}>
                     Discard
                   </button>
                   <button onClick={() => setConfirmCancel(false)} style={iconBtn('transparent', 'var(--eb-text-secondary)')}>
@@ -173,7 +173,7 @@ export default function TranscriptionOverlay() {
           {/* Delivery-failed controls */}
           {status === 'delivery-failed' && (
             <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--eb-status-error-text, #dc2626)', marginBottom: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--eb-status-error-text)', marginBottom: 8 }}>
                 <AlertTriangle size={14} /> Couldn’t send the transcript.
               </div>
               <div style={{ display: 'flex', gap: 8 }}>

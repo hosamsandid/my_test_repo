@@ -318,9 +318,15 @@ function describeEntryWorkItem(entry) {
   const item = p.issue || p.pull_request || {};
   const number = Number.isInteger(item.number) ? item.number : null;
   const label = (p.label && typeof p.label.name === 'string') ? p.label.name : null;
+  // #2799: a PR's linked issue(s), in the Event Log's `→ closes #N` wording, so
+  // a search for the issue number finds the message. Unlinked → unchanged.
+  const closesIssues = (item === p.pull_request && number != null && Array.isArray(item.closesIssues))
+    ? [...new Set(item.closesIssues.filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b)
+    : [];
+  const closes = closesIssues.length ? ` → closes ${closesIssues.map((n) => `#${n}`).join(', ')}` : '';
   const parts = [];
-  if (g.repo) parts.push(number != null ? `${g.repo}#${number}` : g.repo);
-  else if (number != null) parts.push(`#${number}`);
+  if (g.repo) parts.push(number != null ? `${g.repo}#${number}${closes}` : g.repo);
+  else if (number != null) parts.push(`#${number}${closes}`);
   if (label) parts.push(`label '${label}'`);
   if (g.event) parts.push(g.event);
   return {
@@ -328,6 +334,7 @@ function describeEntryWorkItem(entry) {
     number,
     label,
     event: g.event || null,
+    ...(closesIssues.length ? { closesIssues } : {}),
     text: parts.length ? parts.join(' · ') : 'the queued event',
   };
 }

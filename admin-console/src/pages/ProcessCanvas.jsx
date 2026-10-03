@@ -360,6 +360,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // LabelRegistryPanel keeps its name-first contract in both modes.
   const liveLabelOps = useMemo(() => ({
     setLabelFlags: (name, flags) => liveOps.setLabelFlags(scope, name, flags),
+    removeLabels: (names) => liveOps.removeLabels(scope, names),
   }), [scope]);
 
   // Live human-role ops (#987): same teamId binding, so HumanRegistryPanel keeps
@@ -458,7 +459,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
       badge.textContent = String(count);
       badge.style.cssText =
         'position:absolute;top:-8px;right:-8px;min-width:18px;height:18px;padding:0 5px;' +
-        'border-radius:999px;background:var(--eb-status-warning,#d97706);color:#fff;font-size:11px;' +
+        'border-radius:999px;background:var(--eb-status-warning,#d97706);color:var(--eb-text-on-warning);font-size:11px;' +
         'font-weight:700;display:flex;align-items:center;justify-content:center;z-index:5;' +
         'box-shadow:0 1px 3px rgba(0,0,0,0.3);pointer-events:none;';
       node.appendChild(badge);
@@ -1266,8 +1267,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
 
       {labelsOpen && (isDraft || (isTeamScope && !imported)) && (
         <LabelRegistryPanel
-          key={JSON.stringify(displayGraph?.labels || [])}
+          key={JSON.stringify([displayGraph?.labels || [], displayGraph?.unusedLabels || []])}
           labels={displayGraph?.labels || []}
+          unusedLabels={displayGraph?.unusedLabels || []}
           ops={isDraft ? draftOps : liveLabelOps}
           onClose={() => setLabelsOpen(false)}
           onChanged={() => { if (!isDraft) refetch(); }}
@@ -1731,7 +1733,7 @@ function ToolbarButton({ onClick, icon: Icon, disabled, children, badge, title, 
         {badge != null && badge > 0 && (
           <span style={{
             marginLeft: 2, minWidth: 16, height: 16, padding: '0 4px', borderRadius: 999,
-            background: 'var(--eb-status-warning, #d97706)', color: '#fff', fontSize: 10,
+            background: 'var(--eb-status-warning, #d97706)', color: 'var(--eb-text-on-warning)', fontSize: 10,
             fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
           }}>{badge}</span>
         )}

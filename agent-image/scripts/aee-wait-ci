@@ -1,0 +1,568 @@
+#!/usr/bin/env python3
+"""aee-wait-ci — wait, inside this turn, until a pull request's CI has finished
+and report green / red / merge conflict (#2796).
+
+    aee-wait-ci <pr> [--repo <name>] [--timeout <minutes>] [--no-conflict-check]
+
+Blocks in the FOREGROUND, re-reading the PR's head commit every few seconds,
+until a verdict is reached or the timeout runs out, then prints ONE JSON
+object on stdout and exits with a code that names the verdict. Use it when you
+need to know, before you continue in this same turn, whether your PR is green
+or conflicting. Never wrap it (or any CI wait) in a background shell or Task:
+background work is killed when your turn ends.
+
+Arguments:
+  <pr>                    the pull request: a number (`123`, `#123`) or its URL
+  --repo <name>           the repository: a clone directory in your workspace
+                          (e.g. `314092_my-repo`) or `owner/name`. Default: the
+                          git repo of the current directory, else the only
+                          clone in your workspace
+  --timeout <minutes>     how long to wait (default 20). Capped so the wait
+                          always ends before your run's own timeout
+  --no-conflict-check     do not wait for / report merge conflicts — CI only
+  --json                  accepted for the shared CLI contract; the result is
+                          always JSON
+
+Verdict rules (the SAME rules the platform's PR-readiness events and hand-off
+readiness gate use — one shared definition, pr-readiness-rules.json):
+  * every check run AND commit status on the head commit counts, required or
+    not (CodeQL included);
+  * one failing check settles `failed` at once, even while others still run;
+  * no check at all after the grace period (3 min from when the head commit
+    was first seen) means the PR has no CI → `no-ci`;
+  * GitHub's `mergeable=UNKNOWN` (still computing) is re-read, never guessed.
+A conflict is reported as soon as it is seen (a rebase is needed before CI
+means anything). A push that moves the PR's head during the wait restarts the
+evaluation on the new commit; `headSha` always names the commit the verdict
+belongs to and `supersededHeads` lists the ones left behind.
+
+Result (stdout, one line):
+  {"ok": true|false, "status": "...", "repo": "o/n", "pr": 7, "headSha": "...",
+   "ci": "passed|failed|none|pending", "merge": "clean|conflict|pending|skipped",
+   "failingChecks": [...], "pendingChecks": [...], "supersededHeads": [...],
+   "waitedSeconds": 42, "message": "..."}
+
+Exit codes:
+  0  passed — every check passed (status `passed`), or the PR has no CI
+     (status `no-ci`); and, unless --no-conflict-check, it merges cleanly
+  1  error — no GitHub token, PR/repo not found, PR closed or merged
+  2  usage error — bad arguments, or the repository could not be determined
+  3  error — GitHub unreachable (repeated network failures)
+  4  failed — at least one check failed (`failingChecks` names them)
+  5  conflict — the PR has a merge conflict with its base branch
+  6  timeout — not settled in time. Do NOT keep waiting in the background:
+     end your turn and continue via a gated hand-off (`readinessGate`) or a
+     `github-event` trigger on `pull_request.checks_passed` /
+     `pull_request.checks_failed` / `pull_request.merge_conflict`.
+
+Rate limiting is backed off and retried, never reported as a failure. Reads go
+through the GitHub CLI with this container's GitHub token (`GH_TOKEN`).
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_USAGE = 2
+EXIT_UNREACHABLE = 3
+EXIT_FAILED = 4
+EXIT_CONFLICT = 5
+EXIT_TIMEOUT = 6
+
+EXIT_FOR_STATUS = {
+    "passed": EXIT_OK,
+    "no-ci": EXIT_OK,
+    "failed": EXIT_FAILED,
+    "conflict": EXIT_CONFLICT,
+    "timeout": EXIT_TIMEOUT,
+}
+
+DEFAULT_TIMEOUT_MIN = 20.0
+# Hard ceiling regardless of --timeout: a single wait must fit a default run
+# (CLAUDE_TIMEOUT_SEC = 3600 in agent-entrypoint.py) with room to act after.
+MAX_TIMEOUT_MIN = 50.0
+# Kept free before the run's own deadline (`AEE_RUN_DEADLINE`, epoch seconds,
+# set per turn by the runtime) so the agent can still act on the verdict.
+DEADLINE_RESERVE_SEC = 120.0
+DEFAULT_INTERVAL_SEC = 20.0
+MAX_TRANSIENT_FAILURES = 5
+RATE_LIMIT_BACKOFF_SEC = 60.0
+RATE_LIMIT_BACKOFF_MAX_SEC = 300.0
+
+TIMEOUT_ADVICE = (
+    "Do not keep waiting in a background task — it is killed when your turn "
+    "ends. End your turn and continue via a gated hand-off (readinessGate on the "
+    "PR hand-off) or a github-event trigger on pull_request.checks_passed / "
+    "pull_request.checks_failed / pull_request.merge_conflict."
+)
+
+SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.I)
+
+
+# ---- shared verdict rules (pr-readiness-rules.json, #2794/#2796) -------------
+
+def _load_rules():
+    here = os.path.dirname(os.path.realpath(__file__))
+    with open(os.path.join(here, "pr-readiness-rules.json"), encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+RULES = _load_rules()
+CHECK_RUN_PASS = set(RULES["checkRun"]["pass"])
+CHECK_RUN_FAIL = set(RULES["checkRun"]["fail"])
+STATUS_PASS = set(RULES["statusContext"]["pass"])
+STATUS_FAIL = set(RULES["statusContext"]["fail"])
+MERGE_CLEAN = set(RULES["mergeable"]["clean"])
+MERGE_CONFLICT = set(RULES["mergeable"]["conflict"])
+MAX_CHECKS = int(RULES["maxChecks"])
+DEFAULT_CI_GRACE_MS = int(RULES["ciGraceMs"])
+
+
+def ci_grace_ms(env=None):
+    """Same override as the orchestrator (`AEE_PR_READINESS_CI_GRACE_MS`)."""
+    raw = (env if env is not None else os.environ).get("AEE_PR_READINESS_CI_GRACE_MS")
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_CI_GRACE_MS
+    try:
+        n = float(raw)
+    except ValueError:
+        return DEFAULT_CI_GRACE_MS
+    return n if n >= 0 else DEFAULT_CI_GRACE_MS
+
+
+def classify_check(node):
+    """One check run or commit status → 'pass' | 'fail' | 'pending'. Mirrors
+    classifyCheck in orchestrator/pr-readiness.js."""
+    if not isinstance(node, dict):
+        return "pending"
+    if node.get("__typename") == "StatusContext" or ("state" in node and "status" not in node):
+        state = str(node.get("state") or "").upper()
+        if state in STATUS_PASS:
+            return "pass"
+        if state in STATUS_FAIL:
+            return "fail"
+        return "pending"
+    if str(node.get("status") or "").upper() != "COMPLETED":
+        return "pending"
+    conclusion = str(node.get("conclusion") or "").upper()
+    if conclusion in CHECK_RUN_PASS:
+        return "pass"
+    if conclusion in CHECK_RUN_FAIL:
+        return "fail"
+    return "pending"
+
+
+def check_name(node):
+    return str((isinstance(node, dict) and (node.get("name") or node.get("context"))) or "unnamed check")
+
+
+def ci_verdict(checks, truncated=False, head_seen_at_ms=None, now_ms=None, grace_ms=DEFAULT_CI_GRACE_MS):
+    """The CI verdict of one head commit → {'verdict', 'failingChecks'}. Mirrors
+    ciVerdict in orchestrator/pr-readiness.js (pinned by the shared cases)."""
+    items = [c for c in (checks or []) if c]
+    failing = []
+    pending = False
+    for node in items:
+        c = classify_check(node)
+        if c == "fail":
+            failing.append(check_name(node))
+        elif c == "pending":
+            pending = True
+    if failing:
+        return {"verdict": "failed", "failingChecks": sorted(set(failing))}
+    if not items and not truncated:
+        now_ms = time.time() * 1000 if now_ms is None else now_ms
+        elapsed = now_ms - head_seen_at_ms if head_seen_at_ms is not None else 0
+        return {"verdict": "none" if elapsed >= grace_ms else "pending", "failingChecks": []}
+    if pending or truncated:
+        return {"verdict": "pending", "failingChecks": []}
+    return {"verdict": "passed", "failingChecks": []}
+
+
+def merge_verdict(mergeable):
+    m = str(mergeable or "").upper()
+    if m in MERGE_CLEAN:
+        return "clean"
+    if m in MERGE_CONFLICT:
+        return "conflict"
+    return "pending"
+
+
+def pending_check_names(checks):
+    return sorted({check_name(n) for n in (checks or []) if n and classify_check(n) == "pending"})
+
+
+# ---- GitHub reads -------------------------------------------------------------
+
+PR_QUERY = ("query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){"
+            "pullRequest(number:$number){number url state merged headRefOid mergeable}}}")
+
+CHECKS_QUERY = ("query($owner:String!,$name:String!,$oid:GitObjectID!){repository(owner:$owner,name:$name){"
+                "object(oid:$oid){... on Commit{oid statusCheckRollup{"
+                f"contexts(first:{MAX_CHECKS}){{pageInfo{{hasNextPage}} nodes{{__typename "
+                "... on CheckRun{name status conclusion} ... on StatusContext{context state}}}}}}}}")
+
+
+class GhError(Exception):
+    """kind: 'rate-limit' | 'auth' | 'not-found' | 'transient'."""
+
+    def __init__(self, kind, message):
+        super().__init__(message)
+        self.kind = kind
+
+
+def classify_gh_failure(text):
+    t = (text or "").lower()
+    if "rate limit" in t or "http 429" in t or "abuse detection" in t:
+        return "rate-limit"
+    # Only GitHub's own wording / HTTP status: a bare "not found" or
+    # "authentication" also appears in network errors (DNS, TLS), which must be
+    # retried as transient rather than end the wait.
+    if ("http 401" in t or "bad credentials" in t or "gh auth login" in t
+            or "requires authentication" in t):
+        return "auth"
+    if "could not resolve to" in t or "http 404" in t:
+        return "not-found"
+    return "transient"
+
+
+def real_gh():
+    """The real GitHub CLI (reads need no chat-turn forwarding, see aee-gh)."""
+    return os.environ.get("AEE_WAIT_CI_GH") or os.environ.get("AEE_REAL_GH") or "gh"
+
+
+def gh_graphql(query, variables, host=None):
+    args = [real_gh(), "api", "graphql", "-f", f"query={query}"]
+    for k, v in variables.items():
+        args += ["-F" if isinstance(v, int) else "-f", f"{k}={v}"]
+    env = dict(os.environ)
+    if host and host != "github.com" and not env.get("GH_HOST"):
+        env["GH_HOST"] = host
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=60, env=env)
+    except FileNotFoundError:
+        raise GhError("auth", "the GitHub CLI (gh) is not installed in this container")
+    except subprocess.TimeoutExpired:
+        raise GhError("transient", "GitHub did not answer within 60s")
+    out = proc.stdout or ""
+    try:
+        body = json.loads(out) if out.strip() else {}
+    except ValueError:
+        body = {}
+    errors = body.get("errors") if isinstance(body, dict) else None
+    if proc.returncode != 0 or errors:
+        msg = "; ".join(str(e.get("message", e)) if isinstance(e, dict) else str(e) for e in (errors or []))
+        msg = msg or (proc.stderr or out).strip() or f"gh exited {proc.returncode}"
+        types = " ".join(str(e.get("type", "")) for e in (errors or []) if isinstance(e, dict))
+        kind = "rate-limit" if "RATE_LIMITED" in types else (
+            "not-found" if "NOT_FOUND" in types else classify_gh_failure(msg + " " + (proc.stderr or "")))
+        raise GhError(kind, msg)
+    return body.get("data") or {}
+
+
+def read_pr(repo, number, gh=gh_graphql):
+    owner, name, host = repo
+    data = gh(PR_QUERY, {"owner": owner, "name": name, "number": number}, host)
+    pr = (data.get("repository") or {}).get("pullRequest")
+    if not pr:
+        raise GhError("not-found", f"pull request #{number} not found in {owner}/{name}")
+    return pr
+
+
+def read_checks(repo, sha, gh=gh_graphql):
+    """(checks, truncated) for one commit, addressed by SHA."""
+    owner, name, host = repo
+    data = gh(CHECKS_QUERY, {"owner": owner, "name": name, "oid": sha}, host)
+    obj = (data.get("repository") or {}).get("object") or {}
+    contexts = (obj.get("statusCheckRollup") or {}).get("contexts") or {}
+    nodes = contexts.get("nodes") if isinstance(contexts.get("nodes"), list) else []
+    return nodes, bool((contexts.get("pageInfo") or {}).get("hasNextPage"))
+
+
+# ---- the wait -----------------------------------------------------------------
+
+def effective_timeout_sec(requested_min, env=None, now=None):
+    """--timeout in seconds, capped by MAX_TIMEOUT_MIN and by the run's own
+    deadline (`AEE_RUN_DEADLINE` minus a reserve). Never negative."""
+    env = env if env is not None else os.environ
+    now = time.time() if now is None else now
+    sec = min(float(requested_min), MAX_TIMEOUT_MIN) * 60.0
+    raw = env.get("AEE_RUN_DEADLINE")
+    if raw:
+        try:
+            sec = min(sec, float(raw) - now - DEADLINE_RESERVE_SEC)
+        except ValueError:
+            pass
+    return max(0.0, sec)
+
+
+def wait_for_ci(repo, number, timeout_sec, conflict_check=True, interval_sec=DEFAULT_INTERVAL_SEC,
+                grace_ms=DEFAULT_CI_GRACE_MS, gh=gh_graphql, clock=time.time, sleep=time.sleep,
+                log=lambda m: None):
+    """Poll until settled. Returns the result dict (always with `status`)."""
+    start = clock()
+    deadline = start + timeout_sec
+    head = None
+    head_seen_ms = None
+    superseded = []
+    transient = 0
+    rate_backoff = RATE_LIMIT_BACKOFF_SEC
+    last = {"ci": "pending", "merge": "pending" if conflict_check else "skipped",
+            "failingChecks": [], "pendingChecks": []}
+
+    def result(status, message, **extra):
+        out = {"ok": status in ("passed", "no-ci"), "status": status,
+               "repo": f"{repo[0]}/{repo[1]}", "pr": number, "headSha": head,
+               **last, "supersededHeads": superseded,
+               "waitedSeconds": int(round(clock() - start)), "message": message}
+        out.update(extra)
+        return out
+
+    while True:
+        try:
+            pr = read_pr(repo, number, gh)
+            state = str(pr.get("state") or "").upper()
+            if state != "OPEN":
+                what = "merged" if pr.get("merged") or state == "MERGED" else "closed"
+                head = pr.get("headRefOid") or head
+                return result("error", f"pull request #{number} is {what} — nothing to wait for",
+                              prState=state or None)
+            sha = str(pr.get("headRefOid") or "").lower()
+            if not SHA_RE.match(sha):
+                raise GhError("transient", "GitHub returned no head commit for the pull request")
+            if sha != head:
+                if head:
+                    superseded.append(head)
+                    log(f"head moved {head[:7]} → {sha[:7]}; evaluating the new commit")
+                head, head_seen_ms = sha, clock() * 1000
+                last.update(ci="pending", failingChecks=[], pendingChecks=[])
+            if conflict_check:
+                last["merge"] = merge_verdict(pr.get("mergeable"))
+                if last["merge"] == "conflict":
+                    return result("conflict", f"#{number} has a merge conflict with its base branch "
+                                  "— rebase or merge the base, push, then wait again")
+            checks, truncated = read_checks(repo, sha, gh)
+            v = ci_verdict(checks, truncated, head_seen_ms, clock() * 1000, grace_ms)
+            last.update(ci=v["verdict"], failingChecks=v["failingChecks"],
+                        pendingChecks=pending_check_names(checks))
+            transient = 0
+            rate_backoff = RATE_LIMIT_BACKOFF_SEC
+            if v["verdict"] == "failed":
+                return result("failed", "CI failed on " + sha[:7] + ": " + ", ".join(v["failingChecks"]))
+            if v["verdict"] in ("passed", "none") and last["merge"] in ("clean", "skipped"):
+                if v["verdict"] == "none":
+                    return result("no-ci", f"no check reported on {sha[:7]} within the grace period — the PR has no CI")
+                return result("passed", f"all checks passed on {sha[:7]}")
+            log(f"{sha[:7]}: ci={v['verdict']} merge={last['merge']}"
+                + (f" (running: {', '.join(last['pendingChecks'][:5])})" if last["pendingChecks"] else ""))
+            pause = interval_sec
+        except GhError as e:
+            if e.kind in ("auth", "not-found"):
+                hint = ""
+                if e.kind == "auth" and not (os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")):
+                    hint = " (no GitHub token in this container — the environment needs a GitHub token)"
+                return result("error", f"GitHub refused the read: {e}{hint}")
+            if e.kind == "rate-limit":
+                pause = rate_backoff
+                rate_backoff = min(rate_backoff * 2, RATE_LIMIT_BACKOFF_MAX_SEC)
+                log(f"rate-limited by GitHub, backing off {int(pause)}s")
+            else:
+                transient += 1
+                if transient >= MAX_TRANSIENT_FAILURES:
+                    return result("error", f"GitHub unreachable ({transient} attempts in a row): {e}",
+                                  unreachable=True)
+                pause = min(interval_sec * (2 ** (transient - 1)), 120.0)
+                log(f"GitHub read failed ({e}); retrying in {int(pause)}s")
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return result("timeout", f"CI on #{number} not settled within {int(round(timeout_sec / 60))} min. "
+                          + TIMEOUT_ADVICE)
+        sleep(min(pause, remaining))
+
+
+# ---- repository / PR resolution ----------------------------------------------
+
+REMOTE_RE = re.compile(r"^(?:[a-z+]+://)?(?:[^@/]+@)?([^/:]+)[:/]+(?:\d+/)?([^/]+)/([^/]+?)(?:\.git)?/?$", re.I)
+PR_URL_RE = re.compile(r"^https?://([^/]+)/([^/]+)/([^/]+)/pull/(\d+)(?:[/?#].*)?$", re.I)
+
+
+def parse_remote(url):
+    m = REMOTE_RE.match((url or "").strip())
+    if not m:
+        return None
+    return m.group(2), m.group(3), m.group(1).lower()
+
+
+def _origin_of(directory):
+    try:
+        r = subprocess.run(["git", "-C", directory, "remote", "get-url", "origin"],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    return parse_remote(r.stdout) if r.returncode == 0 else None
+
+
+def _git_toplevel(directory):
+    try:
+        r = subprocess.run(["git", "-C", directory, "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+
+
+def _workspace_roots():
+    roots = [os.getcwd(), os.environ.get("HOME") or "", "/repo"]
+    return [r for i, r in enumerate(roots) if r and r not in roots[:i]]
+
+
+def resolve_repo(repo_arg):
+    """(owner, name, host) or raises ValueError with an agent-readable reason."""
+    if repo_arg:
+        if "/" in repo_arg and not os.path.isdir(repo_arg):
+            parsed = parse_remote(repo_arg) if ":" in repo_arg else None
+            if parsed:
+                return parsed
+            parts = repo_arg.strip("/").split("/")
+            if len(parts) == 2 and all(parts):
+                return parts[0], parts[1], "github.com"
+            raise ValueError(f"--repo {repo_arg!r} is neither a clone directory nor owner/name")
+        candidates = [repo_arg] if os.path.isdir(repo_arg) else []
+        candidates += [os.path.join(r, repo_arg) for r in _workspace_roots()]
+        for d in candidates:
+            if os.path.isdir(d):
+                parsed = _origin_of(d)
+                if parsed:
+                    return parsed
+        raise ValueError(f"--repo {repo_arg!r}: no clone with a GitHub origin found in your workspace")
+    top = _git_toplevel(os.getcwd())
+    if top:
+        parsed = _origin_of(top)
+        if parsed:
+            return parsed
+    found = []
+    for root in _workspace_roots():
+        try:
+            for entry in sorted(os.listdir(root)):
+                d = os.path.join(root, entry)
+                if os.path.isdir(os.path.join(d, ".git")):
+                    parsed = _origin_of(d)
+                    if parsed and parsed not in found:
+                        found.append(parsed)
+        except OSError:
+            continue
+    if os.path.isdir("/repo/.git"):
+        parsed = _origin_of("/repo")
+        if parsed and parsed not in found:
+            found.append(parsed)
+    if len(found) == 1:
+        return found[0]
+    if not found:
+        raise ValueError("cannot tell which repository — run inside a clone or pass --repo <name>")
+    raise ValueError("several repositories in your workspace — pass --repo <name> ("
+                     + ", ".join(f"{o}/{n}" for o, n, _ in found) + ")")
+
+
+def parse_pr_arg(raw):
+    """(number, repo-from-url-or-None)."""
+    s = (raw or "").strip()
+    m = PR_URL_RE.match(s)
+    if m:
+        return int(m.group(4)), (m.group(2), m.group(3), m.group(1).lower())
+    s = s.lstrip("#")
+    if s.isdigit() and int(s) > 0:
+        return int(s), None
+    raise ValueError(f"not a pull request number or URL: {raw!r}")
+
+
+# ---- CLI ----------------------------------------------------------------------
+
+def emit(obj, code):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+    sys.exit(code)
+
+
+def usage_error(msg):
+    sys.stderr.write(f"aee-wait-ci: {msg}\n")
+    sys.stderr.write("usage: aee-wait-ci <pr> [--repo <name>] [--timeout <minutes>] [--no-conflict-check]\n")
+    emit({"ok": False, "status": "error", "error": msg}, EXIT_USAGE)
+
+
+def parse_args(argv):
+    opts = {"pr": None, "repo": None, "timeout": DEFAULT_TIMEOUT_MIN, "conflict": True}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--repo", "--timeout"):
+            if i + 1 >= len(argv):
+                usage_error(f"{a} needs a value")
+            val = argv[i + 1]
+            i += 2
+        elif a.startswith("--repo=") or a.startswith("--timeout="):
+            a, val = a.split("=", 1)
+            i += 1
+        elif a == "--no-conflict-check":
+            opts["conflict"] = False
+            i += 1
+            continue
+        elif a == "--json":
+            i += 1
+            continue
+        elif a.startswith("-") and not a.startswith("#"):
+            usage_error(f"unknown option {a}")
+        else:
+            if opts["pr"] is not None:
+                usage_error("exactly one pull request, please")
+            opts["pr"] = a
+            i += 1
+            continue
+        if a == "--repo":
+            opts["repo"] = val
+        else:
+            try:
+                opts["timeout"] = float(val)
+            except ValueError:
+                usage_error(f"--timeout must be a number of minutes, got {val!r}")
+            if not opts["timeout"] > 0:
+                usage_error("--timeout must be greater than 0")
+    if opts["pr"] is None:
+        usage_error("missing the pull request number")
+    return opts
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        sys.stdout.write(__doc__)
+        return EXIT_OK
+    opts = parse_args(argv)
+    try:
+        number, url_repo = parse_pr_arg(opts["pr"])
+        repo = resolve_repo(opts["repo"]) if (opts["repo"] or not url_repo) else url_repo
+    except ValueError as e:
+        usage_error(str(e))
+    timeout_sec = effective_timeout_sec(opts["timeout"])
+    try:
+        interval = float(os.environ.get("AEE_WAIT_CI_INTERVAL_SEC") or DEFAULT_INTERVAL_SEC)
+    except ValueError:
+        interval = DEFAULT_INTERVAL_SEC
+    sys.stderr.write(f"aee-wait-ci: waiting up to {int(round(timeout_sec / 60))} min for "
+                     f"{repo[0]}/{repo[1]}#{number}\n")
+    res = wait_for_ci(repo, number, timeout_sec, conflict_check=opts["conflict"],
+                      interval_sec=max(0.0, interval), grace_ms=ci_grace_ms(),
+                      log=lambda m: sys.stderr.write(f"aee-wait-ci: {m}\n"))
+    if res["status"] == "error":
+        code = EXIT_UNREACHABLE if res.get("unreachable") else EXIT_ERROR
+    else:
+        code = EXIT_FOR_STATUS[res["status"]]
+    res["exitCode"] = code
+    emit(res, code)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

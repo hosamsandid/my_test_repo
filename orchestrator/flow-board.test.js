@@ -295,8 +295,10 @@ test('buildFlowBoard: a claim past the threshold with no live worker needs help,
   const b = stuck(75);
   assert.equal(b.rows[0].status, 'working');
   assert.equal(b.rows[0].stageId, 't-developer');
-  assert.deepEqual(b.rows[0].needsHuman, { reason: 'stuck — no progress, needs help', since: iso(75) });
+  const release = [{ repo: 'o/r', number: 20, kind: 'issue', claim: 'ready:wip', wake: 'ready' }];
+  assert.deepEqual(b.rows[0].needsHuman, { reason: 'stuck — no progress, needs help', since: iso(75), release });
   assert.deepEqual(b.needsHuman.map((n) => [n.id, n.reason, n.since]), [['o/r#20', 'stuck — no progress, needs help', iso(75)]]);
+  assert.deepEqual(b.needsHuman[0].release, release);
   // Inside the threshold it is still ordinary in-progress work.
   assert.equal(stuck(59).rows[0].needsHuman, null);
   assert.deepEqual(stuck(59).needsHuman, []);
@@ -312,6 +314,11 @@ test('buildFlowBoard: a stale claim alongside a re-applied wake label still need
   });
   assert.equal(b.rows[0].status, 'working');
   assert.equal(b.rows[0].needsHuman.reason, 'stuck — no progress, needs help');
+  // Re-adding a wake already present wakes nobody, so its release entry is
+  // marked for a remove-then-re-add (#2754 review).
+  assert.deepEqual(b.rows[0].needsHuman.release, [
+    { repo: 'o/r', number: 21, kind: 'issue', claim: 'ready:wip', wake: 'ready', wakePresent: true },
+  ]);
 });
 
 test('buildFlowBoard: a long claim with a running session or a live pool instance is not flagged (#2734)', () => {
@@ -353,6 +360,72 @@ test('buildFlowBoard: the needs-help flag is report-only — the claim, status a
   assert.equal(q.rows[0].needsHuman, null);
 });
 
+test('buildFlowBoard: a needs-help row lists every orphaned claim it can release, across its items (#2754)', () => {
+  const b = board({
+    github: {
+      issues: [issue(30, { labels: ['ready:wip', 'bug'], updatedAt: iso(200) })],
+      prs: [pr(60, { labels: ['ready-to-merge:wip'], updatedAt: iso(200), body: 'Closes #30\n<!-- agent: t-developer -->', closes: [30] })],
+    },
+    events: [delivered(30, 't-developer', 200)],
+  });
+  const row = b.rows.find((r) => r.id === 'o/r#30');
+  assert.equal(row.needsHuman.reason, fb.REASONS.needsHelp);
+  assert.deepEqual(row.needsHuman.release.map((r) => [r.number, r.kind, r.claim, r.wake]).sort(), [
+    [30, 'issue', 'ready:wip', 'ready'],
+    [60, 'pr', 'ready-to-merge:wip', 'ready-to-merge'],
+  ]);
+  // Other flags never carry a release list.
+  const flagged = board({ github: { issues: [issue(31, { labels: ['ready:wip', 'needs-human'], updatedAt: iso(200) })] }, events: [delivered(31, 't-developer', 200)] });
+  assert.equal(flagged.rows[0].needsHuman.reason, fb.REASONS.flagged);
+  assert.equal(flagged.rows[0].needsHuman.release, undefined);
+  assert.equal(flagged.needsHuman[0].release, undefined);
+});
+
+test('buildFlowBoard: a needs-help row offers only the claims a live consumer would pick up (#2754)', () => {
+  const offReviewer = SDLC.map((m) => (m.id === 't-reviewer' ? { ...m, enabled: false } : m));
+  const b = board({
+    members: offReviewer,
+    github: { issues: [issue(32, { labels: ['ready:wip', 'ready-for-review:wip'], updatedAt: iso(200) })] },
+    events: [delivered(32, 't-developer', 200)],
+  });
+  assert.equal(b.rows[0].needsHuman.reason, fb.REASONS.needsHelp);
+  assert.deepEqual(b.rows[0].needsHuman.release.map((r) => r.claim), ['ready:wip']);
+});
+
+test('buildFlowBoard: a wake whose only consumer is switched off reads as "nobody picks it up", not stuck or queued (#2754)', () => {
+  assert.equal(fb.REASONS.noConsumer, 'nobody picks it up — its agent is switched off');
+  const offDev = SDLC.map((m) => (m.id === 't-developer' ? { ...m, enabled: false } : m));
+  // A queued wake for a disabled agent.
+  const q = board({ members: offDev, github: { issues: [issue(40, { labels: ['ready'], updatedAt: iso(20) })] } });
+  assert.equal(q.rows[0].status, 'queued');
+  assert.deepEqual(q.rows[0].needsHuman, { reason: fb.REASONS.noConsumer, since: iso(20) });
+  // An orphaned claim for a disabled agent: releasing it would wake nobody.
+  const c = board({ members: offDev, github: { issues: [issue(41, { labels: ['ready:wip'], updatedAt: iso(200) })] }, events: [delivered(41, 't-developer', 200)] });
+  assert.equal(c.rows[0].needsHuman.reason, fb.REASONS.noConsumer);
+  assert.equal(c.rows[0].needsHuman.release, undefined);
+  // The consumer's only trigger on that label switched off counts too.
+  const offTrig = SDLC.map((m) => (m.id === 't-reviewer' ? { ...m, triggers: [trig('ready-for-review', { enabled: false })] } : m));
+  const t = board({ members: offTrig, github: { issues: [issue(42, { labels: ['ready-for-review'], updatedAt: iso(20) })] }, events: [delivered(42, 't-developer', 30)] });
+  assert.equal(t.rows[0].needsHuman.reason, fb.REASONS.noConsumer);
+  // Enabled consumers: ordinary queued work, no flag.
+  const ok = board({ github: { issues: [issue(43, { labels: ['ready'], updatedAt: iso(20) })] } });
+  assert.equal(ok.rows[0].needsHuman, null);
+});
+
+test('buildFlowBoard: one live consumer on the row keeps it off the "nobody picks it up" flag (#2754)', () => {
+  const offDev = SDLC.map((m) => (m.id === 't-developer' ? { ...m, enabled: false } : m));
+  // `ready` is dead, but `ready-for-review` still wakes the enabled reviewer.
+  const b = board({ members: offDev, github: { issues: [issue(44, { labels: ['ready', 'ready-for-review'], updatedAt: iso(20) })] } });
+  assert.equal(b.rows[0].needsHuman, null);
+  // A running session for the item is live work regardless.
+  const s = board({
+    members: offDev,
+    github: { issues: [issue(45, { labels: ['ready:wip'], updatedAt: iso(200) })] },
+    sessions: [{ agentId: 't-developer', session: { id: 's', startedAt: iso(5), workItem: { repo: 'o/r', kind: 'issue', number: 45 } } }],
+  });
+  assert.equal(s.rows[0].needsHuman, null);
+});
+
 test('buildFlowBoard: a label handed to a person reads as waiting for approval', () => {
   const members = [...KITCHEN, { id: 'k-host', displayName: 'Host', emits: ['guest-sign-off'], triggers: [trig('dish-approved')] }];
   const b = fb.buildFlowBoard({
@@ -387,6 +460,20 @@ test('buildFlowBoard: pools report busy of capacity, state and held work', () =>
   );
   // The pool instance's own item links the session when the run carries none.
   assert.equal(b.sessions[0].issue.number, 12);
+});
+
+test('#2789 buildFlowBoard: pools count idle instances waiting on a PR apart from busy ones', () => {
+  const b = board({
+    github: { issues: [issue(12)] },
+    sessions: [{ agentId: 't-developer-i12', session: { id: 's', startedAt: iso(3) } }],
+    pools: [{ agentId: 't-developer', roleId: 'developer', maxInstances: 3,
+      instances: [
+        { instanceId: 't-developer-i12', waiting: true, prs: [40] }, // working again — active, not waiting
+        { instanceId: 't-developer-i13', waiting: true, prs: [41] },
+        { instanceId: 't-developer-i14' },
+      ] }],
+  });
+  assert.deepEqual({ busy: b.pools[0].busy, waiting: b.pools[0].waiting, live: b.pools[0].live }, { busy: 1, waiting: 1, live: 3 });
 });
 
 // ---------------------------------------------------------------------------
@@ -523,4 +610,26 @@ test('eventIdFromCorrelation / markerAgents / checksState', () => {
   assert.equal(fb.checksState('PENDING'), 'pending');
   assert.equal(fb.checksState('SUCCESS'), 'passing');
   assert.equal(fb.checksState(null), null);
+});
+
+test('buildFlowBoard: a PR hand-off held by its CI / conflict gate shows what it waits for on the row (#2795)', () => {
+  const ev = delivered(7, 't-developer-i7', 90);
+  const base = {
+    github: { issues: [issue(7)], prs: [pr(70, { labels: ['ready-for-review'] })] },
+    events: [ev],
+    prRecords: [{ kind: 'pr-created', agentId: 't-developer-i7', repo: 'o/r', prNumber: 70, correlationId: `trigger:t:gh:${ev.eventId}`, ts: iso(60) }],
+  };
+  const b = board({
+    ...base,
+    gateHolds: [
+      { repo: 'o/r', number: 70, agentId: 't-reviewer', waitingFor: ['conflict'], heldAt: iso(5) },
+      { repo: 'o/r', number: 70, agentId: 't-security', waitingFor: ['ci'], heldAt: iso(8) },
+      { repo: 'o/r', number: 99, agentId: 't-reviewer', waitingFor: ['ci'], heldAt: iso(1) }, // not on the board
+      { repo: 'o/r', number: 'x' },
+    ],
+  });
+  const row = b.rows.find((r) => r.id === 'o/r#7');
+  assert.deepEqual(row.gateHold, { number: 70, waitingFor: ['ci', 'conflict'], since: iso(8), agentIds: ['t-reviewer', 't-security'] });
+  // No hold → null, as before.
+  assert.equal(board(base).rows.find((r) => r.id === 'o/r#7').gateHold, null);
 });

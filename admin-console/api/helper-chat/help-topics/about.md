@@ -61,8 +61,9 @@ nothing away.
 Consequences worth knowing:
 
 - **Only humans are listed.** Commits authored by this stack's own agents are
-  filtered out by their internal, non-routable e-mail domains (`…@agents.local`,
-  `…@agent`, `…@local`) and by a `[bot]` marker in the name.
+  filtered out by their internal, non-routable e-mail domains (any `.local`
+  domain such as `…@agents.local` or `…@agent-studio.local`, its `.local.test`
+  variant, and a bare `…@agent`) and by a `[bot]` marker in the name.
 - **Identities are merged.** The same person committing under several e-mail
   addresses or name spellings collapses into one entry, and the spelling shown is
   the most complete one found — a full name with a space wins over a login-style
@@ -100,7 +101,10 @@ Help is in the panel you are reading:
   header **Help** button or the small **?** next to a page's title.
 - **Ask** — free-text questions, answered with the current page's help topic and
   the platform documentation as grounding. Use it when the curated page has not
-  answered you.
+  answered you. If no answer can be produced, the reply says why — for example
+  that no model provider is configured — so you know whether to retry or to fix
+  the setup first. While an answer is running, **Send** turns into **Stop**,
+  which cancels it and frees the composer.
 - **Tour** — a guided walk-through of the console for a first-time user.
 - **← Overview** — the big picture of the core concepts, from any page.
 

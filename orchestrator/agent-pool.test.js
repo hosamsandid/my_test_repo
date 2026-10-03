@@ -422,3 +422,96 @@ test('isArchivableSessionPath: the filter really drops the pointer from an fs.cp
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('itemKeyFromInstanceId inverts poolInstanceId for its own role only (#2760)', () => {
+  const id = pool.poolInstanceId('t', 'developer', 42);
+  assert.equal(pool.itemKeyFromInstanceId(id, 't-developer'), '42');
+  assert.equal(pool.itemKeyFromInstanceId(id, 't-reviewer'), null);
+  assert.equal(pool.itemKeyFromInstanceId('t-developer-i', 't-developer'), null);
+  assert.equal(pool.itemKeyFromInstanceId(null, 't-developer'), null);
+});
+
+// ─── #2789: instances waiting on an open PR ───────────────────────────────────
+
+const pr = (number, body = '', ref = 'feat/x', state = 'open') => ({ number, body, state, head: { ref } });
+
+test('#2789 prItemKey: closes #N names the item, else the PR is its own item', () => {
+  assert.equal(pool.prItemKey(pr(50, 'Closes #12')), 12);
+  assert.equal(pool.prItemKey(pr(50, 'no link')), 50);
+  assert.equal(pool.prItemKey(pr(50, '', 'issue-7')), 7);
+});
+
+test('#2789 linkedOpenPrs: PRs closing the item or the item itself; every open one, sorted; closed ones ignored', () => {
+  const prs = [pr(60, 'Fixes #12'), pr(51, 'Closes #12'), pr(70, 'Closes #13'), pr(12), pr(80, 'Closes #12', 'x', 'closed')];
+  assert.deepEqual(pool.linkedOpenPrs(prs, 12), [12, 51, 60]);
+  assert.deepEqual(pool.linkedOpenPrs(prs, 99), []);
+  assert.deepEqual(pool.linkedOpenPrs(null, 12), []);
+});
+
+test('#2789 nextWaitRecord: idle with an open linked PR waits; the wait clock starts', () => {
+  const r = pool.nextWaitRecord(null, { spawnedAt: 'S', idle: true, lookup: { ok: true, prs: [5] } }, 1000);
+  assert.equal(r.waiting, true);
+  assert.deepEqual(r.prs, [5]);
+  assert.equal(r.waitingSince, new Date(1000).toISOString());
+});
+
+test('#2789 nextWaitRecord: AC7 — idle with no open PR does not wait; a busy instance never waits', () => {
+  assert.equal(pool.nextWaitRecord(null, { spawnedAt: 'S', idle: true, lookup: { ok: true, prs: [] } }, 0).waiting, false);
+  assert.equal(pool.nextWaitRecord(null, { spawnedAt: 'S', idle: false, lookup: null }, 0).waiting, false,
+    'edge case: a PR opened mid-run waits only once the run is over');
+});
+
+test('#2789 nextWaitRecord: AC10 — GitHub unreachable keeps the instance waiting, with the last PRs known', () => {
+  const prev = pool.nextWaitRecord(null, { spawnedAt: 'S', idle: true, lookup: { ok: true, prs: [5] } }, 0);
+  const r = pool.nextWaitRecord(prev, { spawnedAt: 'S', idle: true, lookup: { ok: false } }, 1000);
+  assert.equal(r.waiting, true);
+  assert.equal(r.unknown, true);
+  assert.deepEqual(r.prs, [5]);
+  assert.equal(pool.waitJustEnded(prev, r, true), false);
+  const fresh = pool.nextWaitRecord(null, { spawnedAt: 'S', idle: true, lookup: { ok: false } }, 0);
+  assert.equal(fresh.waiting, true, 'unknown counts as waiting even before a first successful check');
+});
+
+test('#2789 waitJustEnded: AC6 — the last linked PR closed on an idle instance ends the wait for an immediate reap', () => {
+  const prev = pool.nextWaitRecord(null, { spawnedAt: 'S', idle: true, lookup: { ok: true, prs: [5, 6] } }, 0);
+  const still = pool.nextWaitRecord(prev, { spawnedAt: 'S', idle: true, lookup: { ok: true, prs: [6] } }, 1);
+  assert.equal(still.waiting, true, 'edge case: several PRs — waits while any is open');
+  assert.equal(pool.waitJustEnded(prev, still, true), false);
+  const done = pool.nextWaitRecord(still, { spawnedAt: 'S', idle: true, lookup: { ok: true, prs: [] } }, 2);
+  assert.equal(pool.waitJustEnded(still, done, true), true);
+  assert.equal(pool.waitJustEnded(null, done, true), false, 'never waited — the plain idle reap decides (AC7)');
+});
+
+test('#2789 AC2: waited time is taken off the hard timeout', () => {
+  const prev = pool.nextWaitRecord(null, { spawnedAt: 'S', idle: true, lookup: { ok: true, prs: [5] } }, 1000);
+  assert.equal(pool.waitedMsSoFar(prev, 6000), 5000, 'the open wait counts while it lasts');
+  const working = pool.endWait(prev, 9000);
+  assert.equal(working.waiting, false);
+  assert.equal(working.waitedMs, 8000);
+  assert.equal(pool.waitedMsSoFar(working, 20000), 8000, 'the clock stops once the instance works again');
+  const spawnedAt = new Date(0).toISOString();
+  assert.equal(pool.isInstanceTimedOut({ spawnedAt, maxRuntimeMs: 10000 }, 15000), true);
+  assert.equal(pool.isInstanceTimedOut({ spawnedAt, maxRuntimeMs: 10000, waitedMs: 8000 }, 15000), false);
+  assert.equal(pool.isInstanceTimedOut({ spawnedAt, maxRuntimeMs: 10000, waitedMs: 8000 }, 18000), true);
+});
+
+test('#2789 normalizeWaitRecord: a record from an earlier spawn of the same instance id is ignored', () => {
+  assert.equal(pool.normalizeWaitRecord({ spawnedAt: 'OLD', waiting: true }, 'NEW'), null);
+  assert.equal(pool.normalizeWaitRecord({ spawnedAt: 'NEW', waiting: true }, 'NEW').waiting, true);
+  assert.deepEqual(pool.normalizePoolWaiting({ a: { waiting: true, prs: [1, 'x', -2] }, b: null }), {
+    a: { spawnedAt: null, waiting: true, prs: [1], unknown: false, waitingSince: null, waitedMs: 0, checkedAt: null },
+  });
+  assert.deepEqual(pool.normalizePoolWaiting([1]), {});
+});
+
+test('#2789 planPoolDispatch: AC4 — waiting instances do not count toward maxInstances', () => {
+  const P = { enabled: true, maxInstances: 3 };
+  const ids = ['t-developer-i1', 't-developer-i2', 't-developer-i3'];
+  const blocked = pool.planPoolDispatch({ teamId: 't', roleId: 'developer', pool: P, itemKey: 9, existingInstanceIds: ids });
+  assert.notEqual(blocked.action, 'spawn');
+  const spawned = pool.planPoolDispatch({ teamId: 't', roleId: 'developer', pool: P, itemKey: 9, existingInstanceIds: ids, waitingInstanceIds: ids });
+  assert.equal(spawned.action, 'spawn');
+  // AC5: the item's own instance is reused even at the cap.
+  const reuse = pool.planPoolDispatch({ teamId: 't', roleId: 'developer', pool: P, itemKey: 2, existingInstanceIds: ids });
+  assert.equal(reuse.instanceId, 't-developer-i2');
+});

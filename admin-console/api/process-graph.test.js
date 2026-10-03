@@ -1706,3 +1706,140 @@ test('lint: label-target-mismatch accepts a listener subscribed to both labeled 
   const g = buildProcessGraph([merger([{ type: 'setLabel', label: 'x', target: 'pr' }]), both]);
   assert.equal(mismatches(g).length, 0);
 });
+
+// ── #2716: registry entries no flow element references are reported unused ──
+
+test('#2716 unusedLabels lists only registry entries no flow element references', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', role: 'agent', emits: ['ready-for-review'], triggers: [
+      { id: 'dev-t', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' },
+    ] },
+    { id: 'rev', role: 'agent', triggers: [], channels: [
+      { artifact: 'pr', from: 'dev', label: 'ready-for-review' },
+      { artifact: 'issue', from: 'dev', label: 'needs-approval', gate: 'human' },
+    ] },
+    withOutcomes('merger', 'exactlyOne', [{ id: 'ok', actions: [{ type: 'setLabel', label: 'merged' }] }]),
+  ], {
+    labels: [
+      { name: 'ready', humanGate: true },          // trigger labelFilter
+      { name: 'ready-for-review' },                 // emit + channel port
+      { name: 'needs-approval' },                   // inline channel gate only
+      { name: 'merged' },                           // outcome setLabel
+      { name: 'old-jvc', humanGate: true },         // nothing
+      { name: '  stale  ', brake: true },           // nothing, padded
+      { name: 'human-only' },                       // human-role emit
+      { name: 'human-brake' },                      // human-role consume
+    ],
+    humans: [{ id: 'po', emits: ['human-only'], consumes: [{ label: 'human-brake' }] }],
+  });
+  assert.deepEqual(g.unusedLabels, ['old-jvc', 'stale']);
+  // The registry seed still keeps unused entries (and their flags) in graph.labels (#928).
+  assert.deepEqual(g.labels.find(l => l.name === 'old-jvc'), { name: 'old-jvc', humanGate: true, brake: false });
+  assert.ok(g.labels.some(l => l.name === 'stale'));
+});
+
+test('#2716 unusedLabels is empty without a registry and never lists referenced-only labels', () => {
+  const g = buildProcessGraph([{ id: 'dev', role: 'agent', emits: ['x'], triggers: [] }]);
+  assert.deepEqual(g.unusedLabels, []);
+  assert.ok(g.labels.some(l => l.name === 'x'));
+});
+
+test('#2716 a label becomes unused once its last reference is removed', () => {
+  const registry = { labels: [{ name: 'handoff', brake: true }] };
+  const used = buildProcessGraph([{ id: 'a', role: 'agent', emits: ['handoff'], triggers: [] }], registry);
+  assert.deepEqual(used.unusedLabels, []);
+  const unused = buildProcessGraph([{ id: 'a', role: 'agent', emits: [], triggers: [] }], registry);
+  assert.deepEqual(unused.unusedLabels, ['handoff']);
+});
+
+test('#2716 a registry human gate set by an outcome setLabel is in use (not unused)', () => {
+  const g = buildProcessGraph([
+    withOutcomes('a', 'exactlyOne', [{ id: 'ok', actions: [{ type: 'setLabel', label: ' approved ' }] }]),
+  ], { labels: [{ name: 'approved', humanGate: true }] });
+  assert.deepEqual(g.unusedLabels, []);
+  // The gate stays out of the emit projection — the lint still reports it.
+  assert.ok(g.lints.some(l => l.code === 'human-label-as-outcome'));
+});
+
+// #2754: a wake label whose every listener is switched off.
+function labelHandoffGraph({ dev = {}, rev = {}, revTrigger = {} } = {}) {
+  return buildProcessGraph([
+    { id: 'dev', displayName: 'Developer', emits: ['ready-for-review'],
+      triggers: [{ id: 'd', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' }], ...dev },
+    { id: 'rev', displayName: 'Reviewer',
+      triggers: [{ id: 'r', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review', ...revTrigger }], ...rev },
+  ]);
+}
+
+test('#2754: wake-label-no-live-consumer fires when the only consumer agent is switched off', () => {
+  const g = labelHandoffGraph({ rev: { enabled: false } });
+  const l = g.lints.filter(x => x.code === 'wake-label-no-live-consumer');
+  assert.equal(l.length, 1);
+  assert.equal(l[0].severity, 'warning');
+  assert.equal(l[0].label, 'ready-for-review');
+  assert.equal(l[0].nodeId, 'rev');
+  assert.match(l[0].message, /switched off/);
+  // Distinct from the "no consumer at all" lints — those are not raised here.
+  assert.ok(!lintCodes(g).includes('dead-end-emitter'));
+  // The node carries the flag; an enabled node does not carry the key at all.
+  assert.equal(g.nodes.find(n => n.id === 'rev').enabled, false);
+  assert.ok(!('enabled' in g.nodes.find(n => n.id === 'dev')));
+});
+
+test('#2754: wake-label-no-live-consumer fires when the consumer\'s trigger on that label is switched off', () => {
+  const g = labelHandoffGraph({ revTrigger: { enabled: false } });
+  assert.deepEqual(g.lints.filter(x => x.code === 'wake-label-no-live-consumer').map(x => x.label), ['ready-for-review']);
+});
+
+test('#2754: one live listener clears wake-label-no-live-consumer; enabled flows raise none', () => {
+  assert.ok(!lintCodes(labelHandoffGraph()).includes('wake-label-no-live-consumer'));
+  const g = buildProcessGraph([
+    { id: 'dev', emits: ['ready-for-review'], triggers: [] },
+    { id: 'rev', enabled: false, triggers: [{ id: 'r', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review' }] },
+    { id: 'rev2', triggers: [{ id: 'r', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review' }] },
+  ]);
+  assert.ok(!lintCodes(g).includes('wake-label-no-live-consumer'));
+});
+
+// ── #2795: hand-off readiness gate ────────────────────────────────────────
+
+test('#2795: gate-failure-label-unheard warns when nothing listens on the failure label', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', github: { producesPr: true }, emits: ['ready-for-review'], triggers: [] },
+    {
+      id: 'rev',
+      channels: [{ artifact: 'pr', from: 'dev', label: 'ready-for-review', readiness: { ci: true, conflict: true } }],
+      triggers: [],
+    },
+  ]);
+  const l = g.lints.filter(x => x.code === 'gate-failure-label-unheard');
+  assert.equal(l.length, 1);
+  assert.equal(l[0].severity, 'warning');
+  assert.equal(l[0].label, 'revisions-required');
+  assert.equal(l[0].nodeId, 'rev');
+});
+
+test('#2795: a listener on the failure label clears the lint and is wired from the gated consumer, not an orphan', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', github: { producesPr: true }, emits: ['ready-for-review'], triggers: [] },
+    {
+      id: 'merger',
+      triggers: [{
+        id: 'm', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-to-merge',
+        readinessGate: { ci: true, conflict: false, failureLabel: 'fix-ci' },
+      }],
+    },
+    { id: 'fixer', triggers: [{ id: 'f', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'fix-ci' }] },
+  ]);
+  const codes = lintCodes(g);
+  assert.ok(!codes.includes('gate-failure-label-unheard'));
+  assert.ok(!g.lints.some(x => x.code === 'orphan-listener' && x.label === 'fix-ci'));
+  const e = g.edges.find(x => x.label === 'fix-ci');
+  assert.equal(e.from, 'merger');
+  assert.equal(e.to, 'fixer');
+  assert.equal(e.gateFailure, true);
+});
+
+test('#2795: an ungated flow raises no gate lint', () => {
+  assert.ok(!lintCodes(labelHandoffGraph()).includes('gate-failure-label-unheard'));
+});

@@ -10,6 +10,10 @@ import {
   since,
   updatedAgo,
   itemRef,
+  issueCell,
+  prEmptyCell,
+  NO_PR_TEXT,
+  NO_ISSUE_TEXT,
   rowView,
   doneTitle,
   sessionView,
@@ -27,6 +31,9 @@ import {
   configFromForm,
   REMOVE_CONFIRM_TEXT,
   removeDialogTitle,
+  RELEASE_CONFIRM_TEXT,
+  releaseDialogTitle,
+  releaseNotice,
   removedView,
   withoutRows,
   instanceOf,
@@ -96,7 +103,7 @@ test('itemRef: short on a single-repo board, qualified across repos', () => {
 test('rowView: one row carries the issue and its PRs, the current stage and time in stage', () => {
   const v = rowView(row(), STAGES, { now: NOW });
   assert.equal(v.ref, '#7');
-  assert.deepEqual(v.prs.map((p) => p.label), ['PR #70']);
+  assert.deepEqual(v.prs.map((p) => p.text), ['#70']);
   assert.equal(v.stageLabel, 'Code Reviewer');
   assert.equal(v.inStage, '1h 15m');
   assert.deepEqual(v.steps.map((s) => s.state), ['past', 'past', 'current', 'future']);
@@ -106,8 +113,76 @@ test('rowView: one row carries the issue and its PRs, the current stage and time
 test('rowView: a PR-only row has no issue ref; a done row marks every step past', () => {
   const pr = rowView(row({ issue: null, stageId: 'done', stageIndex: 3, status: 'done', done: true }), STAGES, { now: NOW });
   assert.equal(pr.ref, '');
-  assert.equal(pr.issueUrl, null);
+  assert.equal(pr.issue.url, null);
   assert.ok(pr.steps.every((s) => s.state === 'past'));
+});
+
+// ── #2800: leading Issue and Pull request columns ──────────────────────────
+
+test('rowView #2800: issue only — issue linked, neutral "no PR yet" placeholder (AC2, AC5)', () => {
+  const v = rowView(row({ prs: [] }), STAGES, { now: NOW });
+  assert.deepEqual(v.issue, { text: '#7', url: 'https://gh/o/r/issues/7', title: '', empty: null });
+  assert.deepEqual(v.prs, []);
+  assert.deepEqual(v.prEmpty, { text: '—', title: 'No pull request yet', empty: 'pending' });
+  assert.equal(NO_PR_TEXT, 'No pull request yet');
+});
+
+test('rowView #2800: issue + one PR — bare number without the "PR" prefix, linked (AC3)', () => {
+  const v = rowView(row(), STAGES, { now: NOW });
+  assert.equal(v.issue.text, '#7');
+  assert.equal(v.prEmpty, null);
+  assert.deepEqual(v.prs, [{ key: 'o/r#70', text: '#70', url: 'https://gh/o/r/pull/70', state: 'open', struck: false }]);
+});
+
+test('rowView #2800: several PRs — one entry each, backend order, merged/closed cues kept (AC3)', () => {
+  const v = rowView(row({
+    prs: [
+      { repo: 'o/r', number: 72, url: 'u72', state: 'open' },
+      { repo: 'o/r', number: 70, url: 'u70', state: 'closed' },
+      { repo: 'o/r', number: 71, url: 'u71', state: 'merged' },
+      { repo: 'o/r', number: 73 },
+    ],
+  }), STAGES, { now: NOW });
+  assert.deepEqual(v.prs.map((p) => p.text), ['#72', '#70', '#71 (merged)', '#73']);
+  assert.deepEqual(v.prs.map((p) => p.struck), [false, true, false, false]);
+  assert.deepEqual(v.prs.map((p) => p.state), ['open', 'closed', 'merged', 'open']);
+  assert.equal(v.prs[3].url, null);
+  assert.ok(v.prs.every((p) => !p.text.startsWith('PR')));
+});
+
+test('rowView #2800: PR only — warning placeholder "No linked issue", distinct from the empty-PR one (AC6)', () => {
+  const v = rowView(row({ issue: null }), STAGES, { now: NOW });
+  assert.deepEqual(v.issue, { text: '—', url: null, title: 'No linked issue', empty: 'missing' });
+  assert.equal(NO_ISSUE_TEXT, 'No linked issue');
+  assert.deepEqual(v.prs.map((p) => p.text), ['#70']);
+  assert.notEqual(v.issue.empty, prEmptyCell([]).empty);
+  assert.notEqual(v.issue.title, prEmptyCell([]).title);
+});
+
+test('rowView #2800: multi-repo board — full owner/repo#N refs in both columns (AC2, AC3)', () => {
+  const v = rowView(row({
+    prs: [{ repo: 'o/other', number: 9, url: 'u9', state: 'merged' }],
+  }), STAGES, { now: NOW, singleRepo: false });
+  assert.equal(v.issue.text, 'o/r#7');
+  assert.deepEqual(v.prs.map((p) => p.text), ['o/other#9 (merged)']);
+  assert.equal(v.ref, 'o/r#7');
+});
+
+test('issueCell #2800: falls back to the row url when the issue carries none', () => {
+  assert.equal(issueCell({ repo: 'o/r', number: 7 }, 'https://row', true).url, 'https://row');
+  assert.equal(issueCell({ repo: 'o/r', number: 7 }, null, true).url, null);
+  assert.equal(prEmptyCell(undefined).title, 'No pull request yet');
+});
+
+test('BoardTable #2800: Issue · Pull request lead the columns; the title cell carries no number line (#651 source guard)', () => {
+  const jsx = fs.readFileSync(path.join(here, '..', 'FlowControl.jsx'), 'utf8');
+  const head = jsx.slice(jsx.indexOf('function BoardTable'), jsx.indexOf('function BoardRow'));
+  const order = ['>Issue<', '>Pull request<', '>Work item<', '>Progress<', '>Stage<', '>In stage<'].map((h) => head.indexOf(h));
+  assert.ok(order.every((i) => i > 0), `all headers present: ${order}`);
+  assert.deepEqual([...order].sort((a, b) => a - b), order);
+  const body = jsx.slice(jsx.indexOf('function BoardRow'), jsx.indexOf('function StageProgress'));
+  assert.doesNotMatch(body, /row\.ref|issueUrl|p\.label/);
+  assert.match(jsx, /const numberCellStyle = \{ \.\.\.cellStyle, whiteSpace: 'nowrap'/);
 });
 
 // ── #2643: time since completion on done rows ─────────────────────────────────
@@ -334,6 +409,14 @@ test('poolView: Paused differs from Draining — it resumes, it never switches o
   assert.deepEqual(v.actions.map((a) => a.label), ['Resume']);
 });
 
+test('#2789 poolView: instances waiting on a PR are named apart — "on a PR", never confused with held work', () => {
+  const v = poolView({ roleId: 'developer', busy: 2, capacity: 3, state: 'running', waiting: 4 });
+  assert.equal(v.occupancy, '2 of 3 busy · 4 waiting on a PR');
+  const d = poolView({ roleId: 'developer', busy: 0, capacity: 3, state: 'draining', waiting: 1, held: 2 });
+  assert.equal(d.stateText, 'Draining, 0 still running · 1 waiting on a PR · 2 waiting');
+  assert.match(POOL_ACTION_TOOLTIPS.drain, /waiting on an open pull request/, 'AC8: the drain says it waits for them');
+});
+
 // ── AC14: tooltips a newcomer understands, and the help topic agrees ───────
 
 test('each Pause/Drain/Resume/Switch-on tooltip says what happens to running work, new work, and how to undo', () => {
@@ -502,4 +585,48 @@ test('configFormRows / configFromForm: round-trip rename, merge, hide and retent
   });
   assert.equal(configFromForm([], 'x').doneRetentionHours, 24);
   assert.deepEqual(configFromForm([{ id: 'a', mergeInto: 'a' }], 24).stages, {}, 'merging into itself is no merge');
+});
+
+test('needsYouView: a stuck row carries its releasable claims; other rows carry none (#2754)', () => {
+  const v = needsYouView({
+    id: 'o/r#7', title: 'Fix', issue: { repo: 'o/r', number: 7 }, prs: [], reason: 'stuck — no progress, needs help', since: ago(75),
+    release: [
+      { repo: 'o/r', number: 7, kind: 'issue', claim: 'ready:wip', wake: 'ready' },
+      { repo: 'o/r', number: 61, kind: 'pr', claim: 'ready-to-merge:wip', wake: 'ready-to-merge' },
+      { repo: 'o/r', number: 8, kind: 'issue' },
+    ],
+  }, { now: NOW });
+  assert.deepEqual(v.release, [
+    { ref: '#7', claim: 'ready:wip', wake: 'ready', text: 'ready:wip → ready' },
+    { ref: 'PR #61', claim: 'ready-to-merge:wip', wake: 'ready-to-merge', text: 'ready-to-merge:wip → ready-to-merge' },
+  ]);
+  const plain = needsYouView({ id: 'o/r#61', title: 'Fix', issue: null, prs: [{ repo: 'o/r', number: 61 }], reason: 'conflict with base', since: ago(130) }, { now: NOW });
+  assert.deepEqual(plain.release, []);
+});
+
+test('release dialog copy says what changes on GitHub (#2754)', () => {
+  assert.equal(releaseDialogTitle('#7'), 'Release the claim on #7?');
+  assert.equal(releaseDialogTitle(''), 'Release this claim?');
+  assert.match(RELEASE_CONFIRM_TEXT, /wake label/);
+  assert.match(RELEASE_CONFIRM_TEXT, /next poll/);
+});
+
+test('a successful release leaves a notice saying what happens next (#2754)', () => {
+  assert.equal(releaseNotice({ released: 1 }, '#7'), 'Claim released on #7 — its agent picks it up on the next poll (within about a minute).');
+  assert.equal(releaseNotice({ released: 2 }, ''), '2 claims released — its agent picks it up on the next poll (within about a minute).');
+  assert.equal(releaseNotice({ released: 0 }, '#7'), null);
+  assert.equal(releaseNotice(null, '#7'), null);
+});
+
+test('#2795: a PR held by its hand-off gate shows "waiting for CI" on the row', () => {
+  const held = rowView(row({ gateHold: { number: 41, waitingFor: ['ci', 'conflict'], since: ago(10), agentIds: ['rev'] } }), STAGES, { now: NOW });
+  assert.equal(held.gateText, 'waiting for CI / conflict-free');
+  assert.match(held.gateTitle, /^PR #41's hand-off is held until the PR is green and conflict-free \(held 10m\)/);
+  assert.equal(rowView(row({ gateHold: { number: 41, waitingFor: ['ci'] } }), STAGES, { now: NOW }).gateText, 'waiting for CI');
+  assert.equal(rowView(row({ gateHold: { number: 41, waitingFor: [] } }), STAGES, { now: NOW }).gateText, 'hand-off gate resolving');
+  const free = rowView(row(), STAGES, { now: NOW });
+  assert.equal(free.gateText, '');
+  assert.equal(free.gateTitle, '');
+  const jsx = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'FlowControl.jsx'), 'utf8');
+  assert.match(jsx, /\{row\.gateText && <div style=\{mutedStyle\} title=\{row\.gateTitle\}>⏳ \{row\.gateText\}<\/div>\}/);
 });

@@ -356,6 +356,20 @@ test('describeAuthz: chatNotifyOnBack surfaces the caller\'s own opt-in, off by 
   assert.equal(stranger.chatNotifyOnBack, false);
 });
 
+test('describeAuthz: chatListFilter surfaces the caller\'s own saved rail selection, null when never saved (#2740)', () => {
+  const users = [
+    { id: 'u-a', subject: 'alice@corp.com', chatListFilter: { hidden: ['team:x', 'singles'] } },
+    { id: 'u-b', subject: 'bob@corp.com' },
+  ];
+  const alice = describeAuthz({ username: 'alice@corp.com', users, memberships: [] });
+  assert.deepEqual(alice.chatListFilter, { hidden: ['team:x', 'singles'] });
+  const bob = describeAuthz({ username: 'bob@corp.com', users, memberships: [] });
+  assert.equal(bob.chatListFilter, null);
+  // Never another user's selection: an unknown subject gets none.
+  const stranger = describeAuthz({ username: 'nobody@corp.com', users, memberships: [] });
+  assert.equal(stranger.chatListFilter, null);
+});
+
 test('describeAuthz: a record with no stored preference gets the 12px default (#1437)', () => {
   // The seeded administrator is such a record — and, unlike the recordless env
   // admin it replaced, its preference now actually persists (#2059 AC6).

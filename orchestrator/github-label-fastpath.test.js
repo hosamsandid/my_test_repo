@@ -185,3 +185,21 @@ test('#2151: buildPendingEntry stamps wakeLabel null when the synthesized event 
   });
   assert.equal(entry.wakeLabel, null);
 });
+
+test('match: a gated PR trigger carries its normalized readinessGate; issue and ungated listeners do not (#2795 review B2)', () => {
+  const agents = [{
+    agentId: 'rev', enabled: true,
+    triggers: [
+      { id: 't-gated', type: 'github-event', repo: 'org/repo', events: ['pull_request.labeled'], labelFilter: 'ready-for-review', readinessGate: { ci: true } },
+      { id: 't-off', type: 'github-event', repo: 'org/repo', events: ['pull_request.labeled'], labelFilter: 'ready-for-review', readinessGate: { ci: false, conflict: false } },
+      { id: 't-iss', type: 'github-event', repo: 'org/repo', events: ['issues.labeled'], labelFilter: 'ready-for-review', readinessGate: { ci: true } },
+    ],
+  }];
+  assert.deepEqual(matchPollerListeners({ repo: 'org/repo', label: 'ready-for-review', kind: 'pr' }, agents), [
+    { agentId: 'rev', triggerId: 't-gated', readinessGate: { ci: true, conflict: false, failureLabel: 'revisions-required', timeoutMinutes: 60 } },
+    { agentId: 'rev', triggerId: 't-off' },
+  ]);
+  assert.deepEqual(matchPollerListeners({ repo: 'org/repo', label: 'ready-for-review', kind: 'issue' }, agents), [
+    { agentId: 'rev', triggerId: 't-iss' },
+  ]);
+});

@@ -8,6 +8,7 @@ import {
   buildTeamMenu,
   isChatOpenable,
   deleteDialogCopy,
+  lastMemberDeleteNote,
   cascadeResidueNotice,
   NO_RIGHTS_HINT,
   TEAM_LOCKED_HINT,
@@ -343,6 +344,29 @@ test('#1964 — a team is the only cascading delete confirm', () => {
   });
   assert.deepEqual(orch, { title: 'Delete agent?', confirmLabel: 'Delete', maxWidth: 440 });
   assert.doesNotMatch(orch.confirmLabel, /mission/i);
+});
+
+test('#2685 — the last member\'s delete confirm names what happens to its team', () => {
+  const last = {
+    role: 'team-member', id: 'ada', displayName: 'Ada',
+    lastMemberOf: { id: 'ada-team', displayName: 'Ada Team', canManage: true },
+  };
+  assert.match(lastMemberDeleteNote(last, true), /last member of the team "Ada Team"/);
+  assert.match(lastMemberDeleteNote(last, true), /team is deleted with it/);
+  assert.match(lastMemberDeleteNote(last, false), /team stays, with no members/);
+  assert.deepEqual(deleteDialogCopy(last, { deleteTeamToo: true }),
+    { title: 'Delete agent?', confirmLabel: 'Delete agent and team', maxWidth: 440 });
+  assert.equal(deleteDialogCopy(last, { deleteTeamToo: false }).confirmLabel, 'Delete');
+
+  // Without the right to delete the team it always stays — and the button
+  // never promises otherwise.
+  const locked = { ...last, lastMemberOf: { ...last.lastMemberOf, canManage: false } };
+  assert.match(lastMemberDeleteNote(locked, true), /team stays, with no members/);
+  assert.equal(deleteDialogCopy(locked, { deleteTeamToo: true }).confirmLabel, 'Delete');
+
+  // Any other target keeps the plain confirm.
+  assert.equal(lastMemberDeleteNote({ role: 'team-member', id: 'x' }, true), null);
+  assert.equal(deleteDialogCopy({ role: 'team-member', id: 'x' }, { deleteTeamToo: true }).confirmLabel, 'Delete');
 });
 
 /* ── cascadeResidueNotice (#1960) ────────────────────────────────────────── */

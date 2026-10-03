@@ -74,7 +74,7 @@ export default function PluginGrantPicker({
             <>
               {row.description && <div>{row.description}</div>}
               {!row.platform.ok && (
-                <div style={{ color: 'var(--eb-warn-fg, #8a6d00)' }}>{row.platform.message}</div>
+                <div style={{ color: 'var(--eb-status-warning-text)' }}>{row.platform.message}</div>
               )}
               {row.granted && (
                 <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
@@ -114,8 +114,8 @@ export default function PluginGrantPicker({
                     title={row.platform.message}
                     style={{
                       fontSize: 'var(--eb-text-xs)',
-                      color: 'var(--eb-warn-fg, #8a6d00)',
-                      border: '1px solid var(--eb-warn-fg, #8a6d00)',
+                      color: 'var(--eb-status-warning-text)',
+                      border: '1px solid var(--eb-status-warning-text)',
                       borderRadius: 'var(--eb-radius-sm)',
                       padding: '0 6px',
                       marginLeft: 'var(--eb-space-2)',

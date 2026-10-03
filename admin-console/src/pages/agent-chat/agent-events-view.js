@@ -7,7 +7,7 @@
 // EventsPanel.jsx only renders what these helpers return.
 
 import { buildTriggerCorrelationId } from '../github-event-session.js';
-import { producerFilterText } from '../event-outcome-presentation.js';
+import { producerFilterText, outcomeStatus, gateWaitText } from '../event-outcome-presentation.js';
 
 // The only drops a human may override (mirrors orchestrator/github-refire.js
 // REFIRABLE_REASONS — the server re-checks, this only decides whether to offer).
@@ -69,7 +69,7 @@ export function dropReasonText(row) {
     case 'internal-dedup':
       return `Already delivered once for ${q(wake)} (the console or supervisor woke the agent directly) — the poller's copy was skipped.`;
     case 'self-claim-label':
-      return `Label ${q(label)} is the agent's own claim label (':wip'), not a hand-off, so it was ignored.`;
+      return `Label ${q(label)} is the agent's own claim label (':wip') or end-of-run label (':completed'), not a hand-off, so it was ignored.`;
     case 'history-horizon':
       return 'The event is older than this trigger — it happened before the trigger was activated.';
     case 'push-duplicate':
@@ -82,6 +82,20 @@ export function dropReasonText(row) {
       const why = producerFilterText(row && row.producer);
       return `${why.charAt(0).toUpperCase()}${why.slice(1)} — this trigger only wakes on pushes by the agents it names.`;
     }
+    // #2795: the PR hand-off's readiness gate decided not to wake the agent.
+    case 'gate-failed': {
+      const gates = Array.isArray(row.gates) ? row.gates : [];
+      const why = [gates.includes('ci') ? 'its checks failed' : null, gates.includes('conflict') ? 'it has a merge conflict' : null]
+        .filter(Boolean).join(' and ') || 'it is not ready';
+      return `Held until the PR was ready, but ${why} — ${q(wake)} was removed, the failure label set and a comment posted on the PR.`;
+    }
+    case 'gate-timeout':
+      return `The PR was not ${gateWaitText(row.gates)} within the gate timeout — ${q(wake)} was removed, 'needs-human' set and a comment posted on the PR.`;
+    case 'gate-cancelled': {
+      const why = { closed: 'the PR was closed', 'label-removed': `${q(wake)} was removed`, 'trigger-removed': 'the trigger was removed' }[row.cancelReason]
+        || 'the hand-off went away';
+      return `Held until the PR was ready, but ${why} first, so nobody was woken.`;
+    }
     default:
       return reason ? `Dropped (${reason}).` : 'Dropped.';
   }
@@ -92,10 +106,19 @@ export function dropReasonText(row) {
 // the primary/secondary text colours (low-contrast status tokens on white).
 export function outcomeView(row) {
   if (!row) return { tone: 'muted', text: '' };
-  if (row.status === 'delivered') {
+  const status = outcomeStatus(row);
+  if (status === 'delivered') {
+    if (row.reason === 'gate-released') return { tone: 'success', text: 'delivered (gate cleared)' };
     return { tone: 'success', text: row.source === 'manual-refire' ? 'delivered (fired again)' : 'delivered' };
   }
-  if (row.status === 'digest') return { tone: 'info', text: 'digested' };
+  // #2795: the readiness gate holds the wake until the PR is green.
+  if (status === 'held' && row.reason === 'readiness-gate') {
+    return { tone: 'info', text: `held — waiting for ${gateWaitText(row.gates)}` };
+  }
+  if (status === 'digest') return { tone: 'info', text: 'digested' };
+  // #2693: a provisioning-sweep row, not a drop.
+  if (status === 'reaped') return { tone: 'muted', text: 'reaped (orphaned instance cleaned up)' };
+  if (status === 'reap-failed') return { tone: 'warning', text: 'reap failed' };
   return { tone: isRefirable(row) ? 'warning' : 'muted', text: `dropped · ${row.reason || 'unknown'}` };
 }
 
@@ -114,15 +137,24 @@ export function canRefire(row, { canManage } = {}) {
 
 // The delivered row's session correlationId (AC4), or null.
 export function sessionCorrelationId(row) {
-  if (!row || row.status !== 'delivered') return null;
+  if (outcomeStatus(row) !== 'delivered') return null;
   return buildTriggerCorrelationId(row.triggerId, row.eventId);
 }
 
-// Work-item cell text: "#42 Title".
+// A PR's linked issue(s) in the GitHub Event Log's wording (#2799):
+// " → closes #12, #15", or '' when the row has no usable link.
+function closesText(wi) {
+  if (wi.kind !== 'pr' || !Array.isArray(wi.closesIssues)) return '';
+  const nums = [...new Set(wi.closesIssues.filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b);
+  return nums.length ? ` → closes ${nums.map((n) => `#${n}`).join(', ')}` : '';
+}
+
+// Work-item cell text: "#42 Title"; a linked PR reads "#42 → closes #7 Title".
 export function workItemText(row) {
   const wi = row && row.workItem;
   if (!wi || wi.number == null) return '';
-  return wi.title ? `#${wi.number} ${wi.title}` : `#${wi.number}`;
+  const ref = `#${wi.number}${closesText(wi)}`;
+  return wi.title ? `${ref} ${wi.title}` : ref;
 }
 
 // The confirm dialog (AC5a): names the reason in plain language; for

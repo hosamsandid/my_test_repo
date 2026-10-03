@@ -138,6 +138,16 @@ This is the honest wording, not the stronger claim. **Nothing in this document s
 
 *A note on #2041's wording of this guarantee is raised, not resolved, in §12.2.*
 
+> **Visibility is not a voice (#2713).** Full visibility does not include speaking in a
+> team's chat. A System Admin still sees every chat, its history and live updates, but
+> can post, attach, answer a quick-reply or launch a loop only in a team they are a
+> member (or Team Admin) of, or a standalone agent they own. Elsewhere the composer is
+> read-only, with a hint that links to the team's Sharing tab, and
+> `POST /api/matrix/rooms/:roomId/messages` / `POST /api/agents/:agentId/chat-upload`
+> answer 403. One predicate decides it — `canChatAgent` (`scope.js`), shipped to the
+> client as `canChat` on `GET /api/matrix/agents`. Stop, reset and the other chat
+> controls are unchanged, as is every other `scope.all` grant in §4.1.
+
 ### 2.3 — The last-admin rule (D4)
 
 Removing or demoting the last `team-admin` of a team is refused unless a successor is named in the same operation. The rule has two enforcement points, both server-side:
@@ -1744,6 +1754,10 @@ it. The row now states the tier, edits it through the shared
 `CredentialOwnership` control (no second copy of the tier semantics) and shows
 the resulting tier before the save. Agents keep the plain selector: an agent has
 no tier, and an Agent Team still moves as one unit.
+*Superseded by #2695:* agent rows are now read-only (an agent's boundary is
+its Agent Team, which the selector could neither show nor change), and the
+environment owner picker lists Agent Teams instead of access scopes; the server
+accepts an Agent Team id as an environment or MCP-server owner.
 
 **A7.4 — A stated capability removal: access scopes lose their console surface.**
 §9.1 retires the team table with the page and names no replacement, so `PUT` and
@@ -1752,7 +1766,7 @@ neither created (#2081, 410) nor renamed nor deleted from the console. That is
 deliberate rather than an oversight: A3.3 retires `teams/index.json` outright,
 and building a management surface for a record on its way out would be work
 undone by the next phase. The scope survives only as the stamp the Resources tab
-assigns. **This is the thing to reverse first if it bites** — the API verbs are
+assigns (since #2695 not even that: the tab offers Agent Teams only). **This is the thing to reverse first if it bites** — the API verbs are
 untouched, so a surface can be restored without a server change.
 
 **A7.5 — Two `seeAlso` links were dropped rather than re-pointed.** §9.3 allows

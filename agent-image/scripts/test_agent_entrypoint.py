@@ -14,6 +14,7 @@ or directly:
 import asyncio
 import inspect
 import types
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -391,6 +392,11 @@ _FAKE_CLAUDE = r'''#!/usr/bin/env python3
 import json, os, subprocess, sys, time
 sys.stdin.read()
 mode = os.environ.get("FAKE_CLAUDE_MODE", "obey")
+if os.environ.get("FAKE_ENV_DUMP"):
+    with open(os.environ["FAKE_ENV_DUMP"], "w") as fh:
+        fh.write(os.environ.get("AEE_RUN_DEADLINE", "") + "\n"
+                 + os.environ.get("BASH_DEFAULT_TIMEOUT_MS", "") + "\n"
+                 + os.environ.get("BASH_MAX_TIMEOUT_MS", ""))
 def out(obj):
     sys.stdout.write(json.dumps(obj) + "\n"); sys.stdout.flush()
 def tool_use(tid, cmd):
@@ -465,6 +471,32 @@ class AskAnswerPrompt(unittest.TestCase):
         self.assertIn("_prepare_chat_prompt(_ask_answer_prompt(body, content),", src)
 
 
+class ChatAuthor(unittest.TestCase):
+    """The session log records the console-stamped author, not just the
+    Matrix sender, which may be the shared admin account (#2715)."""
+    fn = staticmethod(entrypoint._chat_author)
+    F = "io.aee.author"
+
+    def test_keeps_user_id_and_subject(self):
+        content = {"body": "hi", self.F: {"userId": " u-kj ", "subject": "kj@example.com", "x": 1}}
+        self.assertEqual(self.fn(content), {"userId": "u-kj", "subject": "kj@example.com"})
+
+    def test_env_single_admin_has_only_a_subject(self):
+        self.assertEqual(self.fn({self.F: {"subject": "admin"}}), {"subject": "admin"})
+
+    def test_missing_or_malformed_stamp_is_none(self):
+        for content in (None, "x", {}, {"body": "hi"}, {self.F: "junk"}, {self.F: []},
+                        {self.F: {"userId": "  ", "subject": 3}}):
+            self.assertIsNone(self.fn(content))
+
+    def test_dm_handler_records_the_author_on_message_received(self):
+        src = Path(entrypoint.__file__).read_text(encoding="utf-8")
+        i = src.index('"type": "message.received"')
+        block = src[i:i + 600]
+        self.assertIn("author = _chat_author(content)", block)
+        self.assertIn('received["author"] = author', block)
+
+
 class AeeAskEndToEnd(unittest.TestCase):
     """CLI → sentinel → interception → terminal message (#2523 AC), driving the
     real `_call_claude_once` against a fake `claude` that runs the real CLI."""
@@ -536,6 +568,44 @@ class AeeAskEndToEnd(unittest.TestCase):
         q = ctx["_askQuestion"]["questions"][0]
         self.assertIs(q["multiSelect"], True)  # rendered as toggles + Submit
         self.assertEqual([o["label"] for o in q["options"]], ["unit", "e2e"])
+
+    def test_run_deadline_is_handed_to_the_turn_for_aee_wait_ci(self):
+        # #2796: aee-wait-ci caps its wait by AEE_RUN_DEADLINE (epoch seconds
+        # at which this invocation's watchdog kills claude).
+        dump = self.workdir / "deadline"
+        os.environ["FAKE_ENV_DUMP"] = str(dump)
+        try:
+            before = time.time()
+            self._run(["Proceed?", "--option", "yes"])
+            after = time.time()
+        finally:
+            os.environ.pop("FAKE_ENV_DUMP", None)
+        deadline, default_ms, max_ms = dump.read_text(encoding="utf-8").split("\n")
+        self.assertGreaterEqual(int(deadline), int(before + 60))
+        self.assertLessEqual(int(deadline), int(after + 60))
+        # Review B1: the Bash tool's own timeout must not cut the wait short —
+        # the default wait fits the default tool timeout, the cap the maximum.
+        self.assertEqual(int(default_ms), entrypoint._BASH_DEFAULT_TIMEOUT_MS)
+        self.assertEqual(int(max_ms), entrypoint._BASH_MAX_TIMEOUT_MS)
+
+    def test_bash_tool_timeouts_cover_aee_wait_ci_and_keep_larger_values(self):
+        loader = importlib.machinery.SourceFileLoader(
+            "aee_wait_ci", str(Path(_MODULE_PATH).parent / "aee-wait-ci"))
+        spec = importlib.util.spec_from_loader("aee_wait_ci", loader)
+        wait_ci = importlib.util.module_from_spec(spec)
+        loader.exec_module(wait_ci)
+        # Slack beyond the wait itself for the final poll and one 60 s gh call.
+        self.assertGreaterEqual(entrypoint._BASH_DEFAULT_TIMEOUT_MS,
+                                (wait_ci.DEFAULT_TIMEOUT_MIN * 60 + 120) * 1000)
+        self.assertGreaterEqual(entrypoint._BASH_MAX_TIMEOUT_MS,
+                                (wait_ci.MAX_TIMEOUT_MIN * 60 + 120) * 1000)
+        env = {"BASH_DEFAULT_TIMEOUT_MS": "120000", "BASH_MAX_TIMEOUT_MS": "99999999"}
+        entrypoint._raise_bash_tool_timeouts(env)
+        self.assertEqual(env["BASH_DEFAULT_TIMEOUT_MS"], str(entrypoint._BASH_DEFAULT_TIMEOUT_MS))
+        self.assertEqual(env["BASH_MAX_TIMEOUT_MS"], "99999999")
+        env = {"BASH_DEFAULT_TIMEOUT_MS": "garbage"}
+        entrypoint._raise_bash_tool_timeouts(env)
+        self.assertEqual(env["BASH_DEFAULT_TIMEOUT_MS"], str(entrypoint._BASH_DEFAULT_TIMEOUT_MS))
 
     def test_turn_is_hard_ended_before_any_follow_up_tool_runs(self):
         marker = self.workdir / "followup-ran"
@@ -700,6 +770,53 @@ class LogRunReply(unittest.TestCase):
         self.assertEqual(len(sends), 3, sends)
         for assigned, logged in sends:
             self.assertEqual(assigned, logged)
+
+
+class GithubEventDetailLinkedIssue(unittest.TestCase):
+    """#2799: a PR linked to issue(s) names them right after its number."""
+
+    PR = {"number": 2798, "title": "PR readiness",
+          "html_url": "https://github.com/o/r/pull/2798"}
+
+    def _detail(self, key="pull_request.labeled", **extra):
+        return github_event_detail(key, {"pull_request": {**self.PR, **extra}})
+
+    def test_linked_pr_shows_issue_in_plain_and_html(self):
+        # AC1 + AC2: Event Log wording, PR number stays the link.
+        self.assertEqual(self._detail(closesIssues=[2794]), (
+            "#2798 → closes #2794 (https://github.com/o/r/pull/2798): PR readiness",
+            '<a href="https://github.com/o/r/pull/2798">#2798</a> → closes #2794: PR readiness',
+        ))
+
+    def test_multiple_issues_listed_ascending_and_deduplicated(self):
+        # AC3
+        plain, html_ = self._detail(closesIssues=[15, 12, 15])
+        self.assertIn("#2798 → closes #12, #15 (", plain)
+        self.assertIn("</a> → closes #12, #15: ", html_)
+
+    def test_review_events_also_show_the_issue(self):
+        plain, _ = self._detail("pull_request_review.submitted", closesIssues=[2794])
+        self.assertIn("→ closes #2794", plain)
+
+    def test_title_missing_still_shows_issue(self):
+        plain, html_ = github_event_detail("pull_request.labeled", {"pull_request": {
+            "number": 2798, "html_url": "https://github.com/o/r/pull/2798",
+            "closesIssues": [2794]}})
+        self.assertEqual(plain, "#2798 → closes #2794 (https://github.com/o/r/pull/2798)")
+        self.assertEqual(html_, '<a href="https://github.com/o/r/pull/2798">#2798</a> → closes #2794')
+
+    def test_absent_empty_or_malformed_link_is_byte_identical(self):
+        # AC4: identical to the unlinked output for every non-usable value.
+        baseline = self._detail()
+        for bad in ([], None, "2794", 2794, {"n": 1}, [0, -3, "7", 1.5, True, None]):
+            with self.subTest(bad=bad):
+                self.assertEqual(self._detail(closesIssues=bad), baseline)
+
+    def test_issue_events_never_get_a_closes_suffix(self):
+        detail = github_event_detail("issues.labeled", {"issue": {
+            "number": 5, "title": "T", "html_url": "https://github.com/o/r/issues/5",
+            "closesIssues": [7]}})
+        self.assertNotIn("closes", detail[0])
 
 
 class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
@@ -1072,6 +1189,70 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
         self.assertIn('<a href="https://github.com/o/r/pull/123">#123</a>: Wire it up',
                       content["formatted_body"])
 
+    # -- #2799: linked issue next to the PR number ------------------------------
+
+    def _pr_ctx(self, event="pull_request.labeled", **pr_extra):
+        return {"github": {
+            "event": event,
+            "repo": "o/agent-execution-environment",
+            "payload": {"label": {"name": "revisions-required"},
+                        "pull_request": {"number": 2798, "title": "PR readiness",
+                                          "html_url": "https://github.com/o/r/pull/2798",
+                                          **pr_extra}},
+        }}
+
+    async def test_linked_pr_notice_names_the_issue_in_body_and_html(self):
+        """#2799 AC1/AC2/AC6: issue in the plain body, same order in HTML, the
+        label/repo/description segments keep their place."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t1", "type": "github-event", "description": "Rework"}
+        await scheduler._post_trigger_notice(
+            trigger, self._pr_ctx(closesIssues=[2794]), "!room:local")
+        content = client.room_send.call_args.kwargs["content"]
+        self.assertEqual(
+            content["body"],
+            "⚡ Trigger fired — PR labeled · `revisions-required` · `agent-execution-environment` · "
+            "#2798 → closes #2794 (https://github.com/o/r/pull/2798): PR readiness"
+            " — Rework — starting work…")
+        self.assertEqual(
+            content["formatted_body"],
+            "⚡ Trigger fired — PR labeled · <code>revisions-required</code> · "
+            "<code>agent-execution-environment</code> · "
+            '<a href="https://github.com/o/r/pull/2798">#2798</a> → closes #2794: PR readiness'
+            " — Rework — starting work…")
+        self.assertEqual(content["io.aee.trigger"],
+                         {"triggerId": "t1", "triggerType": "github-event",
+                          "event": "pull_request.labeled"})
+
+    async def test_unlinked_pr_notice_is_byte_identical(self):
+        """#2799 AC4: absent / empty / malformed closesIssues → today's notice."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t1", "type": "github-event"}
+        await scheduler._post_trigger_notice(trigger, self._pr_ctx(), "!room:local")
+        baseline = client.room_send.call_args.kwargs["content"]
+        for bad in ([], "2794", [None, 0]):
+            with self.subTest(bad=bad):
+                await scheduler._post_trigger_notice(
+                    trigger, self._pr_ctx(closesIssues=bad), "!room:local")
+                self.assertEqual(client.room_send.call_args.kwargs["content"], baseline)
+
+    async def test_linked_issue_shown_for_every_pr_shaped_event_key(self):
+        """#2799 AC5: every delivery path (poller, label fast-path, re-fire, pool
+        routing) hands the notice the same `payload.pull_request.closesIssues`, so
+        the rendering depends only on the payload — prove it per PR event key,
+        including the #2794 readiness keys."""
+        scheduler, client = self._scheduler()
+        for key in ("pull_request.opened", "pull_request.labeled", "pull_request.checks_failed",
+                    "pull_request.merge_conflict", "pull_request.merged",
+                    "pull_request_review.submitted"):
+            with self.subTest(key=key):
+                await scheduler._post_trigger_notice(
+                    {"id": "t1", "type": "github-event"},
+                    self._pr_ctx(event=key, closesIssues=[12, 15]), "!room:local")
+                content = client.room_send.call_args.kwargs["content"]
+                self.assertIn("#2798 → closes #12, #15 (", content["body"])
+                self.assertIn("</a> → closes #12, #15", content["formatted_body"])
+
     async def test_title_missing_degrades_to_link_only(self):
         """AC5: an internal delivery with no resolved title still renders
         `#N` + link (plain and HTML), never blank."""
@@ -1099,6 +1280,35 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
         content = client.room_send.call_args.kwargs["content"]
         self.assertNotIn("format", content)
         self.assertNotIn("formatted_body", content)
+
+
+class GithubDigestLinkedIssue(unittest.IsolatedAsyncioTestCase):
+    """#2799 AC7: the burst digest DM names the PR conversation's linked issue."""
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    async def _digest_body(self, **extra):
+        scheduler = self._scheduler()
+        entry = {"kind": "github-digest", "roomId": "!room:local", "convKey": "pr:2798",
+                 "count": 6, "events": [{"event": "pull_request.labeled", "eventId": "1"}],
+                 **extra}
+        await scheduler._execute_github_digest(entry)
+        return scheduler._send_formatted.await_args.args[1]
+
+    async def test_digest_names_linked_issues(self):
+        body = await self._digest_body(closesIssues=[15, 12])
+        self.assertIn("6 GitHub events on `pr:2798` → closes #12, #15 in one poll cycle", body)
+
+    async def test_digest_without_link_is_unchanged(self):
+        baseline = await self._digest_body()
+        self.assertIn("on `pr:2798` in one poll cycle", baseline)
+        for bad in ([], None, ["x"]):
+            with self.subTest(bad=bad):
+                self.assertEqual(await self._digest_body(closesIssues=bad), baseline)
 
 
 class DescribeInFlightMarker(unittest.TestCase):
@@ -2295,6 +2505,116 @@ class LoopTriggerValidation(unittest.TestCase):
             self.assertIn("maxTokens", reason)
 
 
+class RunLoopCommand(unittest.TestCase):
+    """#2745: loop `until.command` / `verify.command` are shell command lines —
+    they run through `/bin/sh -c` in the agent workspace, and a failure always
+    carries a readable reason."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.workdir = Path(self._tmpdir.name)
+        patcher = patch.object(entrypoint, "_agent_workdir", return_value=self.workdir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_command_with_arguments_and_operators_runs_through_a_shell(self):
+        code, out = entrypoint._run_loop_command("true && echo 'lints 0' | grep -q '^lints 0'", {})
+        self.assertEqual(code, 0, out)
+
+    def test_runs_in_the_agent_workspace(self):
+        (self.workdir / "STATE.md").write_text("Status: DONE\n", encoding="utf-8")
+        code, out = entrypoint._run_loop_command("grep -q '^Status: DONE' STATE.md && pwd", {})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(Path(out.strip()).resolve(), self.workdir.resolve())
+
+    def test_non_zero_exit_is_reported_with_stdout_and_stderr(self):
+        code, out = entrypoint._run_loop_command("echo 'lint error A'; echo boom >&2; exit 3", {})
+        self.assertEqual(code, 3)
+        self.assertIn("lint error A", out)
+        self.assertIn("boom", out)
+
+    def test_silent_failure_still_explains_itself(self):
+        code, out = entrypoint._run_loop_command("test -f does-not-exist", {})
+        self.assertEqual(code, 1)
+        self.assertIn("exited 1", out)
+
+    def test_env_is_passed_to_the_command(self):
+        code, out = entrypoint._run_loop_command('test "$LOOP_FLAG" = on', {"LOOP_FLAG": "on"})
+        self.assertEqual(code, 0, out)
+
+    def test_spawn_error_is_surfaced_as_output(self):
+        with patch.object(entrypoint.subprocess, "run",
+                          side_effect=FileNotFoundError("/bin/sh missing")):
+            code, out = entrypoint._run_loop_command("true", {})
+        self.assertNotEqual(code, 0)
+        self.assertIn("could not be started", out)
+        self.assertIn("/bin/sh missing", out)
+
+    def test_timeout_is_surfaced_as_output(self):
+        with patch.object(entrypoint.subprocess, "run",
+                          side_effect=subprocess.TimeoutExpired("sh", 600)):
+            code, out = entrypoint._run_loop_command("sleep 999", {})
+        self.assertNotEqual(code, 0)
+        self.assertIn("timed out", out)
+
+
+class LoopCommandsEndToEnd(unittest.IsolatedAsyncioTestCase):
+    """#2745: the loop runner gates and stops on real shell commands (no
+    `_run_loop_command` stub) — `&&` in `verify`, a file check in `until`."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.workdir = Path(self._tmpdir.name)
+        patcher = patch.object(entrypoint, "_agent_workdir", return_value=self.workdir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    async def test_verify_command_with_operators_passes(self):
+        scheduler = self._scheduler()
+        passed, out = await scheduler._run_loop_verify(
+            {"mode": "command", "command": "true && true", "env": {}}, {"id": "lp"}, 1)
+        self.assertTrue(passed, out)
+
+    async def test_failing_verify_command_feeds_its_output_back(self):
+        scheduler = self._scheduler()
+        passed, out = await scheduler._run_loop_verify(
+            {"mode": "command", "command": "echo 'lints 2' && false", "env": {}},
+            {"id": "lp"}, 1)
+        self.assertFalse(passed)
+        self.assertIn("lints 2", entrypoint._build_verify_feedback(out, mode="command"))
+
+    async def test_until_command_stops_the_loop_once_its_goal_is_met(self):
+        scheduler = self._scheduler()
+        trigger = {"id": "lp", "type": "loop", "enabled": True, "roomId": "!room:local",
+                   "maxIterations": 5, "prompt": "do it",
+                   "verify": {"command": "true && true"},
+                   "until": {"command": "test -f done && echo finished"}}
+        calls = []
+
+        async def fake_execute(_trig, ctx=None, loop_sink=None, **_kw):
+            calls.append(ctx)
+            if len(calls) == 2:
+                (self.workdir / "done").write_text("", encoding="utf-8")
+
+        with patch.object(scheduler, "_execute", fake_execute), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._loop_runner(trigger)
+
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("loopFeedback", calls[1])
+        body = scheduler._send_formatted.await_args.args[1]
+        self.assertIn("done", body)
+        self.assertIn("finished", body)
+
+
 class LoopStopDecision(unittest.TestCase):
     """#932: the pure done-vs-exhausted decision evaluated after each iteration."""
 
@@ -2415,7 +2735,7 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
         trigger = self._loop_trigger(
             until={"command": "npm test"}, maxIterations=10)
         precheck = patch.object(
-            entrypoint, "_run_pre_check",
+            entrypoint, "_run_loop_command",
             side_effect=[(1, ""), (1, ""), (0, "all green")])
         with patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
              patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
@@ -2478,7 +2798,7 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
              patch.object(scheduler, "_run_loop_verify", AsyncMock(return_value=(True, ""))), \
              patch.object(scheduler, "_post_loop_note", AsyncMock()), \
              patch.object(entrypoint.asyncio, "sleep", AsyncMock(return_value=None)), \
-             patch.object(entrypoint, "_run_pre_check", return_value=(1, "nope")):
+             patch.object(entrypoint, "_run_loop_command", return_value=(1, "nope")):
             await scheduler._loop_runner(trigger)
         rec = scheduler._send_formatted.await_args.kwargs["extra_content"]["io.aee.loop-record"]
         self.assertEqual(rec["outcome"], "exhausted")
@@ -2513,7 +2833,7 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
         trigger = self._loop_trigger(until={"command": "false"}, maxIterations=2)
         with patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
              patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
-             patch.object(entrypoint, "_run_pre_check", return_value=(1, "still failing")):
+             patch.object(entrypoint, "_run_loop_command", return_value=(1, "still failing")):
             await scheduler._loop_runner(trigger)
         self.assertEqual(execute_mock.await_count, 2)
         scheduler._send_formatted.assert_awaited_once()
@@ -2532,7 +2852,7 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
         with patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
              patch.object(scheduler, "_maintenance_active", fake_maintenance_active), \
              patch.object(entrypoint.asyncio, "sleep", AsyncMock(return_value=None)), \
-             patch.object(entrypoint, "_run_pre_check", return_value=(0, "ok")):
+             patch.object(entrypoint, "_run_loop_command", return_value=(0, "ok")):
             await scheduler._loop_runner(trigger)
         execute_mock.assert_awaited_once()  # one catch-up iteration, then done
         self.assertGreaterEqual(len(maintenance_calls), 2)
@@ -2581,7 +2901,7 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(scheduler, "_execute", side_effect=fake_execute) as execute_mock, \
              patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
-             patch.object(entrypoint, "_run_pre_check", return_value=(1, "nope")):
+             patch.object(entrypoint, "_run_loop_command", return_value=(1, "nope")):
             await scheduler._loop_runner(trigger)
         self.assertEqual(execute_mock.await_count, 3)  # 400*3 = 1200 >= 1000
         scheduler._send_formatted.assert_awaited_once()
@@ -2601,7 +2921,7 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
             if loop_sink is not None:
                 loop_sink["backstopTripped"] = True
 
-        precheck = patch.object(entrypoint, "_run_pre_check",
+        precheck = patch.object(entrypoint, "_run_loop_command",
                                 side_effect=AssertionError("until must not run"))
         with patch.object(scheduler, "_execute", side_effect=fake_execute) as execute_mock, \
              patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
@@ -2972,7 +3292,7 @@ class LoopVerifierGate(unittest.IsolatedAsyncioTestCase):
         with patch.object(scheduler, "_resolve_verify_plan", fake_verify_plan), \
              patch.object(scheduler, "_execute", fake_execute), \
              patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
-             patch.object(entrypoint, "_run_pre_check", side_effect=fake_pre_check):
+             patch.object(entrypoint, "_run_loop_command", side_effect=fake_pre_check):
             await scheduler._loop_runner(trigger)
 
         # 3 iterations: fail, fail, pass→until green→done.
@@ -2998,7 +3318,7 @@ class LoopVerifierGate(unittest.IsolatedAsyncioTestCase):
         with patch.object(scheduler, "_resolve_verify_plan", fake_verify_plan), \
              patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
              patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
-             patch.object(entrypoint, "_run_pre_check", return_value=(1, "still broken")):
+             patch.object(entrypoint, "_run_loop_command", return_value=(1, "still broken")):
             await scheduler._loop_runner(trigger)
 
         # maxIterations bounds the loop even when verify never passes (guardrail).
@@ -3026,7 +3346,7 @@ class LoopVerifierGate(unittest.IsolatedAsyncioTestCase):
              patch.object(scheduler, "_execute", AsyncMock()), \
              patch.object(scheduler, "_run_agent_verify", fake_agent_verify), \
              patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
-             patch.object(entrypoint, "_run_pre_check", return_value=(0, "green")):
+             patch.object(entrypoint, "_run_loop_command", return_value=(0, "green")):
             await scheduler._loop_runner(trigger)
 
         self.assertEqual(verify_calls, [("reviewer-1", 1), ("reviewer-1", 2)])

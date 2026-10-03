@@ -90,6 +90,12 @@ bookmark pointing at either falls back silently to no selection rather than to
 an empty pane. The shipped role templates are still browsable — on the
 **Agent Templates** page, not here.
 
+A link to a team or draft that does not exist — an old `/process/<team>`
+bookmark, a deleted flow, or a draft that was never shared with you — opens
+the Flows page with **Flow "…" not found** (or **Draft "…" not found**) in
+place of the canvas, naming the id from the link. **Back to Flows** returns to
+the empty selection; the list on the left works as usual.
+
 The actions that *create* something live in the page header at the top right,
 not in the list, so they stay reachable while the list is collapsed:
 
@@ -198,7 +204,8 @@ You cannot drag a node to a new position — you change the *layout* by changing
 the flow (or by assigning stages, below).
 
 The small control row over the canvas is view-only and changes nothing about
-the flow: **Fit** the whole graph to the view, **Expand all** / **Collapse all**
+the flow: **Fit** the whole graph to the view (above the legend, so the legend
+never covers a node), **Expand all** / **Collapse all**
 agent nodes, flip the flow direction between top-down and left-right, show or
 hide **archived** agents, and turn **stage** banding on or off.
 
@@ -313,6 +320,36 @@ source of truth: a person re-applying the same label wakes the consumer exactly
 like an agent does, and every wake shows up in the **GitHub Event Log**. (The
 former *Direct (internal)* delivery option was removed in #2578.)
 
+### Holding a PR hand-off until CI is green
+
+A hand-off on a **pull request** — a PR channel, or a label hand-off on pull
+requests — can wait until the PR is actually ready before the next agent is
+woken. The hand-off dialogs (create and edit) offer two switches:
+
+- **Wait for CI** — hold the wake until the PR's checks pass.
+- **Block on merge conflict** — hold the wake until the PR merges cleanly.
+
+With either switch on, two more fields appear: **On failure, set label**
+(default `revisions-required`) and **Timeout (minutes)** (default 60). While a
+hand-off is held, the GitHub Event Log shows *held — waiting for CI /
+conflict-free* and the PR's row on **Flow Control** shows *waiting for CI*.
+
+- **Green**: the next agent is woken as usual.
+- **Failure** (a check failed or the PR conflicts): nobody is woken. The
+  hand-off label is removed, the failure label set and a comment explains why.
+  Wire an agent on the failure label — usually the developer, who fixes the PR
+  and sets the hand-off label again. The Flows editor warns when nobody listens
+  on a failure label.
+- **Timeout**: the hand-off label is removed, `needs-human` set and a comment
+  names what was still pending.
+- A push while the hand-off is held is checked afresh; the timeout keeps
+  counting from the start of the hold.
+
+New PR hand-offs, and the SDLC templates, start with both switches on. Teams
+created before this feature are left as they are: open a hand-off and switch
+the gate on yourself. Issue hand-offs have no gate. Details: the *Hand-off
+readiness gate* section of the triggers documentation.
+
 ## Human gates, brakes and named human roles
 
 The **Label registry** lists, per label, **who sets it and who reacts**. Each
@@ -330,6 +367,11 @@ checkboxes, because a label cannot be both:
 Gate-ness is **configuration, not a naming convention**. A label called
 `approved-for-dispatch` is a gate because the registry says so, not because of
 how it is spelled — which is what lets human-applied labels have ordinary names.
+
+A label that only the registry still knows — nothing in the flow sets, listens
+on or gates with it — is marked *not used in this flow* and has a delete button;
+**Delete all unused (n)** removes them all. Labels in use cannot be deleted, and
+the label on GitHub is never touched.
 
 There is a third, quieter human touchpoint: **delivery**. A person can be wired
 to *consume* a label without the flow stopping — they are notified when it is

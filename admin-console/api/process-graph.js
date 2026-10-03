@@ -47,7 +47,7 @@ const {
 // Claim-label convention (#958) — the suffix is defined once, in process-template,
 // so the lint below can never drift from what the expanders derive. Acyclic:
 // process-template requires only ./outcomes, never this module.
-const { CLAIM_SUFFIX, rawTriggerError } = require('./process-template');
+const { CLAIM_SUFFIX, rawTriggerError, triggerReadiness, readinessFailureLabel } = require('./process-template');
 
 // ─── gate/brake classification (#928) ────────────────────────────────────────
 //
@@ -204,6 +204,10 @@ function triggerView(t) {
     // editor can render the claim badge and the read-only claim readout.
     const c = claimView(t);
     if (c) v.claim = c;
+    // Readiness gate (#2795): carried so the editor's hand-off dialog can show
+    // and edit it, and the graph can wire the gate's failure label.
+    const rg = triggerReadiness(t);
+    if (rg) v.readinessGate = rg;
   } else if (t.type === 'cron') {
     v.cron = t.cron || null;
   } else if (t.type === 'once') {
@@ -326,7 +330,8 @@ function humanNode(h) {
  *   [{ id, name, description?, stage?, emits?, consumes? }]. Synthesized as
  *   `kind: 'human'` nodes; their `emits` classify as gates, and their `consumes`
  *   bind the #981 `@human` gate/brake/delivery edges to the named node.
- * @returns {{ nodes, edges, gates, labels }}
+ * @returns {{ nodes, edges, gates, labels, unusedLabels }}
+ *   `unusedLabels` (#2716): sorted registry names no flow element references.
  */
 function buildProcessGraph(agents, options) {
   const list = Array.isArray(agents) ? agents : [];
@@ -414,6 +419,9 @@ function buildProcessGraph(agents, options) {
       ...(authored ? { outcomes: normalizeOutcomes(a.outcomes) } : {}),
       // DM-only front door: nothing wakes it from git, it talks to a human.
       isEntryPoint: !hasGithubEvent,
+      // Switched off (#2754) — carried only when false so an enabled or
+      // template node stays byte-identical.
+      ...(a.enabled === false ? { enabled: false } : {}),
     };
   });
   const nodeIds = new Set(nodes.map(n => n.id));
@@ -424,7 +432,13 @@ function buildProcessGraph(agents, options) {
   const allListenKeys = new Set();
   const labelMeta = new Map(); // name -> { humanGate, brake }
 
-  const noteLabel = (name) => {
+  // Labels some flow element references (#2716) — everything noteLabel sees
+  // EXCEPT the registry seed below, plus human-role emits/consumes. A registry
+  // entry outside this set is "unused": it is in graph.labels only because of
+  // its own registry entry, so the Label registry panel may offer to delete it.
+  const referencedLabels = new Set();
+  const noteLabel = (name, { seed = false } = {}) => {
+    if (!seed) referencedLabels.add(name);
     if (!labelMeta.has(name)) {
       labelMeta.set(name, { humanGate: isHumanGate(name), brake: isBrake(name) });
     }
@@ -434,7 +448,7 @@ function buildProcessGraph(agents, options) {
   // when no port references it yet — otherwise the flag that makes it a gate or
   // a brake would be silently dropped on export and the label would come back
   // as a plain agent label.
-  for (const name of classifier.registryNames) noteLabel(name);
+  for (const name of classifier.registryNames) noteLabel(name, { seed: true });
 
   const addEmit = (label, agentId) => {
     if (!emitIndex.has(label)) emitIndex.set(label, new Set());
@@ -480,6 +494,25 @@ function buildProcessGraph(agents, options) {
     }
   }
   const ocOf = (label, agentId) => (outcomeByEmit.get(label) || new Map()).get(agentId);
+
+  // Failure labels set by a hand-off readiness gate (#2795): the gate applies
+  // its failure label to the PR on the consumer's behalf, so a listener on it is
+  // wired from the gated consumer, not an orphan. label -> [owner node ids]
+  const gateFailureEmitters = new Map();
+  for (const n of nodes) {
+    const fls = new Set();
+    for (const ch of (Array.isArray(n.channels) ? n.channels : [])) {
+      if (ch && ch.artifact === 'pr' && readinessFailureLabel(ch.readiness)) fls.add(readinessFailureLabel(ch.readiness));
+    }
+    for (const t of (n.triggers || [])) {
+      const fl = readinessFailureLabel(triggerReadiness(t));
+      if (fl) fls.add(fl);
+    }
+    for (const fl of fls) {
+      if (!gateFailureEmitters.has(fl)) gateFailureEmitters.set(fl, []);
+      gateFailureEmitters.get(fl).push(n.id);
+    }
+  }
 
   const edges = [];
   const gateSet = new Set();
@@ -550,7 +583,12 @@ function buildProcessGraph(agents, options) {
           }
         } else {
           const emitters = [...(emitIndex.get(key) || [])];
-          if (emitters.length === 0) {
+          const gateOwners = emitters.length === 0 ? (gateFailureEmitters.get(key) || []) : [];
+          if (gateOwners.length) {
+            for (const s of gateOwners) {
+              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id, gateFailure: true, ...evs, ...clm });
+            }
+          } else if (emitters.length === 0) {
             // No agent emits this label. Without an origin filter we can't infer
             // whether a human sets it, so it's drawn as an orphan listener
             // (advisory lint) — a human applying the label still fires it at
@@ -745,6 +783,22 @@ function buildProcessGraph(agents, options) {
 
   const gates = [...gateSet].sort().map(label => ({ label, humanOnly: true }));
   const labels = [...labelMeta.keys()].sort().map(name => ({ name, ...labelMeta.get(name) }));
+  // Human roles (#987) reference labels without entering labelMeta (their
+  // emits must stay out of the emit index) — they still count as "in use".
+  for (const h of humanRoles) {
+    for (const e of h.emits) referencedLabels.add(e);
+    for (const c of h.consumes) if (c.label) referencedLabels.add(c.label);
+  }
+  // An outcome `setLabel` is a reference even for a registry human gate:
+  // `n.emits` drops those (the `human-label-as-outcome` lint owns them), so the
+  // raw outcome labels are counted unfiltered — otherwise deleting the "unused"
+  // entry would strip the gate flag of a label the flow still sets.
+  for (const a of list) {
+    if (!isAuthoredOutcomes(a.outcomes)) continue;
+    for (const { label } of outcomeEmitPairs(a.outcomes)) referencedLabels.add(label);
+  }
+  const unusedLabels = [...new Set(classifier.registryNames)]
+    .filter(name => !referencedLabels.has(name)).sort();
 
   // Named human roles (#987) join the node set as first-class `kind: 'human'`
   // boxes. Appended last so every agent-side loop above ran over the agent
@@ -755,7 +809,7 @@ function buildProcessGraph(agents, options) {
   const allNodes = humanRoles.length ? [...nodes, ...humanRoles] : nodes;
 
   return {
-    nodes: allNodes, edges, gates, labels,
+    nodes: allNodes, edges, gates, labels, unusedLabels,
     humanTouchpoints: computeHumanTouchpoints(allNodes, edges, humanIds),
     lints: computeLints(allNodes, edges, classifier),
   };
@@ -942,6 +996,52 @@ function computeLints(nodes, edges, classifier) {
         lints.push({ code: 'wake-without-note', severity: 'info', nodeId: n.id, outcome: w.outcome,
           message: `\`${n.id}\` outcome \`${w.outcome}\` hands off to \`${w.to}\` with no note — a sentence of context is what makes the hand-off readable in the event log and useful to \`${w.to}\`.` });
       }
+    }
+  }
+  // A wake label every listener of which is switched off (#2754): the agent is
+  // disabled, or its trigger on that label is. The label still lands on GitHub,
+  // but nothing ever picks the item up — on the Flow Control board it reads
+  // "nobody picks it up". A label with NO listener at all is already
+  // `dead-end-emitter`/`outcome-without-consumer`.
+  const labelListeners = new Map(); // label -> [{ nodeId, live }]
+  for (const n of nodes) {
+    for (const t of (n.triggers || [])) {
+      const l = labelListenKey(t);
+      if (!l) continue;
+      if (!labelListeners.has(l)) labelListeners.set(l, []);
+      labelListeners.get(l).push({ nodeId: n.id, live: n.enabled !== false && t.enabled !== false });
+    }
+  }
+  for (const [label, listeners] of labelListeners) {
+    if (listeners.some(x => x.live)) continue;
+    const ids = [...new Set(listeners.map(x => x.nodeId))];
+    lints.push({ code: 'wake-label-no-live-consumer', severity: 'warning', label, nodeId: ids[0],
+      message: `\`${label}\` wakes only ${ids.map(id => `\`${id}\``).join(', ')}, and ${ids.length === 1 ? 'it is' : 'all are'} switched off — an item carrying it is never picked up.` });
+  }
+  // gate-failure-label-unheard (#2795). A gated PR hand-off that fails CI or hits
+  // a merge conflict sets its failure label instead of waking the consumer — if
+  // nobody listens on that label, the failure only shows as a PR comment and the
+  // item stalls. A gate can come from a channel port (a draft's listeners are
+  // not expanded yet) or from a trigger (derived or raw).
+  const heardLabels = new Set(labelListeners.keys());
+  for (const n of nodes) for (const l of channelLabels(n)) heardLabels.add(l);
+  for (const e of edges) if (e && e.label && e.to && !e.orphan) heardLabels.add(e.label);
+  for (const n of nodes) {
+    if (n.synthetic) continue;
+    const unheard = new Set();
+    for (const ch of (Array.isArray(n.channels) ? n.channels : [])) {
+      if (ch && ch.artifact === 'pr') {
+        const fl = readinessFailureLabel(ch.readiness);
+        if (fl && !heardLabels.has(fl)) unheard.add(fl);
+      }
+    }
+    for (const t of (n.triggers || [])) {
+      const fl = readinessFailureLabel(triggerReadiness(t));
+      if (fl && !heardLabels.has(fl)) unheard.add(fl);
+    }
+    for (const label of unheard) {
+      lints.push({ code: 'gate-failure-label-unheard', severity: 'warning', nodeId: n.id, label,
+        message: `\`${n.id}\` has a CI/conflict-gated hand-off that sets \`${label}\` on failure, but nothing listens on \`${label}\` — a failed hand-off stalls unnoticed.` });
     }
   }
   // The former `direct-handoff-candidate` hint (#2032) only ever fired on edges

@@ -286,3 +286,27 @@ test('the page keeps exactly one page-level "?" in its header line', () => {
     'expected exactly one page-level "?" next to the page description',
   );
 });
+
+// ─── #2692 env/headers template hint renders `${credential}` exactly ─────────
+//
+// The hint under the server form's template textarea once read
+// `${'${credential}'}` — the literal `$` in front of the JSX expression rendered
+// a second dollar sign, so the copied placeholder (`$${credential}`) was never
+// substituted. Every <code> that shows the placeholder must render it verbatim.
+test('every rendered ${credential} placeholder has exactly one leading $', () => {
+  const codeBlocks = page.match(/<code style=\{monoStyle\}>[^<]*\{credential\}[^<]*<\/code>/g) || [];
+  assert.ok(codeBlocks.length >= 2, 'expected the server-form hint and the credential intro to show the placeholder');
+  for (const block of codeBlocks) {
+    assert.equal(
+      block.replace(/^<code style=\{monoStyle\}>|<\/code>$/g, ''),
+      "{'${credential}'}",
+      `placeholder must render as \${credential}: ${block}`,
+    );
+  }
+  const hintAt = page.indexOf(' as the placeholder for the bound credential');
+  assert.ok(hintAt > 0, 'server-form template hint is missing');
+  assert.ok(
+    page.slice(0, hintAt).endsWith("Use <code style={monoStyle}>{'${credential}'}</code>"),
+    'server-form template hint must render ${credential} with a single $',
+  );
+});

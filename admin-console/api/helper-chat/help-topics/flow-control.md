@@ -15,6 +15,7 @@ askPrompts:
   - "Can I rename or merge the stages?"
   - "What does Force dispatch do?"
   - "What does Draft mean, and how do I remove an item from the board?"
+  - "Why is a pool instance still running after it opened its pull request?"
 ---
 
 ## What the Flow Control board shows
@@ -55,6 +56,16 @@ result, so the board stays fast.
   hours (a team can change that — see *Changing the columns*), then drops off.
   The note under the heading shows the team's current setting.
 
+### Waiting for CI
+
+A pull request whose hand-off has a **readiness gate** (see the Flows help,
+*Holding a PR hand-off until CI is green*) shows **⏳ waiting for CI**,
+**waiting for conflict-free** or **waiting for CI / conflict-free** under its
+stage while the gate holds the wake. Hover it to see how long it has been held. The next agent has not
+been woken yet; nothing is stuck unless the hold runs into its timeout, which
+removes the hand-off label and sets `needs-human`. The GitHub Event Log shows
+how each hold ended.
+
 ## Who is working right now
 
 Each line is a run in progress: the **role**, the **instance** number for a
@@ -65,7 +76,10 @@ Click a line to open that agent's chat — for a pooled role, the chat of that
 exact instance.
 
 A **pooled** role (one that starts a separate instance per work item) shows
-how busy it is — for example **2 of 3 busy** — and its controls.
+how busy it is — for example **2 of 3 busy** — and its controls. Instances that
+have finished their run but are kept alive because their pull request is still
+open are added as **· n waiting on a PR** (see *Instances waiting on a pull
+request* below); they do not count toward the limit.
 
 ## Pause, Drain and Switch on
 
@@ -73,7 +87,7 @@ The buttons on a pooled role change whether it takes **new** work. They never
 stop a run that is already going.
 
 - **Pause** — Pause: running instances finish their current work. New work waits in a queue and starts when you click Resume.
-- **Drain** — Drain: running instances finish their current work, new work waits, and the role switches itself Off once the last one is done. Click Switch on to start it again.
+- **Drain** — Drain: running instances finish their current work, new work waits, and the role switches itself Off once the last one is done — including any instance still waiting on an open pull request. Click Switch on to start it again.
 - **Resume** — Resume: start taking new work again. Anything that waited while paused starts now.
 - **Switch on** — Switch on: start taking new work again. Anything that waited while the role was off starts now.
 
@@ -81,6 +95,35 @@ Use **Pause** for a short stop you will undo yourself. Use **Drain** to wind a
 role down: while it drains the line reads **Draining, n still running**; when
 the last run finishes it reads **Off**. Nothing is lost either way — work that
 arrives meanwhile waits and is counted as *waiting*.
+
+A drain is only finished once no instance is left waiting on an open pull
+request either: review feedback on such a PR is still handed to its instance
+while the role drains, and the role switches Off when the last PR is merged or
+closed. To finish sooner, delete the waiting instances by hand. A role that is
+**Off** gives no new work to a waiting instance.
+
+### Instances waiting on a pull request
+
+When a pooled instance finishes its run and its work item has an open pull
+request — a PR that closes the issue, or the PR itself — the instance is not
+torn down. It **waits for the PR**, so review feedback goes back to the same
+instance, which continues its session with its workspace intact instead of a
+fresh instance starting from nothing.
+
+- A waiting instance is shown as **Waiting for PR #N** in the Agent Chat list
+  and counted apart: the role's count reads e.g. **2 / 3 active · 4 waiting**.
+- Waiting instances do **not** count toward **Max parallel instances** — new
+  work still gets new instances. When feedback arrives the instance works again
+  and counts as active; only such returning work can push a role above its cap.
+- Neither the **idle timeout** nor the **hard timeout** removes a waiting
+  instance, and time spent waiting does not count toward the hard timeout.
+- Once no linked PR is open any more (merged or closed), the instance stops
+  waiting and is removed on the next check, about a minute later.
+- If GitHub cannot be reached, the instance keeps waiting until the next
+  successful check.
+- **Cost:** a waiting instance keeps its container running for as long as the
+  PR stays open. Merge or close pull requests you are done with, or delete the
+  instance by hand.
 
 **Force dispatch** appears for work held because the team's limit on work in
 progress is full. It starts that one item now, past the limit, without
@@ -99,7 +142,8 @@ spelled out, together with how long it has been waiting:
 | **approved — waiting for merge** | Merge it. |
 | **checks failing** | Look at the failing checks. |
 | **no agent is scheduled to continue** | The last agent finished and nothing picks it up — check the flow on the Flows page. |
-| **stuck — no progress, needs help** | The row has read *working* for more than an hour, but only because of a claim label (e.g. `ready:wip`) — no agent run or pool instance is alive for it, so the run that claimed it died or was stopped. The board only reports this; it never removes the label. Replace the stale `…:wip` label with the wake label (e.g. `ready`) so the step runs again. |
+| **stuck — no progress, needs help** | The row has read *working* for more than an hour, but only because of a claim label (e.g. `ready:wip`) — no agent run or pool instance is alive for it, so the run that claimed it died or was stopped. Team Admins see a **Release claim** button: after you confirm, it swaps the stale `…:wip` label back to the wake label (e.g. `ready`) on GitHub — if the wake label is still there too, it is removed and added again so the step is noticed — the step runs again on the next poll, and the release is recorded in the GitHub Event Log. The board never does this on its own. You can also swap the label by hand. |
+| **nobody picks it up — its agent is switched off** | The item carries a wake label (or its claim), but every agent listening for it is switched off — the agent, or its trigger on that label. Releasing would wake nobody. Switch the agent back on, or route the label elsewhere; the Flows page shows the same as a lint. |
 
 ## The stages
 
@@ -113,6 +157,23 @@ An issue and the pull requests its agents opened form **one row** — no
 "Closes #…" needed. With several PRs for one issue, the row follows the most
 advanced open one. A pull request an agent opened without an issue gets its
 own row.
+
+### Issue and Pull request columns
+
+The **In progress** and **Recently completed** tables start with two columns,
+**Issue** and **Pull request**, so you can see at a glance how far an item has
+got. The Issue column shows the item's issue number; the Pull request column
+lists every pull request of the row, one per line, in the order the board
+knows them — *(merged)* marks a merged one, a closed one is struck through. On
+a board that spans several repositories both show the full `owner/repo#N`.
+Each number links to GitHub; the **Work item** column shows only the title.
+
+An empty cell says something too:
+
+- A muted **—** under **Pull request** (*No pull request yet*): the work is
+  still at issue level.
+- A highlighted **—** under **Issue** (*No linked issue*): an agent opened the
+  pull request without an issue.
 
 Each row shows its **current stage**, whether an agent is **working** on it or
 it is **up next**, and the **time in that stage** — not the item's total age.

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
-  AlertTriangle, RefreshCw, ExternalLink, Info, Pause, Play, Waves, Zap, Power, Columns, UserRound, EyeOff, RotateCcw,
+  AlertTriangle, RefreshCw, ExternalLink, Info, Pause, Play, Waves, Zap, Power, Columns, UserRound, EyeOff, RotateCcw, LockOpen, CheckCircle2,
 } from 'lucide-react';
 import { Link as RouterLink } from 'react-router';
 import { useApi, apiCall } from '../hooks/useApi';
@@ -10,7 +10,7 @@ import Modal from '../components/Modal';
 import { usePageActions } from '../context/PageActionsContext';
 import {
   boardView, updatedAgo, AUTO_REFRESH_MS, readAutoRefresh, writeAutoRefresh, configFormRows, configFromForm,
-  withoutRows, REMOVE_CONFIRM_TEXT, removeDialogTitle, CHAT_LINK_CLASS, CHAT_LINK_CSS,
+  withoutRows, REMOVE_CONFIRM_TEXT, removeDialogTitle, RELEASE_CONFIRM_TEXT, releaseDialogTitle, releaseNotice, CHAT_LINK_CLASS, CHAT_LINK_CSS,
 } from './process/flow-control-view';
 import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections';
 
@@ -43,11 +43,13 @@ export default function FlowControl() {
   const [teamId, setTeamId] = useState('');
   const [state, setState] = useState({ loading: false, error: null, data: null });
   const [actionError, setActionError] = useState(null);
+  const [actionNotice, setActionNotice] = useState(null);
   const [busy, setBusy] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(() => readAutoRefresh(username));
   const [now, setNow] = useState(() => Date.now());
   const [columnsOpen, setColumnsOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState(null);
+  const [releaseTarget, setReleaseTarget] = useState(null);
   const [removedOpen, setRemovedOpen] = useState(false);
   const loadSeq = useRef(0);
 
@@ -102,6 +104,7 @@ export default function FlowControl() {
 
   const mutate = useCallback(async (fn, failText) => {
     setActionError(null);
+    setActionNotice(null);
     setBusy(true);
     try {
       await fn();
@@ -121,6 +124,19 @@ export default function FlowControl() {
   const forceDispatch = useCallback((id) => mutate(
     () => apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/force-dispatch`, { id }),
     'Failed to force-dispatch',
+  ), [teamId, mutate]);
+
+  // "Release claim" (#2754): the server re-checks the row on a fresh board,
+  // swaps the stale claim back to its wake label on GitHub and logs it; a
+  // partial failure comes back as warnings, shown like any action error.
+  const releaseClaim = useCallback((target) => mutate(
+    async () => {
+      const res = await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/flow-board-release`, { rowId: target.id });
+      setReleaseTarget(null);
+      setActionNotice(releaseNotice(res, target.ref));
+      if (res && Array.isArray(res.warnings) && res.warnings.length) setActionError(res.warnings.join(' · '));
+    },
+    'Failed to release the claim',
   ), [teamId, mutate]);
 
   const saveColumns = useCallback((config) => mutate(
@@ -240,6 +256,7 @@ export default function FlowControl() {
               </Banner>
             )}
             {actionError && <Banner icon={AlertTriangle} tone="error">{actionError}</Banner>}
+            {actionNotice && <Banner icon={CheckCircle2}>{actionNotice}</Banner>}
 
             {state.loading && !state.data && (
               <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Loading…</p>
@@ -248,7 +265,7 @@ export default function FlowControl() {
             {state.data && !view.maintenance && (
               <>
                 <WorkingNow view={view} busy={busy} onSetState={setRoleState} onForceDispatch={forceDispatch} />
-                {view.needsYou && <NeedsYou items={view.needsYou} />}
+                {view.needsYou && <NeedsYou items={view.needsYou} canManage={view.canManage} busy={busy} onRelease={setReleaseTarget} />}
                 <InProgress view={view} busy={busy} onRemove={setRemoveTarget} />
                 {view.doneRows.length > 0 && (
                   <RecentlyCompleted rows={view.doneRows} hint={view.retentionHint} canManage={view.canManage} busy={busy} onRemove={setRemoveTarget} />
@@ -282,6 +299,27 @@ export default function FlowControl() {
           <p style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>{removeTarget.title}</p>
           <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
             {REMOVE_CONFIRM_TEXT}
+          </p>
+        </Modal>
+      )}
+      {releaseTarget && (
+        <Modal
+          open
+          onClose={() => setReleaseTarget(null)}
+          title={releaseDialogTitle(releaseTarget.ref)}
+          maxWidth={480}
+          footer={(
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
+              <HeaderButton icon={LockOpen} label="Release claim" title="Put the wake label back so the flow picks the item up again" disabled={busy} onClick={() => releaseClaim(releaseTarget)} />
+            </div>
+          )}
+        >
+          <p style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>{releaseTarget.title}</p>
+          <ul style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-primary)' }}>
+            {releaseTarget.release.map((c) => <li key={`${c.ref}:${c.claim}`}>{c.ref}: {c.text}</li>)}
+          </ul>
+          <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+            {RELEASE_CONFIRM_TEXT}
           </p>
         </Modal>
       )}
@@ -471,7 +509,7 @@ function WorkingNow({ view, busy, onSetState, onForceDispatch }) {
 
 /* ── area ②: needs you ─────────────────────────────────────────────── */
 
-function NeedsYou({ items }) {
+function NeedsYou({ items, canManage, busy, onRelease }) {
   return (
     <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
       <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.needsYou} helpLabel="What to do about each reason">
@@ -484,6 +522,9 @@ function NeedsYou({ items }) {
           <Link href={n.url}>{n.title}</Link>
           <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>{n.reason}</span>
           <span style={{ marginLeft: 'auto', ...mutedStyle }} title="Waiting for">{n.waiting}</span>
+          {canManage && n.release.length > 0 && (
+            <SmallButton icon={LockOpen} label="Release claim" title={`Release the stale claim (${n.release.map((c) => c.text).join(', ')})`} disabled={busy} onClick={() => onRelease(n)} />
+          )}
         </div>
       ))}
     </section>
@@ -529,6 +570,8 @@ function BoardTable({ rows, canManage, busy, onRemove }) {
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-sm)' }}>
         <thead>
           <tr style={{ textAlign: 'left', ...mutedStyle }}>
+            <th style={numberCellStyle}>Issue</th>
+            <th style={numberCellStyle}>Pull request</th>
             <th style={cellStyle}>Work item</th>
             <th style={cellStyle}>Progress</th>
             <th style={cellStyle}>Stage</th>
@@ -545,21 +588,36 @@ function BoardTable({ rows, canManage, busy, onRemove }) {
 }
 
 const cellStyle = { padding: 'var(--eb-space-2) var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)', verticalAlign: 'top' };
+// The leading Issue / Pull request columns (#2800): never wrapped and shrunk
+// to their content (`width: 1%`), so the title column takes the remaining width.
+const numberCellStyle = { ...cellStyle, whiteSpace: 'nowrap', width: '1%' };
+const numberTextStyle = { fontFamily: 'var(--eb-font-mono)' };
+
+// An empty Issue/Pull request cell: neutral when the work has no PR yet,
+// warning-toned when a PR has no linked issue (the view sets `empty`).
+function EmptyCell({ cell }) {
+  const style = cell.empty === 'missing'
+    ? { color: 'var(--eb-status-warning, #d97706)', fontWeight: 600 }
+    : mutedStyle;
+  return <span role="img" title={cell.title} aria-label={cell.title} style={style}>{cell.text}</span>;
+}
 
 function BoardRow({ row, canManage, busy, onRemove }) {
   return (
     <tr style={{ opacity: row.done ? 0.65 : 1 }}>
+      <td style={{ ...numberCellStyle, ...numberTextStyle }}>
+        {row.issue.empty ? <EmptyCell cell={row.issue} /> : <Link href={row.issue.url}>{row.issue.text}</Link>}
+      </td>
+      <td style={{ ...numberCellStyle, ...numberTextStyle }}>
+        {row.prEmpty ? <EmptyCell cell={row.prEmpty} /> : row.prs.map((p) => (
+          <div key={p.key}>
+            <Link href={p.url}><span style={p.struck ? { textDecoration: 'line-through' } : undefined}>{p.text}</span></Link>
+          </div>
+        ))}
+      </td>
       <td style={cellStyle}>
         <div style={{ color: 'var(--eb-text-primary)', lineHeight: 1.35 }}>
           <Link href={row.url}>{row.title}</Link>
-        </div>
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap', ...mutedStyle }}>
-          {row.ref && <Link href={row.issueUrl}>{row.ref}</Link>}
-          {row.prs.map((p) => (
-            <span key={p.key} style={p.state !== 'open' ? { textDecoration: p.state === 'closed' ? 'line-through' : 'none' } : undefined}>
-              <Link href={p.url}>{p.label}{p.state === 'merged' ? ' (merged)' : ''}</Link>
-            </span>
-          ))}
         </div>
       </td>
       <td style={cellStyle}><StageProgress steps={row.steps} blocked={row.blocked} /></td>
@@ -568,6 +626,7 @@ function BoardRow({ row, canManage, busy, onRemove }) {
           <div style={{ color: 'var(--eb-text-primary)' }}>{row.stageLabel}</div>
           <div style={mutedStyle}>{row.statusText}</div>
         </ChatLink>
+        {row.gateText && <div style={mutedStyle} title={row.gateTitle}>⏳ {row.gateText}</div>}
       </td>
       <td style={{ ...cellStyle, whiteSpace: 'nowrap', ...mutedStyle }}>
         {row.inStageTitle ? <span title={row.inStageTitle}>{row.inStage}</span> : row.inStage}

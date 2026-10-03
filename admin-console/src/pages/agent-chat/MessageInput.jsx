@@ -14,6 +14,7 @@ import {
 } from './message-send-keybinding.js';
 import { loadDraft, saveDraft, clearDraft, restoreUnsentText } from './message-draft.js';
 import { decideComposerAction } from './composer-action.js';
+import { CHAT_READ_ONLY_PLACEHOLDER } from './chat-read-only.js';
 import { commandQuery, filterCommands, commandInsertion, nextIndex } from './command-palette.js';
 import { apiCall } from '../../hooks/useApi.js';
 import ComposerAttachments from './ComposerAttachments.jsx';
@@ -93,6 +94,11 @@ const IS_MAC = isMacPlatform();
  * @param {boolean} [stopBusy]            true while a stop request is in flight
  *        (disables the Stop button so a double-press can't fire two aborts).
  * @param {()=>void} [onStartMeeting]      Start a persistent meeting transcription (#1296)
+ * @param {boolean} [readOnly]             The caller may read but not write here (#2713): a
+ *                                         System Admin outside the team. The host also passes
+ *                                         `disabled`; this additionally locks the meeting menu
+ *                                         (which `disabled` alone leaves open) and swaps the
+ *                                         placeholder. Stop is unaffected.
  *        for this agent. When provided, a chevron next to the mic opens a
  *        "Record meeting" menu; quick dictation stays the plain mic tap.
  * @param {boolean} [meetingActive]        true while a meeting session is running
@@ -106,7 +112,7 @@ const IS_MAC = isMacPlatform();
  *        mirrors `resumeRequest`); the leading `@` is added here, so `ref` is a
  *        bare workspace-relative path with no `@`.
  */
-export default function MessageInput({ onSend, disabled = false, agentId = null, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false, loopTrigger = null, loopProgress = null, busy = false, onStop, stopBusy = false, onStartMeeting, meetingActive = false, insertRefRequest = null }) {
+export default function MessageInput({ onSend, disabled = false, agentId = null, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false, loopTrigger = null, loopProgress = null, busy = false, onStop, stopBusy = false, onStartMeeting, meetingActive = false, insertRefRequest = null, readOnly = false }) {
   // Seed the composer from any persisted draft for this agent (#1388). The
   // component remounts per agent (key={agent.id}) so this initialiser runs
   // fresh with the right agentId on every switch.
@@ -440,9 +446,11 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
   // OS- and preset-aware send hint, e.g. '⌘↩ to send' (Mac/IDE),
   // 'Ctrl+↩ to send' (Windows/IDE) or '↩ to send' (chat style).
   const sendHint = placeholderSendHint(sendKeybinding, IS_MAC);
-  const placeholder = agentDisplayName
-    ? `Message ${agentDisplayName}…  (${sendHint})`
-    : `Message…  (${sendHint})`;
+  const placeholder = readOnly
+    ? CHAT_READ_ONLY_PLACEHOLDER
+    : agentDisplayName
+      ? `Message ${agentDisplayName}…  (${sendHint})`
+      : `Message…  (${sendHint})`;
   const canAttach = !!onUpload && !disabled && !uploading;
   // AC11: no send while any attachment (batch or image card) is uploading.
   const attachmentsUploading = uploading || anyUploading(attachments);
@@ -690,7 +698,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
           {voiceState === 'recording' && (
             <span style={{
               fontSize: 'var(--eb-text-xs)',
-              color: 'var(--eb-status-error-text, #dc2626)',
+              color: 'var(--eb-status-error-text)',
               whiteSpace: 'nowrap',
               fontVariantNumeric: 'tabular-nums',
             }}>
@@ -717,7 +725,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
                 width: 32, height: 32,
                 background: voiceState === 'recording' ? 'var(--eb-status-error-bg, #fef2f2)' : 'transparent',
                 color: voiceState === 'recording'
-                  ? 'var(--eb-status-error-text, #dc2626)'
+                  ? 'var(--eb-status-error-text)'
                   : (voiceState === 'transcribing' || meetingActive)
                     ? 'var(--eb-text-muted)'
                     : 'var(--eb-text-secondary)',
@@ -739,7 +747,8 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
             {/* Meeting-mode chevron (#1296). Only when the host wires meetings. */}
             {onStartMeeting && (
               <button
-                onClick={() => setMeetingMenuOpen(o => !o)}
+                onClick={() => !readOnly && setMeetingMenuOpen(o => !o)}
+                disabled={readOnly}
                 aria-label="Transcription options"
                 aria-haspopup="menu"
                 aria-expanded={meetingMenuOpen}
@@ -747,9 +756,9 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
                 style={{
                   width: 16, height: 32,
                   background: 'transparent',
-                  color: 'var(--eb-text-secondary)',
+                  color: readOnly ? 'var(--eb-text-muted)' : 'var(--eb-text-secondary)',
                   border: 'none', borderRadius: 'var(--eb-radius-md)',
-                  cursor: 'pointer',
+                  cursor: readOnly ? 'not-allowed' : 'pointer',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   flexShrink: 0, padding: 0,
                 }}
@@ -757,7 +766,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
                 <ChevronDown size={12} />
               </button>
             )}
-            {meetingMenuOpen && onStartMeeting && (
+            {meetingMenuOpen && onStartMeeting && !readOnly && (
               <div
                 role="menu"
                 style={{
@@ -824,7 +833,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
                 ? 'var(--eb-status-error-bg, #fef2f2)'
                 : primary.enabled ? 'var(--eb-accent-primary)' : 'var(--eb-bg-active)',
               color: showStop
-                ? 'var(--eb-status-error-text, #dc2626)'
+                ? 'var(--eb-status-error-text)'
                 : primary.enabled ? 'var(--eb-text-inverted)' : 'var(--eb-text-muted)',
               border: 'none',
               borderRadius: 'var(--eb-radius-md)',
@@ -849,7 +858,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
         alignItems: 'center',
         gap: 'var(--eb-space-2)',
         fontSize: 'var(--eb-text-xs)',
-        color: voiceError ? 'var(--eb-status-error-text, #dc2626)' : 'var(--eb-text-muted)',
+        color: voiceError ? 'var(--eb-status-error-text)' : 'var(--eb-text-muted)',
         marginTop: 'var(--eb-space-1)',
         paddingLeft: 'var(--eb-space-1)',
         transition: 'color var(--eb-transition-fast)',

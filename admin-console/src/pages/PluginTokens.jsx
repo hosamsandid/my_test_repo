@@ -100,9 +100,9 @@ function PluginTokenCard({ plugin, onChanged }) {
       {connectionNote && (
         <div style={{
           marginTop: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-3)',
-          fontSize: 'var(--eb-text-xs)', color: 'var(--eb-warn-fg, #8a6d00)',
-          background: 'var(--eb-warn-bg, rgba(138,109,0,0.08))',
-          border: '1px solid var(--eb-warn-fg, #8a6d00)', borderRadius: 'var(--eb-radius-sm)',
+          fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning-text)',
+          background: 'var(--eb-status-warning-bg)',
+          border: '1px solid var(--eb-status-warning-text)', borderRadius: 'var(--eb-radius-sm)',
         }}>
           {connectionNote}
         </div>

@@ -85,7 +85,7 @@ function HumanRow({ human, stages, onSave, onRemove, onUnwireConsume, busy }) {
       )}
       {dirty && (
         <button disabled={busy} onClick={save}
-          style={{ alignSelf: 'flex-start', background: 'var(--eb-accent-primary)', color: '#fff', border: 'none', borderRadius: 'var(--eb-radius-md)', padding: '4px 10px', fontSize: 'var(--eb-text-xs)', cursor: busy ? 'wait' : 'pointer' }}
+          style={{ alignSelf: 'flex-start', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', padding: '4px 10px', fontSize: 'var(--eb-text-xs)', cursor: busy ? 'wait' : 'pointer' }}
         >Save</button>
       )}
     </div>
@@ -146,7 +146,7 @@ export default function HumanRegistryPanel({ humans = [], stages = [], ops, onCl
           onKeyDown={e => { if (e.key === 'Enter') add(); }}
         />
         <button onClick={add} disabled={busy || !newName.trim()}
-          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'var(--eb-accent-primary)', color: '#fff', border: 'none', borderRadius: 'var(--eb-radius-md)', padding: '4px 10px', fontSize: 'var(--eb-text-xs)', cursor: busy ? 'wait' : 'pointer', whiteSpace: 'nowrap' }}>
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', padding: '4px 10px', fontSize: 'var(--eb-text-xs)', cursor: busy ? 'wait' : 'pointer', whiteSpace: 'nowrap' }}>
           <Plus size={13} /> Add
         </button>
       </div>

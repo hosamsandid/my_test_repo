@@ -610,6 +610,20 @@ test("_enrichPullRequestPayload: a fetch failure still parses closes from the br
   assert.equal(out.pull_request.html_url, "https://github.com/o/r/pull/500");
 });
 
+test("_enrichPullRequestPayload: a closesIssues already on the payload is kept, not narrowed to the branch (#2799)", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => { throw new Error("must not fetch"); };
+  const payload = {
+    pull_request: {
+      number: 12, title: "T", html_url: "https://github.com/o/r/pull/12",
+      head: { ref: "issue-40-x" }, closesIssues: [7, 40],
+    },
+  };
+  const out = await poller._enrichPullRequestPayload("pull_request.checks_passed", payload, "tok");
+  assert.equal(out, payload, "nothing to add → identity");
+  assert.deepEqual(out.pull_request.closesIssues, [7, 40]);
+});
+
 // ── pollerSubscribes ─────────────────────────────────────────────────────────
 //
 // Every well-formed, enabled github-event trigger is poller-subscribed. The
@@ -1029,6 +1043,86 @@ test("_fanOutBatch (#2152 follow-up): the disarm does not re-open the double-fir
   } finally {
     githubEventLog.record = origRecord;
   }
+});
+
+test("_fanOutBatch (#2776): a collapsed claim swap is recovered by the <wake>:completed add, so a human re-add re-fires", async () => {
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    // The observed sandbox sequence (wake `converge` there, `ready-for-review`
+    // here):
+    // 1. the human hand-off, collapsed onto another label — delivered + armed.
+    const ev1 = labeledIssueEvent("cc-1", "needs-human", ["ready-for-review"], 2776);
+    // 2. the claim swap `<wake>` -> `<wake>:wip` was collapsed away: no event.
+    //    The run then completes (`<wake>:wip` -> `<wake>:completed`), and that
+    //    add's stale snapshot still names the wake.
+    const ev2 = labeledIssueEvent(
+      "cc-2", "ready-for-review:completed",
+      ["ready-for-review", "ready-for-review:completed"], 2776,
+    );
+    // 3. the human removes `<wake>:completed` and re-adds the wake.
+    const ev3 = labeledIssueEvent("cc-3", "ready-for-review", ["ready-for-review"], 2776);
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2, ev3], reviewerSub(), "tok");
+
+    assert.deepEqual(
+      enqueued.map((e) => e.entry.github.eventId),
+      ["cc-1", "cc-3"],
+      "the re-added wake must fire, not be dropped as wake-already-armed",
+    );
+    assert.equal(recorded[1].outcomes[0].status, "dropped");
+    assert.equal(recorded[1].outcomes[0].reason, "self-claim-label");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch (#2776): the <wake>:completed add never re-fires the trigger itself (stale snapshot still names the wake)", async () => {
+  const origRecord = githubEventLog.record;
+  const recorded = [];
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const ev1 = labeledIssueEvent("cc2-1", "ready-for-review", ["ready-for-review"], 2777);
+    const ev2 = labeledIssueEvent(
+      "cc2-2", "ready-for-review:completed",
+      ["ready-for-review", "ready-for-review:completed"], 2777,
+    );
+    // unrelated churn after completion, current snapshot without the wake.
+    const ev3 = labeledIssueEvent("cc2-3", "bug", ["ready-for-review:completed", "bug"], 2777);
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2, ev3], reviewerSub(), "tok");
+
+    assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["cc2-1"]);
+    // The :completed add must be dropped as self-claim-label, not merely as
+    // wake-already-armed (which also held before the fix).
+    const completed = recorded.find((r) => r.label === "ready-for-review:completed");
+    assert.ok(completed, "the :completed event is recorded");
+    assert.equal(completed.outcomes[0].status, "dropped");
+    assert.equal(completed.outcomes[0].reason, "self-claim-label");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("isSelfClaimLabel (#2776): claim label and completion mirror only, and only for a trigger that declares a claim", () => {
+  const { isSelfClaimLabel } = require("./github-poller");
+  const sub = { labelFilter: "converge", claimAdd: "converge:wip" };
+  assert.equal(isSelfClaimLabel(sub, "converge:wip"), true);
+  assert.equal(isSelfClaimLabel(sub, "converge:completed"), true);
+  assert.equal(isSelfClaimLabel(sub, "converge"), false, "the wake label itself is a genuine wake");
+  assert.equal(isSelfClaimLabel(sub, "other:completed"), false);
+  assert.equal(isSelfClaimLabel(sub, undefined), false);
+  assert.equal(isSelfClaimLabel({ labelFilter: "converge", claimAdd: null }, "converge:completed"), false,
+    "no claim declared -> the runner never swaps, so the label is not ours");
 });
 
 test("_fanOutBatch (#2152 follow-up): presence-based disarm re-opens the edge with NO unlabeled and NO claim swap (human web-UI removal)", async () => {
@@ -1887,6 +1981,44 @@ test("armWake (#2525): no-op without a wake label or with the edge dedup switche
   assert.equal(poller.armWake({ repo: "org/repo", triggerId: "t", kind: "issue", number: 1, label: "ready" }), false);
 });
 
+test("disarmWake (#2754): after a released claim the re-added wake fires even with no unlabeled event seen (PR shape)", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    poller._saveState = () => {};
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+    poller.armWake({ repo: "org/repo", triggerId: "t1785499525109689", kind: "issue", number: 2754, label: "ready" });
+    poller.armWake({ repo: "org/repo", triggerId: "t1785499525109689", kind: "pr", number: 2754, label: "ready" });
+    poller.armWake({ repo: "org/repo", triggerId: "t1785499525109689", kind: "issue", number: 2754, label: "other" });
+
+    // Without the disarm, the re-add's snapshot still names `ready`: dropped.
+    const before = labeledIssueEvent("2754-a", "ready", ["ready", "other"], 2754);
+    await poller._fanOutBatch("org/repo", [before], readyDeveloperSub(), "tok");
+    assert.equal(enqueued.length, 0);
+
+    assert.equal(poller.disarmWake({ repo: "org/repo", number: 2754, label: "ready" }), true);
+    const armedKeys = Object.keys(poller.state["org/repo"].armed).map((k) => JSON.parse(k));
+    assert.deepEqual(armedKeys.map((k) => k[3]), ["other"]);
+
+    const readded = labeledIssueEvent("2754-b", "ready", ["ready", "other"], 2754);
+    await poller._fanOutBatch("org/repo", [readded], readyDeveloperSub(), "tok");
+    assert.equal(enqueued.length, 1);
+    assert.equal(enqueued[0].entry.github.eventId, "2754-b");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("disarmWake (#2754): no-op with the edge dedup off or nothing armed for the repo", () => {
+  const poller = new GitHubPoller();
+  poller._saveState = () => { throw new Error("must not save"); };
+  assert.equal(poller.disarmWake({ repo: "org/none", number: 1, label: "ready" }), false);
+  poller._wakeEdgeDedup = false;
+  assert.equal(poller.disarmWake({ repo: "org/repo", number: 1, label: "ready" }), false);
+});
+
 // ── #2571: optional "pushed by agent" producer filter on push triggers ──────
 
 const { computePollPlan } = require("./github-poller");
@@ -2167,4 +2299,42 @@ test("_fanOutBatch (#2602 scope): only push is affected — other events of a pu
     issueOpened, pushEvent("kb", { ref: "refs/heads/agent-knowledge", head: "h1" }),
   ]], [sub], ["agent-knowledge"]);
   assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["io-kb"]);
+});
+
+// ── #2799 AC7: the burst digest carries the PR conversation's linked issue(s).
+
+test("_fanOutBatch (#2799 AC7): a PR burst digest carries closesIssues from the shared enrichment cache", async () => {
+  const run = async (linked) => {
+    const poller = new GitHubPoller();
+    const prSub = { agentId: "reviewer", triggerId: "t-pr", events: new Set(["pull_request.opened", "pull_request.reopened"]), labelFilter: null, horizon: null };
+    const enrichCalls = [];
+    const prs = [];
+    for (let i = 0; i < BURST_CAP + 1; i++) {
+      prs.push(prOpenedEvent(`pr-d${i}`, { number: 2798, sha: `sha${i}`, action: i % 2 ? "reopened" : "opened" }));
+    }
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+    poller._checkAndIncThrottle = () => ({ drop: false });
+    poller._saveThrottleState = () => {};
+    poller._enrichPullRequestPayload = async (key, payload) => {
+      enrichCalls.push(key);
+      if (!key.startsWith("pull_request") || !linked) return payload;
+      return { ...payload, pull_request: { ...payload.pull_request, closesIssues: linked } };
+    };
+    const origRecord = githubEventLog.record;
+    githubEventLog.record = () => {};
+    try {
+      await poller._fanOutBatch("org/repo", prs, [prSub], "tok");
+    } finally {
+      githubEventLog.record = origRecord;
+    }
+    const digest = enqueued.find((e) => e.entry.kind === "github-digest");
+    assert.ok(digest, "the burst collapses into a digest");
+    assert.equal(digest.entry.convKey, "pr:2798");
+    // No extra request: each PR event is enriched exactly once (digest + log share the cache).
+    assert.equal(enrichCalls.filter((k) => k.startsWith("pull_request")).length, BURST_CAP + 1);
+    return digest.entry;
+  };
+  assert.deepEqual((await run([2794, 12])).closesIssues, [12, 2794]);
+  assert.equal("closesIssues" in (await run(null)), false, "no known link → entry unchanged");
 });

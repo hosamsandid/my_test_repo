@@ -52,6 +52,7 @@ const REASONS = Object.freeze({
   checks: 'checks failing',
   stalled: 'no agent is scheduled to continue',
   needsHelp: 'stuck — no progress, needs help',
+  noConsumer: 'nobody picks it up — its agent is switched off',
 });
 
 function str(v) {
@@ -129,10 +130,16 @@ function buildRoleGraph(members, { labels = [], teamId = null } = {}) {
   const gateLabels = new Set(
     (Array.isArray(labels) ? labels : []).filter((l) => l && l.humanGate && str(l.name)).map((l) => str(l.name)),
   );
-  const roles = new Map(); // id -> { id, displayName, consumes:Set, emits:Set, from:Set }
+  const roles = new Map(); // id -> { id, displayName, enabled, consumes:Set, emits:Set, from:Set }
+  // Wake label -> roles that listen for it only through a switched-off
+  // trigger (#2754): no hand-off edge, but the label is not a person's either.
+  const dormantConsumersOf = new Map();
   for (const m of Array.isArray(members) ? members : []) {
     if (!m || !str(m.id) || m.poolInstance) continue;
-    const r = { id: m.id, displayName: str(m.displayName) || m.id, consumes: new Set(), emits: new Set(), from: new Set() };
+    const r = {
+      id: m.id, displayName: str(m.displayName) || m.id, enabled: m.enabled !== false,
+      consumes: new Set(), emits: new Set(), from: new Set(),
+    };
     for (const e of Array.isArray(m.emits) ? m.emits : []) if (str(e)) r.emits.add(str(e));
     const opts = m.outcomes && Array.isArray(m.outcomes.options) ? m.outcomes.options : [];
     for (const o of opts) {
@@ -141,6 +148,13 @@ function buildRoleGraph(members, { labels = [], teamId = null } = {}) {
       }
     }
     for (const t of Array.isArray(m.triggers) ? m.triggers : []) {
+      if (t && t.type === 'github-event' && t.enabled === false) {
+        const l = str(t.labelFilter);
+        if (l && !isStateSuffix(l)) {
+          if (!dormantConsumersOf.has(l)) dormantConsumersOf.set(l, []);
+          dormantConsumersOf.get(l).push(m.id);
+        }
+      }
       if (!t || t.type !== 'github-event' || t.enabled === false) continue;
       for (const e of Array.isArray(t.emits) ? t.emits : []) if (str(e)) r.emits.add(str(e));
       const l = str(t.labelFilter);
@@ -187,7 +201,7 @@ function buildRoleGraph(members, { labels = [], teamId = null } = {}) {
   // A label an agent sets that no team agent wakes on is a hand-off to a person
   // (e.g. "ready-for-human-review") — the item then waits for approval.
   const toHuman = new Set([...emitted].filter((l) => !consumersOf.has(l) && !isStateSuffix(l)));
-  return { roles, next, prev, gateLabels, emitted, consumersOf, toHuman };
+  return { roles, next, prev, gateLabels, emitted, consumersOf, dormantConsumersOf, toHuman };
 }
 
 /**
@@ -369,7 +383,7 @@ function eventIdFromCorrelation(correlationId) {
  * @param {Array}  args.events    github-event-log entries
  * @param {Array}  args.prRecords pr-events-log records (pr-created / branch-pushed)
  * @param {Array}  args.sessions  [{ agentId, session }] running sessions of the team's agents
- * @param {Array}  args.pools     [{ agentId, roleId, displayName, maxInstances, state, changedAt, held, instances:[{instanceId, busy}] }]
+ * @param {Array}  args.pools     [{ agentId, roleId, displayName, maxInstances, state, changedAt, held, instances:[{instanceId, busy, waiting?, prs?}] }]
  * @param {object} args.removed   rows a person took off the board (see normalizeRemoved)
  * @param {number} args.now
  */
@@ -383,6 +397,7 @@ function buildFlowBoard(args = {}) {
   const displayName = (roleId) => (graph.roles.get(roleId) || {}).displayName || roleId;
   const retentionMs = config.doneRetentionHours * 3600 * 1000;
   const removed = normalizeRemoved(args.removed);
+  const gateHolds = normalizeGateHolds(args.gateHolds);
 
   // --- the GitHub snapshot, keyed `<repo>#<n>` -----------------------------
   const items = new Map();
@@ -568,6 +583,7 @@ function buildFlowBoard(args = {}) {
     }
 
     const needsHuman = isDone ? null : humanBlock({ keys, items, graph, position, live, now });
+    const gateHold = isDone ? null : gateHoldOf(gateHolds, keys);
     out.push({
       id: row.key,
       title: (issue && issue.title) || (prs[0] && prs[0].title) || row.key,
@@ -586,6 +602,8 @@ function buildFlowBoard(args = {}) {
       since: position.since != null ? new Date(position.since).toISOString() : null,
       done: isDone,
       needsHuman,
+      // #2795: a hand-off to this item's PR held by its CI / conflict gate.
+      gateHold,
       // An agent working on it or queued for it keeps it on the board (#2637 AC5).
       removable: position.status !== 'working' && position.status !== 'queued',
     });
@@ -605,7 +623,10 @@ function buildFlowBoard(args = {}) {
   const byId = new Map(out.map((r) => [r.id, r]));
   const needsHuman = out
     .filter((r) => r.needsHuman)
-    .map((r) => ({ id: r.id, title: r.title, url: r.url, issue: r.issue, prs: r.prs, reason: r.needsHuman.reason, since: r.needsHuman.since }))
+    .map((r) => ({
+      id: r.id, title: r.title, url: r.url, issue: r.issue, prs: r.prs, reason: r.needsHuman.reason, since: r.needsHuman.since,
+      ...(r.needsHuman.release ? { release: r.needsHuman.release } : {}),
+    }))
     .sort((a, b) => (toMs(a.since) || now) - (toMs(b.since) || now));
 
   // --- area ①: every running session, and each pool's load ----------------
@@ -636,7 +657,10 @@ function buildFlowBoard(args = {}) {
   const busyAgents = new Set(sessionRows.map((s) => s.agentId));
   const pools = (Array.isArray(args.pools) ? args.pools : []).map((p) => {
     const instances = Array.isArray(p.instances) ? p.instances : [];
-    const busy = instances.filter((i) => i && (i.busy || busyAgents.has(i.instanceId))).length;
+    const isBusy = (i) => i && (i.busy || busyAgents.has(i.instanceId));
+    const busy = instances.filter(isBusy).length;
+    // #2789: idle instances kept alive for an open PR — outside the cap.
+    const waiting = instances.filter((i) => i && i.waiting && !isBusy(i)).length;
     return {
       agentId: p.agentId,
       roleId: p.roleId,
@@ -644,6 +668,7 @@ function buildFlowBoard(args = {}) {
       busy,
       capacity: Number.isFinite(p.maxInstances) ? p.maxInstances : null,
       live: instances.length,
+      waiting,
       state: p.state || 'running',
       changedAt: p.changedAt || null,
       held: Number.isFinite(p.held) ? p.held : 0,
@@ -664,6 +689,48 @@ function buildFlowBoard(args = {}) {
     // no longer swept). The orchestrator drops them from the store (AC11).
     removalsToPrune: [...revived, ...Object.keys(removed).filter((id) => !matchedRemovals.has(id) && !revived.includes(id))],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Hand-off gate holds (#2795).
+// ---------------------------------------------------------------------------
+
+/**
+ * The poller's held PR hand-offs (`GitHubPoller#gateHolds`), keyed `<repo>#<n>`.
+ * A PR may be held for several hand-offs at once; their gates are merged.
+ */
+function normalizeGateHolds(raw) {
+  const byKey = new Map();
+  for (const h of Array.isArray(raw) ? raw : []) {
+    if (!h || !str(h.repo) || !Number.isInteger(h.number)) continue;
+    const key = itemKey(h.repo, h.number);
+    const prev = byKey.get(key) || { waitingFor: new Set(), since: null, agentIds: new Set() };
+    for (const g of Array.isArray(h.waitingFor) ? h.waitingFor : []) prev.waitingFor.add(g);
+    if (str(h.agentId)) prev.agentIds.add(h.agentId);
+    const t = toMs(h.heldAt);
+    if (t != null && (prev.since == null || t < prev.since)) prev.since = t;
+    byKey.set(key, prev);
+  }
+  return byKey;
+}
+
+const GATE_ORDER = ['ci', 'conflict'];
+
+// `{ number, waitingFor: ['ci'|'conflict'…], since, agentIds }` for the first
+// of the row's items held by a gate, or null. `waitingFor` empty = the verdicts
+// are in and the hold resolves on the poller's next pass.
+function gateHoldOf(gateHolds, keys) {
+  for (const k of keys) {
+    const h = gateHolds.get(k);
+    if (!h) continue;
+    return {
+      number: Number(k.slice(k.lastIndexOf('#') + 1)),
+      waitingFor: GATE_ORDER.filter((g) => h.waitingFor.has(g)),
+      since: h.since != null ? new Date(h.since).toISOString() : null,
+      agentIds: [...h.agentIds].sort(),
+    };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -766,17 +833,49 @@ function lastWakeTs(wakes, key, roleId) {
 // agent is working on it or woken for it — a Conflict Solver already queued
 // on a conflict is not a human's problem — except a claim nobody alive holds:
 // past NEEDS_HELP_MS it is an orphaned `:wip` label, not work (#2734). The
-// flag only reports; it never releases the claim or touches a run.
+// flag never touches a run itself; it carries the `release` list (each
+// orphaned claim and the wake it swaps back to) that the board's explicit
+// "Release claim" action acts on (#2754).
+//
+// A wake (or its claim) whose every consumer is switched off is reported as
+// `noConsumer` instead (#2754): releasing it would wake nobody, so it is not
+// "stuck" but dead-ended until someone switches the agent back on.
 function humanBlock({ keys, items, graph, position, live = new Set(), now }) {
   const open = keys.map((k) => items.get(k)).filter((it) => it && it.state !== 'closed');
   const since = (it) => toMs(it.updatedAt) || position.since || now;
   const flagged = open.find((it) => it.labels.includes('needs-human'));
   if (flagged) return { reason: REASONS.flagged, since: new Date(since(flagged)).toISOString() };
+  const isLive = keys.some((k) => live.has(k));
+  if (!isLive) {
+    // Only when NO wake on the row can run: one live consumer still moves it.
+    const wakeItems = open.filter((it) => it.labels.some((l) => isWake(graph, wakeOf(l))));
+    const allDead = wakeItems.length && wakeItems.every((it) =>
+      it.labels.filter((l) => isWake(graph, wakeOf(l))).every((l) => wakeHasNoLiveConsumer(graph, wakeOf(l))));
+    if (allDead) return { reason: REASONS.noConsumer, since: new Date(since(wakeItems[0])).toISOString() };
+  }
   if (
-    position.status === 'working' && position.since != null && now - position.since > NEEDS_HELP_MS &&
-    !keys.some((k) => live.has(k))
+    position.status === 'working' && position.since != null && now - position.since > NEEDS_HELP_MS && !isLive
   ) {
-    return { reason: REASONS.needsHelp, since: new Date(position.since).toISOString() };
+    const release = [];
+    for (const it of open) {
+      for (const l of it.labels) {
+        if (!l.endsWith(CLAIM_SUFFIX)) continue;
+        const wake = wakeOf(l);
+        if (!graph.consumersOf.has(wake) || wakeHasNoLiveConsumer(graph, wake)) continue;
+        // The #2713 shape: the wake was re-applied on top of the claim. Re-adding
+        // a label already present creates no `labeled` event, so the swap must
+        // take the wake off and put it back (#2754 review).
+        release.push({
+          repo: it.repo, number: it.number, kind: it.kind, claim: l, wake,
+          ...(it.labels.includes(wake) ? { wakePresent: true } : {}),
+        });
+      }
+    }
+    return {
+      reason: REASONS.needsHelp,
+      since: new Date(position.since).toISOString(),
+      ...(release.length ? { release } : {}),
+    };
   }
   if (position.status === 'working' || position.status === 'queued') return null;
   const prs = open.filter((it) => it.kind === 'pr');
@@ -792,6 +891,24 @@ function humanBlock({ keys, items, graph, position, live = new Set(), now }) {
     return { reason: REASONS.stalled, since: new Date(position.since).toISOString() };
   }
   return null;
+}
+
+// The wake a label stands for: itself, or the wake its `:wip` claim holds.
+function wakeOf(label) {
+  return label.endsWith(CLAIM_SUFFIX) ? label.slice(0, -CLAIM_SUFFIX.length) : label;
+}
+
+// Whether some team agent listens for `wake`, switched on or off.
+function isWake(graph, wake) {
+  return graph.consumersOf.has(wake) || !!(graph.dormantConsumersOf && graph.dormantConsumersOf.has(wake));
+}
+
+// Whether `wake` is a label some team agent listens for, yet every listener is
+// off — the agent disabled, or its only trigger on that label disabled.
+function wakeHasNoLiveConsumer(graph, wake) {
+  if (!isWake(graph, wake)) return false;
+  const active = graph.consumersOf.get(wake) || [];
+  return active.every((id) => graph.roles.get(id) && graph.roles.get(id).enabled === false);
 }
 
 // Map a GraphQL PR node's statusCheckRollup state onto the board's three

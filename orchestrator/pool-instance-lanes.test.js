@@ -219,3 +219,26 @@ test('buildTeamPoolLanes on an empty role list returns an empty array', () => {
   assert.deepEqual(lanes.buildTeamPoolLanes([], []), []);
   assert.deepEqual(lanes.buildTeamPoolLanes(null, null), []);
 });
+
+// #2789 — instances waiting on an open PR.
+
+test('#2789: an instance waiting on an open PR is tagged waiting, with its PRs, never timed-out', () => {
+  const out = lanes.buildPoolInstanceLanes({
+    role: { ...ROLE, maxRuntimeMs: 60_000 },
+    instances: [instance({ waiting: true, prs: [40], waitedMs: 0 })],
+    tickets: [ticket()],
+    now: Date.parse('2026-01-02T00:00:00.000Z'),
+  });
+  assert.equal(out.lanes[0].status, 'waiting');
+  assert.deepEqual(out.lanes[0].prs, [40]);
+});
+
+test('#2789 AC2: time spent waiting is left out of the lane timed-out test, like the reaper', () => {
+  const now = Date.parse('2026-01-01T00:02:00.000Z');
+  const role = { ...ROLE, maxRuntimeMs: 100_000 };
+  const plain = lanes.buildPoolInstanceLanes({ role, instances: [instance()], tickets: [ticket()], now });
+  assert.equal(plain.lanes[0].status, 'timed-out');
+  const waited = lanes.buildPoolInstanceLanes({ role, instances: [instance({ waitedMs: 60_000 })], tickets: [ticket()], now });
+  assert.equal(waited.lanes[0].status, 'running');
+  assert.equal('prs' in waited.lanes[0], false, 'only waiting lanes carry prs');
+});

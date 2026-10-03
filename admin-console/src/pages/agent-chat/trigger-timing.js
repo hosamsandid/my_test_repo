@@ -192,3 +192,27 @@ export function onceScheduleLabel(at, { schedulerZone = TRIGGER_TIME_ZONE, viewe
   const label = formatRunTime(raw, { now, timeZone: viewerZone });
   return label ? `${label} (your time, ${viewerZone})` : raw;
 }
+
+/**
+ * Inline hint for a `once` run-at time that already lies in the past (#2682):
+ * the scheduler fires such a trigger at its next sync (`now >= fire_at`) and
+ * then removes it, so saving it is legal but should never be silent. A naive
+ * value (hand-written triggers.json) is read as wall time in the scheduler's
+ * zone, like the scheduler does. Returns the hint text, or null.
+ */
+export const PAST_ONCE_HINT = 'This time is in the past — the trigger will run immediately (at the next scheduler sync, within about a minute) and is then removed.';
+
+export function pastOnceHint(at, { schedulerZone = TRIGGER_TIME_ZONE, now = new Date() } = {}) {
+  if (typeof at !== 'string' || !at.trim()) return null;
+  const raw = at.trim();
+  const absolute = /(Z|[+-]\d{2}:?\d{2})$/i.test(raw);
+  let fireAt;
+  if (absolute) {
+    fireAt = Date.parse(raw);
+  } else {
+    const asUtc = Date.parse(`${raw}Z`);
+    fireAt = Number.isNaN(asUtc) ? NaN : asUtc - zoneOffsetMinutes(schedulerZone, new Date(asUtc)) * 60000;
+  }
+  if (Number.isNaN(fireAt)) return null;
+  return fireAt <= now.getTime() ? PAST_ONCE_HINT : null;
+}

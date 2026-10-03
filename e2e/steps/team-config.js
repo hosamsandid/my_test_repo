@@ -8,23 +8,19 @@
 // text, verified against AgentList.jsx (CollapsibleHeader, KebabButton),
 // RowContextMenu.jsx and AgentChat.jsx's TeamConfigSurface/RightRail branch.
 const { expect } = require('@playwright/test');
+const { agentRail, railRowButton } = require('./agent-rail');
 
-// The rail is one flat `role="listbox"` (AgentList.jsx) — scope every lookup
-// to it, mirroring agents.js's expectTeamInRail (`.first()`: the only other
-// listbox in the page is the composer's slash-command palette, mounted only
-// while open).
+// The rail is the "Agents" list (AgentList.jsx, agent-rail.js) — scope every
+// lookup to it, mirroring agents.js's expectTeamInRail.
 function rail(page) {
-  return page.locator('[role="listbox"]').first();
+  return agentRail(page);
 }
 
-// The team group header (CollapsibleHeader) is a real `<button aria-selected>`
-// with NO explicit `role` (default implicit role "button") — a member row
-// (AgentRow) ALSO sets `aria-selected` on its own `<button>`, but stamps
-// `role="option"`, so `:not([role="option"])` is what actually disambiguates
-// the two (a bare `hasText` filter alone is not enough once a journey's team
-// and member labels could ever coincide).
+// The team group header (CollapsibleHeader) is the main button of a team
+// block (#2704); `.first()` because the header precedes its own member rows in
+// DOM order, so a member whose label coincides with the team's never wins.
 function teamHeaderButton(page, label) {
-  return rail(page).locator('button[aria-selected]:not([role="option"])').filter({ hasText: label });
+  return railRowButton(rail(page), label).first();
 }
 
 /**
@@ -180,7 +176,7 @@ async function expectRailStateEqual(ctx, { a, b }) {
  */
 async function openMemberFromRow(ctx, { agentId, label }) {
   const { page } = ctx;
-  const row = rail(page).getByRole('option', { name: label });
+  const row = railRowButton(rail(page), label);
   await expect(row).toBeVisible();
   await row.click();
   await expect(page).toHaveURL(new RegExp(`/chats/${agentId}$`));

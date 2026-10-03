@@ -6,6 +6,8 @@
 // (`loopIteration` / `loopMaxIterations`). Kept out of the JSX so it carries
 // its own node:test suite, mirroring trigger-summary.js / loop-form-options.js.
 
+import { isLaunchedLoop } from './trigger-summary.js';
+
 // Compact a token budget for a badge: 2000000 → "2M", 500000 → "500k",
 // 750 → "750". (Local copy — trigger-summary.js keeps its own private one.)
 function compactTokens(n) {
@@ -216,4 +218,39 @@ export function loopFiredLabel(event) {
   return Number.isFinite(cap) && cap > 0
     ? `Loop · iteration ${it} of ${cap}`
     : `Loop · iteration ${it}`;
+}
+
+// ── live loop signals (#2683) ────────────────────────────────────────────────
+// The composer's running state is polled from the trigger list every 15 s, but
+// the live timeline already tells us when a loop moves on: the runtime posts a
+// `⚡ Trigger fired` notice (`io.aee.trigger`, triggerType 'loop') before each
+// iteration, and the terminal message carries `io.aee.loop-record` — posted
+// only AFTER a launched loop removed itself from triggers.json. These helpers
+// let ChatPanel react to those events at once instead of waiting for the poll.
+
+// Classify a live Matrix event's content: `{ kind: 'finished', triggerId }` for
+// a finished-loop record, `{ kind: 'iteration', triggerId }` for a loop's
+// trigger notice, else null. `triggerId` is null when the payload lacks one.
+export function liveLoopSignal(content) {
+  if (!content || typeof content !== 'object') return null;
+  const record = content['io.aee.loop-record'];
+  if (record && typeof record === 'object') {
+    return { kind: 'finished', triggerId: record.triggerId ? String(record.triggerId) : null };
+  }
+  const trig = content['io.aee.trigger'];
+  if (trig && typeof trig === 'object' && trig.triggerType === 'loop') {
+    return { kind: 'iteration', triggerId: trig.triggerId ? String(trig.triggerId) : null };
+  }
+  return null;
+}
+
+// The running launched loop in a trigger list, skipping ids the live timeline
+// already reported as finished. On an isolated agent volume the orchestrator's
+// canonical copy can still list the loop for a moment after its record arrived
+// (the removal is posted asynchronously), and that stale row must not bring
+// the "Loop running" banner back.
+export function runningLaunchedLoop(list, finishedIds) {
+  if (!Array.isArray(list)) return null;
+  const done = finishedIds instanceof Set ? finishedIds : new Set(finishedIds || []);
+  return list.find(t => isLaunchedLoop(t) && !done.has(t.id)) || null;
 }

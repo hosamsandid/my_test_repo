@@ -65,6 +65,28 @@ function isLastSystemAdmin(users, id) {
   return admins.length === 1 && admins[0].id === id;
 }
 
+// A user's optional email (#2695 finding 88). Before this the store kept any
+// string, so "not-an-email" was accepted and stored — the console's button
+// submits by onClick, which bypasses the browser's native `type=email` check.
+// Deliberately a plausibility check (one `@`, no whitespace, a dot in the
+// domain), not RFC 5322: the field is contact metadata, never an identity —
+// the `subject` is. The Users page mirrors this rule and sentence
+// (`admin-console/src/pages/users-view.js`); its test proves they agree.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const INVALID_EMAIL_REASON = 'Email must be a valid address, e.g. jane.doe@corp.com';
+
+function isValidEmail(v) {
+  return typeof v === 'string' && EMAIL_RE.test(v.trim());
+}
+
+// The stored form of an optional email: '' when blank, the trimmed value when
+// plausible, a 400 otherwise.
+function normalizeEmail(v) {
+  if (!isNonEmptyString(v)) return '';
+  if (!isValidEmail(v)) throw badRequest(INVALID_EMAIL_REASON, 'invalid-email');
+  return v.trim();
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -132,6 +154,36 @@ function coerceChatNotifyOnBack(raw) {
     throw badRequest('chatNotifyOnBack must be a boolean');
   }
   return raw;
+}
+
+// Per-user Agent-Chat rail team selection (#2740). Stored as the entries the
+// user has *hidden* (`team:<id>` keys plus `singles` for the Individual agents
+// block), not the ones shown, so a team that becomes visible later is shown by
+// default. A pure view preference: it never widens what the user may see.
+// Blank/absent clears it (everything shown); anything else must be
+// `{ hidden: string[] }`. Duplicates are folded and the list is bounded so a
+// runaway client cannot bloat the user record.
+const CHAT_LIST_FILTER_MAX_KEYS = 2000;
+const CHAT_LIST_FILTER_MAX_KEY_LENGTH = 512;
+
+function coerceChatListFilter(raw) {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'object' || Array.isArray(raw) || !Array.isArray(raw.hidden)) {
+    throw badRequest('chatListFilter must be an object with a hidden array');
+  }
+  // Bound the raw array before touching its entries: request bodies are not
+  // size-capped on the orchestrator, so the cap must hold ahead of the loop.
+  if (raw.hidden.length > CHAT_LIST_FILTER_MAX_KEYS) {
+    throw badRequest(`chatListFilter.hidden may hold at most ${CHAT_LIST_FILTER_MAX_KEYS} entries`);
+  }
+  const hidden = new Set();
+  for (const key of raw.hidden) {
+    if (typeof key !== 'string' || !key || key.length > CHAT_LIST_FILTER_MAX_KEY_LENGTH) {
+      throw badRequest(`chatListFilter.hidden entries must be non-empty strings of at most ${CHAT_LIST_FILTER_MAX_KEY_LENGTH} characters`);
+    }
+    hidden.add(key);
+  }
+  return { hidden: [...hidden] };
 }
 
 // A membership's `teamId` may name an **Agent Team** as well as a legacy access
@@ -276,11 +328,12 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
     if (getUserBySubject(subject)) {
       throw conflict(`User with subject '${subject}' already exists`);
     }
+    const normalizedEmail = normalizeEmail(email);
     const users = listUsers();
     const user = {
       id: crypto.randomUUID(),
       subject: subject.trim(),
-      email: isNonEmptyString(email) ? email.trim() : '',
+      email: normalizedEmail,
       displayName: isNonEmptyString(displayName) ? displayName.trim() : subject.trim(),
       systemAdmin: systemAdmin === true,
       githubHandle: coerceGithubHandle(githubHandle),
@@ -306,7 +359,7 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
     if (idx === -1) throw notFound(`User '${id}' not found`);
     const user = users[idx];
     if (patch.email !== undefined) {
-      user.email = isNonEmptyString(patch.email) ? patch.email.trim() : '';
+      user.email = normalizeEmail(patch.email);
     }
     if (patch.displayName !== undefined) {
       if (!isNonEmptyString(patch.displayName)) throw badRequest('displayName cannot be empty');
@@ -333,6 +386,12 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
       // rather than storing an explicit `false` (#2397).
       if (cnb === true) user.chatNotifyOnBack = true;
       else delete user.chatNotifyOnBack;
+    }
+    if (patch.chatListFilter !== undefined) {
+      const clf = coerceChatListFilter(patch.chatListFilter);
+      // A blank value clears the selection back to "everything shown" (#2740).
+      if (clf === undefined) delete user.chatListFilter;
+      else user.chatListFilter = clf;
     }
     user.updatedAt = nowIso();
     users[idx] = user;
@@ -622,7 +681,9 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
       if (!existing.systemAdmin) return updateUser(existing.id, { systemAdmin: true });
       return existing;
     }
-    return createUser({ subject, email, displayName, systemAdmin: true });
+    // A malformed configured seed email must not block seeding the operator
+    // (#2695): the address is optional metadata, so it is dropped, not thrown.
+    return createUser({ subject, email: isValidEmail(email) ? email : '', displayName, systemAdmin: true });
   }
 
   // Seeds the very FIRST System Admin from the deployment's configured initial
@@ -733,6 +794,7 @@ module.exports = {
   coerceGithubHandle,
   coerceChatFontSize,
   coerceChatNotifyOnBack,
+  coerceChatListFilter,
   CHAT_FONT_SIZE_MIN,
   CHAT_FONT_SIZE_MAX,
   CHAT_FONT_SIZE_DEFAULT,
@@ -743,4 +805,6 @@ module.exports = {
   isLastSystemAdmin,
   LAST_SYSTEM_ADMIN_DELETE_REASON,
   LAST_SYSTEM_ADMIN_DEMOTE_REASON,
+  isValidEmail,
+  INVALID_EMAIL_REASON,
 };

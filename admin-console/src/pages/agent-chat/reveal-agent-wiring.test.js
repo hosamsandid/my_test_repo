@@ -30,9 +30,11 @@ test('edge case — a not-yet-listed new agent holds the unknown-id bounce, with
   assert.match(chat, /setTimeout\(\(\) => setRevealExpiredFor\(revealId\), REVEAL_WAIT_MS\)/);
 });
 
-test('AC2 — on arrival a hiding filter is dropped, the list is asked to reveal, the state is consumed', () => {
-  assert.match(chat, /revealPlan\(routedAgent, listFilter\)/);
-  assert.match(chat, /if \(resetFilter\) setListFilter\(\{ kind: 'all' \}\);/);
+test('AC2 — on arrival a hiding selection gets the target ticked back in, the list is asked to reveal, the state is consumed', () => {
+  assert.match(chat, /const \{ showKey \} = revealPlan\(routedAgent, listFilter\);/);
+  // #2740 AC10: only the target's entry is added — never a reset to "all".
+  assert.match(chat, /if \(showKey\) handleFilterAction\(\{ type: 'reveal', key: showKey \}\);/);
+  assert.doesNotMatch(chat, /setListFilter\(\{ kind: 'all' \}\)/);
   assert.match(chat, /setRevealRequest\(\{ id: revealId, ts: Date\.now\(\) \}\);/);
   assert.match(chat, /navigate\(`\$\{location\.pathname\}\$\{location\.search\}`, \{ replace: true, state: null \}\);/);
   assert.match(chat, /revealRequest=\{revealRequest\}/);

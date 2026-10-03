@@ -240,7 +240,7 @@ function ModelEditor({ models, defaultModelId, onChange, onDefaultChange }) {
 /* ─────────────────── Sub: endpoint form (create + edit) ─────────────────── */
 
 function EndpointForm({ endpoint, onSave, onCancel, saving, error,
-                        teams = [], isSysAdmin = false, adminTeamIds = [] }) {
+                        teams = [], names = {}, isSysAdmin = false, adminTeamIds = [] }) {
   // Rendered only while the side panel is slid out, so the subject needs no
   // `active` flag. Registering it is what lifts the help panel above this
   // SidePanel (z-index 60/61) — without it the three "?" buttons below would
@@ -559,6 +559,8 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
           onChange={setOwnership}
           options={ownershipOptions}
           teams={selectableTeams}
+          names={names}
+          deletedTeamIds={endpoint?.deletedTeamIds}
         />
       ) : (
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
@@ -1192,7 +1194,7 @@ export default function ModelRegistry() {
             <span style={{ fontSize: 'var(--eb-text-xs)' }} title={s.detail}>
               <span style={{
                 display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)',
-                background: 'var(--eb-accent-subtle, var(--eb-bg-elevated))', color: 'var(--eb-accent, var(--eb-text-secondary))',
+                background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
                 fontWeight: 'var(--eb-font-medium)',
               }}>Global</span>
             </span>
@@ -1602,6 +1604,7 @@ export default function ModelRegistry() {
             saving={saving}
             error={formError}
             teams={teams}
+            names={names}
             isSysAdmin={isSysAdmin}
             adminTeamIds={adminTeamIds}
           />
@@ -1625,6 +1628,7 @@ export default function ModelRegistry() {
             saving={saving}
             error={formError}
             teams={teams}
+            names={names}
             isSysAdmin={isSysAdmin}
             adminTeamIds={adminTeamIds}
           />

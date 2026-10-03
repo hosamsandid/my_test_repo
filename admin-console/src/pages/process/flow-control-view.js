@@ -62,13 +62,35 @@ export function itemRef(repo, number, singleRepo) {
   return singleRepo || !repo ? `#${number}` : `${repo}#${number}`;
 }
 
-function prLinks(prs, singleRepo) {
-  return (Array.isArray(prs) ? prs : []).map((p) => ({
-    key: `${p.repo}#${p.number}`,
-    label: `PR ${itemRef(p.repo, p.number, singleRepo)}`,
-    url: p.url || null,
-    state: p.state || 'open',
-  }));
+// The board's leading Issue and Pull request columns (#2800). An empty cell
+// is a placeholder with an explanation: neutral for "no PR yet" (the work is
+// still at issue level), warning-toned for "no linked issue" (a PR an agent
+// opened on its own), so the two never read alike.
+export const NO_PR_TEXT = 'No pull request yet';
+export const NO_ISSUE_TEXT = 'No linked issue';
+
+export function issueCell(issue, fallbackUrl, singleRepo) {
+  if (!issue) return { text: '—', url: null, title: NO_ISSUE_TEXT, empty: 'missing' };
+  return { text: itemRef(issue.repo, issue.number, singleRepo), url: issue.url || fallbackUrl || null, title: '', empty: null };
+}
+
+// One entry per PR, in the order the backend delivers them. The number has no
+// `PR` prefix — the column header says it.
+function prCells(prs, singleRepo) {
+  return (Array.isArray(prs) ? prs : []).map((p) => {
+    const state = p.state || 'open';
+    return {
+      key: `${p.repo}#${p.number}`,
+      text: `${itemRef(p.repo, p.number, singleRepo)}${state === 'merged' ? ' (merged)' : ''}`,
+      url: p.url || null,
+      state,
+      struck: state === 'closed',
+    };
+  });
+}
+
+export function prEmptyCell(prs) {
+  return Array.isArray(prs) && prs.length ? null : { text: '—', title: NO_PR_TEXT, empty: 'pending' };
 }
 
 // `draft` is stage 0: nobody released the item yet and no agent is on it, so
@@ -124,6 +146,24 @@ export const CHAT_LINK_CSS = `
 // its time in stage. For a done row `since` is the completion time, so "in
 // stage" reads "in Done since" (#2643). `stages` is the board's own stage list, so the step count
 // is exactly the team's hand-off chain.
+// #2795: a PR hand-off held by its readiness gate — "waiting for CI" on the
+// row, so a hand-off that has not reached the next agent yet is not mistaken
+// for one that is lost. `waitingFor` empty = verdicts are in, resolving.
+const GATE_WAIT = { ci: 'CI', conflict: 'conflict-free' };
+
+export function gateHoldText(gateHold) {
+  if (!gateHold || typeof gateHold !== 'object') return '';
+  const w = (Array.isArray(gateHold.waitingFor) ? gateHold.waitingFor : []).map(g => GATE_WAIT[g]).filter(Boolean);
+  return w.length ? `waiting for ${w.join(' / ')}` : 'hand-off gate resolving';
+}
+
+export function gateHoldTitle(gateHold, { now = Date.now() } = {}) {
+  if (!gateHold || typeof gateHold !== 'object') return '';
+  const pr = Number.isInteger(gateHold.number) ? `PR #${gateHold.number}` : 'The PR';
+  const held = since(gateHold.since, now);
+  return `${pr}'s hand-off is held until the PR is green and conflict-free${held ? ` (held ${held})` : ''}. The next agent is woken then; a failure or timeout is labelled and commented on the PR.`;
+}
+
 export function rowView(row, stages, { now = Date.now(), singleRepo = true } = {}) {
   const list = Array.isArray(stages) ? stages : [];
   const current = Number.isInteger(row.stageIndex) ? row.stageIndex : list.findIndex((s) => s.id === row.stageId);
@@ -138,8 +178,9 @@ export function rowView(row, stages, { now = Date.now(), singleRepo = true } = {
     title: row.title || '(untitled)',
     url: row.url || null,
     ref: row.issue ? itemRef(row.issue.repo, row.issue.number, singleRepo) : '',
-    issueUrl: row.issue ? row.issue.url || row.url || null : null,
-    prs: prLinks(row.prs, singleRepo),
+    issue: issueCell(row.issue, row.url, singleRepo),
+    prs: prCells(row.prs, singleRepo),
+    prEmpty: prEmptyCell(row.prs),
     steps,
     stageLabel: stage ? stage.label : '',
     status: row.status,
@@ -151,6 +192,8 @@ export function rowView(row, stages, { now = Date.now(), singleRepo = true } = {
     done: !!row.done,
     blocked: !!row.needsHuman,
     removable: !!row.removable,
+    gateText: gateHoldText(row.gateHold),
+    gateTitle: gateHoldTitle(row.gateHold, { now }),
   };
 }
 
@@ -222,7 +265,7 @@ export function sessionView(s, { now = Date.now(), singleRepo = true } = {}) {
 // same three facts — `flow-control-view.test.js` keeps the two in step.
 export const POOL_ACTION_TOOLTIPS = Object.freeze({
   pause: 'Pause: running instances finish their current work. New work waits in a queue and starts when you click Resume.',
-  drain: 'Drain: running instances finish their current work, new work waits, and the role switches itself Off once the last one is done. Click Switch on to start it again.',
+  drain: 'Drain: running instances finish their current work, new work waits, and the role switches itself Off once the last one is done — including any instance still waiting on an open pull request. Click Switch on to start it again.',
   resume: 'Resume: start taking new work again. Anything that waited while paused starts now.',
   switchOn: 'Switch on: start taking new work again. Anything that waited while the role was off starts now.',
 });
@@ -231,9 +274,14 @@ export const POOL_ACTION_TOOLTIPS = Object.freeze({
 // apply to it. `running` → Pause + Drain; `paused` → Resume; `draining` and
 // `off` → Switch on (the same "back to running" write, named for what the
 // operator sees).
+//
+// #2789: instances kept alive for an open pull request are outside the cap and
+// named apart — "on a PR", since "waiting" already means held new work here.
 export function poolView(p) {
   const busy = Number.isFinite(p.busy) ? p.busy : 0;
-  const occupancy = p.capacity != null ? `${busy} of ${p.capacity} busy` : `${busy} busy`;
+  const onPr = Number.isFinite(p.waiting) && p.waiting > 0 ? p.waiting : 0;
+  const onPrText = onPr ? ` · ${onPr} waiting on a PR` : '';
+  const occupancy = (p.capacity != null ? `${busy} of ${p.capacity} busy` : `${busy} busy`) + onPrText;
   const held = Number.isFinite(p.held) && p.held > 0 ? p.held : 0;
   const waiting = held ? ` · ${held} waiting` : '';
   let stateText;
@@ -244,7 +292,7 @@ export function poolView(p) {
       actions = ['resume'];
       break;
     case 'draining':
-      stateText = `Draining, ${busy} still running${waiting}`;
+      stateText = `Draining, ${busy} still running${onPrText}${waiting}`;
       actions = ['switchOn'];
       break;
     case 'off':
@@ -275,12 +323,38 @@ export function poolView(p) {
 // Area ② — where a person is needed
 // ---------------------------------------------------------------------------
 
+// "Release claim" (#2754): what the confirm dialog says before a stuck row's
+// orphaned `<wake>:wip` claim is swapped back to its wake label on GitHub.
+export const RELEASE_CONFIRM_TEXT = 'The stale claim label is removed and the wake label put back on the GitHub item, so the flow picks it up again on its next poll (within about a minute). Only do this when nobody is still working on it.';
+
+export function releaseDialogTitle(ref) {
+  return ref ? `Release the claim on ${ref}?` : 'Release this claim?';
+}
+
+// The notice after a release that swapped at least one claim — on success the
+// dialog just closes, so say what happens next (#2754 review). Null when
+// nothing was released (the error bar carries that).
+export function releaseNotice(res, ref) {
+  const n = res && Number.isFinite(res.released) ? res.released : 0;
+  if (n < 1) return null;
+  const what = n === 1 ? 'Claim released' : `${n} claims released`;
+  return `${what}${ref ? ` on ${ref}` : ''} — its agent picks it up on the next poll (within about a minute).`;
+}
+
 export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}) {
   const ref = entry.issue
     ? itemRef(entry.issue.repo, entry.issue.number, singleRepo)
     : Array.isArray(entry.prs) && entry.prs[0]
       ? `PR ${itemRef(entry.prs[0].repo, entry.prs[0].number, singleRepo)}`
       : '';
+  const release = (Array.isArray(entry.release) ? entry.release : [])
+    .filter((c) => c && typeof c.claim === 'string' && typeof c.wake === 'string')
+    .map((c) => ({
+      ref: `${c.kind === 'pr' ? 'PR ' : ''}${itemRef(c.repo, c.number, singleRepo)}`,
+      claim: c.claim,
+      wake: c.wake,
+      text: `${c.claim} → ${c.wake}`,
+    }));
   return {
     id: entry.id,
     ref,
@@ -288,6 +362,7 @@ export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}
     url: entry.url || null,
     reason: entry.reason || (entry.needsHuman && entry.needsHuman.reason) || '',
     waiting: since(entry.since || (entry.needsHuman && entry.needsHuman.since), now),
+    release,
   };
 }
 

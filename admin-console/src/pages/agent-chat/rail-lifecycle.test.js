@@ -9,6 +9,9 @@ import {
   teamOptions,
   existingIds,
   deleteTargetFor,
+  deleteRequestId,
+  resolveDeleteRequest,
+  teamKeptNotice,
   isTeamLocked,
   importedAgentFilterNote,
   resetToStubNotice,
@@ -182,6 +185,76 @@ test('deleteTargetFor attaches a team\'s members', () => {
   assert.equal(deleteTargetFor(null, AGENTS), null);
 });
 
+test('#2685 — deleteTargetFor marks the last member of its team', () => {
+  // zeta-dev is Zeta's only member: the confirm must name the team's fate.
+  assert.deepEqual(deleteTargetFor(AGENTS[5], AGENTS).lastMemberOf,
+    { id: 'zeta', displayName: 'Zeta Team', canManage: true });
+
+  // Alpha still has QA after Dev goes — nothing to say about the team.
+  assert.equal(deleteTargetFor(AGENTS[3], AGENTS).lastMemberOf, undefined);
+
+  // A stub left in the team keeps it from being empty.
+  const withStub = [...AGENTS, { id: 'zeta-stub', role: 'team-member', parentTeamId: 'zeta', hasToken: false }];
+  assert.equal(deleteTargetFor(AGENTS[5], withStub).lastMemberOf, undefined);
+
+  // Teams and standalone agents are never "last members".
+  assert.equal(deleteTargetFor(AGENTS[1], AGENTS).lastMemberOf, undefined);
+  assert.equal(deleteTargetFor(AGENTS[0], AGENTS).lastMemberOf, undefined);
+
+  // A team the caller cannot manage is reported, but not offered for deletion.
+  const locked = AGENTS.map(a => (a.id === 'zeta' ? { ...a, canManage: false } : a));
+  assert.equal(deleteTargetFor(AGENTS[5], locked).lastMemberOf.canManage, false);
+
+  // A parent team that is not in the list (e.g. hidden) is never guessed at.
+  assert.equal(deleteTargetFor(AGENTS[5], AGENTS.filter(a => a.id !== 'zeta')).lastMemberOf, undefined);
+});
+
+test('#2685 — deleteRequestId deletes the team (cascading the member) only when chosen and allowed', () => {
+  const last = deleteTargetFor(AGENTS[5], AGENTS);
+  assert.equal(deleteRequestId(last, true), 'zeta');
+  assert.equal(deleteRequestId(last, false), 'zeta-dev');
+
+  const locked = deleteTargetFor(AGENTS[5], AGENTS.map(a => (a.id === 'zeta' ? { ...a, canManage: false } : a)));
+  assert.equal(deleteRequestId(locked, true), 'zeta-dev');
+
+  // Every other target deletes exactly itself, whatever the checkbox says.
+  assert.equal(deleteRequestId(deleteTargetFor(AGENTS[3], AGENTS), true), 'alpha-dev');
+  assert.equal(deleteRequestId(deleteTargetFor(AGENTS[2], AGENTS), true), 'alpha');
+  assert.equal(deleteRequestId(null, true), null);
+});
+
+test('#2685 review B1 — a member hidden from the chat list keeps the team delete from resolving to the team', () => {
+  // The rail only has the chat payload (configs not loaded, or the load
+  // failed): the disabled sibling `b` is not in it, so the member LOOKS last.
+  const chat = [{ id: 't', role: 'team', displayName: 'T' }, { id: 'a', role: 'team-member', parentTeamId: 't' }];
+  const target = deleteTargetFor(chat[1], mergeAgentConfigs(chat, null));
+  assert.equal(deleteRequestId(target, true), 't', 'precondition: the stale list alone would delete the team');
+
+  // The fresh full config list shows `b`: only the member is deleted.
+  const onDisk = [...chat, { id: 'b', role: 'team-member', parentTeamId: 't', enabled: false }];
+  const hidden = resolveDeleteRequest(target, true, onDisk);
+  assert.equal(hidden.id, 'a');
+  assert.deepEqual(hidden.keptTeam, { id: 't', displayName: 'T', reason: 'members' });
+
+  // The fresh list could not be read: never guess, delete the member only.
+  const unread = resolveDeleteRequest(target, true, null);
+  assert.equal(unread.id, 'a');
+  assert.equal(unread.keptTeam.reason, 'unverified');
+
+  // The fresh list confirms it really is the last member: one team delete.
+  assert.deepEqual(resolveDeleteRequest(target, true, chat), { id: 't', keptTeam: null });
+  // Unticked, or not a last member: the target itself, no fresh list needed.
+  assert.deepEqual(resolveDeleteRequest(target, false, null), { id: 'a', keptTeam: null });
+  assert.deepEqual(resolveDeleteRequest(deleteTargetFor(AGENTS[3], AGENTS), true, null), { id: 'alpha-dev', keptTeam: null });
+  assert.equal(resolveDeleteRequest(null, true, onDisk), null);
+});
+
+test('#2685 review B1 — teamKeptNotice says why the team stayed', () => {
+  assert.equal(teamKeptNotice(null), null);
+  assert.match(teamKeptNotice({ id: 't', displayName: 'T', reason: 'members' }), /"T" was kept: it still has other members/);
+  assert.match(teamKeptNotice({ id: 't', reason: 'unverified' }), /"t" was kept: its members could not be checked/);
+});
+
 test('isTeamLocked is true only for a member of a listed, disabled team', () => {
   const dev = AGENTS[3];
   assert.equal(isTeamLocked(dev, AGENTS), true);
@@ -204,24 +277,22 @@ test('the rail no longer builds a create menu — the header owns those actions'
 });
 
 test('importedAgentFilterNote stays silent when the new agent is visible (AC4)', () => {
-  assert.equal(importedAgentFilterNote({ kind: 'all' }, 'zeta', undefined), null);
+  assert.equal(importedAgentFilterNote({ hidden: [] }, 'zeta', undefined), null);
   assert.equal(importedAgentFilterNote(undefined, 'zeta', undefined), null);
-  // Filtered to the very agent that just landed.
-  assert.equal(importedAgentFilterNote({ kind: 'agent', id: 'zeta' }, 'zeta', undefined), null);
-  // Filtered to the team it was imported into.
-  assert.equal(importedAgentFilterNote({ kind: 'team', id: 'alpha' }, 'zeta', 'alpha'), null);
-  // An unknown filter kind is reported visible — a wrong "hidden" note next to
-  // an agent the user can see would be worse than no note. Since #1964 the
-  // retired `orchestrator` kind is exactly such an unknown.
-  assert.equal(importedAgentFilterNote({ kind: 'something-new' }, 'zeta', undefined), null);
-  assert.equal(importedAgentFilterNote({ kind: 'orchestrator', id: 'omega' }, 'zeta', 'alpha'), null);
+  // Imported into a team the selection shows (#2740).
+  assert.equal(importedAgentFilterNote({ hidden: ['team:beta'] }, 'zeta', 'alpha'), null);
+  // No team in the response: it may land as its own (new, so shown) team or
+  // as an ungrouped row — undecidable, so no note unless both are hidden.
+  assert.equal(importedAgentFilterNote({ hidden: ['singles'] }, 'zeta', undefined), null);
+  // A retired single-choice spec reads as "everything shown".
+  assert.equal(importedAgentFilterNote({ kind: 'team', id: 'alpha' }, 'zeta', 'beta'), null);
 });
 
-test('importedAgentFilterNote reports an import the filter swallows (AC4)', () => {
-  const other = importedAgentFilterNote({ kind: 'agent', id: 'dev' }, 'zeta', undefined);
-  assert.ok(other && /filter/i.test(other), 'names the filter as the reason');
-  assert.ok(importedAgentFilterNote({ kind: 'team', id: 'alpha' }, 'zeta', undefined));
-  assert.ok(importedAgentFilterNote({ kind: 'team', id: 'alpha' }, 'zeta', 'beta'));
+test('importedAgentFilterNote reports an import the selection swallows (AC4)', () => {
+  const hidden = importedAgentFilterNote({ hidden: ['team:alpha'] }, 'zeta', 'alpha');
+  assert.ok(hidden && /filter/i.test(hidden), 'names the filter as the reason');
+  assert.match(hidden, /Select all/);
+  assert.ok(importedAgentFilterNote({ hidden: ['singles', 'team:zeta'] }, 'zeta', undefined));
 });
 
 test('railMenuItems routes each target kind to its own menu', () => {

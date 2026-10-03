@@ -131,6 +131,10 @@ def _is_human_sender(agent_user_id: str, sender: str, members: list[str]) -> boo
 # verdict, and how often to poll for it. Overridable for tests / slow reviewers.
 VERIFY_WAIT_SEC = int(os.environ.get("LOOP_VERIFY_WAIT_SEC", "1800"))
 VERIFY_POLL_SEC = float(os.environ.get("LOOP_VERIFY_POLL_SEC", "10"))
+# Loop `until.command` / `verify.command` (#2745): shell commands such as
+# `npm test`, so they get far more headroom than the 30 s preCheck default.
+LOOP_COMMAND_TIMEOUT_SEC = max(
+    1, int(os.environ.get("LOOP_COMMAND_TIMEOUT_MS", "600000")) // 1000)
 
 # A triggered run whose claude invocation dies on a transient infra error
 # (API 5xx, connection closed mid-response) gets exactly one retry after this
@@ -1549,6 +1553,26 @@ _ASK_USER_QUESTION_TOOL = "AskUserQuestion"
 # path) so a concurrent DM turn and trigger run in the same container can never
 # pick up each other's question.
 _ASK_FILE_ENV = "AEE_ASK_FILE"
+# Epoch seconds by which this invocation is killed (#2796, read by aee-wait-ci).
+_RUN_DEADLINE_ENV = "AEE_RUN_DEADLINE"
+# Claude Code's Bash tool stops a command after 2 min by default and never
+# allows more than 10 min, which would kill a foreground `aee-wait-ci` long
+# before its own wait ends (#2796). Raised per turn to the CLI's default /
+# maximum wait (20 / 50 min, see aee-wait-ci) plus slack for its last poll and
+# a 60 s `gh` call. An operator-set larger value is kept.
+_BASH_DEFAULT_TIMEOUT_MS = (20 + 5) * 60 * 1000
+_BASH_MAX_TIMEOUT_MS = (50 + 5) * 60 * 1000
+
+
+def _raise_bash_tool_timeouts(env: dict) -> None:
+    """Make sure the Bash tool lets a foreground `aee-wait-ci` run to its end."""
+    for key, floor in (("BASH_DEFAULT_TIMEOUT_MS", _BASH_DEFAULT_TIMEOUT_MS),
+                       ("BASH_MAX_TIMEOUT_MS", _BASH_MAX_TIMEOUT_MS)):
+        try:
+            current = int(env.get(key) or 0)
+        except ValueError:
+            current = 0
+        env[key] = str(max(current, floor))
 
 
 def _ask_sentinel_path(invocation_id: str) -> Path:
@@ -1697,6 +1721,31 @@ def _ask_user_question_payload(tool_input) -> dict | None:
     if not out_questions:
         return None
     return {"version": 1, "questions": out_questions}
+
+
+_CHAT_AUTHOR_FIELD = "io.aee.author"
+
+
+def _chat_author(content):
+    """The console-stamped author of a human chat message (#2065, #2715).
+
+    The Matrix `sender` is not the person who wrote the message: a console
+    user without a personal Matrix identity posts through the shared admin
+    account. The console stamps the real author under `io.aee.author`; keep
+    just its `userId` / `subject` strings so the session log can name the same
+    person the transcript bubble does. `None` when no usable stamp is present.
+    """
+    if not isinstance(content, dict):
+        return None
+    raw = content.get(_CHAT_AUTHOR_FIELD)
+    if not isinstance(raw, dict):
+        return None
+    author = {}
+    for key in ("userId", "subject"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            author[key] = value.strip()[:256]
+    return author or None
 
 
 _ASK_ANSWER_FIELD = "io.aee.ask-answer"
@@ -3536,6 +3585,10 @@ def _call_claude_once_inner(prompt: str, room_id: str, correlation_id: str,
     ask_sentinel = _ask_sentinel_path(f"{correlation_id or 'run'}-{uuid.uuid4().hex[:8]}")
     _clear_ask_sentinel(ask_sentinel)
     env[_ASK_FILE_ENV] = str(ask_sentinel)
+    # Run deadline (#2796): `aee-wait-ci` caps its in-turn CI wait so it ends
+    # before this invocation's own timeout, with room left to act on the verdict.
+    env[_RUN_DEADLINE_ENV] = str(int(time.time() + timeout_sec))
+    _raise_bash_tool_timeouts(env)
 
     # Git context for the usage record (#654): capture HEAD before the run so the
     # record can show what this invocation moved. Best-effort — never blocks the run.
@@ -4314,6 +4367,51 @@ def _run_pre_check(script_path: str, env: dict) -> tuple[int, str]:
     return proc.returncode, (proc.stdout or "")[:4000]
 
 
+def _run_loop_command(command: str, env: dict) -> tuple[int, str]:
+    """Run a loop's ``until.command`` / ``verify.command`` (#2745).
+
+    Unlike ``_run_pre_check`` (a script *path*), loop commands are shell
+    command lines (``npm test && test ! -s fix_plan.md``), so they run through
+    ``/bin/sh -c`` in the agent workspace. Returns ``(exit_code, output)``;
+    the output carries stdout plus stderr, and a spawn error or timeout is
+    reported as text with a non-zero code, so the loop feedback / outcome DM
+    always shows why the command failed instead of an empty block.
+    """
+    full_env = {**os.environ, **(env or {})}
+    try:
+        cwd = _agent_workdir()
+        cwd = str(cwd) if cwd.is_dir() else None
+    except Exception:
+        cwd = None
+    try:
+        proc = subprocess.run(
+            ["/bin/sh", "-c", command],
+            env=full_env,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=LOOP_COMMAND_TIMEOUT_SEC,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        msg = f"loop command timed out after {LOOP_COMMAND_TIMEOUT_SEC}s: {command}"
+        print(f"[Runner] {msg}", file=sys.stderr)
+        return 124, msg
+    except Exception as exc:
+        msg = f"loop command could not be started: {exc}"
+        print(f"[Runner] {msg}", file=sys.stderr)
+        return 127, msg
+
+    out = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    if err:
+        print(f"[Runner] loop command stderr: {err[:400]}", file=sys.stderr)
+    if proc.returncode != 0 and not (out or err):
+        out = f"(command exited {proc.returncode} with no output)"
+    combined = "\n".join(part for part in (out, f"[stderr]\n{err}" if err else "") if part)
+    return proc.returncode, combined[:4000]
+
+
 def _validate_loop_trigger(trigger: dict) -> tuple[bool, str]:
     """Validate a `loop` trigger's stop contract (#932).
 
@@ -4369,8 +4467,8 @@ def _validate_verify_spec(verify) -> tuple[bool, str]:
 
     A verifier takes exactly one of four shapes:
 
-    - ``{"command": "<sh>", "env": {}}`` — an exit-code gate (reuses
-      ``_run_pre_check``).
+    - ``{"command": "<sh>", "env": {}}`` — an exit-code gate (a shell
+      command line, run by ``_run_loop_command``).
     - ``{"agentId": "<other-agent>"}`` — delegate the check to a *different*
       agent and block on its verdict.
     - ``{"flow": true}`` — hand-off to the flow: no inline gate, verification
@@ -5783,7 +5881,7 @@ class TriggerScheduler:
                 until_code: int | None = None
                 if until_cmd:
                     until_code, last_until_output = await asyncio.to_thread(
-                        _run_pre_check, until_cmd, until_env)
+                        _run_loop_command, until_cmd, until_env)
                 outcome = _loop_stop_decision(
                     iterations, max_iterations, until_code,
                     tokens_spent, max_tokens)
@@ -6087,7 +6185,7 @@ class TriggerScheduler:
                                iteration: int) -> tuple[bool, str]:
         """Run one iteration's verifier gate (#933). Returns ``(passed, output)``.
 
-        - ``command`` → exit-code gate via ``_run_pre_check`` (0 == pass).
+        - ``command`` → exit-code gate via ``_run_loop_command`` (0 == pass).
         - ``agent``   → delegate to a different agent and block on its verdict.
         - ``flow``    → no inline gate; the downstream flow QS chain verifies
           each hand-off asynchronously.
@@ -6096,7 +6194,7 @@ class TriggerScheduler:
         mode = plan.get("mode")
         if mode == "command":
             code, out = await asyncio.to_thread(
-                _run_pre_check, plan["command"], plan.get("env") or {})
+                _run_loop_command, plan["command"], plan.get("env") or {})
             return code == 0, out
         if mode == "agent":
             return await self._run_agent_verify(plan["agentId"], trigger, iteration)
@@ -6853,10 +6951,13 @@ class TriggerScheduler:
         if not isinstance(count, int) or count <= 0:
             count = len(events)
         conv = entry.get("convKey") or "?"
+        # #2799: the poller carries the PR conversation's linked issue(s) on the
+        # entry; name them so a search for the issue number finds the digest.
+        closes = self._closes_text(self._closes_issues(entry.get("closesIssues")))
 
         lines = [
             f"⚠️ **Event burst clamped** — {count} GitHub events on "
-            f"`{conv}` in one poll cycle. Collapsing them into this digest "
+            f"`{conv}`{closes} in one poll cycle. Collapsing them into this digest "
             f"instead of starting **{count}** separate sessions.",
             "",
         ]
@@ -6901,6 +7002,9 @@ class TriggerScheduler:
         'pull_request.reopened':                'PR reopened',
         'pull_request.labeled':                 'PR labeled',
         'pull_request.unlabeled':               'PR unlabeled',
+        'pull_request.checks_passed':           'PR checks passed',
+        'pull_request.checks_failed':           'PR checks failed',
+        'pull_request.merge_conflict':          'PR merge conflict',
         'pull_request_review.submitted':        'PR review submitted',
         'pull_request_review_comment.created':  'PR review comment',
         'issue_comment.created':                'Issue / PR comment',
@@ -6922,6 +7026,29 @@ class TriggerScheduler:
     ])
 
     @staticmethod
+    def _closes_issues(value) -> list[int]:
+        """The PR's linked issue numbers (#2799), normalised for display.
+
+        Reads the ``closesIssues`` list the orchestrator already resolved
+        (poller enrichment, label fast-path, re-fire — pr-events-log.js
+        ``parseCloses``); never derives a link itself. Keeps positive ints only
+        (bools excluded), de-duplicated and ascending, so an absent, empty or
+        malformed value yields ``[]`` and the caller's text stays unchanged.
+        """
+        if not isinstance(value, list):
+            return []
+        nums = {n for n in value if isinstance(n, int) and not isinstance(n, bool) and n > 0}
+        return sorted(nums)
+
+    @staticmethod
+    def _closes_text(numbers: list[int]) -> str:
+        """`` → closes #12, #15`` — the GitHub Event Log's wording (#1833), or
+        ``""`` when there is no linked issue."""
+        if not numbers:
+            return ""
+        return " → closes " + ", ".join(f"#{n}" for n in numbers)
+
+    @staticmethod
     def _github_event_detail(event_key: str, payload: dict) -> tuple[str, str] | None:
         """Best-effort `(plain, html)` detail for a `github-event` trigger notice.
 
@@ -6936,19 +7063,28 @@ class TriggerScheduler:
         ``<a href="url">#N</a>``) and ``: <title>`` is appended only when a title
         is present. A missing title therefore never wipes out the number and
         link (the old all-or-nothing gate); it degrades to ``#N`` + link.
+
+        A PR linked to issue(s) (#2799) carries `` → closes #M`` right after its
+        number (plain ``#N → closes #M (url)``, html ``<a>#N</a> → closes #M``),
+        so a search for the issue number finds the run. Unlinked → unchanged.
         """
         try:
             item = None
+            is_pr = False
             if event_key.startswith("issues."):
                 item = payload.get("issue")
             elif event_key.startswith("pull_request.") or event_key.startswith("pull_request_review."):
                 item = payload.get("pull_request")
+                is_pr = True
             if isinstance(item, dict):
                 number, title, url = item.get("number"), item.get("title"), item.get("html_url")
                 if number is not None and url:
                     nref = f"#{number}"
-                    plain = f"{nref} ({url})"
-                    link_html = f'<a href="{html.escape(str(url), quote=True)}">{html.escape(nref)}</a>'
+                    closes = (TriggerScheduler._closes_text(TriggerScheduler._closes_issues(item.get("closesIssues")))
+                              if is_pr else "")
+                    plain = f"{nref}{closes} ({url})"
+                    link_html = (f'<a href="{html.escape(str(url), quote=True)}">{html.escape(nref)}</a>'
+                                 f'{html.escape(closes)}')
                     if title:
                         plain = f"{plain}: {title}"
                         link_html = f"{link_html}: {html.escape(str(title))}"
@@ -8049,12 +8185,17 @@ async def run_dm_listener() -> None:
         # needed.
         await workspace_gate.acquire_chat_turn()
         try:
-            _append_event(room_id, {
+            content = (getattr(event, "source", None) or {}).get("content")
+            received = {
                 "type": "message.received",
                 "correlationId": correlation_id,
                 "from": sender,
                 "body": body[:4000],
-            })
+            }
+            author = _chat_author(content)
+            if author:
+                received["author"] = author
+            _append_event(room_id, received)
 
             # Custom slash commands (#1796): recognise a provisioned `/command`
             # so it is fed verbatim (Claude Code expands it), and neutralise an
@@ -8065,7 +8206,6 @@ async def run_dm_listener() -> None:
                 _agent_workdir() / ".claude" / "commands")
             # A multi-select quick-reply answer (#2523) is resumed with every
             # selected label from its structured `io.aee.ask-answer`.
-            content = (getattr(event, "source", None) or {}).get("content")
             prepared = _prepare_chat_prompt(_ask_answer_prompt(body, content),
                                             known_commands)
             send_body = prepared["prompt"]

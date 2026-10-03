@@ -90,7 +90,7 @@ export default function PluginTeamAssign({ row, teams, stackRuntime, onChanged }
 
           {/* Platform mismatch still gates/warns here (edge case). */}
           {!gate.ok && (
-            <div style={{ marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-warn-fg, #8a6d00)' }}>
+            <div style={{ marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning-text)' }}>
               {gate.reason}
             </div>
           )}
@@ -111,7 +111,7 @@ export default function PluginTeamAssign({ row, teams, stackRuntime, onChanged }
           </button>
 
           {err && (
-            <div role="alert" style={{ marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-danger-fg, #a00)' }}>
+            <div role="alert" style={{ marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error-text)' }}>
               {err}
             </div>
           )}

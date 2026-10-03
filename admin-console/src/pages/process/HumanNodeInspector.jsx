@@ -169,7 +169,7 @@ export default function HumanNodeInspector({ human, stages = [], ops, triggerOps
         </div>
         <div style={{ display: 'flex', gap: 8, marginTop: 'var(--eb-space-2)' }}>
           <button disabled={busy || !dirty} onClick={save}
-            style={{ background: 'var(--eb-accent-primary)', color: '#fff', border: 'none', borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontSize: 'var(--eb-text-sm)', cursor: busy ? 'wait' : (dirty ? 'pointer' : 'default'), opacity: dirty ? 1 : 0.5 }}>
+            style={{ background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontSize: 'var(--eb-text-sm)', cursor: busy ? 'wait' : (dirty ? 'pointer' : 'default'), opacity: dirty ? 1 : 0.5 }}>
             Save
           </button>
           <button disabled={busy} onClick={remove}

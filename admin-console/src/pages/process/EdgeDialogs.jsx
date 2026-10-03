@@ -10,6 +10,10 @@ import { TriggerForm } from '../agent-chat/TriggersPanel';
 import { defaultListenerPrompt, handoffVerb, handoffTargetNoun } from './handoff-prompt';
 import { labelNameError, promptPlaceholderError } from './handoff-validation';
 import { hasChannel } from './channel-ops';
+import {
+  DEFAULT_FAILURE_LABEL, DEFAULT_TIMEOUT_MINUTES, TIMEOUT_LABEL,
+  gateable, readinessForm, readinessFormError, readinessFromForm,
+} from './readiness-gate';
 import { isGateLabel, isBrakeLabel } from './label-flags';
 import { defaultGateKind } from './human-gate-ops';
 import { labelEdgeHasListener, setLabelTarget, labelTargetKind } from './outcome-routing';
@@ -50,6 +54,9 @@ const GH_EVENTS = [
   { value: 'pull_request.merged', label: 'PR merged' },
   { value: 'pull_request.labeled', label: 'PR labeled' },
   { value: 'pull_request.unlabeled', label: 'PR unlabeled' },
+  { value: 'pull_request.checks_passed', label: 'PR checks passed' },
+  { value: 'pull_request.checks_failed', label: 'PR checks failed' },
+  { value: 'pull_request.merge_conflict', label: 'PR merge conflict' },
   { value: 'pull_request_review.submitted', label: 'PR review submitted' },
   { value: 'issue_comment.created', label: 'Comment created' },
   { value: 'push', label: 'Push' },
@@ -119,6 +126,9 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
   const [action, setAction] = useState('labeled');       // labeled | unlabeled
   const [repo, setRepo] = useState('');
   const [prompt, setPrompt] = useState('');
+  // #2795: a NEW PR hand-off waits for CI and a conflict-free PR by default
+  // (not on the default failure label itself, which would loop).
+  const [readiness, setReadiness] = useState(() => readinessForm(null, { isNew: true, wakeLabel: initialLabel }));
 
   useEffect(() => {
     let alive = true;
@@ -157,11 +167,14 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
   // `<Describe …>` placeholder must be replaced before the listener is saved.
   const labelErr = label.trim() ? labelNameError(label) : null;
   const promptErr = promptPlaceholderError(effectivePrompt);
+  const gated = gateable({ event });
+  const readinessErr = gated ? readinessFormError(readiness, { wakeLabel: label }) : null;
 
   async function submit() {
     const trimmed = label.trim();
     const invalid = labelNameError(trimmed) || promptErr;
     if (invalid) { setError(invalid); return; }
+    if (readinessErr) { setError(readinessErr); return; }
     setSaving(true); setError(null);
     try {
       // The engine wires both sides: single-event listener (+claim) on B —
@@ -170,6 +183,7 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
       await wireLabelHandoff({ ops }, {
         from, to, label: trimmed, target, action, repo,
         prompt: effectivePrompt, labels, emitSource, fromName, toName,
+        ...(gated ? { readinessGate: readinessFromForm(readiness) } : {}),
       });
       onDone?.();
     } catch (e) {
@@ -227,6 +241,9 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
               style={{ ...input, minHeight: 120, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
           </Field>
           {promptErr && <small style={errStyle}>{promptErr}</small>}
+          {gated && (
+            <ReadinessGateFields value={readiness} onChange={setReadiness} toLabel={toName || to} error={readinessErr} />
+          )}
           <small style={small}>
             The repository is resolved automatically — from the agent's working
             environment (live team) or when the draft is materialised.
@@ -559,9 +576,14 @@ export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifac
   // Named approver (#1005, §4.3/§5 path A): picking a person turns the gated
   // channel into the FULL review-gate triangle in this one dialog.
   const [approver, setApprover] = useState('');
+  // #2795: a NEW PR channel waits for CI and a conflict-free PR by default.
+  const [readiness, setReadiness] = useState(() => readinessForm(null, { isNew: true }));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const noun = artifact === 'pr' ? 'pull request' : 'issue';
+  // The named-approver path wires a review gate, not a channel — no gate there.
+  const gated = gateable({ artifact }) && !(human && approver);
+  const readinessErr = gated ? readinessFormError(readiness, { wakeLabel: label }) : null;
   // #2665: `existingChannels` is the consumer's `channels` port. Re-drawing a
   // channel that is already there would only upsert it in place, so say so and
   // don't offer to create it again — it is edited from its edge.
@@ -570,6 +592,7 @@ export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifac
   async function submit() {
     if (exists) return;
     if (human && !label.trim()) { setError('A human-approval gate needs the label a human applies.'); return; }
+    if (readinessErr) { setError(readinessErr); return; }
     setSaving(true); setError(null);
     try {
       // With a NAMED approver the engine wires the whole S3 triangle
@@ -579,6 +602,7 @@ export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifac
         from, to, artifact, label,
         human: human ? (approver || null) : null,
         gate: human,
+        ...(gated ? { readiness: readinessFromForm(readiness) } : {}),
       });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
@@ -621,6 +645,9 @@ export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifac
               delivered to them, and their approval label wakes {toName || to} (claim stamped).
             </small>
           </Field>
+        )}
+        {gated && (
+          <ReadinessGateFields value={readiness} onChange={setReadiness} toLabel={toName || to} error={readinessErr} />
         )}
         {exists && (
           <small style={small}>
@@ -686,8 +713,13 @@ export function AgentToPersonDialog({ from, to, fromName, toName, ops = liveOps,
   // the graph builder); an unflagged label is a plain delivery that never blocks.
   const labelIsGate = isLabelChoice && isGateLabel(labels, chosenLabel);
   const labelIsBrake = isLabelChoice && isBrakeLabel(labels, chosenLabel);
+  // #2706: the gate label is written into the person's emits and the
+  // consumer's labelFilter/claim — it must be one GitHub keeps whole.
+  const wiresGate = isArtifactChoice && !!wakeTo;
+  const gateLabelErr = wiresGate ? labelNameError(gateLabel) : null;
 
   async function submit() {
+    if (gateLabelErr) { setError(gateLabelErr); return; }
     setSaving(true); setError(null);
     try {
       const entry = isLabelChoice
@@ -700,7 +732,7 @@ export function AgentToPersonDialog({ from, to, fromName, toName, ops = liveOps,
       // target is always a plain consume — no PR/Issue delivery is created (AC2).
       await submitAgentToPerson({ ops, humanOps }, {
         from, human: to, entry,
-        ...(isArtifactChoice && wakeTo ? { wake: { to: wakeTo, gateLabel } } : {}),
+        ...(wiresGate ? { wake: { to: wakeTo, gateLabel: gateLabel.trim() } } : {}),
       });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
@@ -739,13 +771,14 @@ export function AgentToPersonDialog({ from, to, fromName, toName, ops = liveOps,
               Completes the review gate in one go: {toName || to} applies the label,
               the consumer wakes (claim stamped). Leave empty to wire it later.
             </small>
+            {gateLabelErr && <small style={errStyle}>{gateLabelErr}</small>}
           </Field>
         )}
         {error && <span style={errStyle}>{error}</span>}
         <div style={actions}>
           {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
           <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
-          <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Wiring…' : 'Wire delivery'}</button>
+          <button onClick={submit} disabled={saving || !!gateLabelErr} style={primary}>{saving ? 'Wiring…' : 'Wire delivery'}</button>
         </div>
       </div>
     </SidePanel>
@@ -1356,12 +1389,18 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onD
   // Optional authored wake-prompt override (#868): empty = keep the generated
   // "a PR/issue arrived" prompt; any text overrides it on the derived listener.
   const [wakePrompt, setWakePrompt] = useState(edge.wakePrompt || '');
+  // #2795: shows exactly what is stored — an old channel without a gate stays
+  // ungated on Save unless the operator switches it on.
+  const [readiness, setReadiness] = useState(() => readinessForm(edge.readiness));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const noun = artifact === 'pr' ? 'pull request' : 'issue';
+  const gated = gateable({ artifact });
+  const readinessErr = gated ? readinessFormError(readiness, { wakeLabel: label }) : null;
 
   async function save() {
     if (human && !label.trim()) { setError('A human-approval gate needs the label a human applies.'); return; }
+    if (readinessErr) { setError(readinessErr); return; }
     setSaving(true); setError(null);
     try {
       // #2717: keyed on the label the channel had when the dialog opened, so a
@@ -1373,6 +1412,7 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onD
         ...(label.trim() ? { label: label.trim() } : {}),
         ...(human ? { gate: 'human' } : {}),
         wakePrompt: wakePrompt.trim(),
+        ...(gated ? { readiness: readinessFromForm(readiness) } : {}),
       } });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
@@ -1413,6 +1453,9 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onD
             Replaces the auto-generated wake instruction {toName || to} is woken with. Empty keeps the default.
           </span>
         </Field>
+        {gated && (
+          <ReadinessGateFields value={readiness} onChange={setReadiness} toLabel={toName || to} error={readinessErr} />
+        )}
         {error && <span style={errStyle}>{error}</span>}
         <div style={actions}>
           <button onClick={remove} disabled={saving}
@@ -1445,6 +1488,8 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
   // the auto-generated default); any string (incl. '') = an operator-owned value
   // shown verbatim and saved as-is (AC2 + the empty-prompt / rename edge cases).
   const [prompt, setPrompt] = useState(null);
+  // #2795: the listener's stored gate (absent = off, never switched on silently).
+  const [readiness, setReadiness] = useState(() => readinessForm(null));
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [delListener, setDelListener] = useState(true);
   const [delEmit, setDelEmit] = useState(!humanSource);
@@ -1470,6 +1515,7 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
           // prompt (undefined / non-string — e.g. created before this field
           // existed) stays `null`, so the default seeds it below (AC3).
           if (typeof t.prompt === 'string') setPrompt(t.prompt);
+          setReadiness(readinessForm(t.readinessGate));
         }
       } catch (e) {
         if (alive) setError(e.message);
@@ -1497,11 +1543,14 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
   // or an unusable label name has to be fixed before the listener is saved.
   const labelErr = labelName.trim() ? labelNameError(labelName) : null;
   const promptErr = promptPlaceholderError(effectivePrompt);
+  const gated = gateable({ event });
+  const readinessErr = gated ? readinessFormError(readiness, { wakeLabel: labelName }) : null;
 
   async function saveEdits() {
     const newLabel = labelName.trim();
     const invalid = labelNameError(newLabel) || promptErr;
     if (invalid) { setError(invalid); return; }
+    if (readinessErr) { setError(readinessErr); return; }
     setSaving(true); setError(null);
     try {
       // The engine updates the listener (prompt persisted verbatim — the
@@ -1511,6 +1560,7 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
       await updateLabelHandoff({ ops }, {
         from, to, triggerId, label, newLabel, target, action,
         prompt: effectivePrompt, humanSource,
+        readinessGate: gated ? readinessFromForm(readiness) : null,
       });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
@@ -1614,6 +1664,9 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
             The instruction <strong>{toName || to}</strong> is woken with. Leave the
             default or refine it; clearing it saves an empty prompt.
           </small>
+          {gated && (
+            <ReadinessGateFields value={readiness} onChange={setReadiness} toLabel={toName || to} error={readinessErr} />
+          )}
 
           {error && <span style={errStyle}>{error}</span>}
 
@@ -2235,6 +2288,45 @@ export function WebhookForm({ to, toName, ops = liveOps, onBack, onClose, onDone
 }
 
 /* ── shared bits ───────────────────────────────────────────────────────── */
+
+// Readiness gate on a PR hand-off (#2795): hold the wake until CI is green and
+// the PR merges cleanly. `value` is a readinessForm() state.
+function ReadinessGateFields({ value, onChange, toLabel, error }) {
+  const set = (patch) => onChange({ ...value, ...patch });
+  const on = value.ci || value.conflict;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)' }}>
+      <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Before {toLabel} is woken</span>
+      <label style={check}>
+        <input type="checkbox" checked={!!value.ci} onChange={e => set({ ci: e.target.checked })} />
+        Wait for CI — hold the wake until the PR's checks pass
+      </label>
+      <label style={check}>
+        <input type="checkbox" checked={!!value.conflict} onChange={e => set({ conflict: e.target.checked })} />
+        Block on merge conflict — hold the wake until the PR merges cleanly
+      </label>
+      {on && (
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+          <Field label="On failure, set label">
+            <input value={value.failureLabel} onChange={e => set({ failureLabel: e.target.value })}
+              placeholder={DEFAULT_FAILURE_LABEL} style={input} />
+          </Field>
+          <Field label="Timeout (minutes)">
+            <input value={value.timeoutMinutes} onChange={e => set({ timeoutMinutes: e.target.value })}
+              inputMode="numeric" placeholder={String(DEFAULT_TIMEOUT_MINUTES)} style={input} />
+          </Field>
+        </div>
+      )}
+      <small style={small}>
+        {on
+          ? <>Failing checks or a conflict remove the hand-off label, set the failure label and comment on the PR. After the timeout the label is removed and <code>{TIMEOUT_LABEL}</code> is set.</>
+          : <>Off: {toLabel} is woken as soon as the label is set, whatever the PR's checks say.</>}
+      </small>
+      {error && <small style={errStyle}>{error}</small>}
+    </div>
+  );
+}
+
 function Field({ label, children }) {
   return (
     <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>

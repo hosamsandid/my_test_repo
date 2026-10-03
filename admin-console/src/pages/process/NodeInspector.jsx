@@ -13,6 +13,7 @@ import { ID_FORMAT_HINT } from '../../components/id-field-view';
 import PromptHistory from '../agent-chat/PromptHistory';
 import ScalingSection from './ScalingSection';
 import { poolControlUrl, livePoolCount } from './pool-cap-view.js';
+import { poolInstanceHint } from './pool-instance-hint.js';
 import { poolBadgeText, scalingDraftFromPool, scalingDraftDirty, scalingSaveDecision } from './scaling-view.js';
 import { ROUTING_SAVE_HINT, leaveGuard, discardMessage, roleDeleteImpact, deleteRoleSummary } from './node-inspector-view.js';
 import {
@@ -119,6 +120,8 @@ export default function NodeInspector({
 
   // #2760 AC5: the role's live instance count against its cap, for Scaling.
   const { data: poolControl } = useApi(isPooledRoleNode ? poolControlUrl(memberCfg) : null);
+  // #2814 AC5: the role's live instances — no longer canvas nodes of their own.
+  const poolHint = isPooledRoleNode ? poolInstanceHint(poolControl, memberCfg.id) : null;
 
   // Scaling draft (#2295), only meaningful for a pooled role node — declared
   // unconditionally (hooks can't be conditional) with a harmless blank/
@@ -265,11 +268,23 @@ export default function NodeInspector({
                 operator looking at one agent sees its scaling at a glance"),
                 visible regardless of which tab is active. */}
             {isPooledRoleNode && poolBadgeText(memberCfg.pool) && <span style={badge}>{poolBadgeText(memberCfg.pool)}</span>}
+            {poolHint && <span style={badge} title={poolHint.title}>{poolHint.text}</span>}
           </>
         ) : (
           <span style={badge}>draft agent</span>
         )}
       </div>
+      {/* #2814 AC5: one line per live pool instance of this role, from the
+          same pool-control read as the Scaling count. */}
+      {poolHint && (
+        <ul aria-label="Live instances" style={{ listStyle: 'none', margin: '0 0 var(--eb-space-4)', padding: 0, display: 'flex', flexDirection: 'column', gap: 2, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+          {poolHint.instances.map((i) => (
+            <li key={i.instanceId} title={i.instanceId}>
+              <span style={{ fontWeight: 'var(--eb-font-medium)' }}>{i.label}</span> · {i.statusText}
+            </li>
+          ))}
+        </ul>
+      )}
 
       {isTemplate ? (
         <TemplateReadonly node={node} />

@@ -14,6 +14,7 @@ import FlowCopilotPanel from './process/FlowCopilotPanel';
 import { useFlowCopilot } from '../context/FlowCopilotContext.jsx';
 import { proposalNodeDiff } from './process/flow-copilot-view';
 import { anomalyCountByNode } from './process/flow-anomalies-view';
+import { poolInstanceHintsByNode, poolInstanceRoleMap, isPoolInstanceRow } from './process/pool-instance-hint.js';
 import { lintView } from './process/lint-view';
 import HumanNodeInspector from './process/HumanNodeInspector';
 import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog, CreateChannelDialog, AgentToPersonDialog } from './process/EdgeDialogs';
@@ -224,6 +225,21 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     : `/api/flows/graph?team=${encodeURIComponent(scope)}`;
   const { data: graph, loading, error, refetch } = useApi(graphUrl);
 
+  // Live pool instances (#2814): not graph nodes (the server leaves them out),
+  // shown as an "n running" hint on their role's node instead. Read from the
+  // team's pool-control — the same instance read and status rule as the
+  // pool-instance lanes — and re-read whenever the graph is.
+  const poolControlUrl = !isDraft && !isImportPreview && isTeamScope && hasPooledRole
+    ? `/api/teams/${encodeURIComponent(scope)}/pool-control` : null;
+  const { data: poolControl, refetch: refetchPoolControl } = useApi(poolControlUrl);
+  const seenGraphRef = useRef(null);
+  useEffect(() => {
+    // Skip the first graph load — useApi already fetched for the new URL.
+    if (graph && seenGraphRef.current && poolControlUrl) refetchPoolControl();
+    seenGraphRef.current = graph;
+  }, [graph]); // eslint-disable-line react-hooks/exhaustive-deps
+  const poolHints = useMemo(() => poolInstanceHintsByNode(poolControl), [poolControl]);
+
   // An imported bundle (#334) overrides the fetched graph until closed — shown
   // as a read-only blueprint that can be materialised into a real team.
   const [imported, setImported] = useState(null); // { bundle, graph }
@@ -250,13 +266,18 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   const [humansOpen, setHumansOpen] = useState(false);
   const [anomaliesOpen, setAnomaliesOpen] = useState(false);
   // Per-node anomaly counts (#959) — overlaid as a badge on the canvas cards.
-  const [anomalyCounts, setAnomalyCounts] = useState({});
+  const [anomalyList, setAnomalyList] = useState([]);
   // Stable callback so FlowAnomaliesPanel's useCallback([teamId, onData]) dep never
   // changes between renders — an inline arrow here would recreate load() on every
   // render, causing an infinite fetch → setState → re-render → fetch loop.
   const onAnomalyData = useCallback(
-    (data) => setAnomalyCounts(anomalyCountByNode(data && data.anomalies)),
+    (data) => setAnomalyList(Array.isArray(data && data.anomalies) ? data.anomalies : []),
     [],
+  );
+  // A pool instance is not a node (#2814): its anomalies count on its role.
+  const anomalyCounts = useMemo(
+    () => anomalyCountByNode(anomalyList, poolInstanceRoleMap(agents)),
+    [anomalyList, agents],
   );
   // Improvements panel (#1223, hill-climbing loop Phase 1) — run-metric tiles.
   const [improvementsOpen, setImprovementsOpen] = useState(false);
@@ -469,6 +490,35 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     };
   }, [anomalyCounts, displayGraph]);
 
+  // "n running" hint on a pooled role's card (#2814 AC4) — same overlay
+  // technique as the anomaly badge, bottom-right so the two never overlap.
+  // Live team graph only: a draft, import or Copilot proposal has no instances.
+  const showPoolHints = !isDraft && !imported && !proposal;
+  useEffect(() => {
+    const root = viewportRef.current;
+    if (!root) return;
+    root.querySelectorAll('.bp-pool-hint-badge').forEach((el) => el.remove());
+    if (!showPoolHints) return;
+    for (const [id, hint] of Object.entries(poolHints || {})) {
+      const node = root.querySelector(`.bp-node[data-id="${(window.CSS && window.CSS.escape) ? window.CSS.escape(id) : id}"]`);
+      if (!node) continue;
+      if (getComputedStyle(node).position === 'static') node.style.position = 'relative';
+      const badge = document.createElement('div');
+      badge.className = 'bp-pool-hint-badge';
+      badge.title = `${hint.title} — open the node for details`;
+      badge.textContent = hint.text;
+      badge.style.cssText =
+        'position:absolute;bottom:-9px;right:8px;height:18px;padding:0 6px;' +
+        'border-radius:999px;background:var(--eb-bg-elevated);color:var(--eb-text-secondary);' +
+        'border:1px solid var(--eb-border-default);font-size:11px;font-weight:600;white-space:nowrap;' +
+        'display:flex;align-items:center;z-index:5;pointer-events:none;';
+      node.appendChild(badge);
+    }
+    return () => {
+      if (viewportRef.current) viewportRef.current.querySelectorAll('.bp-pool-hint-badge').forEach((el) => el.remove());
+    };
+  }, [poolHints, displayGraph, showPoolHints]);
+
   // Clear selection/dialogs when the scope (and thus the graph) changes. A
   // scope change from the parent also drops any imported blueprint preview or
   // Copilot proposal preview.
@@ -678,7 +728,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // trigger gets the agent's repo filled in exactly as on the canvas.
   const liveCopilotTransport = useMemo(() => ({
     teamId: scope,
-    memberIds: Array.isArray(agents) ? agents.filter(a => a.parentTeamId === scope).map(a => a.id) : [],
+    // Roles only — an auto-scaled pool instance is not a member to edit (#2814).
+    memberIds: Array.isArray(agents) ? agents.filter(a => a.parentTeamId === scope && !isPoolInstanceRow(a)).map(a => a.id) : [],
     fetchCurrent: fetchLiveBundle,
     fetchTickets: async () => {
       try {

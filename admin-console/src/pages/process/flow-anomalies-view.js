@@ -80,12 +80,15 @@ function anomalyView(a) {
 }
 
 // Count anomalies per node id (agentId) for the on-canvas badge. Anomalies with
-// no responsible agent (gate-idle) are not attributed to a node.
-function anomalyCountByNode(anomalies) {
+// no responsible agent (gate-idle) are not attributed to a node. `roleOf`
+// (#2814) maps an auto-scaled pool instance id to its role's id — instances
+// are not canvas nodes, so their anomalies count on the role's node.
+function anomalyCountByNode(anomalies, roleOf = {}) {
   const out = {};
   for (const a of Array.isArray(anomalies) ? anomalies : []) {
     if (!a || !a.agentId) continue;
-    out[a.agentId] = (out[a.agentId] || 0) + 1;
+    const id = (roleOf && roleOf[a.agentId]) || a.agentId;
+    out[id] = (out[id] || 0) + 1;
   }
   return out;
 }

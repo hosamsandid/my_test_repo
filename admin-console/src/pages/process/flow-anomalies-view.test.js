@@ -74,3 +74,11 @@ test('classInfo falls back gracefully on an unknown class', () => {
   assert.equal(info.title, 'mystery');
   assert.equal(info.severity, 'info');
 });
+
+test('#2814 anomalyCountByNode folds a pool instance\'s anomalies onto its role node', () => {
+  const counts = anomalyCountByNode(
+    [{ agentId: 'acme-spec-i71' }, { agentId: 'acme-spec' }, { agentId: 'acme-dev' }],
+    { 'acme-spec-i71': 'acme-spec' },
+  );
+  assert.deepEqual(counts, { 'acme-spec': 2, 'acme-dev': 1 });
+});

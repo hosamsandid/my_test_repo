@@ -64,7 +64,7 @@ through unchanged.
 
 ### 4. Exit codes
 
-One vocabulary across all four:
+One vocabulary across all of them:
 
 | Code | Meaning |
 |---|---|

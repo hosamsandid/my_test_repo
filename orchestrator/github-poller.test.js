@@ -610,6 +610,20 @@ test("_enrichPullRequestPayload: a fetch failure still parses closes from the br
   assert.equal(out.pull_request.html_url, "https://github.com/o/r/pull/500");
 });
 
+test("_enrichPullRequestPayload: a closesIssues already on the payload is kept, not narrowed to the branch (#2799)", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => { throw new Error("must not fetch"); };
+  const payload = {
+    pull_request: {
+      number: 12, title: "T", html_url: "https://github.com/o/r/pull/12",
+      head: { ref: "issue-40-x" }, closesIssues: [7, 40],
+    },
+  };
+  const out = await poller._enrichPullRequestPayload("pull_request.checks_passed", payload, "tok");
+  assert.equal(out, payload, "nothing to add → identity");
+  assert.deepEqual(out.pull_request.closesIssues, [7, 40]);
+});
+
 // ── pollerSubscribes ─────────────────────────────────────────────────────────
 //
 // Every well-formed, enabled github-event trigger is poller-subscribed. The
@@ -2285,4 +2299,42 @@ test("_fanOutBatch (#2602 scope): only push is affected — other events of a pu
     issueOpened, pushEvent("kb", { ref: "refs/heads/agent-knowledge", head: "h1" }),
   ]], [sub], ["agent-knowledge"]);
   assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["io-kb"]);
+});
+
+// ── #2799 AC7: the burst digest carries the PR conversation's linked issue(s).
+
+test("_fanOutBatch (#2799 AC7): a PR burst digest carries closesIssues from the shared enrichment cache", async () => {
+  const run = async (linked) => {
+    const poller = new GitHubPoller();
+    const prSub = { agentId: "reviewer", triggerId: "t-pr", events: new Set(["pull_request.opened", "pull_request.reopened"]), labelFilter: null, horizon: null };
+    const enrichCalls = [];
+    const prs = [];
+    for (let i = 0; i < BURST_CAP + 1; i++) {
+      prs.push(prOpenedEvent(`pr-d${i}`, { number: 2798, sha: `sha${i}`, action: i % 2 ? "reopened" : "opened" }));
+    }
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+    poller._checkAndIncThrottle = () => ({ drop: false });
+    poller._saveThrottleState = () => {};
+    poller._enrichPullRequestPayload = async (key, payload) => {
+      enrichCalls.push(key);
+      if (!key.startsWith("pull_request") || !linked) return payload;
+      return { ...payload, pull_request: { ...payload.pull_request, closesIssues: linked } };
+    };
+    const origRecord = githubEventLog.record;
+    githubEventLog.record = () => {};
+    try {
+      await poller._fanOutBatch("org/repo", prs, [prSub], "tok");
+    } finally {
+      githubEventLog.record = origRecord;
+    }
+    const digest = enqueued.find((e) => e.entry.kind === "github-digest");
+    assert.ok(digest, "the burst collapses into a digest");
+    assert.equal(digest.entry.convKey, "pr:2798");
+    // No extra request: each PR event is enriched exactly once (digest + log share the cache).
+    assert.equal(enrichCalls.filter((k) => k.startsWith("pull_request")).length, BURST_CAP + 1);
+    return digest.entry;
+  };
+  assert.deepEqual((await run([2794, 12])).closesIssues, [12, 2794]);
+  assert.equal("closesIssues" in (await run(null)), false, "no known link → entry unchanged");
 });

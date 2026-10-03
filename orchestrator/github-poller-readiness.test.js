@@ -184,6 +184,24 @@ test('AC6/AC8: checks_passed wakes the subscriber exactly once, with PR, head SH
   assert.equal(enqueued.length, 1);
 }));
 
+test('#2799 AC5: a readiness event for a PR whose body links an issue carries closesIssues to the subscriber', withLog(async () => {
+  const { poller, enqueued } = makePoller();
+  const subs = [subscriber(['pull_request.checks_passed', 'pull_request.merge_conflict'])];
+  openPrs = [{ ...prNode(2798, SHA_A), body: 'Implements the gate.\n\nCloses #2794' }, prNode(9, SHA_B)];
+  checksBySha = { [SHA_A]: [running('build')], [SHA_B]: [running('build')] };
+  await cycle(poller, subs); // baseline
+  openPrs = [{ ...openPrs[0], mergeable: 'CONFLICTING' }, openPrs[1]];
+  checksBySha = { [SHA_A]: [ok('build')], [SHA_B]: [ok('build')] };
+  const before = calls.length;
+  await cycle(poller, subs);
+  assert.equal(calls.length - before, 2, 'open PRs + checks: no PR detail fetch added');
+  const linked = enqueued.filter((e) => e.entry.github.payload.pull_request.number === 2798);
+  assert.deepEqual(linked.map((e) => e.entry.github.event).sort(), ['pull_request.checks_passed', 'pull_request.merge_conflict']);
+  for (const e of linked) assert.deepEqual(e.entry.github.payload.pull_request.closesIssues, [2794]);
+  const unlinked = enqueued.find((e) => e.entry.github.payload.pull_request.number === 9);
+  assert.equal('closesIssues' in unlinked.entry.github.payload.pull_request, false, 'no link → no key');
+}));
+
 test('AC2/AC6: checks_failed carries the failing check names; merge_conflict fires for CONFLICTING', withLog(async () => {
   const { poller, enqueued } = makePoller();
   const subs = [subscriber(['pull_request.checks_failed', 'pull_request.merge_conflict'])];

@@ -728,6 +728,53 @@ class LogRunReply(unittest.TestCase):
             self.assertEqual(assigned, logged)
 
 
+class GithubEventDetailLinkedIssue(unittest.TestCase):
+    """#2799: a PR linked to issue(s) names them right after its number."""
+
+    PR = {"number": 2798, "title": "PR readiness",
+          "html_url": "https://github.com/o/r/pull/2798"}
+
+    def _detail(self, key="pull_request.labeled", **extra):
+        return github_event_detail(key, {"pull_request": {**self.PR, **extra}})
+
+    def test_linked_pr_shows_issue_in_plain_and_html(self):
+        # AC1 + AC2: Event Log wording, PR number stays the link.
+        self.assertEqual(self._detail(closesIssues=[2794]), (
+            "#2798 → closes #2794 (https://github.com/o/r/pull/2798): PR readiness",
+            '<a href="https://github.com/o/r/pull/2798">#2798</a> → closes #2794: PR readiness',
+        ))
+
+    def test_multiple_issues_listed_ascending_and_deduplicated(self):
+        # AC3
+        plain, html_ = self._detail(closesIssues=[15, 12, 15])
+        self.assertIn("#2798 → closes #12, #15 (", plain)
+        self.assertIn("</a> → closes #12, #15: ", html_)
+
+    def test_review_events_also_show_the_issue(self):
+        plain, _ = self._detail("pull_request_review.submitted", closesIssues=[2794])
+        self.assertIn("→ closes #2794", plain)
+
+    def test_title_missing_still_shows_issue(self):
+        plain, html_ = github_event_detail("pull_request.labeled", {"pull_request": {
+            "number": 2798, "html_url": "https://github.com/o/r/pull/2798",
+            "closesIssues": [2794]}})
+        self.assertEqual(plain, "#2798 → closes #2794 (https://github.com/o/r/pull/2798)")
+        self.assertEqual(html_, '<a href="https://github.com/o/r/pull/2798">#2798</a> → closes #2794')
+
+    def test_absent_empty_or_malformed_link_is_byte_identical(self):
+        # AC4: identical to the unlinked output for every non-usable value.
+        baseline = self._detail()
+        for bad in ([], None, "2794", 2794, {"n": 1}, [0, -3, "7", 1.5, True, None]):
+            with self.subTest(bad=bad):
+                self.assertEqual(self._detail(closesIssues=bad), baseline)
+
+    def test_issue_events_never_get_a_closes_suffix(self):
+        detail = github_event_detail("issues.labeled", {"issue": {
+            "number": 5, "title": "T", "html_url": "https://github.com/o/r/issues/5",
+            "closesIssues": [7]}})
+        self.assertNotIn("closes", detail[0])
+
+
 class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
     def _scheduler(self):
         client = AsyncMock()
@@ -1098,6 +1145,70 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
         self.assertIn('<a href="https://github.com/o/r/pull/123">#123</a>: Wire it up',
                       content["formatted_body"])
 
+    # -- #2799: linked issue next to the PR number ------------------------------
+
+    def _pr_ctx(self, event="pull_request.labeled", **pr_extra):
+        return {"github": {
+            "event": event,
+            "repo": "o/agent-execution-environment",
+            "payload": {"label": {"name": "revisions-required"},
+                        "pull_request": {"number": 2798, "title": "PR readiness",
+                                          "html_url": "https://github.com/o/r/pull/2798",
+                                          **pr_extra}},
+        }}
+
+    async def test_linked_pr_notice_names_the_issue_in_body_and_html(self):
+        """#2799 AC1/AC2/AC6: issue in the plain body, same order in HTML, the
+        label/repo/description segments keep their place."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t1", "type": "github-event", "description": "Rework"}
+        await scheduler._post_trigger_notice(
+            trigger, self._pr_ctx(closesIssues=[2794]), "!room:local")
+        content = client.room_send.call_args.kwargs["content"]
+        self.assertEqual(
+            content["body"],
+            "⚡ Trigger fired — PR labeled · `revisions-required` · `agent-execution-environment` · "
+            "#2798 → closes #2794 (https://github.com/o/r/pull/2798): PR readiness"
+            " — Rework — starting work…")
+        self.assertEqual(
+            content["formatted_body"],
+            "⚡ Trigger fired — PR labeled · <code>revisions-required</code> · "
+            "<code>agent-execution-environment</code> · "
+            '<a href="https://github.com/o/r/pull/2798">#2798</a> → closes #2794: PR readiness'
+            " — Rework — starting work…")
+        self.assertEqual(content["io.aee.trigger"],
+                         {"triggerId": "t1", "triggerType": "github-event",
+                          "event": "pull_request.labeled"})
+
+    async def test_unlinked_pr_notice_is_byte_identical(self):
+        """#2799 AC4: absent / empty / malformed closesIssues → today's notice."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t1", "type": "github-event"}
+        await scheduler._post_trigger_notice(trigger, self._pr_ctx(), "!room:local")
+        baseline = client.room_send.call_args.kwargs["content"]
+        for bad in ([], "2794", [None, 0]):
+            with self.subTest(bad=bad):
+                await scheduler._post_trigger_notice(
+                    trigger, self._pr_ctx(closesIssues=bad), "!room:local")
+                self.assertEqual(client.room_send.call_args.kwargs["content"], baseline)
+
+    async def test_linked_issue_shown_for_every_pr_shaped_event_key(self):
+        """#2799 AC5: every delivery path (poller, label fast-path, re-fire, pool
+        routing) hands the notice the same `payload.pull_request.closesIssues`, so
+        the rendering depends only on the payload — prove it per PR event key,
+        including the #2794 readiness keys."""
+        scheduler, client = self._scheduler()
+        for key in ("pull_request.opened", "pull_request.labeled", "pull_request.checks_failed",
+                    "pull_request.merge_conflict", "pull_request.merged",
+                    "pull_request_review.submitted"):
+            with self.subTest(key=key):
+                await scheduler._post_trigger_notice(
+                    {"id": "t1", "type": "github-event"},
+                    self._pr_ctx(event=key, closesIssues=[12, 15]), "!room:local")
+                content = client.room_send.call_args.kwargs["content"]
+                self.assertIn("#2798 → closes #12, #15 (", content["body"])
+                self.assertIn("</a> → closes #12, #15", content["formatted_body"])
+
     async def test_title_missing_degrades_to_link_only(self):
         """AC5: an internal delivery with no resolved title still renders
         `#N` + link (plain and HTML), never blank."""
@@ -1125,6 +1236,35 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
         content = client.room_send.call_args.kwargs["content"]
         self.assertNotIn("format", content)
         self.assertNotIn("formatted_body", content)
+
+
+class GithubDigestLinkedIssue(unittest.IsolatedAsyncioTestCase):
+    """#2799 AC7: the burst digest DM names the PR conversation's linked issue."""
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    async def _digest_body(self, **extra):
+        scheduler = self._scheduler()
+        entry = {"kind": "github-digest", "roomId": "!room:local", "convKey": "pr:2798",
+                 "count": 6, "events": [{"event": "pull_request.labeled", "eventId": "1"}],
+                 **extra}
+        await scheduler._execute_github_digest(entry)
+        return scheduler._send_formatted.await_args.args[1]
+
+    async def test_digest_names_linked_issues(self):
+        body = await self._digest_body(closesIssues=[15, 12])
+        self.assertIn("6 GitHub events on `pr:2798` → closes #12, #15 in one poll cycle", body)
+
+    async def test_digest_without_link_is_unchanged(self):
+        baseline = await self._digest_body()
+        self.assertIn("on `pr:2798` in one poll cycle", baseline)
+        for bad in ([], None, ["x"]):
+            with self.subTest(bad=bad):
+                self.assertEqual(await self._digest_body(closesIssues=bad), baseline)
 
 
 class DescribeInFlightMarker(unittest.TestCase):

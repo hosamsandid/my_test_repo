@@ -1058,11 +1058,14 @@ class GitHubPoller {
         continue;
       }
       if (decision.action === 'release') {
-        delete holds[hk];
-        this._saveState();
+        // Enrich first (network), then forget + save + enqueue with no await in
+        // between, so a restart can neither lose the wake nor deliver it twice.
         const stored = hold.event || {};
         const payload = await this._enrichPullRequestPayload(hold.key, stored.payload, token);
         const ghEvent = { ...stored, payload };
+        if (holds[hk] !== hold) continue; // resolved meanwhile
+        delete holds[hk];
+        this._saveState();
         const d = this._enqueue(hold.agentId, hold.triggerId, hold.key, ghEvent, hold.wakeLabel);
         console.log(`[GH-Poller] readiness-gate: ${repoFullName}#${hold.number} → ${hold.agentId} released (head ${String(decision.sha || '').slice(0, 7)})`);
         const outcome = { status: 'delivered', reason: 'gate-released', gates: handoffGate.enabledGates(hold.gate) };
@@ -1105,7 +1108,7 @@ class GitHubPoller {
   async _resolveHold(repoFullName, hold, token, commented) {
     const { decision, done } = hold.resolution;
     const gate = handoffGate.normalizeGate(hold.gate) || {};
-    const setLabel = decision.action === 'fail' ? gate.failureLabel : handoffGate.TIMEOUT_LABEL;
+    const setLabel = handoffGate.resolutionLabel(decision, gate, hold.wakeLabel);
     const base = `/repos/${repoFullName}/issues/${hold.number}`;
     try {
       if (!done.removed) {
@@ -2117,6 +2120,31 @@ class GitHubPoller {
     wakeArmory.arm(repoState.armed, wakeArmory.armedKey({ triggerId, kind, number, label }), Date.now());
     this._saveState();
     return true;
+  }
+
+  // #2795: hold a gated PR hand-off from OUTSIDE a poll — the internal label
+  // fast-path (`wakeGithubLabelListeners`) must not bypass the readiness gate.
+  // Opens the same hold `_fanOutBatch` opens (idempotent per trigger + PR) and
+  // arms the wake edge like a delivery, so `_pollReadiness` decides it on its
+  // next pass. Returns the gates the hold waits for, or null when not gated.
+  holdWake({ repo, agentId, triggerId, readinessGate, key, ghEvent, number, label }) {
+    const gate = handoffGate.normalizeGate(readinessGate);
+    if (!repo || !handoffGate.gateApplies(gate, key) || !Number.isInteger(number)) return null;
+    const repoState = this.state[repo] || (this.state[repo] = {});
+    if (!repoState.holds || typeof repoState.holds !== 'object') repoState.holds = {};
+    const hk = handoffGate.holdKey(triggerId, number);
+    if (!repoState.holds[hk]) {
+      repoState.holds[hk] = handoffGate.newHold({
+        sub: { agentId, triggerId, readinessGate: gate }, key, ghEvent, number,
+        wakeLabel: key.endsWith('.labeled') ? label : null,
+      });
+    }
+    if (this._wakeEdgeDedup && label && key.endsWith('.labeled')) {
+      if (!repoState.armed || typeof repoState.armed !== 'object') repoState.armed = {};
+      wakeArmory.arm(repoState.armed, wakeArmory.armedKey({ triggerId, kind: 'pr', number, label }), Date.now());
+    }
+    this._saveState();
+    return handoffGate.enabledGates(gate);
   }
 
   // #2754: clear every armed key for one wake on one object from OUTSIDE a

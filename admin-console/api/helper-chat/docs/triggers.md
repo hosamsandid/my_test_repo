@@ -84,7 +84,7 @@ A PR hand-off — a `github-event` trigger on `pull_request.labeled`, `pull_requ
 |---|---|
 | `ci` | **Wait for CI** — hold until the head's checks pass. *None* (no check at all after the grace period) also releases. |
 | `conflict` | **Block on merge conflict** — hold until GitHub reports the PR as mergeable. |
-| `failureLabel` | Set when a gate fails. Default `revisions-required`. Must differ from the wake label. |
+| `failureLabel` | Set when a gate fails. Default `revisions-required`. Must differ from the wake label — also when left at the default, so a new hand-off on `revisions-required` starts ungated. |
 | `timeoutMinutes` | How long a hold may last, 1–10080. Default 60. |
 
 On a channel port the same object is the channel's `readiness` field; the derived listener carries it as `readinessGate`. Both toggles off (or the field absent) means no gate. Defaults are not written.
@@ -94,6 +94,7 @@ On a channel port the same object is the channel's `readiness` field; the derive
 - **Timeout**: still pending after `timeoutMinutes` → the wake label is removed, `needs-human` set and a comment names what was still pending.
 - **Push during a hold**: the new head is evaluated from scratch (a failure of the old head no longer counts); the timeout still counts from the original hold.
 - **Cancel**: the PR is closed or merged, the wake label is removed, or the listening trigger is deleted → the hold is dropped and nobody is woken.
+- **Labels applied from the console**: a hand-off label set through the GitHub Issues plugin (Agent Chat, Flow Control, the Flow Supervisor) is held the same way — it never skips the gate.
 - **Restarts**: holds live in the poller's `state.json` and survive an orchestrator restart; a failed GitHub write is retried on the next cycle.
 - **Fan-in**: when several PR channels share one listener, their gates are combined — each toggle is on if any channel enables it; the first channel's explicit failure label / timeout wins.
 - **Defaults**: the core, extended and dispatched SDLC templates gate their PR hand-offs, and a new PR hand-off drawn in the Flow editor starts with both gates on. Existing teams are not changed — their hand-offs stay ungated until switched on in the hand-off dialog.

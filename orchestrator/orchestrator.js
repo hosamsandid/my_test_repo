@@ -1934,7 +1934,28 @@ async function wakeGithubLabelListeners({ repo, number, kind, label, actor, sour
   });
   // #2596: per-listener enqueue verdict, read back for the log outcome below.
   const decisions = new Map();
+  // #2795: gated PR hand-offs held by the poller instead of enqueued.
+  const held = new Map();
   for (const l of listeners) {
+    if (l.readinessGate) {
+      // Never bypass the readiness gate: open the poller's hold (it releases,
+      // fails or times out on its next readiness pass). Without a poller yet,
+      // leave the wake to its Events-API path, which holds it the same way.
+      const gates = githubPollerRef && githubPollerRef.holdWake({
+        repo, agentId: l.agentId, triggerId: l.triggerId, readinessGate: l.readinessGate,
+        key, ghEvent, number, label,
+      });
+      if (!gates) continue;
+      held.set(l, gates);
+      labelDedupMarkers.add({
+        agentId: l.agentId, triggerId: l.triggerId,
+        repo, kind, number, label, appliedAt: now,
+      });
+      console.log(
+        `[Orchestrator] label-fastpath: ${repo}#${number} +${label} → agent=${l.agentId} ` +
+        `trigger=${l.triggerId} held by the readiness gate`);
+      continue;
+    }
     // Enqueue first (immediate wake), then arm the dedup marker so the
     // poller's later delivery of the same label is dropped.
     const decision = {};
@@ -1957,10 +1978,15 @@ async function wakeGithubLabelListeners({ repo, number, kind, label, actor, sour
   githubEventLog.record({
     ...githubEventLog.buildEventEntry({
       ghEvent, repoFullName: repo, key,
-      outcomes: listeners.map((l) => githubEventLog.applyPoolDecision({
-        agentId: l.agentId, triggerId: l.triggerId,
-        status: 'delivered', reason: null, digest: false, wakeLabel: label,
-      }, decisions.get(l))),
+      outcomes: listeners.filter((l) => held.has(l) || decisions.has(l)).map((l) => (held.has(l)
+        ? {
+          agentId: l.agentId, triggerId: l.triggerId, status: 'held', reason: 'readiness-gate',
+          gates: held.get(l), digest: false, wakeLabel: label,
+        }
+        : githubEventLog.applyPoolDecision({
+          agentId: l.agentId, triggerId: l.triggerId,
+          status: 'delivered', reason: null, digest: false, wakeLabel: label,
+        }, decisions.get(l)))),
     }),
     source,
   });

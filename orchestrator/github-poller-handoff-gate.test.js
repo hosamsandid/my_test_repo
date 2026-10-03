@@ -449,3 +449,76 @@ test('gated subscribers alone drive the readiness read; no readiness events are 
   assert.equal(poller.state[REPO].readiness.prs[23].ci, 'passed');
   assert.equal(recorded.length, 0, 'no checks_passed row for nobody');
 }));
+
+test('review B2: a hold opened by the internal label fast-path (holdWake) is decided like any other and never delivered twice', withLog(async () => {
+  const { poller, enqueued } = makePoller();
+  const subs = [reviewer()];
+  openPrs = [prNode(30, SHA_A)];
+  checksBySha = { [SHA_A]: [running('build')] };
+  const synthetic = {
+    id: 'intlbl:abc', actor: { login: 'alice' }, repo: { name: REPO }, created_at: new Date().toISOString(),
+    payload: { action: 'labeled', label: { name: WAKE }, pull_request: { number: 30 } },
+  };
+  const gates = poller.holdWake({
+    repo: REPO, agentId: 'team-code-reviewer', triggerId: 'team-code-reviewer-on-pr-ready-for-review',
+    readinessGate: GATE, key: 'pull_request.labeled', ghEvent: synthetic, number: 30, label: WAKE,
+  });
+  assert.deepEqual(gates, ['ci', 'conflict']);
+  assert.ok(poller.state[REPO].holds['team-code-reviewer-on-pr-ready-for-review#30']);
+  assert.equal(enqueued.length, 0, 'held, not delivered');
+
+  // The Events-API copy of the same label is the armed wake edge: no 2nd hold, no delivery.
+  await handOff(poller, subs, labeledEvent(30, WAKE));
+  assert.equal(outcomesWith('wake-already-armed').length, 1);
+  assert.equal(Object.keys(poller.state[REPO].holds).length, 1);
+
+  await pass(poller, subs);
+  assert.equal(enqueued.length, 0, 'CI still running');
+  checksBySha = { [SHA_A]: [ok('build')] };
+  await pass(poller, subs);
+  await pass(poller, subs);
+  assert.equal(enqueued.length, 1, 'released once');
+  assert.equal(enqueued[0].entry.wakeLabel, WAKE);
+
+  // Not gated (no gate, or an issue key): nothing is held.
+  assert.equal(poller.holdWake({ repo: REPO, agentId: 'a', triggerId: 't', readinessGate: null, key: 'pull_request.labeled', ghEvent: synthetic, number: 31, label: WAKE }), null);
+  assert.equal(poller.holdWake({ repo: REPO, agentId: 'a', triggerId: 't', readinessGate: GATE, key: 'issues.labeled', ghEvent: synthetic, number: 31, label: WAKE }), null);
+}));
+
+test('review B3: a gate whose default failure label is its own wake label sets needs-human instead — no relabel loop', withLog(async () => {
+  const { poller, enqueued } = makePoller();
+  const rework = { ...reworker(), readinessGate: { ci: true, conflict: true, failureLabel: 'revisions-required', timeoutMinutes: 60 } };
+  const subs = [rework];
+  openPrs = [prNode(31, SHA_A, { labels: ['revisions-required'] })];
+  checksBySha = { [SHA_A]: [bad('build')] };
+  await handOff(poller, subs, labeledEvent(31, 'revisions-required'));
+  await pass(poller, subs);
+  const labelled = writes.filter((w) => w.method === 'POST' && w.path.endsWith('/labels'));
+  assert.deepEqual(labelled.map((w) => w.body.labels), [['needs-human']], 'never re-sets the wake label');
+  assert.match(writes.find((w) => w.path.endsWith('/comments')).body.body, /needs-human/);
+  assert.equal(enqueued.length, 0);
+  assert.deepEqual(poller.gateHolds(), []);
+}));
+
+test('review S1: a release enriches before it forgets the hold, then forgets + saves + enqueues with no await between', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, 'github-poller.js'), 'utf8');
+  const i = src.indexOf("if (decision.action === 'release') {");
+  const block = src.slice(i, src.indexOf('_logHoldOutcome(', i));
+  const enrich = block.indexOf('await this._enrichPullRequestPayload(');
+  const del = block.indexOf('delete holds[hk];');
+  const enq = block.indexOf('this._enqueue(');
+  assert.ok(enrich > 0 && enrich < del && del < enq, 'enrich → delete → enqueue');
+  assert.doesNotMatch(block.slice(del, enq), /await /);
+});
+
+test('review B2: the internal label fast-path holds a gated listener through the poller instead of enqueuing it', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, 'orchestrator.js'), 'utf8');
+  const i = src.indexOf('async function wakeGithubLabelListeners(');
+  const body = src.slice(i, src.indexOf('\n}\n', i));
+  const gated = body.indexOf('if (l.readinessGate) {');
+  assert.ok(gated > 0, 'the loop branches on the listener gate');
+  const branch = body.slice(gated, body.indexOf('enqueuePending(l.agentId', gated));
+  assert.match(branch, /githubPollerRef\.holdWake\(\{/);
+  assert.match(branch, /continue;\s*\}\s*\/\/ Enqueue first/, 'a gated listener never reaches enqueuePending');
+  assert.match(body, /status: 'held', reason: 'readiness-gate'/, 'the Event Log row says held');
+});

@@ -365,7 +365,7 @@ function PageFace({ pageHelp, context, atOverview, section, onHome, onNavigate, 
 }
 
 export default function HelperChatPanel() {
-  const { isOpen, toggle, messages, sendMessage, isStreaming, mode, setMode, openTour, pageHelp, currentRoute, helpContext, helpSection } = useHelperChat();
+  const { isOpen, toggle, messages, sendMessage, stopMessage, isStreaming, mode, setMode, openTour, pageHelp, currentRoute, helpContext, helpSection } = useHelperChat();
   const [composer, setComposer] = useState('');
   const scrollRef = useRef(null);
   const navigate = useNavigate();
@@ -610,26 +610,50 @@ export default function HelperChatPanel() {
                   : <Mic size={15} />}
             </button>
           </div>
-          <button
-            onClick={submit}
-            disabled={isStreaming || !composer.trim()}
-            title="Send"
-            aria-label="Send"
-            style={{
-              background: (isStreaming || !composer.trim()) ? 'var(--eb-bg-hover)' : 'var(--eb-accent-primary)',
-              color: (isStreaming || !composer.trim()) ? 'var(--eb-text-muted)' : 'var(--eb-text-inverted)',
-              border: 'none',
-              borderRadius: 'var(--eb-radius-md)',
-              cursor: (isStreaming || !composer.trim()) ? 'default' : 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: 'var(--eb-space-2) var(--eb-space-3)',
-              height: 'fit-content',
-            }}
-          >
-            <Send size={16} />
-          </button>
+          {/* While a turn runs, Send becomes Stop (#2700) — aborts the request so
+              a hanging provider never locks the composer. */}
+          {isStreaming ? (
+            <button
+              onClick={stopMessage}
+              title="Stop"
+              aria-label="Stop"
+              style={{
+                background: 'var(--eb-bg-hover)',
+                color: 'var(--eb-text-primary)',
+                border: 'none',
+                borderRadius: 'var(--eb-radius-md)',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 'var(--eb-space-2) var(--eb-space-3)',
+                height: 'fit-content',
+              }}
+            >
+              <Square size={16} />
+            </button>
+          ) : (
+            <button
+              onClick={submit}
+              disabled={!composer.trim()}
+              title="Send"
+              aria-label="Send"
+              style={{
+                background: !composer.trim() ? 'var(--eb-bg-hover)' : 'var(--eb-accent-primary)',
+                color: !composer.trim() ? 'var(--eb-text-muted)' : 'var(--eb-text-inverted)',
+                border: 'none',
+                borderRadius: 'var(--eb-radius-md)',
+                cursor: !composer.trim() ? 'default' : 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 'var(--eb-space-2) var(--eb-space-3)',
+                height: 'fit-content',
+              }}
+            >
+              <Send size={16} />
+            </button>
+          )}
         </div>
         {/* Transcription status / error surface (AC6): errors never break the
             composer and clear themselves after 3s so the user can retry. */}

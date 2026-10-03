@@ -7,7 +7,7 @@
 // EventsPanel.jsx only renders what these helpers return.
 
 import { buildTriggerCorrelationId } from '../github-event-session.js';
-import { producerFilterText } from '../event-outcome-presentation.js';
+import { producerFilterText, outcomeStatus } from '../event-outcome-presentation.js';
 
 // The only drops a human may override (mirrors orchestrator/github-refire.js
 // REFIRABLE_REASONS — the server re-checks, this only decides whether to offer).
@@ -69,7 +69,7 @@ export function dropReasonText(row) {
     case 'internal-dedup':
       return `Already delivered once for ${q(wake)} (the console or supervisor woke the agent directly) — the poller's copy was skipped.`;
     case 'self-claim-label':
-      return `Label ${q(label)} is the agent's own claim label (':wip'), not a hand-off, so it was ignored.`;
+      return `Label ${q(label)} is the agent's own claim label (':wip') or end-of-run label (':completed'), not a hand-off, so it was ignored.`;
     case 'history-horizon':
       return 'The event is older than this trigger — it happened before the trigger was activated.';
     case 'push-duplicate':
@@ -92,10 +92,14 @@ export function dropReasonText(row) {
 // the primary/secondary text colours (low-contrast status tokens on white).
 export function outcomeView(row) {
   if (!row) return { tone: 'muted', text: '' };
-  if (row.status === 'delivered') {
+  const status = outcomeStatus(row);
+  if (status === 'delivered') {
     return { tone: 'success', text: row.source === 'manual-refire' ? 'delivered (fired again)' : 'delivered' };
   }
-  if (row.status === 'digest') return { tone: 'info', text: 'digested' };
+  if (status === 'digest') return { tone: 'info', text: 'digested' };
+  // #2693: a provisioning-sweep row, not a drop.
+  if (status === 'reaped') return { tone: 'muted', text: 'reaped (orphaned instance cleaned up)' };
+  if (status === 'reap-failed') return { tone: 'warning', text: 'reap failed' };
   return { tone: isRefirable(row) ? 'warning' : 'muted', text: `dropped · ${row.reason || 'unknown'}` };
 }
 
@@ -114,7 +118,7 @@ export function canRefire(row, { canManage } = {}) {
 
 // The delivered row's session correlationId (AC4), or null.
 export function sessionCorrelationId(row) {
-  if (!row || row.status !== 'delivered') return null;
+  if (outcomeStatus(row) !== 'delivered') return null;
   return buildTriggerCorrelationId(row.triggerId, row.eventId);
 }
 

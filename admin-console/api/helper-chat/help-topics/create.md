@@ -164,13 +164,13 @@ retire the assistant from its row menu if the team replaces it. Adding a member
 grows the assistant itself, which is why it is the shorter answer when the thing
 you want to grow *is* this assistant.
 
-A brought-in assistant (via **Clone** or **Import**) can still occasionally land
-as a standalone agent rather than a team of one, since those two paths build
-their config directly rather than going through the ordinary create flow. There
-is no manual conversion action to reach for any more — a System Admin can bring
-such an agent into line by re-running the team-of-one migration sweep, which is
-safe to run again at any time and only ever acts on agents still in the old
-shape.
+A brought-in assistant (via **Clone** or **Import**) lands the same way: with
+*Its own team* picked as the target it becomes a team of one, and with an
+existing team picked it joins that team as a member. An agent cloned or
+imported *without* a team before that (it shows up in no list, only under its
+`/chats/<id>` address) can be brought into line by a System Admin re-running
+the team-of-one migration sweep, which is safe to run again at any time and
+only ever acts on agents still in the old shape.
 
 One detail worth knowing either way: the repository fast lane below never adds
 to an existing team. Submitting the same repository again always creates a

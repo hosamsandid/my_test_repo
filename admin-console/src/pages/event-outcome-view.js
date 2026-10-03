@@ -9,6 +9,8 @@
 // misconfiguration, so every chip now carries an explanation + a "what to do"
 // line, and the page shows the same set as a collapsible legend.
 
+import { outcomeStatus } from './event-outcome-presentation.js';
+
 // The legend, in the order it reads best top-to-bottom: the two success
 // states first, then the drop reasons a protection layer can stamp, then the
 // no-subscriber case. `key` is stable for React lists and tests; `term` is the
@@ -78,7 +80,7 @@ export const OUTCOME_LEGEND = [
   {
     key: 'self-claim-label',
     term: 'dropped (self-claim-label)',
-    meaning: "The label is an agent's own ':wip' claim label, not a hand-off.",
+    meaning: "The label is an agent's own claim label (':wip') or end-of-run label (':completed'), not a hand-off.",
     whatToDo: 'Nothing to do.',
   },
   {
@@ -94,6 +96,18 @@ export const OUTCOME_LEGEND = [
     whatToDo: 'Nothing to do if that is intended. Otherwise widen or clear the filter on the trigger.',
   },
   {
+    key: 'reaped',
+    term: 'reaped → <agent>',
+    meaning: 'Not a GitHub event: the provisioning sweep removed an orphaned instance whose setup never finished. Nothing was dropped.',
+    whatToDo: 'Nothing to do — the leftover instance is cleaned up.',
+  },
+  {
+    key: 'reap-failed',
+    term: 'reap failed → <agent>',
+    meaning: 'Not a GitHub event: the provisioning sweep tried to remove an orphaned instance whose setup never finished, but the removal did not go through.',
+    whatToDo: 'The sweep retries on its next run. If the same instance keeps showing up here, check the orchestrator logs or delete the agent by hand.',
+  },
+  {
     key: 'no-match',
     term: "nobody's listening",
     meaning: 'No trigger subscribed to this event type at all, so nobody was woken.',
@@ -103,14 +117,19 @@ export const OUTCOME_LEGEND = [
 
 const LEGEND_BY_KEY = OUTCOME_LEGEND.reduce((m, e) => { m[e.key] = e; return m; }, {});
 
-// Map one recorded outcome to its legend key. `delivered`/`digest` come straight
-// from `status`; every other status is a drop keyed by its `reason`, falling
-// back to a generic drop when the reason is unfamiliar.
+// Map one recorded outcome to its legend key. `delivered`/`digest`/`held` and
+// the provisioning sweep's `reaped`/`reap-failed` come from the shown status
+// (a digest is `delivered` + `digest: true`, see outcomeStatus); every other
+// status is a drop keyed by its `reason`, falling back to a generic drop when
+// the reason is unfamiliar.
 export function outcomeLegendKey(outcome) {
   if (!outcome || typeof outcome !== 'object') return null;
-  if (outcome.status === 'delivered') return 'delivered';
-  if (outcome.status === 'digest') return 'digest';
-  if (outcome.status === 'held') return 'held';
+  const status = outcomeStatus(outcome);
+  if (status === 'delivered') return 'delivered';
+  if (status === 'digest') return 'digest';
+  if (status === 'held') return 'held';
+  if (status === 'reaped') return 'reaped';
+  if (status === 'reap-failed') return 'reap-failed';
   const reason = outcome.reason || '';
   if (LEGEND_BY_KEY[reason]) return reason;
   return 'drop-unknown';

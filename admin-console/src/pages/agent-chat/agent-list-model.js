@@ -16,6 +16,7 @@
 
 import { agentState } from '../agent-lifecycle/agent-lifecycle-menu.js';
 import { matchesSelection } from './list-selection.js';
+import { poolCapView } from '../process/pool-cap-view.js';
 
 /** Stable key for a group across the ordering / drag / collapse maps. */
 export function groupKey(g) {
@@ -58,9 +59,33 @@ export function isPoolInstance(agent) {
   return !!(agent && agent.poolInstance);
 }
 
-/** The collapsible sub-list label, mirrors `stubSectionLabel`'s role (AC1). */
-export function poolInstancesLabel(count) {
-  return `Instances (${count})`;
+/**
+ * The collapsible sub-list label, mirrors `stubSectionLabel`'s role (AC1).
+ * #2760: with the role's `maxInstances` cap the count reads against it
+ * ("Instances (5 / 3)"); without one it stays the bare count.
+ */
+export function poolInstancesLabel(count, cap = null, waiting = 0) {
+  return `Instances (${poolCapView(count, cap, waiting).text})`;
+}
+
+/**
+ * #2789: a pool instance kept alive because its pull request is still open
+ * (`poolWaiting` on the roster row). "Waiting for PR #N" names the lowest open
+ * PR; "Waiting for review" when GitHub could not be read. `null` otherwise.
+ */
+export function poolWaitingLabel(agent) {
+  if (!agent || !agent.poolInstance || agent.poolWaiting !== true) return null;
+  return Number.isInteger(agent.poolWaitingPr) ? `Waiting for PR #${agent.poolWaitingPr}` : 'Waiting for review';
+}
+
+/**
+ * #2789 AC9: split a role's instances into the active count (against the cap)
+ * and the ones waiting on an open PR (outside it).
+ */
+export function poolInstanceCounts(instances) {
+  const list = Array.isArray(instances) ? instances : [];
+  const waiting = list.filter((a) => poolWaitingLabel(a) != null).length;
+  return { active: list.length - waiting, waiting };
 }
 
 /**

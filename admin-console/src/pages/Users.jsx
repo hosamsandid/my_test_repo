@@ -16,11 +16,13 @@ import PasswordField from '../components/PasswordField';
 import IconButton from '../components/IconButton';
 import {
   usersToRows, chatIdentityDetail, isSelf, selfActionWarning, validateUserForm, lastSystemAdminGuard,
+  INVALID_EMAIL_REASON,
 } from './users-view';
 import {
   ADMIN_TABS, resolveAdminTab,
   allTeamRows, isUnadministered, teamDeleteImpact,
-  groupAgentsForOwnership,
+  groupAgentsForOwnership, agentsSectionTitle, agentOwnershipNote, agentTeamOwnerOptions,
+  userNameIndex, ownerLabel,
   environmentTierSummary, environmentOwnershipError, environmentOwnershipPatch,
   ownershipUnchanged,
 } from './administration-view.js';
@@ -31,8 +33,6 @@ import { ownershipFromRecord, teamsById } from './credential-scope-view.js';
 // System-Admin surface is here now, so the pointer that used to send readers to
 // Access has nowhere left to point and is replaced by what the tabs do.
 const PAGE_DESCRIPTION = 'Everything only a System Admin manages: the user records, every team on the platform, and who owns each agent and environment.';
-
-const DEFAULT_TEAM_ID = 'default';
 
 const primaryBtn = {
   display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)',
@@ -49,19 +49,6 @@ const ghostBtn = {
   background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
   borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)',
   cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
-};
-
-const inputStyle = {
-  width: '100%',
-  padding: 'var(--eb-space-2) var(--eb-space-3)',
-  background: 'var(--eb-bg-elevated)',
-  border: '1px solid var(--eb-border-default)',
-  borderRadius: 'var(--eb-radius-md)',
-  color: 'var(--eb-text-primary)',
-  fontSize: 'var(--eb-text-sm)',
-  fontFamily: 'inherit',
-  outline: 'none',
-  boxSizing: 'border-box',
 };
 
 const cardStyle = {
@@ -156,7 +143,8 @@ function CreateUserPanel({ onSave, onCancel, saving, error }) {
   const [email, setEmail] = useState('');
   const [systemAdmin, setSystemAdmin] = useState(false);
 
-  const validation = validateUserForm({ subject, displayName }, 'create');
+  const validation = validateUserForm({ subject, displayName, email }, 'create');
+  const emailError = validation === INVALID_EMAIL_REASON ? validation : null;
   const canSave = !validation && !saving;
 
   return (
@@ -164,7 +152,7 @@ function CreateUserPanel({ onSave, onCancel, saving, error }) {
       <ErrorBar error={error} />
       <FormInput label="Subject (stable identity)" required value={subject} onChange={setSubject} placeholder="e.g. jane.doe@corp.com or OIDC subject" />
       <FormInput label="Display name" value={displayName} onChange={setDisplayName} placeholder="e.g. Jane Doe" />
-      <FormInput label="Email" type="email" value={email} onChange={setEmail} placeholder="jane.doe@corp.com" />
+      <FormInput label="Email" type="email" value={email} onChange={setEmail} placeholder="jane.doe@corp.com" error={emailError || undefined} />
       <SysAdminField checked={systemAdmin} onChange={setSystemAdmin} />
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
         The <strong>subject</strong> is the stable identifier a future SSO login maps onto (OIDC subject claim or corporate email) and cannot be changed later. To let a user log in today, set a login password after creating them.
@@ -195,7 +183,8 @@ function EditUserPanel({ user, me, users, onSave, saving, error, onError, onRefr
   const [pwSaving, setPwSaving] = useState(false);
   const [pwMsg, setPwMsg] = useState(null);
 
-  const validation = validateUserForm({ subject: user.subject, displayName }, 'edit');
+  const validation = validateUserForm({ subject: user.subject, displayName, email }, 'edit');
+  const emailError = validation === INVALID_EMAIL_REASON ? validation : null;
   const canSave = !validation && !saving;
   const lockoutWarn = selfActionWarning({ me, target: user, action: 'edit', nextSystemAdmin: systemAdmin });
   // The server refuses to demote the last System Admin (#2059 AC7); mirror it
@@ -252,8 +241,8 @@ function EditUserPanel({ user, me, users, onSave, saving, error, onError, onRefr
             section={ADMINISTRATION_HELP_SECTIONS.edit}
           />
         </div>
-        <FormInput label="Display name" required value={displayName} onChange={setDisplayName} error={validation || undefined} />
-        <FormInput label="Email" type="email" value={email} onChange={setEmail} placeholder="jane.doe@corp.com" />
+        <FormInput label="Display name" required value={displayName} onChange={setDisplayName} error={(!emailError && validation) || undefined} />
+        <FormInput label="Email" type="email" value={email} onChange={setEmail} placeholder="jane.doe@corp.com" error={emailError || undefined} />
         <SysAdminField
           checked={systemAdmin}
           onChange={setSystemAdmin}
@@ -770,7 +759,7 @@ const PERSONAL_RESOURCE_DELETE_PATH = {
 };
 const PERSONAL_RESOURCE_KIND_LABEL = { provider: 'Model provider', 'ssh-key': 'SSH key', 'github-token': 'GitHub token' };
 
-function PersonalResourcesSection({ onError }) {
+function PersonalResourcesSection({ onError, userNames }) {
   const { data, loading, refetch } = useApi('/api/admin/personal-resources');
   const [confirm, setConfirm] = useState(null); // the resource pending delete
 
@@ -797,7 +786,7 @@ function PersonalResourcesSection({ onError }) {
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 'var(--eb-text-sm)' }}>{r.name}</div>
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>
-              {PERSONAL_RESOURCE_KIND_LABEL[r.kind] || r.kind} · owner {r.ownerId || 'unknown'}
+              {PERSONAL_RESOURCE_KIND_LABEL[r.kind] || r.kind} · owner {ownerLabel(r.ownerId, userNames)}
               {r.fingerprint ? ` · ${r.fingerprint}` : ''}{r.authType ? ` · ${r.authType}` : ''}
             </div>
           </div>
@@ -808,7 +797,7 @@ function PersonalResourcesSection({ onError }) {
         open={!!confirm}
         title="Delete personal resource?"
         message={confirm
-          ? `Delete ${PERSONAL_RESOURCE_KIND_LABEL[confirm.kind] || confirm.kind} "${confirm.name}" owned by ${confirm.ownerId || 'unknown'}? The secret is removed — revoke it at its provider too. This cannot be undone.`
+          ? `Delete ${PERSONAL_RESOURCE_KIND_LABEL[confirm.kind] || confirm.kind} "${confirm.name}" owned by ${ownerLabel(confirm.ownerId, userNames)}? The secret is removed — revoke it at its provider too. This cannot be undone.`
           : ''}
         variant="danger" confirmLabel="Delete"
         onConfirm={() => confirm && doDelete(confirm)}
@@ -819,33 +808,27 @@ function PersonalResourcesSection({ onError }) {
 }
 
 function ResourcesTab() {
-  const { data: teams, loading: lt, error: et } = useApi('/api/admin/teams');
-  const { data: agents, loading: laAgents, refetch: refetchAgents } = useApi('/api/agents');
+  const { data: agents, loading: laAgents, error: ea } = useApi('/api/agents');
   const { data: environments, refetch: refetchEnvs } = useApi('/api/environments');
+  const { data: users } = useApi('/api/admin/users');
   const [actionError, setActionError] = useState(null);
 
-  const teamList = teams ?? [];
+  // #2695: the ownership options are Agent Teams (role:'team' agents) — what a
+  // membership names since #2078 — never the legacy /api/admin/teams access
+  // scopes (only `default`), whose ids an Agent-Team-owned record never matches.
+  const teamList = useMemo(() => agentTeamOwnerOptions(agents), [agents]);
   const teamNames = useMemo(() => teamsById(teamList), [teamList]);
+  const userNames = useMemo(() => userNameIndex(users), [users]);
   const { agentTeams, standaloneAgents } = useMemo(
     () => groupAgentsForOwnership(agents ?? []),
     [agents],
   );
 
-  // An Agent Team moves between tenants as one unit (#568): reassigning the
-  // parent `team` agent cascades to all its members server-side, so the UI
-  // fires a single call against the team agent and re-fetches. Agents carry no
-  // tier of their own — only environments do — so this stays a plain select.
-  async function reassignAgent(id, teamId) {
-    try {
-      await apiCall('PUT', `/api/agents/${encodeURIComponent(id)}`, { teamId });
-    } catch (e) { setActionError(e.message); }
-    finally { refetchAgents(); }
-  }
-
-  const TeamSelect = ({ value, onChange }) => (
-    <select value={value || DEFAULT_TEAM_ID} onChange={e => onChange(e.target.value)} style={{ ...inputStyle, width: 'auto' }}>
-      {teamList.map(t => <option key={t.id} value={t.id}>{t.name || t.id}</option>)}
-    </select>
+  // An agent's access boundary is derived from its Agent Team (#2078, #2169),
+  // not chosen, so the agent rows are read-only (#2695) — the former select
+  // offered access scopes and could neither show nor change the boundary.
+  const OwnershipNote = ({ agent }) => (
+    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{agentOwnershipNote(agent, userNames)}</div>
   );
 
   const standaloneRow = (item) => (
@@ -853,13 +836,13 @@ function ResourcesTab() {
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 'var(--eb-text-sm)' }}>{item.displayName || item.id}</div>
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>{item.id}</div>
+        <OwnershipNote agent={item} />
       </div>
-      <TeamSelect value={item.teamId} onChange={tid => reassignAgent(item.id, tid)} />
     </div>
   );
 
-  // An Agent Team: one assignment control for the whole squad; members are
-  // listed read-only beneath it (no individual dropdown — they inherit).
+  // An Agent Team: one ownership line for the whole squad; members are listed
+  // beneath it (they inherit the team's boundary).
   const teamGroup = ({ team, members }) => (
     <div key={`team:${team.id}`} style={{ ...cardStyle, flexDirection: 'column', alignItems: 'stretch', gap: 'var(--eb-space-2)' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
@@ -869,8 +852,8 @@ function ResourcesTab() {
             <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Agent Team · {members.length} member{members.length === 1 ? '' : 's'}</span>
           </div>
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>{team.id}</div>
+          <OwnershipNote agent={team} />
         </div>
-        <TeamSelect value={team.teamId} onChange={tid => reassignAgent(team.id, tid)} />
       </div>
       {members.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)', paddingLeft: 'var(--eb-space-3)', borderLeft: '2px solid var(--eb-border-default)' }}>
@@ -885,13 +868,13 @@ function ResourcesTab() {
     </div>
   );
 
-  if (lt || laAgents) {
+  if (laAgents) {
     return <div aria-busy="true" style={{ height: 200, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />;
   }
-  if (et) {
+  if (ea) {
     return (
       <div role="alert" style={{ padding: 'var(--eb-space-6)', color: 'var(--eb-status-error)' }}>
-        Failed to load access scopes: {et}. The orchestrator must be reachable.
+        Failed to load agent teams: {ea}.
       </div>
     );
   }
@@ -904,14 +887,14 @@ function ResourcesTab() {
         label="What ownership means for an agent and for an environment"
         section={ADMINISTRATION_HELP_SECTIONS.resources}
       >
-        Which tenant owns each agent and environment. An environment can also be
-        <strong> shared</strong> across several teams; an agent is always owned by exactly one.
+        Which Agent Team each agent and environment belongs to. An agent follows its
+        Agent Team; an environment can be re-owned here, or <strong>shared</strong> across several teams.
       </TabLead>
 
       <ErrorBar error={actionError} onDismiss={() => setActionError(null)} />
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 'var(--eb-space-6)' }}>
-        <Section title={`Agents (${agentTeams.length + standaloneAgents.length})`}>
+        <Section title={agentsSectionTitle({ agentTeams, standaloneAgents })}>
           {agentTeams.length === 0 && standaloneAgents.length === 0 && (
             <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>No agents.</div>
           )}
@@ -932,7 +915,7 @@ function ResourcesTab() {
           ))}
         </Section>
         {/* The delete-only personal-resource governance view (#2360). */}
-        <PersonalResourcesSection onError={setActionError} />
+        <PersonalResourcesSection onError={setActionError} userNames={userNames} />
       </div>
     </div>
   );

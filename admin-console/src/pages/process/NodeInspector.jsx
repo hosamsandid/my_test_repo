@@ -4,7 +4,7 @@ import SidePanel from '../../components/SidePanel';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import { useHelpSubject } from '../../context/HelperChatContext';
 import { OVERLAY_FLOW_NODE } from '../../context/page-help-view.js';
-import { apiCall } from '../../hooks/useApi';
+import { apiCall, useApi } from '../../hooks/useApi';
 import RoutingSection from './RoutingSection';
 import { resolveInheritedStage } from './hierarchy-utils';
 import { applyDetailsSave, parseSaveError, savedSummary } from './node-inspector-save';
@@ -12,6 +12,7 @@ import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
 import { ID_FORMAT_HINT } from '../../components/id-field-view';
 import PromptHistory from '../agent-chat/PromptHistory';
 import ScalingSection from './ScalingSection';
+import { poolControlUrl, livePoolCount } from './pool-cap-view.js';
 import { poolBadgeText, scalingDraftFromPool, scalingDraftDirty, scalingSaveDecision } from './scaling-view.js';
 import { ROUTING_SAVE_HINT, leaveGuard, discardMessage, roleDeleteImpact, deleteRoleSummary } from './node-inspector-view.js';
 import {
@@ -115,6 +116,9 @@ export default function NodeInspector({
   const isPooledRoleNode = isLive && memberCfg?.role === 'team-member';
   const parentCfg = isPooledRoleNode && memberCfg.parentTeamId
     ? agents.find(a => a.id === memberCfg.parentTeamId) : null;
+
+  // #2760 AC5: the role's live instance count against its cap, for Scaling.
+  const { data: poolControl } = useApi(isPooledRoleNode ? poolControlUrl(memberCfg) : null);
 
   // Scaling draft (#2295), only meaningful for a pooled role node — declared
   // unconditionally (hooks can't be conditional) with a harmless blank/
@@ -370,6 +374,7 @@ export default function NodeInspector({
                     onChange={(next) => { setPoolDraft(next); markDirty(); }}
                     parentWipLimit={parentCfg?.wipLimit}
                     error={saveError?.label === 'Scaling' ? saveError.message : null}
+                    live={livePoolCount(poolControl, memberCfg.id)}
                   />
                 </div>
               )}

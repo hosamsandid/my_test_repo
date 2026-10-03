@@ -1031,6 +1031,86 @@ test("_fanOutBatch (#2152 follow-up): the disarm does not re-open the double-fir
   }
 });
 
+test("_fanOutBatch (#2776): a collapsed claim swap is recovered by the <wake>:completed add, so a human re-add re-fires", async () => {
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    // The observed sandbox sequence (wake `converge` there, `ready-for-review`
+    // here):
+    // 1. the human hand-off, collapsed onto another label — delivered + armed.
+    const ev1 = labeledIssueEvent("cc-1", "needs-human", ["ready-for-review"], 2776);
+    // 2. the claim swap `<wake>` -> `<wake>:wip` was collapsed away: no event.
+    //    The run then completes (`<wake>:wip` -> `<wake>:completed`), and that
+    //    add's stale snapshot still names the wake.
+    const ev2 = labeledIssueEvent(
+      "cc-2", "ready-for-review:completed",
+      ["ready-for-review", "ready-for-review:completed"], 2776,
+    );
+    // 3. the human removes `<wake>:completed` and re-adds the wake.
+    const ev3 = labeledIssueEvent("cc-3", "ready-for-review", ["ready-for-review"], 2776);
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2, ev3], reviewerSub(), "tok");
+
+    assert.deepEqual(
+      enqueued.map((e) => e.entry.github.eventId),
+      ["cc-1", "cc-3"],
+      "the re-added wake must fire, not be dropped as wake-already-armed",
+    );
+    assert.equal(recorded[1].outcomes[0].status, "dropped");
+    assert.equal(recorded[1].outcomes[0].reason, "self-claim-label");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch (#2776): the <wake>:completed add never re-fires the trigger itself (stale snapshot still names the wake)", async () => {
+  const origRecord = githubEventLog.record;
+  const recorded = [];
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const ev1 = labeledIssueEvent("cc2-1", "ready-for-review", ["ready-for-review"], 2777);
+    const ev2 = labeledIssueEvent(
+      "cc2-2", "ready-for-review:completed",
+      ["ready-for-review", "ready-for-review:completed"], 2777,
+    );
+    // unrelated churn after completion, current snapshot without the wake.
+    const ev3 = labeledIssueEvent("cc2-3", "bug", ["ready-for-review:completed", "bug"], 2777);
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2, ev3], reviewerSub(), "tok");
+
+    assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["cc2-1"]);
+    // The :completed add must be dropped as self-claim-label, not merely as
+    // wake-already-armed (which also held before the fix).
+    const completed = recorded.find((r) => r.label === "ready-for-review:completed");
+    assert.ok(completed, "the :completed event is recorded");
+    assert.equal(completed.outcomes[0].status, "dropped");
+    assert.equal(completed.outcomes[0].reason, "self-claim-label");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("isSelfClaimLabel (#2776): claim label and completion mirror only, and only for a trigger that declares a claim", () => {
+  const { isSelfClaimLabel } = require("./github-poller");
+  const sub = { labelFilter: "converge", claimAdd: "converge:wip" };
+  assert.equal(isSelfClaimLabel(sub, "converge:wip"), true);
+  assert.equal(isSelfClaimLabel(sub, "converge:completed"), true);
+  assert.equal(isSelfClaimLabel(sub, "converge"), false, "the wake label itself is a genuine wake");
+  assert.equal(isSelfClaimLabel(sub, "other:completed"), false);
+  assert.equal(isSelfClaimLabel(sub, undefined), false);
+  assert.equal(isSelfClaimLabel({ labelFilter: "converge", claimAdd: null }, "converge:completed"), false,
+    "no claim declared -> the runner never swaps, so the label is not ours");
+});
+
 test("_fanOutBatch (#2152 follow-up): presence-based disarm re-opens the edge with NO unlabeled and NO claim swap (human web-UI removal)", async () => {
   const origRecord = githubEventLog.record;
   githubEventLog.record = () => {};

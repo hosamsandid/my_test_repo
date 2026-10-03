@@ -222,7 +222,7 @@ export function sessionView(s, { now = Date.now(), singleRepo = true } = {}) {
 // same three facts — `flow-control-view.test.js` keeps the two in step.
 export const POOL_ACTION_TOOLTIPS = Object.freeze({
   pause: 'Pause: running instances finish their current work. New work waits in a queue and starts when you click Resume.',
-  drain: 'Drain: running instances finish their current work, new work waits, and the role switches itself Off once the last one is done. Click Switch on to start it again.',
+  drain: 'Drain: running instances finish their current work, new work waits, and the role switches itself Off once the last one is done — including any instance still waiting on an open pull request. Click Switch on to start it again.',
   resume: 'Resume: start taking new work again. Anything that waited while paused starts now.',
   switchOn: 'Switch on: start taking new work again. Anything that waited while the role was off starts now.',
 });
@@ -231,9 +231,14 @@ export const POOL_ACTION_TOOLTIPS = Object.freeze({
 // apply to it. `running` → Pause + Drain; `paused` → Resume; `draining` and
 // `off` → Switch on (the same "back to running" write, named for what the
 // operator sees).
+//
+// #2789: instances kept alive for an open pull request are outside the cap and
+// named apart — "on a PR", since "waiting" already means held new work here.
 export function poolView(p) {
   const busy = Number.isFinite(p.busy) ? p.busy : 0;
-  const occupancy = p.capacity != null ? `${busy} of ${p.capacity} busy` : `${busy} busy`;
+  const onPr = Number.isFinite(p.waiting) && p.waiting > 0 ? p.waiting : 0;
+  const onPrText = onPr ? ` · ${onPr} waiting on a PR` : '';
+  const occupancy = (p.capacity != null ? `${busy} of ${p.capacity} busy` : `${busy} busy`) + onPrText;
   const held = Number.isFinite(p.held) && p.held > 0 ? p.held : 0;
   const waiting = held ? ` · ${held} waiting` : '';
   let stateText;
@@ -244,7 +249,7 @@ export function poolView(p) {
       actions = ['resume'];
       break;
     case 'draining':
-      stateText = `Draining, ${busy} still running${waiting}`;
+      stateText = `Draining, ${busy} still running${onPrText}${waiting}`;
       actions = ['switchOn'];
       break;
     case 'off':

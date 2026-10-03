@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { createTeamsStore, DEFAULT_TEAM_ID, normalizeGithubHandle, coerceGithubHandle, coerceChatFontSize, coerceChatNotifyOnBack, coerceChatListFilter } = require('./teams-store');
+const { createTeamsStore, DEFAULT_TEAM_ID, normalizeGithubHandle, coerceGithubHandle, coerceChatFontSize, coerceChatNotifyOnBack, coerceChatListFilter, isValidEmail, INVALID_EMAIL_REASON } = require('./teams-store');
 
 function freshStore() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'teams-store-'));
@@ -640,4 +640,39 @@ test('users: a lone ordinary user (legacy stack, no System Admin) is still delet
   const only = store.createUser({ subject: 'lonely@corp.com' });
   store.deleteUser(only.id);
   assert.equal(store.listUsers().length, 0);
+});
+
+// ---- Email validation (#2695 finding 88) -----------------------------------
+
+test('users: a malformed email is refused on create and on update (400)', () => {
+  const { store } = freshStore();
+  for (const bad of ['not-an-email', 'jane@corp', '@corp.com', 'jane doe@corp.com', 'jane@@corp.com']) {
+    assert.throws(() => store.createUser({ subject: `s-${bad}`, email: bad }), (err) => {
+      assert.equal(err.statusHint, 400);
+      assert.equal(err.code, 'invalid-email');
+      assert.equal(err.message, INVALID_EMAIL_REASON);
+      return true;
+    }, bad);
+  }
+  assert.equal(store.listUsers().length, 0, 'a refused create must not persist a record');
+
+  const u = store.createUser({ subject: 'jane', email: ' jane.doe@corp.com ' });
+  assert.equal(u.email, 'jane.doe@corp.com');
+  assert.throws(() => store.updateUser(u.id, { email: 'not-an-email' }), (err) => err.statusHint === 400);
+  assert.equal(store.getUser(u.id).email, 'jane.doe@corp.com', 'a refused update keeps the stored email');
+  // Blank still clears — the field stays optional.
+  assert.equal(store.updateUser(u.id, { email: '  ' }).email, '');
+  assert.equal(store.createUser({ subject: 'no-mail' }).email, '');
+});
+
+test('users: a malformed configured seed email is dropped, not fatal to seeding', () => {
+  const { store } = freshStore();
+  const seeded = store.seedInitialSystemAdmin({ subject: 'admin', email: 'not-an-email' });
+  assert.ok(seeded && seeded.systemAdmin);
+  assert.equal(seeded.email, '');
+});
+
+test('isValidEmail accepts plausible addresses only', () => {
+  for (const ok of ['a@b.co', 'jane.doe+x@corp.example.com']) assert.equal(isValidEmail(ok), true, ok);
+  for (const bad of ['', 'x', 'a@b', 'a b@c.d', null, 42]) assert.equal(isValidEmail(bad), false, String(bad));
 });

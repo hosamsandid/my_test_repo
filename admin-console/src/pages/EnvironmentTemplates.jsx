@@ -287,7 +287,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit, tok
           placeholder="COBOL Migration"
         />
         <div style={helpTextStyle}>
-          A short, human-readable label shown in the agent list and this overview (e.g. <em>COBOL Migration Project</em>).
+          A short, human-readable label shown in this overview and in the environment pickers (e.g. <em>COBOL Migration Project</em>).
         </div>
       </div>
 

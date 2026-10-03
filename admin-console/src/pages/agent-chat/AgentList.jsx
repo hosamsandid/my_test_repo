@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
-import { MessageCircle, Bot, Server, Users, ChevronDown, ChevronRight, GripVertical, MoreVertical, Loader2 } from 'lucide-react';
+import { MessageCircle, Bot, Server, Users, ChevronDown, ChevronRight, GripVertical, MoreVertical, Loader2, AlertTriangle } from 'lucide-react';
 
 import { computeReorder, dropPosition } from './agent-list-dnd.js';
 import { groupEnvironmentName, rowEnvironmentName } from './agent-list-env.js';
-import { buildGroups, groupKey, orderModel, filterModel, stubSectionLabel, poolInstancesLabel } from './agent-list-model.js';
+import { buildGroups, groupKey, orderModel, filterModel, stubSectionLabel, poolInstancesLabel, poolInstanceCounts, poolWaitingLabel } from './agent-list-model.js';
+import { poolCapView } from '../process/pool-cap-view.js';
 import { teamMembershipIndicator, membershipsByTeam, fitAdminNames } from './team-membership-view.js';
 import { computeTeamAttention } from '../../context/agent-statuses.js';
 import { agentState, isChatOpenable } from '../agent-lifecycle/agent-lifecycle-menu.js';
@@ -15,6 +16,30 @@ import {
 // Re-exported so `AgentChat` can populate the filter dropdown without importing
 // the model module directly (the grouping logic used to live in this file).
 export { buildGroups } from './agent-list-model.js';
+
+// The accessible name of the rail's top-level `list` (#2704).
+const RAIL_LABEL = 'Agents';
+
+/**
+ * A `<button>` with the browser chrome stripped so it lays out like the row
+ * text it wraps (#2704): the rows' main buttons and the chevron/kebab controls
+ * beside them inherit the row's font, colour and casing, and keep the
+ * browser's own focus ring.
+ */
+const BARE_BUTTON_STYLE = {
+  display: 'flex',
+  alignItems: 'center',
+  padding: 0,
+  margin: 0,
+  background: 'transparent',
+  border: 'none',
+  color: 'inherit',
+  font: 'inherit',
+  letterSpacing: 'inherit',
+  textTransform: 'inherit',
+  textAlign: 'left',
+  cursor: 'pointer',
+};
 
 const COLLAPSED_KEY = 'agentChat.collapsedGroups';
 const ORDER_KEY = 'agentChat.sidebarOrder';
@@ -343,55 +368,67 @@ export default function AgentList({
     // gap — and the scrollbar on the right — gave them any room. The inset also
     // aligns the ungrouped "Individual agents" rows to the same left edge as the
     // cards' outer margin.
-    <div role="listbox" style={{ display: 'flex', flexDirection: 'column', padding: 'var(--eb-space-2)' }}>
-      {visibleGroups.map((group) => (
-        <GroupSection
-          key={`${group.kind}:${group.id}`}
-          group={group}
-          collapsed={isCollapsed(group)}
-          onToggle={toggleCollapsed}
-          selectedAgentId={selectedAgentId}
-          onSelect={onSelect}
-          statuses={statuses}
-          memberReorder={canReorderMembers}
-          onReorder={reorderByOne}
-          drag={drag}
-          groupDragKey={groupKey(group)}
-          dragEnabled={canReorder && visibleGroups.length > 1}
-          busyIds={busyIds}
-          onRequestMenu={onRequestMenu}
-          onOpenTeamSettings={onOpenTeamSettings}
-          isEntityCollapsed={isCollapsed}
-          teamMemberships={membershipMap.get(group.id) || EMPTY_MEMBERSHIPS}
-          directory={directory}
-          viewerId={viewerId}
-          revealId={group.id === revealTeamId ? revealId : null}
-        />
-      ))}
+    //
+    // #2704: the rail is a named `list` of team blocks, each a `listitem` that
+    // holds its header row plus a nested `list` of member rows — not a
+    // `listbox`. A listbox may only own `option`s, and an option may not
+    // contain the kebab/drag-grip controls every row carries; with a plain list
+    // the row's main `<button>` and those controls sit side by side inside the
+    // `listitem`. The empty-state hint sits outside the list so the list never
+    // owns a non-`listitem` child.
+    <div style={{ display: 'flex', flexDirection: 'column', padding: 'var(--eb-space-2)' }}>
+      <div role="list" aria-label={RAIL_LABEL} style={{ display: 'flex', flexDirection: 'column' }}>
+        {visibleGroups.map((group) => (
+          <GroupSection
+            key={`${group.kind}:${group.id}`}
+            group={group}
+            collapsed={isCollapsed(group)}
+            onToggle={toggleCollapsed}
+            selectedAgentId={selectedAgentId}
+            onSelect={onSelect}
+            statuses={statuses}
+            memberReorder={canReorderMembers}
+            onReorder={reorderByOne}
+            drag={drag}
+            groupDragKey={groupKey(group)}
+            dragEnabled={canReorder && visibleGroups.length > 1}
+            busyIds={busyIds}
+            onRequestMenu={onRequestMenu}
+            onOpenTeamSettings={onOpenTeamSettings}
+            isEntityCollapsed={isCollapsed}
+            teamMemberships={membershipMap.get(group.id) || EMPTY_MEMBERSHIPS}
+            directory={directory}
+            viewerId={viewerId}
+            revealId={group.id === revealTeamId ? revealId : null}
+          />
+        ))}
 
-      {visibleSingles.length > 0 && (
-        <>
-          <SectionHeader label={INDIVIDUAL_LABEL} icon={MessageCircle} />
-          {visibleSingles.map((agent) => (
-            <AgentRow
-              key={agent.id}
-              agent={agent}
-              selected={agent.id === selectedAgentId}
-              onSelect={onSelect}
-              activityState={statuses[agent.id] || 'idle'}
-              // Ungrouped: no header to hoist the environment to (#1451).
-              environmentName={rowEnvironmentName(agent)}
-              onReorder={reorderByOne}
-              drag={drag}
-              dragScope="singles"
-              dragKey={agent.id}
-              dragEnabled={canReorder && visibleSingles.length > 1}
-              onRequestMenu={onRequestMenu}
-              reveal={agent.id === revealId}
-            />
-          ))}
-        </>
-      )}
+        {visibleSingles.length > 0 && (
+          <div role="listitem">
+            <SectionHeader label={INDIVIDUAL_LABEL} icon={MessageCircle} />
+            <div role="list" aria-label={INDIVIDUAL_LABEL}>
+              {visibleSingles.map((agent) => (
+                <AgentRow
+                  key={agent.id}
+                  agent={agent}
+                  selected={agent.id === selectedAgentId}
+                  onSelect={onSelect}
+                  activityState={statuses[agent.id] || 'idle'}
+                  // Ungrouped: no header to hoist the environment to (#1451).
+                  environmentName={rowEnvironmentName(agent)}
+                  onReorder={reorderByOne}
+                  drag={drag}
+                  dragScope="singles"
+                  dragKey={agent.id}
+                  dragEnabled={canReorder && visibleSingles.length > 1}
+                  onRequestMenu={onRequestMenu}
+                  reveal={agent.id === revealId}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
 
       {empty && (
         <div style={{
@@ -489,7 +526,7 @@ const GroupSection = React.memo(function GroupSection({
     [memberIds, statuses],
   );
   return (
-    <div style={TEAM_BLOCK_STYLE}>
+    <div role="listitem" style={TEAM_BLOCK_STYLE}>
       <CollapsibleHeader
         label={group.displayName}
         icon={Icon}
@@ -517,60 +554,64 @@ const GroupSection = React.memo(function GroupSection({
        * the team (a redundant, mislabeled "DISABLED" row) — a leftover from the
        * pre-#1964 model where a group header was a chat-openable orchestrator.
        */}
-      {!collapsed && group.children.map((agent) => (
-        <React.Fragment key={agent.id}>
-          <AgentRow
-            agent={agent}
-            selected={agent.id === selectedAgentId}
-            onSelect={onSelect}
-            activityState={statuses[agent.id] || 'idle'}
-            environmentName={rowEnvironmentName(agent, groupEnv)}
-            indent
-            onReorder={onReorder}
-            drag={drag}
-            dragScope={memberScope}
-            dragKey={agent.id}
-            dragEnabled={memberDragEnabled}
-            onRequestMenu={onRequestMenu}
-            reveal={agent.id === revealId}
-          />
+      {!collapsed && (group.children.length > 0 || stubs.length > 0) && (
+        <div role="list" aria-label={group.displayName}>
+          {group.children.map((agent) => (
+            <React.Fragment key={agent.id}>
+              <AgentRow
+                agent={agent}
+                selected={agent.id === selectedAgentId}
+                onSelect={onSelect}
+                activityState={statuses[agent.id] || 'idle'}
+                environmentName={rowEnvironmentName(agent, groupEnv)}
+                indent
+                onReorder={onReorder}
+                drag={drag}
+                dragScope={memberScope}
+                dragKey={agent.id}
+                dragEnabled={memberDragEnabled}
+                onRequestMenu={onRequestMenu}
+                reveal={agent.id === revealId}
+              />
+              {/*
+               * A pooled role's live instances (#2297), nested directly under it —
+               * collapsible and persisted like a team group (`{kind:'pool', id}`),
+               * unlike the stub section's own always-collapsed, unpersisted default.
+               * Empty when the role is not pooled or has no live instances (AC1).
+               */}
+              {agent.instances && agent.instances.length > 0 && (
+                <PoolInstancesSection
+                  roleAgent={agent}
+                  instances={agent.instances}
+                  groupEnv={groupEnv}
+                  collapsed={isEntityCollapsed({ kind: 'pool', id: agent.id })}
+                  onToggle={onToggle}
+                  selectedAgentId={selectedAgentId}
+                  onSelect={onSelect}
+                  statuses={statuses}
+                  busyIds={busyIds}
+                  onRequestMenu={onRequestMenu}
+                />
+              )}
+            </React.Fragment>
+          ))}
           {/*
-           * A pooled role's live instances (#2297), nested directly under it —
-           * collapsible and persisted like a team group (`{kind:'pool', id}`),
-           * unlike the stub section's own always-collapsed, unpersisted default.
-           * Empty when the role is not pooled or has no live instances (AC1).
+           * The team's not-yet-materialized members (#1957), below the active ones
+           * and behind their own collapsed sub-header. A group with no stubs renders
+           * nothing at all here (AC2) — the section is never an empty affordance.
            */}
-          {agent.instances && agent.instances.length > 0 && (
-            <PoolInstancesSection
-              roleAgent={agent}
-              instances={agent.instances}
+          {stubs.length > 0 && (
+            <StubSection
+              stubs={stubs}
               groupEnv={groupEnv}
-              collapsed={isEntityCollapsed({ kind: 'pool', id: agent.id })}
-              onToggle={onToggle}
               selectedAgentId={selectedAgentId}
               onSelect={onSelect}
-              statuses={statuses}
               busyIds={busyIds}
               onRequestMenu={onRequestMenu}
+              revealId={revealId}
             />
           )}
-        </React.Fragment>
-      ))}
-      {/*
-       * The team's not-yet-materialized members (#1957), below the active ones
-       * and behind their own collapsed sub-header. A group with no stubs renders
-       * nothing at all here (AC2) — the section is never an empty affordance.
-       */}
-      {!collapsed && stubs.length > 0 && (
-        <StubSection
-          stubs={stubs}
-          groupEnv={groupEnv}
-          selectedAgentId={selectedAgentId}
-          onSelect={onSelect}
-          busyIds={busyIds}
-          onRequestMenu={onRequestMenu}
-          revealId={revealId}
-        />
+        </div>
       )}
     </div>
   );
@@ -604,7 +645,7 @@ function StubSection({ stubs, groupEnv, selectedAgentId, onSelect, busyIds, onRe
   const [hovered, setHovered] = useState(false);
   const label = stubSectionLabel(stubs.length);
   return (
-    <>
+    <div role="listitem">
       <button
         type="button"
         onClick={() => setCollapsed(v => !v)}
@@ -638,23 +679,27 @@ function StubSection({ stubs, groupEnv, selectedAgentId, onSelect, busyIds, onRe
           {label}
         </span>
       </button>
-      {!collapsed && stubs.map((agent) => (
-        <AgentRow
-          key={agent.id}
-          agent={agent}
-          selected={agent.id === selectedAgentId}
-          onSelect={onSelect}
-          // A stub has no chat identity, so the status poll never keys on it —
-          // its row state comes from its own payload (see `AgentRow`).
-          activityState="idle"
-          environmentName={rowEnvironmentName(agent, groupEnv)}
-          indent
-          busy={busyIds.has(agent.id)}
-          onRequestMenu={onRequestMenu}
-          reveal={agent.id === revealId}
-        />
-      ))}
-    </>
+      {!collapsed && (
+        <div role="list" aria-label={label}>
+          {stubs.map((agent) => (
+            <AgentRow
+              key={agent.id}
+              agent={agent}
+              selected={agent.id === selectedAgentId}
+              onSelect={onSelect}
+              // A stub has no chat identity, so the status poll never keys on it —
+              // its row state comes from its own payload (see `AgentRow`).
+              activityState="idle"
+              environmentName={rowEnvironmentName(agent, groupEnv)}
+              indent
+              busy={busyIds.has(agent.id)}
+              onRequestMenu={onRequestMenu}
+              reveal={agent.id === revealId}
+            />
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -675,20 +720,27 @@ function StubSection({ stubs, groupEnv, selectedAgentId, onSelect, busyIds, onRe
  */
 function PoolInstancesSection({ roleAgent, instances, groupEnv, collapsed, onToggle, selectedAgentId, onSelect, statuses, busyIds, onRequestMenu }) {
   const [hovered, setHovered] = useState(false);
-  const label = poolInstancesLabel(instances.length);
+  // #2760 AC5: the count reads against the role's cap ("5 / 3"), and an
+  // over-cap count is marked, its tooltip saying what that means.
+  // #2789 AC9: instances waiting on an open PR are outside the cap and are
+  // counted apart ("2 / 3 active · 4 waiting").
+  const cap = roleAgent.poolMaxInstances ?? null;
+  const counts = poolInstanceCounts(instances);
+  const label = poolInstancesLabel(counts.active, cap, counts.waiting);
+  const capView = poolCapView(counts.active, cap, counts.waiting);
   const handleToggle = useCallback(
     () => onToggle({ kind: 'pool', id: roleAgent.id }),
     [onToggle, roleAgent.id],
   );
   return (
-    <>
+    <div role="listitem">
       <button
         type="button"
         onClick={handleToggle}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
         aria-expanded={!collapsed}
-        title={`Live pool instances of ${roleAgent.displayName || roleAgent.id}`}
+        title={`Live pool instances of ${roleAgent.displayName || roleAgent.id}: ${capView.title}`}
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -714,21 +766,33 @@ function PoolInstancesSection({ roleAgent, instances, groupEnv, collapsed, onTog
         <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {label}
         </span>
+        {capView.over && (
+          <AlertTriangle
+            size={12}
+            role="img"
+            aria-label="Over the instance limit"
+            style={{ flexShrink: 0, color: 'var(--eb-status-warning)' }}
+          />
+        )}
       </button>
-      {!collapsed && instances.map((agent) => (
-        <AgentRow
-          key={agent.id}
-          agent={agent}
-          selected={agent.id === selectedAgentId}
-          onSelect={onSelect}
-          activityState={statuses[agent.id] || 'idle'}
-          environmentName={rowEnvironmentName(agent, groupEnv)}
-          indent={2}
-          busy={busyIds.has(agent.id)}
-          onRequestMenu={onRequestMenu}
-        />
-      ))}
-    </>
+      {!collapsed && (
+        <div role="list" aria-label={label}>
+          {instances.map((agent) => (
+            <AgentRow
+              key={agent.id}
+              agent={agent}
+              selected={agent.id === selectedAgentId}
+              onSelect={onSelect}
+              activityState={statuses[agent.id] || 'idle'}
+              environmentName={rowEnvironmentName(agent, groupEnv)}
+              indent={2}
+              busy={busyIds.has(agent.id)}
+              onRequestMenu={onRequestMenu}
+            />
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -737,9 +801,17 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, attention, member
 
   const dnd = dragEnabled && drag ? makeRowDnd(drag, dragScope, dragKey) : null;
 
+  // #2704: the header is a row *of* controls rather than one `<button>` that
+  // nests them — chevron, the main select button, kebab and grip are siblings,
+  // so none of them is an interactive element inside another. The row itself
+  // still takes the click anywhere outside those controls (the count, the
+  // attention dots, the padding): a click on the main button bubbles up here
+  // too — including the one a browser synthesises for Enter/Space — and the
+  // chevron/kebab/grip stop propagation so they never also activate the team.
+  // The key handler lives on the row for the same reason: Alt+↑/↓ and the
+  // context-menu keys work from whichever of its controls has focus.
   return (
-    <button
-      type="button"
+    <div
       onClick={onActivate}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -762,15 +834,10 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, attention, member
         if (e.key === 'ArrowUp')   { e.preventDefault(); onReorder(dragScope, dragKey, -1); }
         if (e.key === 'ArrowDown') { e.preventDefault(); onReorder(dragScope, dragKey, 1); }
       }}
-      // Surfaces the (still-live) Alt+↑/↓ reorder shortcut to assistive tech now
-      // that the visible arrow buttons — previously its only affordance — are gone.
-      aria-keyshortcuts={dragEnabled ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
-      aria-selected={selected}
       style={{
         display: 'flex',
         alignItems: 'center',
         gap: 'var(--eb-space-2)',
-        width: '100%',
         padding: 'var(--eb-space-3) var(--eb-space-3) var(--eb-space-1)',
         // At rest the header wears a filled band (`--eb-bg-hover`) so it reads
         // as a team header — not just an uppercase agent row — against the
@@ -780,9 +847,6 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, attention, member
         // (AC5). Top corners round to meet the enclosing block.
         background: selected ? 'var(--eb-bg-selected)' : hovered ? 'var(--eb-bg-active)' : 'var(--eb-bg-hover)',
         borderLeft: selected ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
-        borderTop: 'none',
-        borderRight: 'none',
-        borderBottom: 'none',
         borderTopLeftRadius: 'var(--eb-radius-md)',
         borderTopRightRadius: 'var(--eb-radius-md)',
         // Collapsed → the header is the block's only row, so its fill must round
@@ -795,54 +859,57 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, attention, member
         textTransform: 'uppercase',
         color: subtle ? 'var(--eb-text-muted)' : 'var(--eb-text-secondary)',
         cursor: 'pointer',
-        fontFamily: 'inherit',
-        textAlign: 'left',
         opacity: dnd && dnd.isDragging ? 0.4 : 1,
         boxShadow: dnd ? dnd.indicatorShadow : undefined,
         transition: 'background var(--eb-transition-fast)',
       }}
     >
       {/*
-       * The chevron is now the ONLY expand/collapse control (#2213) — a `span`
-       * rather than a nested `<button>` (the `KebabButton`/`DragGrip` pattern
-       * just below, since a `<button>` inside a `<button>` is invalid HTML).
-       * `stopPropagation` keeps its click off the row's own `onActivate`.
+       * The chevron is the ONLY expand/collapse control (#2213), a real
+       * `<button>` beside the main one since #2704. `stopPropagation` keeps its
+       * click off the row's own `onActivate`.
        */}
-      <span
-        role="button"
-        tabIndex={0}
+      <button
+        type="button"
         aria-expanded={!collapsed}
         aria-label={collapsed ? `Expand ${label}` : `Collapse ${label}`}
         title={collapsed ? 'Expand' : 'Collapse'}
         onClick={e => { e.stopPropagation(); onToggle(); }}
-        onKeyDown={e => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            e.stopPropagation();
-            onToggle();
-          }
-        }}
-        style={{ display: 'flex', flexShrink: 0, cursor: 'pointer' }}
+        style={{ ...BARE_BUTTON_STYLE, flexShrink: 0 }}
       >
         {collapsed
           ? <ChevronRight size={12} />
           : <ChevronDown  size={12} />}
-      </span>
-      {Icon && <Icon size={12} style={{ flexShrink: 0 }} />}
-      <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {label}
+      </button>
+      {/*
+       * The main button: selects the team (its click bubbles to the row's
+       * `onActivate`). The selection is announced as `aria-current` — a plain
+       * button may not carry `aria-selected` (#2704).
+       */}
+      <button
+        type="button"
+        aria-current={selected ? 'true' : undefined}
+        // Surfaces the (still-live) Alt+↑/↓ reorder shortcut to assistive tech now
+        // that the visible arrow buttons — previously its only affordance — are gone.
+        aria-keyshortcuts={dragEnabled ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
+        style={{ ...BARE_BUTTON_STYLE, flex: 1, minWidth: 0, gap: 'var(--eb-space-2)' }}
+      >
+        {Icon && <Icon size={12} style={{ flexShrink: 0 }} />}
+        <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {label}
+          </span>
+          {/*
+           * The team-membership indicator (#2381), in the slot that used to show
+           * the team's Working Environment name (#1529, since removed from the
+           * header — the env is still on the Settings tab). `textTransform`/
+           * `letterSpacing` are reset so it reads as itself, not as an uppercase
+           * section label. Renders nothing for a team with no visible members
+           * (AC9) rather than an empty affordance.
+           */}
+          <MembershipLine indicator={membershipIndicator} />
         </span>
-        {/*
-         * The team-membership indicator (#2381), in the slot that used to show
-         * the team's Working Environment name (#1529, since removed from the
-         * header — the env is still on the Settings tab). `textTransform`/
-         * `letterSpacing` are reset so it reads as itself, not as an uppercase
-         * section label. Renders nothing for a team with no visible members
-         * (AC9) rather than an empty affordance.
-         */}
-        <MembershipLine indicator={membershipIndicator} />
-      </span>
+      </button>
       {/*
        * Trailing cluster order (left→right): grip → persistent count. The grip
        * sits immediately left of the always-present count so its horizontal
@@ -876,7 +943,7 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, attention, member
       }}>
         {count}
       </span>
-    </button>
+    </div>
   );
 }
 
@@ -898,6 +965,7 @@ function AttentionRollup({ attention }) {
     <span style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', flexShrink: 0 }}>
       {hasReply && (
         <span
+          role="img"
           title="Reply awaiting you"
           aria-label="A reply is awaiting you in this team"
           style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--eb-status-success)', flexShrink: 0 }}
@@ -905,6 +973,7 @@ function AttentionRollup({ attention }) {
       )}
       {hasBusy && (
         <span
+          role="img"
           className="eb-status-pulse"
           title="An agent is working"
           aria-label="An agent in this team is working"
@@ -1117,6 +1186,8 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
   // vocabulary for this state (AC3) — the same agent must not be called two
   // different things depending on which surface you are looking at.
   const stateBadge = openable ? null : (stub ? 'Not initialised' : 'Disabled');
+  // #2789: a pool instance kept alive for review feedback on its open PR.
+  const waitingLabel = poolWaitingLabel(agent);
 
   const requestMenu = onRequestMenu
     ? anchor => onRequestMenu({ kind: 'agent', agent }, anchor)
@@ -1125,17 +1196,20 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
   const dnd = dragEnabled && drag ? makeRowDnd(drag, dragScope, dragKey) : null;
 
   return (
-    <button
+    // #2704: a `listitem` row holding the main select `<button>` and, beside
+    // it, the kebab/grip/status cluster — never nested inside it. The row takes
+    // the click anywhere (a click on the main button, including the one a
+    // browser synthesises for Enter/Space, bubbles up here; the kebab and grip
+    // stop propagation), the right-click, the drop and the keys, so Alt+↑/↓
+    // and Shift+F10 work from whichever of its controls has focus.
+    <div
       ref={rowRef}
-      role="option"
-      aria-selected={selected}
-      aria-disabled={!openable || undefined}
+      role="listitem"
       // A disabled agent has no chat to open (the DM route rejects it), so the
       // row opens its own menu instead — Enable sits right there, which beats
       // both a silent no-op and a dead-end "agent disabled" panel (AC6). A stub
       // has no chat *identity* at all (the DM route 409s on a tokenless agent),
       // so the same rule covers it, pointing at Materialize instead (#1957 AC3).
-      title={!openable ? dot.label : undefined}
       onClick={e => {
         if (openable) { onSelect(agent.id); return; }
         if (requestMenu) requestMenu({ x: e.clientX, y: e.clientY });
@@ -1157,14 +1231,10 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
         if (e.key === 'ArrowUp')   { e.preventDefault(); onReorder(dragScope, dragKey, -1); }
         if (e.key === 'ArrowDown') { e.preventDefault(); onReorder(dragScope, dragKey, 1); }
       }}
-      // Surfaces the (still-live) Alt+↑/↓ reorder shortcut to assistive tech now
-      // that the visible arrow buttons — previously its only affordance — are gone.
-      aria-keyshortcuts={dragEnabled ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
       style={{
         display: 'flex',
         alignItems: 'center',
         gap: 'var(--eb-space-3)',
-        width: '100%',
         padding: 'var(--eb-space-2) var(--eb-space-3)',
         // #2389: plain member/stub rows sit flush with the card's base padding.
         // The old extra `--eb-space-4` step signalled an agent hierarchy the rail
@@ -1177,13 +1247,9 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
           : 'var(--eb-space-3)',
         background: selected ? 'var(--eb-bg-selected)' : hovered ? 'var(--eb-bg-hover)' : 'transparent',
         borderLeft: selected ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
-        borderTop: 'none',
-        borderRight: 'none',
         borderBottom: '1px solid transparent',
         color: selected ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
         cursor: 'pointer',
-        fontFamily: 'inherit',
-        textAlign: 'left',
         opacity: dnd && dnd.isDragging ? 0.4 : 1,
         boxShadow: dnd ? dnd.indicatorShadow : undefined,
         transition: 'background var(--eb-transition-fast)',
@@ -1191,69 +1257,99 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <Icon size={18} style={{ flexShrink: 0, color: selected ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)' }} />
+      {/*
+       * The selected row is announced as `aria-current` — a plain button may
+       * not carry `aria-selected` (#2704).
+       */}
+      <button
+        type="button"
+        aria-current={selected ? 'true' : undefined}
+        aria-disabled={!openable || undefined}
+        title={!openable ? dot.label : undefined}
+        // Surfaces the (still-live) Alt+↑/↓ reorder shortcut to assistive tech now
+        // that the visible arrow buttons — previously its only affordance — are gone.
+        aria-keyshortcuts={dragEnabled ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
+        style={{ ...BARE_BUTTON_STYLE, flex: 1, minWidth: 0, gap: 'var(--eb-space-3)' }}
+      >
+        <Icon size={18} style={{ flexShrink: 0, color: selected ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)' }} />
 
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', minWidth: 0 }}>
-          <span
-            title={agent.displayName || agent.id}
-            style={{
-              fontSize: 'var(--eb-text-md)',
-              fontWeight: 'var(--eb-font-medium)',
-              color: openable ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {agent.displayName || agent.id}
-          </span>
-          {/*
-           * The word, not just the amber dot: with the opt-in on, a disabled row
-           * sits among enabled ones and has to read as disabled at a glance
-           * (AC6) — a colour alone would also fail anyone who can't see it. The
-           * same applies to a stub, which says "Not initialised" (#1957 AC3):
-           * two different states must not wear one badge.
-           */}
-          {stateBadge && (
-            <span style={{
-              flexShrink: 0,
-              padding: '0 4px',
-              borderRadius: 'var(--eb-radius-sm)',
-              border: '1px solid var(--eb-border-default)',
-              fontSize: 'var(--eb-text-xs)',
-              lineHeight: 1.5,
-              color: 'var(--eb-text-muted)',
-              textTransform: 'uppercase',
-              letterSpacing: '0.04em',
-            }}>
-              {stateBadge}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', minWidth: 0 }}>
+            <span
+              title={agent.displayName || agent.id}
+              style={{
+                fontSize: 'var(--eb-text-md)',
+                fontWeight: 'var(--eb-font-medium)',
+                color: openable ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {agent.displayName || agent.id}
             </span>
+            {/*
+             * The word, not just the amber dot: with the opt-in on, a disabled row
+             * sits among enabled ones and has to read as disabled at a glance
+             * (AC6) — a colour alone would also fail anyone who can't see it. The
+             * same applies to a stub, which says "Not initialised" (#1957 AC3):
+             * two different states must not wear one badge.
+             */}
+            {stateBadge && (
+              <span style={{
+                flexShrink: 0,
+                padding: '0 4px',
+                borderRadius: 'var(--eb-radius-sm)',
+                border: '1px solid var(--eb-border-default)',
+                fontSize: 'var(--eb-text-xs)',
+                lineHeight: 1.5,
+                color: 'var(--eb-text-muted)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.04em',
+              }}>
+                {stateBadge}
+              </span>
+            )}
+          </div>
+          {environmentName && (
+            <div
+              title={environmentName}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 3,
+                marginTop: 2,
+                maxWidth: '100%',
+                fontSize: 'var(--eb-text-xs)',
+                color: 'var(--eb-text-muted)',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              <Server size={10} style={{ flexShrink: 0 }} />
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {environmentName}
+              </span>
+            </div>
+          )}
+          {waitingLabel && (
+            <div
+              title={`${waitingLabel} — kept alive so review feedback returns to this instance; not counted against the role's instance limit`}
+              style={{
+                marginTop: 2,
+                fontSize: 'var(--eb-text-xs)',
+                color: 'var(--eb-text-muted)',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {waitingLabel}
+            </div>
           )}
         </div>
-        {environmentName && (
-          <div
-            title={environmentName}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 3,
-              marginTop: 2,
-              maxWidth: '100%',
-              fontSize: 'var(--eb-text-xs)',
-              color: 'var(--eb-text-muted)',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            <Server size={10} style={{ flexShrink: 0 }} />
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {environmentName}
-            </span>
-          </div>
-        )}
-      </div>
+      </button>
 
       <span style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
         {/*
@@ -1290,6 +1386,10 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
           />
         ) : (
           <span
+            // `role="img"` so the label is allowed on the span (#2704): now that
+            // the dot sits beside the row button instead of inside it, its
+            // `aria-label` is exposed and a bare span may not carry one.
+            role="img"
             title={dot.label}
             aria-label={dot.label}
             className={dot.pulse ? 'eb-status-pulse' : undefined}
@@ -1308,7 +1408,7 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
           />
         )}
       </span>
-    </button>
+    </div>
   );
 });
 
@@ -1367,13 +1467,12 @@ function makeRowDnd(drag, scope, key) {
  * was opened, and it is a real focusable control so the menu is reachable by
  * keyboard without knowing the Shift+F10 convention (AC9).
  *
- * Rendered as a `span[role=button]`: the rows it sits in are themselves
- * `<button>`s, and a nested `<button>` is invalid HTML that browsers recover
- * from by hoisting it out of its parent — the same reason the drag grip beside
- * it is a span. Always mounted while a menu is available (faint at rest,
- * full-strength on row hover) so its width never shifts the trailing cluster,
- * and `stopPropagation` keeps a click off the row's own select/collapse
- * handler.
+ * A real `<button>` since #2704: it sits beside the row's main button rather
+ * than inside it (it used to be a `span[role=button]` nested in the row's own
+ * `<button>`, which axe flags as nested-interactive). Always mounted while a
+ * menu is available (faint at rest, full-strength on row hover) so its width
+ * never shifts the trailing cluster, and `stopPropagation` keeps a click off
+ * the row's own select/activate handler.
  */
 function KebabButton({ label, active, onOpen }) {
   function open(e) {
@@ -1383,17 +1482,14 @@ function KebabButton({ label, active, onOpen }) {
     onOpen({ x: r.right, y: r.bottom + 2 });
   }
   return (
-    <span
-      role="button"
-      tabIndex={0}
+    <button
+      type="button"
       aria-haspopup="menu"
       aria-label={label}
       title="Actions"
       onClick={open}
-      onKeyDown={e => {
-        if (e.key === 'Enter' || e.key === ' ') open(e);
-      }}
       style={{
+        ...BARE_BUTTON_STYLE,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -1410,7 +1506,7 @@ function KebabButton({ label, active, onOpen }) {
       onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
     >
       <MoreVertical size={13} />
-    </span>
+    </button>
   );
 }
 
@@ -1424,6 +1520,9 @@ function KebabButton({ label, active, onOpen }) {
 function DragGrip({ dnd, active }) {
   return (
     <span
+      // `role="img"`: a bare span may not carry `aria-label` (#2704). The grip
+      // is mouse-only; the keyboard path is the row's Alt+↑/↓.
+      role="img"
       aria-label="Drag to reorder"
       title="Drag to reorder"
       draggable

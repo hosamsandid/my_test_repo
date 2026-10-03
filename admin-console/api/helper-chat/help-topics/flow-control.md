@@ -15,6 +15,7 @@ askPrompts:
   - "Can I rename or merge the stages?"
   - "What does Force dispatch do?"
   - "What does Draft mean, and how do I remove an item from the board?"
+  - "Why is a pool instance still running after it opened its pull request?"
 ---
 
 ## What the Flow Control board shows
@@ -65,7 +66,10 @@ Click a line to open that agent's chat — for a pooled role, the chat of that
 exact instance.
 
 A **pooled** role (one that starts a separate instance per work item) shows
-how busy it is — for example **2 of 3 busy** — and its controls.
+how busy it is — for example **2 of 3 busy** — and its controls. Instances that
+have finished their run but are kept alive because their pull request is still
+open are added as **· n waiting on a PR** (see *Instances waiting on a pull
+request* below); they do not count toward the limit.
 
 ## Pause, Drain and Switch on
 
@@ -73,7 +77,7 @@ The buttons on a pooled role change whether it takes **new** work. They never
 stop a run that is already going.
 
 - **Pause** — Pause: running instances finish their current work. New work waits in a queue and starts when you click Resume.
-- **Drain** — Drain: running instances finish their current work, new work waits, and the role switches itself Off once the last one is done. Click Switch on to start it again.
+- **Drain** — Drain: running instances finish their current work, new work waits, and the role switches itself Off once the last one is done — including any instance still waiting on an open pull request. Click Switch on to start it again.
 - **Resume** — Resume: start taking new work again. Anything that waited while paused starts now.
 - **Switch on** — Switch on: start taking new work again. Anything that waited while the role was off starts now.
 
@@ -81,6 +85,35 @@ Use **Pause** for a short stop you will undo yourself. Use **Drain** to wind a
 role down: while it drains the line reads **Draining, n still running**; when
 the last run finishes it reads **Off**. Nothing is lost either way — work that
 arrives meanwhile waits and is counted as *waiting*.
+
+A drain is only finished once no instance is left waiting on an open pull
+request either: review feedback on such a PR is still handed to its instance
+while the role drains, and the role switches Off when the last PR is merged or
+closed. To finish sooner, delete the waiting instances by hand. A role that is
+**Off** gives no new work to a waiting instance.
+
+### Instances waiting on a pull request
+
+When a pooled instance finishes its run and its work item has an open pull
+request — a PR that closes the issue, or the PR itself — the instance is not
+torn down. It **waits for the PR**, so review feedback goes back to the same
+instance, which continues its session with its workspace intact instead of a
+fresh instance starting from nothing.
+
+- A waiting instance is shown as **Waiting for PR #N** in the Agent Chat list
+  and counted apart: the role's count reads e.g. **2 / 3 active · 4 waiting**.
+- Waiting instances do **not** count toward **Max parallel instances** — new
+  work still gets new instances. When feedback arrives the instance works again
+  and counts as active; only such returning work can push a role above its cap.
+- Neither the **idle timeout** nor the **hard timeout** removes a waiting
+  instance, and time spent waiting does not count toward the hard timeout.
+- Once no linked PR is open any more (merged or closed), the instance stops
+  waiting and is removed on the next check, about a minute later.
+- If GitHub cannot be reached, the instance keeps waiting until the next
+  successful check.
+- **Cost:** a waiting instance keeps its container running for as long as the
+  PR stays open. Merge or close pull requests you are done with, or delete the
+  instance by hand.
 
 **Force dispatch** appears for work held because the team's limit on work in
 progress is full. It starts that one item now, past the limit, without

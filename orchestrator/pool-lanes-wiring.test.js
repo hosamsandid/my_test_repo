@@ -83,7 +83,8 @@ test('GET /internal/teams/:teamId/pool-lanes feeds the pure core each role\'s li
   assert.ok(start > 0, 'poolLanesMatch route not found');
   const body = SRC.slice(start, SRC.indexOf("const poolControlSetMatch ="));
   assert.match(body, /const ledger = await computeTeamTicketLedger\(teamId\)/);
-  assert.match(body, /instances: _liveInstancesForRole\(role\.id\)/);
+  assert.match(body, /instances: _liveInstancesForWithWaiting\(role\.id, poolWaiting\)/);
+  assert.match(SRC, /function _liveInstancesForWithWaiting[\s\S]*?_liveInstancesForRole\(roleFullId\)/, '#2789: still built on the live instances');
   assert.match(body, /poolInstanceLanes\.buildTeamPoolLanes\(roleInputs, ledger\.tickets \|\| \[\]\)/);
   assert.match(body, /maxRuntimeMs: role\.pool\.teardown\.maxRuntimeMs/, 'the hard-timeout budget must be threaded through, or the pure core can never emit timed-out');
 });

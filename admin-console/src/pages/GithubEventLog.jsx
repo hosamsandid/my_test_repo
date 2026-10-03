@@ -13,7 +13,7 @@ import {
   pendingRowMenu, reassignPickerState, reassignTargetLabel, pendingReassignError, pendingReassignSuccess,
 } from './pending-queue-view';
 import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip, refireNote } from './event-outcome-view';
-import { OUTCOME_TONES, NO_MATCH_LABEL, outcomePresentation } from './event-outcome-presentation';
+import { OUTCOME_TONES, NO_MATCH_LABEL, outcomePresentation, outcomesFilterText } from './event-outcome-presentation';
 import { eventLabel, eventFilterText } from './agent-chat/trigger-summary';
 import { workItemTypeLabel } from './github-event-log-type';
 import { isHandoffRow, handoffNote, handoffNoteDisplay, handoffTitleHint } from './github-event-handoff-view';
@@ -491,7 +491,11 @@ function ProcessedEventsView() {
           ))}
         </div>
       );
-    } },
+    },
+      // #2693: search what the column shows (outcome lines) plus the raw agent /
+      // instance ids and drop reasons, so "which events woke or dropped agent X?"
+      // is a filter away.
+      filterValue: outcomesFilterText },
   ];
 
   return (

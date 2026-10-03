@@ -12,10 +12,15 @@
 // instance configs, the team's admission lane, and the ticket ledger
 // (`GET /internal/teams/:id/tickets`), then calls in here.
 //
-// THREE TAGS, not a general status enum:
+// FOUR TAGS, not a general status enum:
 //
 //   running        — a live pool instance, within its configured runtime budget.
+//   waiting        — a live pool instance that is idle with an open linked PR
+//                     (#2789): kept alive so review feedback returns to it.
+//                     Outside the role's cap and never timed out. `prs` names
+//                     the open PR numbers (empty when GitHub could not be read).
 //   timed-out      — a live pool instance past its `pool.teardown.maxRuntimeMs`
+//                     (time spent waiting does not count, #2789)
 //                     (`agent-pool.js`'s `isInstanceTimedOut` — the hard-timeout
 //                     reaper's own predicate, reused so the lane view can never
 //                     disagree with what will actually get reaped).
@@ -54,9 +59,10 @@ function ticketKey(repo, number) {
  *   full agent id (what `ticket.ownerAgentId` names); `maxRuntimeMs` is the
  *   role's `pool.teardown.maxRuntimeMs` (null = no hard timeout).
  * @param {Array<{instanceId:string, repo:string|null, itemKey:number|null,
- *   spawnedAt:string|null}>} [args.instances] - the role's LIVE pool
- *   instances only (`_liveInstanceIdsForRole` + each instance's own
- *   `poolRepo`/`poolItem`/`poolSpawnedAt`).
+ *   spawnedAt:string|null, waiting?:boolean, prs?:number[], waitedMs?:number}>}
+ *   [args.instances] - the role's LIVE pool instances only
+ *   (`_liveInstanceIdsForRole` + each instance's own
+ *   `poolRepo`/`poolItem`/`poolSpawnedAt`, plus the #2789 waiting record).
  * @param {Array<object>} [args.tickets] - the team's full ticket ledger
  *   (`computeTeamTicketLedger`'s `tickets` array) — each entry carries at
  *   least `{ticketId, repo, number, epicId, state, ownerAgentId}`.
@@ -88,7 +94,8 @@ function buildPoolInstanceLanes({ role, instances = [], tickets = [], now = Date
     if (!inst || typeof inst !== 'object' || !inst.repo || inst.itemKey == null) continue;
     const key = ticketKey(inst.repo, inst.itemKey);
     const ticket = ticketByKey.get(key) || null;
-    const timedOut = isInstanceTimedOut({ spawnedAt: inst.spawnedAt, maxRuntimeMs }, now);
+    const waitedMs = Number.isFinite(inst.waitedMs) ? inst.waitedMs : 0;
+    const timedOut = isInstanceTimedOut({ spawnedAt: inst.spawnedAt, maxRuntimeMs, waitedMs }, now);
     runningKeys.add(key);
     if (ticket && ticket.epicId != null && !runningEpicOwner.has(ticket.epicId)) {
       runningEpicOwner.set(ticket.epicId, ticket.ticketId || key);
@@ -99,9 +106,10 @@ function buildPoolInstanceLanes({ role, instances = [], tickets = [], now = Date
       repo: inst.repo,
       number: Number(inst.itemKey),
       epicId: ticket ? (ticket.epicId ?? null) : null,
-      status: timedOut ? 'timed-out' : 'running',
+      status: inst.waiting ? 'waiting' : (timedOut ? 'timed-out' : 'running'),
       spawnedAt: inst.spawnedAt || null,
       sameEpicAs: null,
+      ...(inst.waiting ? { prs: Array.isArray(inst.prs) ? inst.prs.slice() : [] } : {}),
     });
   }
 

@@ -12,7 +12,9 @@ function baseName(path) {
 // backdrop-click-to-close, fit-to-window), fed by the same `/file` metadata
 // fetch a tree click makes (`useWorkspaceFileData`), so this is not a second
 // viewer — it is the existing one, opened from a different trigger. Also
-// opened by the composer's attachment cards (#2567 AC8).
+// opened by the composer's attachment cards (#2567 AC8). The modal owns its own
+// Raw/Rendered state, so an HTML file opened here gets the same sandboxed,
+// confirm-every-time preview as in the Workspace tab (#2778 AC12).
 export function ChatImagePreviewModal({ agentId, path, onClose }) {
   const { data, loading, error } = useWorkspaceFileData(agentId, path);
   return (
@@ -22,8 +24,6 @@ export function ChatImagePreviewModal({ agentId, path, onClose }) {
       data={data}
       loading={loading}
       error={error}
-      viewMode="raw"
-      onToggleViewMode={() => {}}
       onClose={onClose}
     />
   );

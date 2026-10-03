@@ -14,6 +14,8 @@ import {
   stubSectionLabel,
   isPoolInstance,
   poolInstancesLabel,
+  poolWaitingLabel,
+  poolInstanceCounts,
 } from './agent-list-model.js';
 
 const EMPTY_ORDER = { groups: [], singles: [], members: {} };
@@ -448,6 +450,9 @@ test('isPoolInstance tells a spawned instance from an ordinary member', () => {
 test('poolInstancesLabel carries the count, mirrors stubSectionLabel (AC1)', () => {
   assert.equal(poolInstancesLabel(2), 'Instances (2)');
   assert.equal(poolInstancesLabel(1), 'Instances (1)');
+  // #2760 AC5: against the role's cap when it has one.
+  assert.equal(poolInstancesLabel(5, 3), 'Instances (5 / 3)');
+  assert.equal(poolInstancesLabel(2, null), 'Instances (2)');
 });
 
 test('AC1 — a pooled role nests its live instances, sorted by poolItem', () => {
@@ -517,4 +522,25 @@ test('the team filter narrows the instances list like the member list', () => {
   const model = buildAgentListModel(agents, EMPTY_ORDER, ONLY_T1);
   assert.deepEqual(model.visibleGroups.map(g => g.id), ['t1']);
   assert.deepEqual(model.visibleGroups[0].children[0].instances.map(i => i.id), ['t1-dev-i1']);
+});
+
+// #2789 AC9 — instances waiting on an open PR.
+
+test('poolWaitingLabel: names the PR, falls back when GitHub could not be read, null otherwise', () => {
+  const inst = { id: 't1-dev-i1', poolInstance: true };
+  assert.equal(poolWaitingLabel({ ...inst, poolWaiting: true, poolWaitingPr: 42 }), 'Waiting for PR #42');
+  assert.equal(poolWaitingLabel({ ...inst, poolWaiting: true, poolWaitingPr: null }), 'Waiting for review');
+  assert.equal(poolWaitingLabel(inst), null);
+  assert.equal(poolWaitingLabel({ id: 'x', poolWaiting: true }), null, 'only pool instances wait');
+  assert.equal(poolWaitingLabel(null), null);
+});
+
+test('poolInstanceCounts + poolInstancesLabel: active against the cap, waiting apart', () => {
+  const w = (n) => ({ id: `i${n}`, poolInstance: true, poolWaiting: true, poolWaitingPr: n });
+  const a = (n) => ({ id: `a${n}`, poolInstance: true });
+  const counts = poolInstanceCounts([a(1), a(2), w(3), w(4), w(5), w(6)]);
+  assert.deepEqual(counts, { active: 2, waiting: 4 });
+  assert.equal(poolInstancesLabel(counts.active, 3, counts.waiting), 'Instances (2 / 3 active · 4 waiting)');
+  assert.equal(poolInstancesLabel(2, 3, 0), 'Instances (2 / 3)');
+  assert.deepEqual(poolInstanceCounts(null), { active: 0, waiting: 0 });
 });

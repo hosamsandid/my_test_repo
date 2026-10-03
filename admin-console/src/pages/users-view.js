@@ -119,14 +119,29 @@ export function lastSystemAdminGuard({ users, target, action } = {}) {
   return { ok: true, reason: null };
 }
 
+// The optional-email rule (#2695 finding 88), mirrored from the store
+// (`orchestrator/teams-store.js` EMAIL_RE / INVALID_EMAIL_REASON) — the two run
+// in different containers, so `users-view.test.js` proves rule and sentence
+// still agree. Needed client-side because the Save buttons submit by onClick,
+// which bypasses the browser's native `type="email"` check.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export const INVALID_EMAIL_REASON = 'Email must be a valid address, e.g. jane.doe@corp.com';
+
+export function isValidEmail(v) {
+  return typeof v === 'string' && EMAIL_RE.test(v.trim());
+}
+
 // Client-side mirror of the backend create/update validation (AC11), returning
 // an error string or null. On create the backend requires a subject (an empty
 // display name defaults to the subject); on edit the backend rejects an empty
-// display name and the subject is immutable. `mode` is 'create' | 'edit'.
-export function validateUserForm({ subject, displayName } = {}, mode = 'create') {
+// display name and the subject is immutable. A non-blank email must be a
+// plausible address in both modes (#2695). `mode` is 'create' | 'edit'.
+export function validateUserForm({ subject, displayName, email } = {}, mode = 'create') {
   const s = String(subject == null ? '' : subject).trim();
   const dn = String(displayName == null ? '' : displayName).trim();
+  const em = String(email == null ? '' : email).trim();
   if (mode === 'create' && !s) return 'Subject is required.';
   if (mode === 'edit' && !dn) return 'Display name cannot be empty.';
+  if (em && !isValidEmail(em)) return INVALID_EMAIL_REASON;
   return null;
 }

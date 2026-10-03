@@ -383,7 +383,7 @@ function eventIdFromCorrelation(correlationId) {
  * @param {Array}  args.events    github-event-log entries
  * @param {Array}  args.prRecords pr-events-log records (pr-created / branch-pushed)
  * @param {Array}  args.sessions  [{ agentId, session }] running sessions of the team's agents
- * @param {Array}  args.pools     [{ agentId, roleId, displayName, maxInstances, state, changedAt, held, instances:[{instanceId, busy}] }]
+ * @param {Array}  args.pools     [{ agentId, roleId, displayName, maxInstances, state, changedAt, held, instances:[{instanceId, busy, waiting?, prs?}] }]
  * @param {object} args.removed   rows a person took off the board (see normalizeRemoved)
  * @param {number} args.now
  */
@@ -653,7 +653,10 @@ function buildFlowBoard(args = {}) {
   const busyAgents = new Set(sessionRows.map((s) => s.agentId));
   const pools = (Array.isArray(args.pools) ? args.pools : []).map((p) => {
     const instances = Array.isArray(p.instances) ? p.instances : [];
-    const busy = instances.filter((i) => i && (i.busy || busyAgents.has(i.instanceId))).length;
+    const isBusy = (i) => i && (i.busy || busyAgents.has(i.instanceId));
+    const busy = instances.filter(isBusy).length;
+    // #2789: idle instances kept alive for an open PR — outside the cap.
+    const waiting = instances.filter((i) => i && i.waiting && !isBusy(i)).length;
     return {
       agentId: p.agentId,
       roleId: p.roleId,
@@ -661,6 +664,7 @@ function buildFlowBoard(args = {}) {
       busy,
       capacity: Number.isFinite(p.maxInstances) ? p.maxInstances : null,
       live: instances.length,
+      waiting,
       state: p.state || 'running',
       changedAt: p.changedAt || null,
       held: Number.isFinite(p.held) ? p.held : 0,

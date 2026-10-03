@@ -459,6 +459,11 @@ token (replaces webhooks for local stacks).
 - Matched events → `pending-triggers.json` (drained every 5s). Event keys
   `<type>.<action>` (e.g. `pull_request.opened`); bare `push`. Some actions are
   omitted by the API (no `pull_request.synchronize`).
+- **PR readiness** (#2794): CI/merge state is not in the Events API, so for a
+  repo with a subscriber to `pull_request.checks_passed|checks_failed|merge_conflict`
+  the poller reads open PRs + head-commit checks via GraphQL each tick and fans out
+  synthetic `PullRequestEvent`s, once per (PR, head SHA, verdict)
+  (`orchestrator/pr-readiness.js`, state in `state.json` `readiness`). Spec: `docs/triggers.md`.
 - **Loop protection is frequency-only, no source filtering unless a producer
   filter is set**: a per-`(agent, conversation)` throttle (default 5/h) + a
   per-poll burst-cap digest. A trigger fires on any matching event, including

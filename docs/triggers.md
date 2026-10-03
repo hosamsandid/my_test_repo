@@ -55,6 +55,23 @@ Every 30 s the poller queries the GitHub Events API for each environment reposit
 
 **The first push to a new branch arrives as the pull request it opens.** The Events API reports no `PushEvent` (and often no `CreateEvent`) for the push that creates a branch — only later pushes to the existing branch surface as `push`. So the poller turns every `pull_request.opened` / `pull_request.reopened` whose head branch lives in the same repository (not a fork) into an extra `push` event for that head branch and commit, logged as its own `push` row (event id `prpush:<id>`, payload `ref`/`head` plus `synthesizedFrom` and the PR number). Push wakes are de-duplicated per repository on branch + head commit: whichever of the PR-derived push and a real `PushEvent` for the same commit arrives first wakes `push` triggers, and the other is logged as dropped (`push-duplicate`). A trigger that also listens to the originating `pull_request.*` event is not woken a second time by the derived push. History horizon, throttle and burst digest apply as for any event. A branch pushed without opening a PR is still not detected — GitHub reports nothing for it.
 
+### PR readiness: `pull_request.checks_passed` / `checks_failed` / `merge_conflict`
+
+The Events API has no event for "CI finished" or "this PR now conflicts" (no `check_suite`, `check_run`, `workflow_run`, `status`, and nothing for mergeability). So for a repository where at least one `github-event` trigger listens to one of these three keys, the poller **reads** the state of the open pull requests itself on every cycle (GitHub GraphQL API) and wakes the trigger once a verdict is reached (`orchestrator/pr-readiness.js`, #2794). **GitHub only** — GitLab repositories are not polled.
+
+| Key | Fires when |
+|---|---|
+| `pull_request.checks_passed` | The PR's head commit has at least one check and **all** of them passed (`success`, `neutral` or `skipped`). |
+| `pull_request.checks_failed` | **Any** check of the head commit failed (`failure`, `cancelled`, `timed_out`, `action_required`, `startup_failure`, `stale`, or a commit status `failure`/`error`) — even while others are still running. |
+| `pull_request.merge_conflict` | GitHub reports the PR as conflicting with its base branch. |
+
+- **Every check counts**, required or not — CodeQL, external commit statuses, and checks branch protection does not require. A queued or running check keeps CI *pending*.
+- **No CI**: a head commit with no check at all after a grace period (default 3 minutes from when the poller first saw it, `AEE_PR_READINESS_CI_GRACE_MS` on the orchestrator) gets the verdict *none*, which fires nothing. Mergeability `UNKNOWN` (GitHub still computing) stays *pending* and is re-read on the next cycle; `MERGEABLE` is *clean* and fires nothing.
+- **Once per (PR, head commit, verdict).** A new push resets both verdicts for the new head; a verdict of the old head is never delivered after the new head was seen. A re-run on the same commit can still turn `checks_failed` into a later `checks_passed`; a base branch that moves under an already-clean head still produces `merge_conflict` (once per head). A PR closed or merged while pending fires nothing. Fork PRs are evaluated like any other.
+- **Payload**: a `pull_request` event (`payload.action` = `checks_passed` / `checks_failed` / `merge_conflict`) with `number`, `pull_request.{number, title, html_url, head.{ref,sha}, base.ref}` and `payload.readiness = {headSha, verdict, ci, merge, failingChecks, fromFork}` — `failingChecks` names the failed checks for `checks_failed`. The wake is routed to the PR's conversation and logged in the **GitHub Event Log** like any polled event; history horizon, throttle and burst digest apply.
+- **No replay**: the first evaluation of a repository (or one after more than 15 minutes without an evaluation, e.g. an orchestrator restart) only records the verdicts already reached and wakes nobody.
+- **API cost** per poll cycle, per repository with a subscriber: **one** GraphQL call for the open PRs (head commit + mergeability, up to 100 PRs), plus **one** GraphQL call for the checks of all head commits whose CI verdict is still open (pending or failed), only when there is one. A head whose verdict is `passed` or *none* is no longer read. Repositories without a subscriber cost nothing extra. While the events poll of a repository backs off (rate limit, GitHub unreachable, bad token), readiness is not evaluated either; a failed read leaves every verdict as it was.
+
 Re-fire a dropped wake from Agent Chat → **Events** (#2525).
 
 ## Operational note: host clock skew (Podman machine)

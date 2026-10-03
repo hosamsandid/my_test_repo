@@ -106,6 +106,45 @@ Three consequences that surprise people:
   costs nothing and nothing is delivered twice. The very first poll after a
   restart only establishes that baseline — it delivers nothing.
 
+### CI results and merge conflicts (PR checks passed / failed, PR merge conflict)
+
+GitHub's event feed says nothing about CI or merge conflicts. So for a
+repository where some trigger listens to **PR checks passed**, **PR checks
+failed** or **PR merge conflict**, the poller looks at the open pull requests
+itself on every cycle and logs one row the moment a verdict is reached. These
+rows use the usual PR event keys `pull_request.checks_passed`,
+`pull_request.checks_failed` and `pull_request.merge_conflict`. This works for
+**GitHub only**, not GitLab.
+
+- **Checks passed** — the PR's latest commit has at least one check, and all of
+  them succeeded (or were neutral or skipped).
+- **Checks failed** — any check failed, was cancelled or timed out, even while
+  others are still running. The wake names the failed checks.
+- **Merge conflict** — GitHub reports the PR as conflicting with its base branch.
+
+**Every check counts**, including CodeQL and checks that are not required to
+merge. If a commit has no checks at all after 3 minutes, CI is counted as absent,
+and nothing is logged. That commit's checks are not looked at again, so checks
+that only start later (for example after a long queue) are missed. While GitHub is still working out whether a PR can merge,
+nothing is reported yet; the poller asks again on the next cycle.
+
+**Each verdict fires once per commit.** A new push starts over for the new commit.
+A result for the old commit is never delivered after that. A re-run that turns
+failed checks green still logs *PR checks passed*. A PR closed while its checks
+are still running logs nothing.
+
+**Turning this on does not replay the past.** On the first look at a repository
+(or the first after its last such trigger was removed), results that already
+exist are only noted. They wake nobody. After that, nothing is lost to an
+outage: if GitHub was unreachable or the orchestrator was down, a result reached
+in the meantime still wakes the trigger on the next successful cycle.
+
+**Cost.** It costs one extra GitHub request per cycle for each repository with
+such a trigger. A second request is made only while some PR's checks are still
+open. Repositories without such a trigger cost nothing. While the repository's
+polling is backing off (rate limit, GitHub unreachable), nothing is evaluated,
+and nothing is guessed.
+
 ### The poller is not the only writer
 
 Three other things write rows here, which is why this stays one honest timeline of

@@ -36,6 +36,7 @@ const { canonicalEventKey, listensTo } = require('./event-key-aliases');
 const pushAttribution = require('./push-attribution');
 const { parseBranchFilter, pushBranch, branchFilterMatches } = require('./branch-filter');
 const { knowledgeBranchesByRepo, isKnowledgeBranchPush } = require('./knowledge-branch-exclusion');
+const prReadiness = require('./pr-readiness');
 
 // Poll cadence. Fixed 30s in production; overridable via
 // AEE_GITHUB_POLL_INTERVAL_MS (#711) so the E2E stack can tighten it — the
@@ -584,8 +585,11 @@ function requestWithDeadline(makeRequest, { deadlineMs = REQUEST_DEADLINE_MS } =
 }
 
 class GitHubPoller {
-  constructor({ loadEnvironment, listEnvironmentIds, enqueuePending, triggersPath, onMergedPr, labelMarkers, lookupPushProducer, listKnowledgeLocations } = {}) {
+  constructor({ loadEnvironment, listEnvironmentIds, enqueuePending, triggersPath, onMergedPr, labelMarkers, lookupPushProducer, listKnowledgeLocations, ciGraceMs } = {}) {
     this.loadEnvironment = loadEnvironment;
+    // #2794: how long a PR head commit may carry no check before its CI verdict
+    // is `none` (see pr-readiness.js). AEE_PR_READINESS_CI_GRACE_MS, default 3m.
+    this.ciGraceMs = Number.isFinite(ciGraceMs) && ciGraceMs >= 0 ? ciGraceMs : prReadiness.ciGraceMs();
     this.listEnvironmentIds = listEnvironmentIds;
     // #2571: who pushed a (repo, ref, head)? The orchestrator records every
     // push it makes for an agent (push-attribution.js); a trigger with a
@@ -692,6 +696,10 @@ class GitHubPoller {
       if (plan.size === 0) return;
       for (const [repoFullName, entry] of plan) {
         await this._pollRepo(repoFullName, entry);
+        this._markTickProgress();
+        // #2794: CI / merge-conflict readiness of open PRs — not on the Events
+        // API, so read separately (also when the events poll returned 304).
+        await this._pollReadiness(repoFullName, entry);
         this._markTickProgress();
       }
     } catch (err) {
@@ -928,6 +936,131 @@ class GitHubPoller {
 
     this.state[repoFullName] = repoState;
     this._saveState();
+  }
+
+  // #2794: evaluate the CI and merge readiness of the repo's open PRs and fan
+  // out a synthetic `pull_request.checks_passed` / `checks_failed` /
+  // `merge_conflict` event for every (PR, head commit, verdict) reached for the
+  // first time. Only for a repo with a subscriber to one of those keys; the
+  // verdict rules and the API budget are documented in pr-readiness.js. Any
+  // GitHub failure leaves the verdicts as they were (pending is never guessed).
+  async _pollReadiness(repoFullName, { tokenId, subscribers, knowledgeBranches } = {}) {
+    const listeners = (subscribers || []).filter(
+      (s) => prReadiness.READINESS_EVENT_KEYS.some((k) => listensTo(s.events, k)),
+    );
+    const repoState = this.state[repoFullName] || {};
+    if (listeners.length === 0) {
+      // Nobody listens (any more): forget the state, so a later subscriber
+      // starts from a baseline instead of from stale verdicts.
+      if (repoState.readiness) {
+        delete repoState.readiness;
+        this._saveState();
+      }
+      return;
+    }
+    // The events poll is backing off (GitHub unreachable, token revoked, …).
+    if (repoState.skipUntil && new Date(repoState.skipUntil).getTime() > Date.now()) return;
+    const token = this._readToken(tokenId);
+    if (!token) return;
+    const [owner, name] = repoFullName.split('/');
+
+    let open;
+    try {
+      open = prReadiness.parseOpenPrs(await this._graphql(prReadiness.OPEN_PRS_QUERY, { owner, name }, token));
+    } catch (err) {
+      console.error(`[GH-Poller] ${repoFullName}: PR readiness — open PRs not readable (${err.message}); verdicts unchanged`);
+      return;
+    }
+
+    let checks = null;
+    const shas = prReadiness.shasToRead(repoState.readiness, open.prs);
+    if (shas.length > 0) {
+      const q = prReadiness.buildChecksQuery(owner, name, shas);
+      try {
+        checks = prReadiness.parseChecks(await this._graphql(q.query, q.variables, token), q.shas);
+      } catch (err) {
+        console.error(`[GH-Poller] ${repoFullName}: PR readiness — checks not readable (${err.message}); CI verdicts unchanged`);
+      }
+    }
+
+    const now = Date.now();
+    const result = prReadiness.evaluateReadiness({
+      state: repoState.readiness,
+      prs: open.prs,
+      truncated: open.truncated,
+      checks,
+      now,
+      graceMs: this.ciGraceMs,
+    });
+    repoState.readiness = result.state;
+    this.state[repoFullName] = repoState;
+    if (result.baseline) {
+      console.log(`[GH-Poller] ${repoFullName}: PR readiness baseline (${open.prs.length} open PR(s)) — current verdicts recorded, none delivered`);
+    }
+    if (result.emits.length > 0) {
+      const events = result.emits.map((e) => prReadiness.readinessEvent(repoFullName, e, now));
+      await this._fanOutBatch(repoFullName, events, subscribers, token, repoState, knowledgeBranches);
+    }
+    this._saveState();
+  }
+
+  // #2794: the poll token for `tokenId` (null when unusable). A method so the
+  // readiness tests can stand in for the token store.
+  _readToken(tokenId) {
+    return readTokenFile(tokenId);
+  }
+
+  // #2794: a GitHub GraphQL POST under the same request deadline as every other
+  // poller request. `/api/v3` (GHE) maps to `/api/graphql`, api.github.com to
+  // `/graphql`. Resolves `data`; a partial result (GraphQL `errors` beside
+  // `data`, e.g. a commit GitHub no longer has) still resolves — the parsers
+  // skip what is missing.
+  _graphql(query, variables, token) {
+    return requestWithDeadline(({ resolve, reject }) => {
+      const api = resolveGithubApiTarget();
+      const gqlPath = /\/v3$/.test(api.basePath) ? api.basePath.replace(/\/v3$/, '/graphql') : `${api.basePath}/graphql`;
+      const body = JSON.stringify({ query, variables });
+      const req = api.transport.request({
+        hostname: api.hostname,
+        port: api.port,
+        path: gqlPath,
+        method: 'POST',
+        headers: {
+          'User-Agent': 'agent-studio-poller',
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+          'Authorization': `Bearer ${token}`,
+        },
+        timeout: 15_000,
+      }, (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        // See _fetchEvents — same two handlers, same reason.
+        res.on('aborted', () => reject(new Error('response aborted before end')));
+        res.on('error', reject);
+        res.on('end', () => {
+          if (res.statusCode !== 200) {
+            reject(new Error(`graphql HTTP ${res.statusCode}`));
+            return;
+          }
+          try {
+            const json = JSON.parse(Buffer.concat(chunks).toString());
+            if (!json || !json.data) {
+              const msg = json && Array.isArray(json.errors) && json.errors[0] && json.errors[0].message;
+              reject(new Error(`graphql: ${msg || 'no data'}`));
+              return;
+            }
+            resolve(json.data);
+          } catch (err) {
+            reject(err);
+          }
+        });
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(new Error('timeout')); });
+      req.end(body);
+      return req;
+    });
   }
 
   // #678: fire the merge callback for every merged PR in this batch. Fully
@@ -1986,6 +2119,17 @@ function agentScopedTokenSource(agent, envById) {
   const env = agent.config.environmentId ? envById.get(agent.config.environmentId) : null;
   if (!env || !env.githubTokenId || !isValidTokenId(env.githubTokenId)) return null;
   return { tokenId: env.githubTokenId, envId: env.id };
+}
+
+// The trimmed token stored under `tokenId`, or null when the id is invalid or
+// the file is missing/unreadable/empty.
+function readTokenFile(tokenId) {
+  if (!isValidTokenId(tokenId)) return null;
+  try {
+    return fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), 'utf8').trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 // #2537: can the poller actually use this token? Mirrors the early returns in

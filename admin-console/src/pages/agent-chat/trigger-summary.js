@@ -20,6 +20,10 @@ export const GITHUB_EVENT_OPTIONS = [
   { value: 'pull_request.reopened',                 label: 'PR reopened' },
   { value: 'pull_request.labeled',                  label: 'PR labeled' },
   { value: 'pull_request.unlabeled',                label: 'PR unlabeled' },
+  // #2794: synthetic — the poller reads the PR's checks and mergeability.
+  { value: 'pull_request.checks_passed',            label: 'PR checks passed' },
+  { value: 'pull_request.checks_failed',            label: 'PR checks failed' },
+  { value: 'pull_request.merge_conflict',           label: 'PR merge conflict' },
   { value: 'pull_request_review.submitted',         label: 'PR review submitted' },
   { value: 'pull_request_review_comment.created',   label: 'PR review comment' },
   { value: 'issue_comment.created',                 label: 'Issue / PR comment' },

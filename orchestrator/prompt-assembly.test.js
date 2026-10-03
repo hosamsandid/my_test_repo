@@ -149,6 +149,10 @@ test('the wait-for-an-external-event advice is autonomous-only', () => {
   const plain = backgroundTasksSection(false);
   assert.match(auto, /github-event.*trigger|trigger.*re-wake/is);
   assert.match(auto, /pull_request\.checks_passed/);
+  // #2797: only working options — the merge-conflict event, and handing a
+  // still-pending PR back by re-applying its (gated) hand-off label.
+  assert.match(auto, /pull_request\.merge_conflict/);
+  assert.match(auto, /re-apply its hand-off label/);
   // A non-autonomous agent gets the core rule but not the trigger advice.
   assert.doesNotMatch(plain, /pull_request\.checks_passed/);
   assert.ok(plain.startsWith('## Background tasks'));

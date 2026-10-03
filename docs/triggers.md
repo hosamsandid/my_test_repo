@@ -72,6 +72,34 @@ The Events API has no event for "CI finished" or "this PR now conflicts" (no `ch
 - **No replay**: the first evaluation of a repository (or the first after its last readiness subscriber was removed) only records the verdicts already reached and wakes nobody. After that the state is kept (in the poller's `state.json`), so an outage, an orchestrator restart or a backoff does **not** re-baseline: a PR whose verdict was reached meanwhile is woken on the next successful cycle, like the events poll backfills.
 - **API cost** per poll cycle, per repository with a subscriber: **one** GraphQL call for the open PRs (head commit + mergeability, up to 100 PRs), plus **one** GraphQL call for the checks of all head commits whose CI verdict is still open (pending or failed), only when there is one. A head whose verdict is `passed` or *none* is no longer read. Repositories without a subscriber cost nothing extra. While the events poll of a repository backs off (rate limit, GitHub unreachable, bad token), readiness is not evaluated either; a failed read leaves every verdict as it was.
 
+### Hand-off readiness gate: wait for CI, block on merge conflict
+
+A PR hand-off — a `github-event` trigger on `pull_request.labeled`, `pull_request.opened` or `pull_request.reopened`, including the listener a PR channel derives — can carry a **readiness gate** (#2795). Instead of waking the next agent the moment the label is set, the poller **holds** the wake until the PR's current head commit is ready, using the same GitHub reads as PR readiness above.
+
+```json
+"readinessGate": { "ci": true, "conflict": true, "failureLabel": "revisions-required", "timeoutMinutes": 60 }
+```
+
+| Field | Meaning |
+|---|---|
+| `ci` | **Wait for CI** — hold until the head's checks pass. *None* (no check at all after the grace period) also releases. |
+| `conflict` | **Block on merge conflict** — hold until GitHub reports the PR as mergeable. |
+| `failureLabel` | Set when a gate fails. Default `revisions-required`. Must differ from the wake label. |
+| `timeoutMinutes` | How long a hold may last, 1–10080. Default 60. |
+
+On a channel port the same object is the channel's `readiness` field; the derived listener carries it as `readinessGate`. Both toggles off (or the field absent) means no gate. Defaults are not written.
+
+- **Release**: every enabled gate is satisfied for the current head → the agent is woken with the original event, logged `delivered · gate cleared`.
+- **Failure**: a check failed or the PR conflicts → nobody is woken; the poller removes the wake label, sets the failure label and comments on the PR, listing the failing checks or naming the conflict. Wire an agent on the failure label (e.g. a developer that fixes the PR and re-applies the hand-off label) — the Flows editor warns when nobody listens on it.
+- **Timeout**: still pending after `timeoutMinutes` → the wake label is removed, `needs-human` set and a comment names what was still pending.
+- **Push during a hold**: the new head is evaluated from scratch (a failure of the old head no longer counts); the timeout still counts from the original hold.
+- **Cancel**: the PR is closed or merged, the wake label is removed, or the listening trigger is deleted → the hold is dropped and nobody is woken.
+- **Restarts**: holds live in the poller's `state.json` and survive an orchestrator restart; a failed GitHub write is retried on the next cycle.
+- **Fan-in**: when several PR channels share one listener, their gates are combined — each toggle is on if any channel enables it; the first channel's explicit failure label / timeout wins.
+- **Defaults**: the core, extended and dispatched SDLC templates gate their PR hand-offs, and a new PR hand-off drawn in the Flow editor starts with both gates on. Existing teams are not changed — their hand-offs stay ungated until switched on in the hand-off dialog.
+
+Visible in the **GitHub Event Log** (`held — waiting for CI / conflict-free`, then `delivered · gate cleared` or `not woken (gate failed / timed out / cancelled)`), on the agent's **Events** tab, and as **waiting for CI** on the PR's row in **Flow Control**. Only PR hand-offs can be gated; issue hand-offs are not.
+
 Re-fire a dropped wake from Agent Chat → **Events** (#2525).
 
 ## Operational note: host clock skew (Podman machine)

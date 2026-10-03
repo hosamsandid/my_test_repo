@@ -56,6 +56,16 @@ result, so the board stays fast.
   hours (a team can change that — see *Changing the columns*), then drops off.
   The note under the heading shows the team's current setting.
 
+### Waiting for CI
+
+A pull request whose hand-off has a **readiness gate** (see the Flows help,
+*Holding a PR hand-off until CI is green*) shows **⏳ waiting for CI**,
+**waiting for conflict-free** or **waiting for CI / conflict-free** under its
+stage while the gate holds the wake. Hover it to see how long it has been held. The next agent has not
+been woken yet; nothing is stuck unless the hold runs into its timeout, which
+removes the hand-off label and sets `needs-human`. The GitHub Event Log shows
+how each hold ended.
+
 ## Who is working right now
 
 Each line is a run in progress: the **role**, the **instance** number for a

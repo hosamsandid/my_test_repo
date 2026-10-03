@@ -508,8 +508,9 @@ function backgroundTasksSection(autonomous) {
     '\n\nTo wait for something that happens **outside** this turn — CI finishing, ' +
     "another agent's pull request, a long external job — do **not** poll it in a " +
     'background task. End your turn and let an event re-wake you: add a ' +
-    '`github-event` trigger (e.g. on `check_suite.completed` or the pull-request ' +
-    'status) or use a `loop`. That is the only reliable way to continue after an ' +
+    '`github-event` trigger (e.g. on `pull_request.checks_passed` / ' +
+    '`pull_request.checks_failed` for CI, or the pull-request status) or use a ' +
+    '`loop`. That is the only reliable way to continue after an ' +
     'external event.';
   return autonomous ? base + waitAdvice : base;
 }

@@ -148,9 +148,9 @@ test('the wait-for-an-external-event advice is autonomous-only', () => {
   const auto = backgroundTasksSection(true);
   const plain = backgroundTasksSection(false);
   assert.match(auto, /github-event.*trigger|trigger.*re-wake/is);
-  assert.match(auto, /check_suite\.completed/);
+  assert.match(auto, /pull_request\.checks_passed/);
   // A non-autonomous agent gets the core rule but not the trigger advice.
-  assert.doesNotMatch(plain, /check_suite\.completed/);
+  assert.doesNotMatch(plain, /pull_request\.checks_passed/);
   assert.ok(plain.startsWith('## Background tasks'));
   assert.ok(auto.startsWith(plain)); // autonomous = core + advice appended
 });

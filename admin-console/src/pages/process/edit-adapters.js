@@ -329,12 +329,12 @@ export const liveOps = {
   },
   // Channels live on the *consumer*; the backend re-derives the github-event
   // triggers from them (reconcileTeamGithubChannels). Upsert keyed on (artifact, from).
-  addChannel: async (roleId, { artifact, from, label, gate, wakePrompt, autoClaim }) => {
+  addChannel: async (roleId, { artifact, from, label, gate, wakePrompt, autoClaim, readiness }) => {
     if (!from || from === roleId) return;
     const a = await apiCall('GET', `/api/agents/${roleId}`);
     // `autoClaim` (#958) rides along so the claim opt-out survives the live port
     // write — otherwise the reconciler re-stamps the claim.
-    const channels = upsertChannel(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label, gate, wakePrompt, autoClaim });
+    const channels = upsertChannel(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label, gate, wakePrompt, autoClaim, readiness });
     await apiCall('PUT', `/api/agents/${roleId}`, { channels });
   },
   // Edit an existing channel (#2717): `prevLabel` is its label when the editor
@@ -466,6 +466,9 @@ export function makeDraftOps(getBundle, persist) {
       const b = clone(getBundle());
       const t = (role(b, roleId)?.triggers || []).find(x => x.id === tid);
       if (t) Object.assign(t, patch);
+      // A switched-off readiness gate (#2795) is sent as null — drop the key,
+      // as the live trigger PUT does.
+      if (t && t.readinessGate === null) delete t.readinessGate;
       await persist(b);
     },
     deleteTrigger: async (roleId, tid) => {

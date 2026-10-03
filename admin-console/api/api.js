@@ -129,7 +129,7 @@ const knowledgeLinks = require('./knowledge-links');
 const { applyPushedBy } = require('./push-producer-filter');
 const { normalizeBranchFilter } = require('./branch-filter');
 const { newTriggerIdError, annotateTriggerList, stripTriggerAnnotations, resolveTriggerIndex } = require('./trigger-validate');
-const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext, normalizeReadinessGate, cleanReadiness, readinessError } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { rederiveTeamDataFlow } = require('./derived-data-flow');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
@@ -3443,6 +3443,12 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   }
   let channelsChanged = false;
   if (channels !== undefined) {
+    // Readiness gate (#2795): a malformed gate is refused, not dropped — the
+    // author would otherwise believe the hand-off waits for CI.
+    for (const c of (Array.isArray(channels) ? channels : [])) {
+      const re = c && c.readiness != null ? readinessError(c.readiness, { wakeLabel: c.label }) : null;
+      if (re) return res.status(400).json({ error: `channel from ${c.from || '?'}: ${re}` });
+    }
     const norm = (Array.isArray(channels) ? channels : [])
       .filter(c => c && (c.artifact === 'pr' || c.artifact === 'issue')
         && typeof c.from === 'string' && c.from && c.from !== id)
@@ -3458,6 +3464,9 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
         // reconcileTeamGithubChannels re-stamps the claim the author just turned
         // off. Only the non-default is persisted.
         ...(c.autoClaim === false ? { autoClaim: false } : {}),
+        // Readiness gate (#2795) — must survive the live port write, or the
+        // reconciler regenerates an ungated listener (PR channels only).
+        ...(c.artifact === 'pr' && cleanReadiness(c.readiness) ? { readiness: cleanReadiness(c.readiness) } : {}),
       }));
     if (norm.length) fresh.channels = norm; else delete fresh.channels;
     channelsChanged = true;
@@ -6571,6 +6580,8 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   // Push branch filter (#2570): persisted in its normalized array form (or
   // absent = every branch), validated by rawTriggerError above.
   normalizeBranchFilter(newTrigger);
+  // Hand-off readiness gate (#2795) — canonical form, or cleared.
+  normalizeReadinessGate(newTrigger);
   // "Pushed by agent" producer filter (#2571): same-team agent ids on push
   // triggers only.
   const pbf = applyPushedBy(newTrigger, { ownerId: id, lookupAgent: readAgentConfigForFilter });
@@ -6647,6 +6658,8 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   // Push branch filter (#2570) — normalized as on POST; a blank/null value
   // clears a stored filter.
   normalizeBranchFilter(merged);
+  // Readiness gate (#2795) — as on POST; `null` clears it.
+  normalizeReadinessGate(merged);
   // Producer filter (#2571) — same route-level check as POST; `null` clears it.
   const pbf = applyPushedBy(merged, { ownerId: id, lookupAgent: readAgentConfigForFilter });
   if (pbf.error) return res.status(400).json({ error: pbf.error });

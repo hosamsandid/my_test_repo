@@ -21,6 +21,7 @@ import {
 } from './outcome-routing.js';
 import { consumeKey } from './humans-registry-ops';
 import { WAKE_NOTE_MAX, clampWakeNote } from './wake-edge-view.js';
+import { readinessSummary, NEW_HANDOFF_READINESS } from './readiness-gate.js';
 
 // The human role currently wired to consume `entry` (or '' if none). #987.
 function humanConsuming(humans, entry) {
@@ -288,6 +289,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
             text={<>Reacts to <strong>{nameOf(c.from)}</strong>'s {noun}
               {c.label ? <> when labeled <code style={codeChip}>{c.label}</code></> : null}
               {c.gate === 'human' ? ' · 👤 human gate' : null}
+              {readinessSummary(c.readiness) ? <span title={readinessSummary(c.readiness)}> · waits for {[c.readiness.ci ? 'CI' : null, c.readiness.conflict ? 'conflict-free' : null].filter(Boolean).join(' + ')}</span> : null}
               {/* Derived claim, read-only (auto) + per-listener opt-out. The flag
                   lives on the PORT because the derived trigger is regenerated on
                   every reconcile — a trigger-level flag would be wiped. */}
@@ -416,7 +418,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
 
       {editChannel && (
         <EditHandoffDialog
-          edge={{ on: 'github', from: editChannel.from, to: node.id, artifact: editChannel.artifact, label: editChannel.label || '', gate: editChannel.gate, wakePrompt: editChannel.wakePrompt || '' }}
+          edge={{ on: 'github', from: editChannel.from, to: node.id, artifact: editChannel.artifact, label: editChannel.label || '', gate: editChannel.gate, readiness: editChannel.readiness, wakePrompt: editChannel.wakePrompt || '' }}
           fromName={nameOf(editChannel.from)} toName={node.displayName || node.id}
           ops={ops}
           onClose={closeEdits} onDone={afterEdit} />
@@ -767,9 +769,14 @@ function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [
       await wireLabelHandoff({ ops }, {
         from: node.id, to: targetId, label: wireSpec.label, target: wireSpec.target, labels,
         fromName: node.displayName || node.id, toName: target?.displayName || targetId,
+        // #2795: a new PR hand-off waits for CI and a conflict-free PR.
+        readinessGate: { ...NEW_HANDOFF_READINESS },
       });
     } else {
-      await wireChannel({ ops }, { from: node.id, to: targetId, artifact: wireSpec.artifact });
+      await wireChannel({ ops }, {
+        from: node.id, to: targetId, artifact: wireSpec.artifact,
+        ...(wireSpec.artifact === 'pr' ? { readiness: { ...NEW_HANDOFF_READINESS } } : {}),
+      });
     }
   });
   const unwire = (w) => run(async () => {

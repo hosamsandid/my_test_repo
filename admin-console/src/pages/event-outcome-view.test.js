@@ -118,3 +118,15 @@ test('#2693: outcomeLegendKey maps sweep reaped / reap-failed to their own legen
     assert.match(tip, /provisioning sweep/);
   }
 });
+
+test('#2795: every readiness-gate outcome has its own legend entry and tooltip', () => {
+  assert.equal(outcomeLegendKey({ status: 'held', reason: 'readiness-gate', gates: ['ci'] }), 'readiness-gate');
+  assert.equal(outcomeLegendKey({ status: 'delivered', reason: 'gate-released' }), 'gate-released');
+  assert.equal(outcomeLegendKey({ status: 'delivered', reason: null }), 'delivered');
+  for (const r of ['gate-failed', 'gate-timeout', 'gate-cancelled']) {
+    assert.equal(outcomeLegendKey({ status: 'dropped', reason: r }), r);
+  }
+  assert.match(outcomeTooltip({ status: 'held', reason: 'readiness-gate' }), /checks pass and it merges cleanly/);
+  assert.match(outcomeTooltip({ status: 'dropped', reason: 'gate-failed' }), /revisions-required/);
+  assert.match(outcomeTooltip({ status: 'dropped', reason: 'gate-timeout' }), /needs-human/);
+});

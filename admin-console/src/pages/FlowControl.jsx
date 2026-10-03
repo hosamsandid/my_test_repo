@@ -609,6 +609,7 @@ function BoardRow({ row, canManage, busy, onRemove }) {
           <div style={{ color: 'var(--eb-text-primary)' }}>{row.stageLabel}</div>
           <div style={mutedStyle}>{row.statusText}</div>
         </ChatLink>
+        {row.gateText && <div style={mutedStyle} title={row.gateTitle}>⏳ {row.gateText}</div>}
       </td>
       <td style={{ ...cellStyle, whiteSpace: 'nowrap', ...mutedStyle }}>
         {row.inStageTitle ? <span title={row.inStageTitle}>{row.inStage}</span> : row.inStage}

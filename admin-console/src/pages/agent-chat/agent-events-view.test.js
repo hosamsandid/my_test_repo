@@ -145,3 +145,15 @@ test('#2693: outcomeView reads the digest flag and shows sweep rows as reaped, n
   assert.equal(sessionCorrelationId({ status: 'delivered', digest: true, triggerId: 't', eventId: 'e' }), null);
   assert.equal(sessionCorrelationId(null), null);
 });
+
+test('#2795: readiness-gate rows read as held / cleared, and gate drops explain what happened on the PR', () => {
+  assert.deepEqual(outcomeView({ ...drop('readiness-gate'), status: 'held', gates: ['ci', 'conflict'] }),
+    { tone: 'info', text: 'held — waiting for CI / conflict-free' });
+  assert.deepEqual(outcomeView({ ...drop('gate-released'), status: 'delivered' }),
+    { tone: 'success', text: 'delivered (gate cleared)' });
+  assert.match(dropReasonText(drop('gate-failed', { gates: ['ci'] })), /its checks failed — 'ready-for-review' was removed, the failure label set/);
+  assert.match(dropReasonText(drop('gate-failed', { gates: ['conflict'] })), /merge conflict/);
+  assert.match(dropReasonText(drop('gate-timeout', { gates: ['ci'] })), /not CI within the gate timeout.*'needs-human'/);
+  assert.match(dropReasonText(drop('gate-cancelled', { cancelReason: 'closed' })), /the PR was closed first/);
+  assert.match(dropReasonText(drop('gate-cancelled', { cancelReason: 'label-removed' })), /'ready-for-review' was removed first/);
+});

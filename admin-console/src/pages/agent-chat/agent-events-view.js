@@ -7,7 +7,7 @@
 // EventsPanel.jsx only renders what these helpers return.
 
 import { buildTriggerCorrelationId } from '../github-event-session.js';
-import { producerFilterText, outcomeStatus } from '../event-outcome-presentation.js';
+import { producerFilterText, outcomeStatus, gateWaitText } from '../event-outcome-presentation.js';
 
 // The only drops a human may override (mirrors orchestrator/github-refire.js
 // REFIRABLE_REASONS — the server re-checks, this only decides whether to offer).
@@ -82,6 +82,20 @@ export function dropReasonText(row) {
       const why = producerFilterText(row && row.producer);
       return `${why.charAt(0).toUpperCase()}${why.slice(1)} — this trigger only wakes on pushes by the agents it names.`;
     }
+    // #2795: the PR hand-off's readiness gate decided not to wake the agent.
+    case 'gate-failed': {
+      const gates = Array.isArray(row.gates) ? row.gates : [];
+      const why = [gates.includes('ci') ? 'its checks failed' : null, gates.includes('conflict') ? 'it has a merge conflict' : null]
+        .filter(Boolean).join(' and ') || 'it is not ready';
+      return `Held until the PR was ready, but ${why} — ${q(wake)} was removed, the failure label set and a comment posted on the PR.`;
+    }
+    case 'gate-timeout':
+      return `The PR was not ${gateWaitText(row.gates)} within the gate timeout — ${q(wake)} was removed, 'needs-human' set and a comment posted on the PR.`;
+    case 'gate-cancelled': {
+      const why = { closed: 'the PR was closed', 'label-removed': `${q(wake)} was removed`, 'trigger-removed': 'the trigger was removed' }[row.cancelReason]
+        || 'the hand-off went away';
+      return `Held until the PR was ready, but ${why} first, so nobody was woken.`;
+    }
     default:
       return reason ? `Dropped (${reason}).` : 'Dropped.';
   }
@@ -94,7 +108,12 @@ export function outcomeView(row) {
   if (!row) return { tone: 'muted', text: '' };
   const status = outcomeStatus(row);
   if (status === 'delivered') {
+    if (row.reason === 'gate-released') return { tone: 'success', text: 'delivered (gate cleared)' };
     return { tone: 'success', text: row.source === 'manual-refire' ? 'delivered (fired again)' : 'delivered' };
+  }
+  // #2795: the readiness gate holds the wake until the PR is green.
+  if (status === 'held' && row.reason === 'readiness-gate') {
+    return { tone: 'info', text: `held — waiting for ${gateWaitText(row.gates)}` };
   }
   if (status === 'digest') return { tone: 'info', text: 'digested' };
   // #2693: a provisioning-sweep row, not a drop.

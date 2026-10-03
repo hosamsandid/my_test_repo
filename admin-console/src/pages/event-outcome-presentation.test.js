@@ -230,3 +230,22 @@ test('#2693: the Outcomes column wires outcomesFilterText as its filterValue', (
   const src = readFileSync(fileURLToPath(new URL('./GithubEventLog.jsx', import.meta.url)), 'utf8').replace(/\s+/g, ' ');
   assert.match(src, /\{ key: 'outcomes', label: 'Outcomes',[^]*?filterValue: outcomesFilterText \}, \];/);
 });
+
+test('#2795: readiness-gate outcomes read as held / cleared / not woken, naming the gate', () => {
+  const base = { agentId: 'rev', agentName: 'Reviewer', wakeLabel: 'ready-for-review' };
+  assert.equal(outcomeLabel({ ...base, status: 'held', reason: 'readiness-gate', gates: ['ci', 'conflict'] }),
+    'held — waiting for CI / conflict-free (ready-for-review) → Reviewer');
+  assert.equal(outcomeLabel({ ...base, status: 'held', reason: 'readiness-gate', gates: ['ci'] }),
+    'held — waiting for CI (ready-for-review) → Reviewer');
+  assert.equal(outcomeTone({ ...base, status: 'held', reason: 'readiness-gate' }), 'held');
+  assert.equal(outcomeLabel({ ...base, status: 'delivered', reason: 'gate-released' }),
+    'delivered · gate cleared (ready-for-review) → Reviewer');
+  assert.equal(outcomeLabel({ ...base, status: 'dropped', reason: 'gate-failed', gates: ['ci'] }),
+    'not woken (gate failed: CI failing) (ready-for-review) → Reviewer');
+  assert.equal(outcomeLabel({ ...base, status: 'dropped', reason: 'gate-failed', gates: ['conflict'] }),
+    'not woken (gate failed: merge conflict) (ready-for-review) → Reviewer');
+  assert.equal(outcomeLabel({ ...base, status: 'dropped', reason: 'gate-timeout', gates: ['ci'] }),
+    'not woken (gate timed out waiting for CI) (ready-for-review) → Reviewer');
+  assert.equal(outcomeLabel({ ...base, status: 'dropped', reason: 'gate-cancelled', cancelReason: 'closed' }),
+    'not woken (gate cancelled: PR closed) (ready-for-review) → Reviewer');
+});

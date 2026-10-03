@@ -37,6 +37,7 @@ const pushAttribution = require('./push-attribution');
 const { parseBranchFilter, pushBranch, branchFilterMatches } = require('./branch-filter');
 const { knowledgeBranchesByRepo, isKnowledgeBranchPush } = require('./knowledge-branch-exclusion');
 const prReadiness = require('./pr-readiness');
+const handoffGate = require('./handoff-gate');
 
 // Poll cadence. Fixed 30s in production; overridable via
 // AEE_GITHUB_POLL_INTERVAL_MS (#711) so the E2E stack can tighten it — the
@@ -949,7 +950,11 @@ class GitHubPoller {
       (s) => prReadiness.READINESS_EVENT_KEYS.some((k) => listensTo(s.events, k)),
     );
     const repoState = this.state[repoFullName] || {};
-    if (listeners.length === 0) {
+    // #2795: a gated PR hand-off (or a hold still open) needs the same
+    // verdicts, even when nobody listens to the readiness events themselves.
+    const holds = repoState.holds && typeof repoState.holds === 'object' ? repoState.holds : null;
+    const gated = (subscribers || []).some((s) => s.readinessGate) || (holds && Object.keys(holds).length > 0);
+    if (listeners.length === 0 && !gated) {
       // Nobody listens (any more): forget the state, so a later subscriber
       // starts from a baseline instead of from stale verdicts.
       if (repoState.readiness) {
@@ -997,11 +1002,240 @@ class GitHubPoller {
     if (result.baseline) {
       console.log(`[GH-Poller] ${repoFullName}: PR readiness baseline (${open.prs.length} open PR(s)) — current verdicts recorded, none delivered`);
     }
-    if (result.emits.length > 0) {
+    if (result.emits.length > 0 && listeners.length > 0) {
       const events = result.emits.map((e) => prReadiness.readinessEvent(repoFullName, e, now));
       await this._fanOutBatch(repoFullName, events, subscribers, token, repoState, knowledgeBranches);
     }
+    if (holds && Object.keys(holds).length > 0) {
+      await this._processHolds(repoFullName, { repoState, open, token, subscribers, now });
+    }
     this._saveState();
+  }
+
+  // #2795: decide every held hand-off on this repo from the verdicts just
+  // evaluated (handoff-gate.js evaluateHold) and act on the decision:
+  //   release → wake the consumer now (the held event, enriched as usual);
+  //   fail    → remove the wake label, set the failure label, comment;
+  //   timeout → remove the wake label, set `needs-human`, comment;
+  //   cancel  → forget the hold (PR closed/merged, or the wake label is gone).
+  // Every resolution is logged in the GitHub Event Log against the held event.
+  // A hold survives restarts in state.json; a release forgets the hold and
+  // saves BEFORE it enqueues (never delivered twice), and a fail/timeout records
+  // each GitHub write as it succeeds, so a retry never repeats one.
+  async _processHolds(repoFullName, { repoState, open, token, subscribers = [], now = Date.now() }) {
+    const holds = repoState.holds;
+    const prs = new Map((open && Array.isArray(open.prs) ? open.prs : []).map((p) => [p.number, p]));
+    const entries = (repoState.readiness && repoState.readiness.prs) || {};
+    const live = new Set((subscribers || []).filter((s) => s.readinessGate).map((s) => s.triggerId));
+    // Comments posted this pass, so two holds failing the same PR for the same
+    // reason (fan-in, several gated hand-offs) comment once.
+    const commented = new Set();
+
+    for (const [hk, hold] of Object.entries(holds)) {
+      if (!hold || typeof hold !== 'object' || !Number.isInteger(hold.number)) {
+        delete holds[hk];
+        continue;
+      }
+      // The gated trigger is gone (deleted, gate switched off, agent disabled):
+      // nothing is waiting for this hold any more.
+      let decision = live.has(hold.triggerId)
+        ? handoffGate.evaluateHold(hold, {
+          pr: prs.get(hold.number) || null,
+          listComplete: !(open && open.truncated),
+          entry: entries[hold.number] || null,
+          now,
+        })
+        : { action: 'cancel', reason: 'trigger-removed' };
+      if (hold.resolution) decision = hold.resolution.decision; // finish what was started
+
+      if (decision.action === 'wait') continue;
+      if (decision.action === 'cancel') {
+        delete holds[hk];
+        console.log(`[GH-Poller] readiness-gate: ${repoFullName}#${hold.number} → ${hold.agentId} cancelled (${decision.reason})`);
+        this._logHoldOutcome(repoFullName, hold, {
+          status: 'dropped', reason: 'gate-cancelled', cancelReason: decision.reason,
+        });
+        continue;
+      }
+      if (decision.action === 'release') {
+        // Enrich first (network), then forget + save + enqueue with no await in
+        // between, so a restart can neither lose the wake nor deliver it twice.
+        const stored = hold.event || {};
+        const payload = await this._enrichPullRequestPayload(hold.key, stored.payload, token);
+        const ghEvent = { ...stored, payload };
+        if (holds[hk] !== hold) continue; // resolved meanwhile
+        delete holds[hk];
+        this._saveState();
+        const d = this._enqueue(hold.agentId, hold.triggerId, hold.key, ghEvent, hold.wakeLabel);
+        console.log(`[GH-Poller] readiness-gate: ${repoFullName}#${hold.number} → ${hold.agentId} released (head ${String(decision.sha || '').slice(0, 7)})`);
+        const outcome = { status: 'delivered', reason: 'gate-released', gates: handoffGate.enabledGates(hold.gate) };
+        if (d && d.held) {
+          outcome.status = 'held';
+          outcome.reason = d.reason || 'wip';
+          if (d.wipLimit != null) outcome.wipLimit = d.wipLimit;
+        } else if (d && d.instanceId) {
+          outcome.instanceId = d.instanceId;
+        }
+        this._logHoldOutcome(repoFullName, hold, outcome, ghEvent);
+        continue;
+      }
+      // fail / timeout: three GitHub writes, each recorded once done.
+      if (!hold.resolution) hold.resolution = { decision, done: {} };
+      const ok = await this._resolveHold(repoFullName, hold, token, commented);
+      if (!ok) continue; // retried on the next pass; the hold keeps waking nobody
+      delete holds[hk];
+      // The wake label is gone: a later genuine re-add must wake again.
+      if (hold.wakeLabel && repoState.armed) {
+        wakeArmory.disarmLabel(repoState.armed, { kind: 'pr', number: hold.number, label: hold.wakeLabel });
+      }
+      const failed = decision.action === 'fail';
+      console.log(
+        `[GH-Poller] readiness-gate: ${repoFullName}#${hold.number} → ${hold.agentId} not woken ` +
+        `(${failed ? `${decision.gate} failed` : `timed out waiting for ${handoffGate.gatesText(decision.pending)}`})`,
+      );
+      this._logHoldOutcome(repoFullName, hold, {
+        status: 'dropped',
+        reason: failed ? 'gate-failed' : 'gate-timeout',
+        gates: failed ? [decision.gate] : (decision.pending || handoffGate.enabledGates(hold.gate)),
+      });
+    }
+  }
+
+  // #2795: the GitHub writes of a failed / timed-out hold, in order: remove the
+  // wake label, set the failure (or `needs-human`) label, post the comment.
+  // True once all are done. A step that fails stops here; the done-flags
+  // persisted in the hold make the next pass resume after the last success.
+  async _resolveHold(repoFullName, hold, token, commented) {
+    const { decision, done } = hold.resolution;
+    const gate = handoffGate.normalizeGate(hold.gate) || {};
+    const setLabel = handoffGate.resolutionLabel(decision, gate, hold.wakeLabel);
+    const base = `/repos/${repoFullName}/issues/${hold.number}`;
+    try {
+      if (!done.removed) {
+        if (hold.wakeLabel) {
+          await this._githubWrite('DELETE', `${base}/labels/${encodeURIComponent(hold.wakeLabel)}`, null, token, { okStatus: [404] });
+        }
+        done.removed = true;
+        this._saveState();
+      }
+      if (!done.labelled) {
+        await this._githubWrite('POST', `${base}/labels`, { labels: [setLabel] }, token);
+        done.labelled = true;
+        this._saveState();
+      }
+      if (!done.commented) {
+        const ck = `${hold.number}\u0000${decision.action}\u0000${decision.gate || ''}\u0000${hold.wakeLabel || ''}`;
+        if (!commented.has(ck)) {
+          const body = decision.action === 'fail'
+            ? handoffGate.failureComment({ decision, hold, consumer: hold.agentId })
+            : handoffGate.timeoutComment({ decision, hold, consumer: hold.agentId });
+          await this._githubWrite('POST', `${base}/comments`, { body }, token);
+          commented.add(ck);
+        }
+        done.commented = true;
+        this._saveState();
+      }
+      return true;
+    } catch (err) {
+      console.error(`[GH-Poller] readiness-gate: ${repoFullName}#${hold.number} — GitHub write failed (${err.message}); retried next pass`);
+      return false;
+    }
+  }
+
+  // #2795: one GitHub Event Log row for a hold's resolution, against the held
+  // event (its id suffixed, so the row is distinct from the original "held").
+  _logHoldOutcome(repoFullName, hold, fields, ghEventArg = null) {
+    const stored = ghEventArg || hold.event || {};
+    const action = String(fields.reason || 'gate').replace(/^gate-/, '');
+    const outcome = {
+      agentId: hold.agentId, triggerId: hold.triggerId, digest: false,
+      wakeLabel: hold.wakeLabel || null,
+      ...fields,
+    };
+    githubEventLog.record(githubEventLog.buildEventEntry({
+      ghEvent: { ...stored, id: `${stored.id}:gate-${action}` },
+      repoFullName,
+      key: hold.key,
+      outcomes: [outcome],
+    }));
+  }
+
+  // #2795: the holds the poller is keeping, for the Flow Control board:
+  // `[{ repo, number, agentId, triggerId, wakeLabel, gates, waitingFor, heldAt }]`.
+  // `waitingFor` = the enabled gates the current head has not yet satisfied.
+  gateHolds() {
+    const out = [];
+    for (const [repo, repoState] of Object.entries(this.state || {})) {
+      const holds = repoState && repoState.holds;
+      if (!holds || typeof holds !== 'object') continue;
+      const entries = (repoState.readiness && repoState.readiness.prs) || {};
+      for (const hold of Object.values(holds)) {
+        const gate = hold && handoffGate.normalizeGate(hold.gate);
+        if (!gate) continue;
+        out.push({
+          repo,
+          number: hold.number,
+          agentId: hold.agentId,
+          triggerId: hold.triggerId,
+          wakeLabel: hold.wakeLabel || null,
+          gates: handoffGate.enabledGates(gate),
+          waitingFor: handoffGate.pendingGates(gate, entries[hold.number] || null),
+          heldAt: hold.heldAt,
+        });
+      }
+    }
+    return out;
+  }
+
+  // #2795: a GitHub REST write (label add/remove, comment) under the poller's
+  // request deadline. Resolves the parsed body (or null); rejects on any status
+  // outside 2xx and `okStatus` (e.g. 404 for removing a label already gone).
+  _githubWrite(method, apiPath, body, token, { okStatus = [] } = {}) {
+    return requestWithDeadline(({ resolve, reject }) => {
+      const api = resolveGithubApiTarget();
+      const data = body == null ? null : JSON.stringify(body);
+      const headers = {
+        'User-Agent': 'agent-studio-poller',
+        'Accept': 'application/vnd.github+json',
+        'Authorization': `Bearer ${token}`,
+        'X-GitHub-Api-Version': '2022-11-28',
+      };
+      if (data != null) {
+        headers['Content-Type'] = 'application/json';
+        headers['Content-Length'] = Buffer.byteLength(data);
+      }
+      const req = api.transport.request({
+        hostname: api.hostname,
+        port: api.port,
+        path: `${api.basePath}${apiPath}`,
+        method,
+        headers,
+        timeout: 15_000,
+      }, (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        // See _fetchEvents — same two handlers, same reason.
+        res.on('aborted', () => reject(new Error('response aborted before end')));
+        res.on('error', reject);
+        res.on('end', () => {
+          const ok = (res.statusCode >= 200 && res.statusCode < 300) || okStatus.includes(res.statusCode);
+          if (!ok) {
+            reject(new Error(`${method} ${apiPath}: HTTP ${res.statusCode}`));
+            return;
+          }
+          try {
+            const text = Buffer.concat(chunks).toString();
+            resolve(text ? JSON.parse(text) : null);
+          } catch {
+            resolve(null);
+          }
+        });
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(new Error('timeout')); });
+      req.end(data == null ? undefined : data);
+      return req;
+    });
   }
 
   // #2794: the poll token for `tokenId` (null when unusable). A method so the
@@ -1444,6 +1678,32 @@ class GitHubPoller {
           wakeArmory.arm(armed, wakeArmKey, Date.now());
         }
 
+        // #2795: a gated PR hand-off is HELD until the PR's current head is
+        // green / conflict-free; `_pollReadiness` releases, fails, times out or
+        // cancels it (see handoff-gate.js). After the wake-edge arm, so label
+        // churn on the PR while held is still deduplicated.
+        if (handoffGate.gateApplies(sub.readinessGate, key)) {
+          const num = workItemNumber(ghEvent);
+          if (num != null) {
+            if (!repoState.holds || typeof repoState.holds !== 'object') repoState.holds = {};
+            const hk = handoffGate.holdKey(sub.triggerId, num);
+            if (!repoState.holds[hk]) {
+              repoState.holds[hk] = handoffGate.newHold({
+                sub, key, ghEvent, number: num,
+                wakeLabel: key.endsWith('.labeled') ? sub.labelFilter : null,
+              });
+            }
+            console.log(
+              `[GH-Poller] readiness-gate: ${key} (${ghEvent.id}) → ${sub.agentId} held ` +
+              `(${repoFullName}#${num} waiting for ${handoffGate.gatesText(handoffGate.enabledGates(sub.readinessGate))})`,
+            );
+            outcome.status = 'held';
+            outcome.reason = 'readiness-gate';
+            outcome.gates = handoffGate.enabledGates(sub.readinessGate);
+            continue;
+          }
+        }
+
         deliverables.push({
           agentId: sub.agentId,
           triggerId: sub.triggerId,
@@ -1566,7 +1826,7 @@ class GitHubPoller {
           ghEvent: ghEventForLog,
           repoFullName,
           key: entry.key,
-          outcomes: entry.outcomes.map(({ agentId, triggerId, status, reason, digest, wakeLabel, wipLimit, producer, instanceId }) => {
+          outcomes: entry.outcomes.map(({ agentId, triggerId, status, reason, digest, wakeLabel, wipLimit, producer, instanceId, gates }) => {
             const o = { agentId, triggerId, status, reason, digest };
             if (wakeLabel !== undefined) o.wakeLabel = wakeLabel;
             // Held-by-WIP outcomes carry the flow's limit so the log row can read
@@ -1576,6 +1836,8 @@ class GitHubPoller {
             if (producer !== undefined) o.producer = producer;
             // The pool instance a pooled role's delivery ran on (#2596).
             if (instanceId !== undefined) o.instanceId = instanceId;
+            // #2795: the hand-off gates a readiness-gate hold waits for.
+            if (gates !== undefined) o.gates = gates;
             return o;
           }),
         }),
@@ -1860,6 +2122,31 @@ class GitHubPoller {
     return true;
   }
 
+  // #2795: hold a gated PR hand-off from OUTSIDE a poll — the internal label
+  // fast-path (`wakeGithubLabelListeners`) must not bypass the readiness gate.
+  // Opens the same hold `_fanOutBatch` opens (idempotent per trigger + PR) and
+  // arms the wake edge like a delivery, so `_pollReadiness` decides it on its
+  // next pass. Returns the gates the hold waits for, or null when not gated.
+  holdWake({ repo, agentId, triggerId, readinessGate, key, ghEvent, number, label }) {
+    const gate = handoffGate.normalizeGate(readinessGate);
+    if (!repo || !handoffGate.gateApplies(gate, key) || !Number.isInteger(number)) return null;
+    const repoState = this.state[repo] || (this.state[repo] = {});
+    if (!repoState.holds || typeof repoState.holds !== 'object') repoState.holds = {};
+    const hk = handoffGate.holdKey(triggerId, number);
+    if (!repoState.holds[hk]) {
+      repoState.holds[hk] = handoffGate.newHold({
+        sub: { agentId, triggerId, readinessGate: gate }, key, ghEvent, number,
+        wakeLabel: key.endsWith('.labeled') ? label : null,
+      });
+    }
+    if (this._wakeEdgeDedup && label && key.endsWith('.labeled')) {
+      if (!repoState.armed || typeof repoState.armed !== 'object') repoState.armed = {};
+      wakeArmory.arm(repoState.armed, wakeArmory.armedKey({ triggerId, kind: 'pr', number, label }), Date.now());
+    }
+    this._saveState();
+    return handoffGate.enabledGates(gate);
+  }
+
   // #2754: clear every armed key for one wake on one object from OUTSIDE a
   // poll — the Flow Control "Release claim" re-applies a wake on GitHub, and on
   // a PR the Events API delivers no standalone `unlabeled(<wake>)`, so the
@@ -2103,6 +2390,8 @@ function computePollPlan({ environments = [], agents = [], knowledgeLocations = 
         // Optional branch filter for `push` events (#2570): the parsed pattern
         // list, or null for no filter (every branch — legacy behaviour).
         branchFilter: branchFilter.length ? branchFilter : null,
+        // #2795: the hand-off's CI / merge-conflict gate (null = wake at once).
+        readinessGate: handoffGate.normalizeGate(t.readinessGate),
       });
     }
   }

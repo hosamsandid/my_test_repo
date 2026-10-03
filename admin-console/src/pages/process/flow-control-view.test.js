@@ -545,3 +545,16 @@ test('a successful release leaves a notice saying what happens next (#2754)', ()
   assert.equal(releaseNotice({ released: 0 }, '#7'), null);
   assert.equal(releaseNotice(null, '#7'), null);
 });
+
+test('#2795: a PR held by its hand-off gate shows "waiting for CI" on the row', () => {
+  const held = rowView(row({ gateHold: { number: 41, waitingFor: ['ci', 'conflict'], since: ago(10), agentIds: ['rev'] } }), STAGES, { now: NOW });
+  assert.equal(held.gateText, 'waiting for CI / conflict-free');
+  assert.match(held.gateTitle, /^PR #41's hand-off is held until the PR is green and conflict-free \(held 10m\)/);
+  assert.equal(rowView(row({ gateHold: { number: 41, waitingFor: ['ci'] } }), STAGES, { now: NOW }).gateText, 'waiting for CI');
+  assert.equal(rowView(row({ gateHold: { number: 41, waitingFor: [] } }), STAGES, { now: NOW }).gateText, 'hand-off gate resolving');
+  const free = rowView(row(), STAGES, { now: NOW });
+  assert.equal(free.gateText, '');
+  assert.equal(free.gateTitle, '');
+  const jsx = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'FlowControl.jsx'), 'utf8');
+  assert.match(jsx, /\{row\.gateText && <div style=\{mutedStyle\} title=\{row\.gateTitle\}>⏳ \{row\.gateText\}<\/div>\}/);
+});

@@ -246,3 +246,20 @@ test('projectPoolInstance leaves non-pooled and pre-#2596 outcomes untouched', (
   assert.equal(eventLog.projectPoolInstance(o, () => { calls++; return null; }), o);
   assert.equal(calls, 0, 'no config read for a row without an instance');
 });
+
+test('projectAgentRows (#2795): a readiness-gate row carries its gates and cancel reason', () => {
+  const entry = {
+    ts: '2026-10-03T10:00:00.000Z', eventId: '900', repo: 'org/repo', event: 'pull_request.labeled', label: 'ready-for-review',
+    workItem: { kind: 'pr', number: 9 },
+    outcomes: [
+      { agentId: DEV, triggerId: 'g1', status: 'held', reason: 'readiness-gate', gates: ['ci', 'conflict'], wakeLabel: 'ready-for-review' },
+      { agentId: DEV, triggerId: 'g2', status: 'dropped', reason: 'gate-cancelled', cancelReason: 'closed' },
+      { agentId: DEV, triggerId: 'g3', status: 'dropped', reason: 'wake-already-armed', cancelReason: 'stray' },
+    ],
+  };
+  const rows = eventLog.projectAgentRows([entry], DEV);
+  const by = Object.fromEntries(rows.map(r => [r.triggerId, r]));
+  assert.deepEqual(by.g1.gates, ['ci', 'conflict']);
+  assert.equal(by.g2.cancelReason, 'closed');
+  assert.ok(!('gates' in by.g3) && !('cancelReason' in by.g3));
+});

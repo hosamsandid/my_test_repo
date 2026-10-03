@@ -62,6 +62,31 @@ export function producerFilterText(producer) {
 // with reason `pool-<state>`.
 const POOL_HOLD_TEXT = { 'pool-paused': 'role paused', 'pool-draining': 'role draining', 'pool-off': 'role off' };
 
+// #2795: a PR hand-off's readiness gate holds the wake until CI is green and
+// the PR merges cleanly. `gates` is what the poller recorded (['ci','conflict']).
+const GATE_WAIT_TEXT = { ci: 'CI', conflict: 'conflict-free' };
+const GATE_FAIL_TEXT = { ci: 'CI failing', conflict: 'merge conflict' };
+const GATE_CANCEL_TEXT = { closed: 'PR closed', 'label-removed': 'label removed', 'trigger-removed': 'trigger removed' };
+
+export function gateWaitText(gates) {
+  const g = (Array.isArray(gates) ? gates : []).filter(x => GATE_WAIT_TEXT[x]);
+  return (g.length ? g : ['ci', 'conflict']).map(x => GATE_WAIT_TEXT[x]).join(' / ');
+}
+
+function gateDropText(o) {
+  const gates = Array.isArray(o.gates) ? o.gates : [];
+  if (o.reason === 'gate-failed') {
+    const why = gates.map(x => GATE_FAIL_TEXT[x]).filter(Boolean).join(', ');
+    return `gate failed${why ? `: ${why}` : ''}`;
+  }
+  if (o.reason === 'gate-timeout') return `gate timed out waiting for ${gateWaitText(gates)}`;
+  if (o.reason === 'gate-cancelled') {
+    const why = GATE_CANCEL_TEXT[o.cancelReason];
+    return `gate cancelled${why ? `: ${why}` : ''}`;
+  }
+  return null;
+}
+
 export function outcomeLabel(outcome, { refired = false } = {}) {
   const o = outcome && typeof outcome === 'object' ? outcome : {};
   const wakeSuffix = typeof o.wakeLabel === 'string' ? ` (${o.wakeLabel})` : '';
@@ -71,7 +96,8 @@ export function outcomeLabel(outcome, { refired = false } = {}) {
     // #2596: a pooled delivery names the per-ticket instance that ran it
     // ("Developer · #2562"), falling back to its id while no name is known.
     const ran = typeof o.instanceId === 'string' && o.instanceId ? (o.instanceName || o.instanceId) : target;
-    return `delivered${refired ? ' · fired again' : ''}${wakeSuffix} → ${ran}`;
+    const cleared = o.reason === 'gate-released' ? ' · gate cleared' : '';
+    return `delivered${refired ? ' · fired again' : ''}${cleared}${wakeSuffix} → ${ran}`;
   }
   if (status === 'digest') return `digested${wakeSuffix} → ${target}`;
   if (status === 'reaped') return `reaped → ${target}`;
@@ -81,12 +107,15 @@ export function outcomeLabel(outcome, { refired = false } = {}) {
   // `held (WIP)` rather than printing "undefined".
   if (status === 'held') {
     if (POOL_HOLD_TEXT[o.reason]) return `held (${POOL_HOLD_TEXT[o.reason]})${wakeSuffix} → ${target}`;
+    if (o.reason === 'readiness-gate') return `held — waiting for ${gateWaitText(o.gates)}${wakeSuffix} → ${target}`;
     const wip = o.wipLimit != null ? ` ${o.wipLimit}` : '';
     return `held (WIP${wip})${wakeSuffix} → ${target}`;
   }
   if (o.reason === 'producer-filter') return `dropped (${producerFilterText(o.producer)}) → ${target}`;
   // #2602: built in and not configurable, so it reads as a rule, not a filter.
   if (o.reason === 'knowledge-branch') return `dropped (${KNOWLEDGE_BRANCH_TEXT}) → ${target}`;
+  const gate = gateDropText(o);
+  if (gate) return `not woken (${gate})${wakeSuffix} → ${target}`;
   return `dropped (${o.reason || 'unknown'})${wakeSuffix} → ${target}`;
 }
 

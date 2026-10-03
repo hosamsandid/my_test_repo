@@ -456,6 +456,8 @@ function buildUnifiedGraph(nodes, edges, options) {
         // Authored wake-prompt override (#868), surfaced so the channel edit
         // dialog can pre-fill and round-trip it.
         ...(typeof ch.wakePrompt === 'string' && ch.wakePrompt.trim() ? { wakePrompt: ch.wakePrompt } : {}),
+        // Readiness gate (#2795), so the edit dialog shows the stored state.
+        ...(artifact === 'pr' && ch.readiness && typeof ch.readiness === 'object' ? { readiness: ch.readiness } : {}),
         ...(nodeIds.has(ch.from) ? {} : { orphan: true }),
       });
     }

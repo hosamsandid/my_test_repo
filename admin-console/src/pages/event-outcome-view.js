@@ -108,6 +108,36 @@ export const OUTCOME_LEGEND = [
     whatToDo: 'The sweep retries on its next run. If the same instance keeps showing up here, check the orchestrator logs or delete the agent by hand.',
   },
   {
+    key: 'readiness-gate',
+    term: 'held — waiting for CI / conflict-free → <agent>',
+    meaning: "A PR hand-off's readiness gate is holding the wake until the PR's checks pass and it merges cleanly. A push during the hold is checked again; the timeout counts from the first hold.",
+    whatToDo: 'Nothing to do — the agent is woken once the PR is green (see Flow Control). Fix the checks or the conflict if it takes long.',
+  },
+  {
+    key: 'gate-released',
+    term: 'delivered · gate cleared → <agent>',
+    meaning: 'The PR became green and conflict-free while its hand-off was held, so the agent was woken.',
+    whatToDo: 'Nothing to do.',
+  },
+  {
+    key: 'gate-failed',
+    term: 'not woken (gate failed) → <agent>',
+    meaning: "The PR's checks failed or it has a merge conflict. The hand-off label was removed, the failure label (default revisions-required) set, and a comment lists the failing checks or names the conflict.",
+    whatToDo: 'Nothing to do if an agent listens on the failure label — it fixes the PR and re-applies the hand-off label. Otherwise fix it yourself; the Flows editor warns when nobody listens.',
+  },
+  {
+    key: 'gate-timeout',
+    term: 'not woken (gate timed out) → <agent>',
+    meaning: 'The PR did not become green and conflict-free within the gate timeout (default 60 min). The hand-off label was removed, needs-human set, and a comment explains what was still pending.',
+    whatToDo: 'Check why CI is slow or stuck, then re-apply the hand-off label. Raise the timeout in the hand-off dialog if CI regularly runs longer.',
+  },
+  {
+    key: 'gate-cancelled',
+    term: 'not woken (gate cancelled) → <agent>',
+    meaning: 'A held hand-off was dropped because the PR was closed, the hand-off label was removed, or the listening trigger was removed.',
+    whatToDo: 'Nothing to do — re-apply the label to hand off again.',
+  },
+  {
     key: 'no-match',
     term: "nobody's listening",
     meaning: 'No trigger subscribed to this event type at all, so nobody was woken.',
@@ -125,9 +155,9 @@ const LEGEND_BY_KEY = OUTCOME_LEGEND.reduce((m, e) => { m[e.key] = e; return m; 
 export function outcomeLegendKey(outcome) {
   if (!outcome || typeof outcome !== 'object') return null;
   const status = outcomeStatus(outcome);
-  if (status === 'delivered') return 'delivered';
+  if (status === 'delivered') return outcome.reason === 'gate-released' ? 'gate-released' : 'delivered';
   if (status === 'digest') return 'digest';
-  if (status === 'held') return 'held';
+  if (status === 'held') return outcome.reason === 'readiness-gate' ? 'readiness-gate' : 'held';
   if (status === 'reaped') return 'reaped';
   if (status === 'reap-failed') return 'reap-failed';
   const reason = outcome.reason || '';

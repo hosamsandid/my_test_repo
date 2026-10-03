@@ -397,6 +397,7 @@ function buildFlowBoard(args = {}) {
   const displayName = (roleId) => (graph.roles.get(roleId) || {}).displayName || roleId;
   const retentionMs = config.doneRetentionHours * 3600 * 1000;
   const removed = normalizeRemoved(args.removed);
+  const gateHolds = normalizeGateHolds(args.gateHolds);
 
   // --- the GitHub snapshot, keyed `<repo>#<n>` -----------------------------
   const items = new Map();
@@ -582,6 +583,7 @@ function buildFlowBoard(args = {}) {
     }
 
     const needsHuman = isDone ? null : humanBlock({ keys, items, graph, position, live, now });
+    const gateHold = isDone ? null : gateHoldOf(gateHolds, keys);
     out.push({
       id: row.key,
       title: (issue && issue.title) || (prs[0] && prs[0].title) || row.key,
@@ -600,6 +602,8 @@ function buildFlowBoard(args = {}) {
       since: position.since != null ? new Date(position.since).toISOString() : null,
       done: isDone,
       needsHuman,
+      // #2795: a hand-off to this item's PR held by its CI / conflict gate.
+      gateHold,
       // An agent working on it or queued for it keeps it on the board (#2637 AC5).
       removable: position.status !== 'working' && position.status !== 'queued',
     });
@@ -685,6 +689,48 @@ function buildFlowBoard(args = {}) {
     // no longer swept). The orchestrator drops them from the store (AC11).
     removalsToPrune: [...revived, ...Object.keys(removed).filter((id) => !matchedRemovals.has(id) && !revived.includes(id))],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Hand-off gate holds (#2795).
+// ---------------------------------------------------------------------------
+
+/**
+ * The poller's held PR hand-offs (`GitHubPoller#gateHolds`), keyed `<repo>#<n>`.
+ * A PR may be held for several hand-offs at once; their gates are merged.
+ */
+function normalizeGateHolds(raw) {
+  const byKey = new Map();
+  for (const h of Array.isArray(raw) ? raw : []) {
+    if (!h || !str(h.repo) || !Number.isInteger(h.number)) continue;
+    const key = itemKey(h.repo, h.number);
+    const prev = byKey.get(key) || { waitingFor: new Set(), since: null, agentIds: new Set() };
+    for (const g of Array.isArray(h.waitingFor) ? h.waitingFor : []) prev.waitingFor.add(g);
+    if (str(h.agentId)) prev.agentIds.add(h.agentId);
+    const t = toMs(h.heldAt);
+    if (t != null && (prev.since == null || t < prev.since)) prev.since = t;
+    byKey.set(key, prev);
+  }
+  return byKey;
+}
+
+const GATE_ORDER = ['ci', 'conflict'];
+
+// `{ number, waitingFor: ['ci'|'conflict'…], since, agentIds }` for the first
+// of the row's items held by a gate, or null. `waitingFor` empty = the verdicts
+// are in and the hold resolves on the poller's next pass.
+function gateHoldOf(gateHolds, keys) {
+  for (const k of keys) {
+    const h = gateHolds.get(k);
+    if (!h) continue;
+    return {
+      number: Number(k.slice(k.lastIndexOf('#') + 1)),
+      waitingFor: GATE_ORDER.filter((g) => h.waitingFor.has(g)),
+      since: h.since != null ? new Date(h.since).toISOString() : null,
+      agentIds: [...h.agentIds].sort(),
+    };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

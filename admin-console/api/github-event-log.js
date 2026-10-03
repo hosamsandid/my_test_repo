@@ -141,6 +141,10 @@ function projectAgentRows(entries, agentId) {
         wakeLabel,
         // #2571: who pushed, on a producer-filter drop (null = unknown).
         ...(o.reason === 'producer-filter' ? { producer: typeof o.producer === 'string' ? o.producer : null } : {}),
+        // #2795: the readiness gates a held / failed / timed-out hand-off was
+        // about, and why a hold was cancelled.
+        ...(Array.isArray(o.gates) ? { gates: o.gates.filter(g => typeof g === 'string') } : {}),
+        ...(o.reason === 'gate-cancelled' && typeof o.cancelReason === 'string' ? { cancelReason: o.cancelReason } : {}),
         refiredBy: e.refiredBy || null,
         refireOf: e.refireOf || null,
         refired: ref ? { eventId: String(ref.eventId), by: ref.refiredBy || null, at: ref.ts || null } : null,

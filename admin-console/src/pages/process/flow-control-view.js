@@ -124,6 +124,24 @@ export const CHAT_LINK_CSS = `
 // its time in stage. For a done row `since` is the completion time, so "in
 // stage" reads "in Done since" (#2643). `stages` is the board's own stage list, so the step count
 // is exactly the team's hand-off chain.
+// #2795: a PR hand-off held by its readiness gate — "waiting for CI" on the
+// row, so a hand-off that has not reached the next agent yet is not mistaken
+// for one that is lost. `waitingFor` empty = verdicts are in, resolving.
+const GATE_WAIT = { ci: 'CI', conflict: 'conflict-free' };
+
+export function gateHoldText(gateHold) {
+  if (!gateHold || typeof gateHold !== 'object') return '';
+  const w = (Array.isArray(gateHold.waitingFor) ? gateHold.waitingFor : []).map(g => GATE_WAIT[g]).filter(Boolean);
+  return w.length ? `waiting for ${w.join(' / ')}` : 'hand-off gate resolving';
+}
+
+export function gateHoldTitle(gateHold, { now = Date.now() } = {}) {
+  if (!gateHold || typeof gateHold !== 'object') return '';
+  const pr = Number.isInteger(gateHold.number) ? `PR #${gateHold.number}` : 'The PR';
+  const held = since(gateHold.since, now);
+  return `${pr}'s hand-off is held until the PR is green and conflict-free${held ? ` (held ${held})` : ''}. The next agent is woken then; a failure or timeout is labelled and commented on the PR.`;
+}
+
 export function rowView(row, stages, { now = Date.now(), singleRepo = true } = {}) {
   const list = Array.isArray(stages) ? stages : [];
   const current = Number.isInteger(row.stageIndex) ? row.stageIndex : list.findIndex((s) => s.id === row.stageId);
@@ -151,6 +169,8 @@ export function rowView(row, stages, { now = Date.now(), singleRepo = true } = {
     done: !!row.done,
     blocked: !!row.needsHuman,
     removable: !!row.removable,
+    gateText: gateHoldText(row.gateHold),
+    gateTitle: gateHoldTitle(row.gateHold, { now }),
   };
 }
 

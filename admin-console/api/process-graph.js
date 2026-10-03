@@ -47,7 +47,7 @@ const {
 // Claim-label convention (#958) — the suffix is defined once, in process-template,
 // so the lint below can never drift from what the expanders derive. Acyclic:
 // process-template requires only ./outcomes, never this module.
-const { CLAIM_SUFFIX, rawTriggerError } = require('./process-template');
+const { CLAIM_SUFFIX, rawTriggerError, triggerReadiness, readinessFailureLabel } = require('./process-template');
 
 // ─── gate/brake classification (#928) ────────────────────────────────────────
 //
@@ -204,6 +204,10 @@ function triggerView(t) {
     // editor can render the claim badge and the read-only claim readout.
     const c = claimView(t);
     if (c) v.claim = c;
+    // Readiness gate (#2795): carried so the editor's hand-off dialog can show
+    // and edit it, and the graph can wire the gate's failure label.
+    const rg = triggerReadiness(t);
+    if (rg) v.readinessGate = rg;
   } else if (t.type === 'cron') {
     v.cron = t.cron || null;
   } else if (t.type === 'once') {
@@ -491,6 +495,25 @@ function buildProcessGraph(agents, options) {
   }
   const ocOf = (label, agentId) => (outcomeByEmit.get(label) || new Map()).get(agentId);
 
+  // Failure labels set by a hand-off readiness gate (#2795): the gate applies
+  // its failure label to the PR on the consumer's behalf, so a listener on it is
+  // wired from the gated consumer, not an orphan. label -> [owner node ids]
+  const gateFailureEmitters = new Map();
+  for (const n of nodes) {
+    const fls = new Set();
+    for (const ch of (Array.isArray(n.channels) ? n.channels : [])) {
+      if (ch && ch.artifact === 'pr' && readinessFailureLabel(ch.readiness)) fls.add(readinessFailureLabel(ch.readiness));
+    }
+    for (const t of (n.triggers || [])) {
+      const fl = readinessFailureLabel(triggerReadiness(t));
+      if (fl) fls.add(fl);
+    }
+    for (const fl of fls) {
+      if (!gateFailureEmitters.has(fl)) gateFailureEmitters.set(fl, []);
+      gateFailureEmitters.get(fl).push(n.id);
+    }
+  }
+
   const edges = [];
   const gateSet = new Set();
 
@@ -560,7 +583,12 @@ function buildProcessGraph(agents, options) {
           }
         } else {
           const emitters = [...(emitIndex.get(key) || [])];
-          if (emitters.length === 0) {
+          const gateOwners = emitters.length === 0 ? (gateFailureEmitters.get(key) || []) : [];
+          if (gateOwners.length) {
+            for (const s of gateOwners) {
+              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id, gateFailure: true, ...evs, ...clm });
+            }
+          } else if (emitters.length === 0) {
             // No agent emits this label. Without an origin filter we can't infer
             // whether a human sets it, so it's drawn as an orphan listener
             // (advisory lint) — a human applying the label still fires it at
@@ -989,6 +1017,32 @@ function computeLints(nodes, edges, classifier) {
     const ids = [...new Set(listeners.map(x => x.nodeId))];
     lints.push({ code: 'wake-label-no-live-consumer', severity: 'warning', label, nodeId: ids[0],
       message: `\`${label}\` wakes only ${ids.map(id => `\`${id}\``).join(', ')}, and ${ids.length === 1 ? 'it is' : 'all are'} switched off — an item carrying it is never picked up.` });
+  }
+  // gate-failure-label-unheard (#2795). A gated PR hand-off that fails CI or hits
+  // a merge conflict sets its failure label instead of waking the consumer — if
+  // nobody listens on that label, the failure only shows as a PR comment and the
+  // item stalls. A gate can come from a channel port (a draft's listeners are
+  // not expanded yet) or from a trigger (derived or raw).
+  const heardLabels = new Set(labelListeners.keys());
+  for (const n of nodes) for (const l of channelLabels(n)) heardLabels.add(l);
+  for (const e of edges) if (e && e.label && e.to && !e.orphan) heardLabels.add(e.label);
+  for (const n of nodes) {
+    if (n.synthetic) continue;
+    const unheard = new Set();
+    for (const ch of (Array.isArray(n.channels) ? n.channels : [])) {
+      if (ch && ch.artifact === 'pr') {
+        const fl = readinessFailureLabel(ch.readiness);
+        if (fl && !heardLabels.has(fl)) unheard.add(fl);
+      }
+    }
+    for (const t of (n.triggers || [])) {
+      const fl = readinessFailureLabel(triggerReadiness(t));
+      if (fl && !heardLabels.has(fl)) unheard.add(fl);
+    }
+    for (const label of unheard) {
+      lints.push({ code: 'gate-failure-label-unheard', severity: 'warning', nodeId: n.id, label,
+        message: `\`${n.id}\` has a CI/conflict-gated hand-off that sets \`${label}\` on failure, but nothing listens on \`${label}\` — a failed hand-off stalls unnoticed.` });
+    }
   }
   // The former `direct-handoff-candidate` hint (#2032) only ever fired on edges
   // that had already opted out of GitHub delivery via the internal transport.

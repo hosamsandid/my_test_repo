@@ -26,6 +26,7 @@
 // (queue write, marker store, event log) stays in orchestrator.js.
 
 const { listensTo } = require('./event-key-aliases');
+const handoffGate = require('./handoff-gate');
 
 const TARGET_KINDS = ['issue', 'pr'];
 
@@ -69,7 +70,9 @@ function validateLabelAppliedRequest(body) {
 // filter (absent/blank labelFilter = any label, the poller's legacy
 // semantics). This is the same predicate `_fanOutBatch` uses. A legacy
 // `transport` field on a trigger is ignored (#2578). Returns
-// [{agentId, triggerId}] in agent order.
+// [{agentId, triggerId}] in agent order; a PR listener whose trigger carries a
+// readiness gate (#2795) also gets its normalized `readinessGate`, so the
+// caller holds that wake instead of delivering it.
 function matchPollerListeners({ repo, label, kind }, agents) {
   const key = eventKeyForKind(kind);
   const out = [];
@@ -81,7 +84,9 @@ function matchPollerListeners({ repo, label, kind }, agents) {
       if (!Array.isArray(t.events) || !listensTo(t.events, key)) continue;
       const filter = typeof t.labelFilter === 'string' && t.labelFilter.trim();
       if (filter && filter !== label) continue;
-      out.push({ agentId: a.agentId, triggerId: t.id });
+      const normalized = handoffGate.normalizeGate(t.readinessGate);
+      const gate = handoffGate.gateApplies(normalized, key) ? normalized : null;
+      out.push({ agentId: a.agentId, triggerId: t.id, ...(gate ? { readinessGate: gate } : {}) });
     }
   }
   return out;

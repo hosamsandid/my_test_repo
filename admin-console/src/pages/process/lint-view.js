@@ -38,6 +38,7 @@ const LINT_INFO = {
   'wake-without-note': { title: 'Hand-off carries no context', fix: 'Add a sentence of context — it is what the target and the event log get instead of a label.' },
   // Wake label whose every consumer is switched off (#2754).
   'wake-label-no-live-consumer': { title: 'Nobody picks this label up', fix: 'Switch the consuming agent (or its trigger on this label) back on, or route the label to an agent that is running.' },
+  'gate-failure-label-unheard': { title: 'Failed hand-offs go unnoticed', fix: 'Wire a consumer for the failure label (e.g. a reworker on `revisions-required`), or choose a failure label an agent already listens on in the hand-off dialog.' },
 };
 
 const SEVERITY_WORD = { error: 'Error', warning: 'Warning', info: 'Info' };

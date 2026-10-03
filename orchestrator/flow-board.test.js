@@ -611,3 +611,25 @@ test('eventIdFromCorrelation / markerAgents / checksState', () => {
   assert.equal(fb.checksState('SUCCESS'), 'passing');
   assert.equal(fb.checksState(null), null);
 });
+
+test('buildFlowBoard: a PR hand-off held by its CI / conflict gate shows what it waits for on the row (#2795)', () => {
+  const ev = delivered(7, 't-developer-i7', 90);
+  const base = {
+    github: { issues: [issue(7)], prs: [pr(70, { labels: ['ready-for-review'] })] },
+    events: [ev],
+    prRecords: [{ kind: 'pr-created', agentId: 't-developer-i7', repo: 'o/r', prNumber: 70, correlationId: `trigger:t:gh:${ev.eventId}`, ts: iso(60) }],
+  };
+  const b = board({
+    ...base,
+    gateHolds: [
+      { repo: 'o/r', number: 70, agentId: 't-reviewer', waitingFor: ['conflict'], heldAt: iso(5) },
+      { repo: 'o/r', number: 70, agentId: 't-security', waitingFor: ['ci'], heldAt: iso(8) },
+      { repo: 'o/r', number: 99, agentId: 't-reviewer', waitingFor: ['ci'], heldAt: iso(1) }, // not on the board
+      { repo: 'o/r', number: 'x' },
+    ],
+  });
+  const row = b.rows.find((r) => r.id === 'o/r#7');
+  assert.deepEqual(row.gateHold, { number: 70, waitingFor: ['ci', 'conflict'], since: iso(8), agentIds: ['t-reviewer', 't-security'] });
+  // No hold → null, as before.
+  assert.equal(board(base).rows.find((r) => r.id === 'o/r#7').gateHold, null);
+});

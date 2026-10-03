@@ -1800,3 +1800,46 @@ test('#2754: one live listener clears wake-label-no-live-consumer; enabled flows
   ]);
   assert.ok(!lintCodes(g).includes('wake-label-no-live-consumer'));
 });
+
+// ── #2795: hand-off readiness gate ────────────────────────────────────────
+
+test('#2795: gate-failure-label-unheard warns when nothing listens on the failure label', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', github: { producesPr: true }, emits: ['ready-for-review'], triggers: [] },
+    {
+      id: 'rev',
+      channels: [{ artifact: 'pr', from: 'dev', label: 'ready-for-review', readiness: { ci: true, conflict: true } }],
+      triggers: [],
+    },
+  ]);
+  const l = g.lints.filter(x => x.code === 'gate-failure-label-unheard');
+  assert.equal(l.length, 1);
+  assert.equal(l[0].severity, 'warning');
+  assert.equal(l[0].label, 'revisions-required');
+  assert.equal(l[0].nodeId, 'rev');
+});
+
+test('#2795: a listener on the failure label clears the lint and is wired from the gated consumer, not an orphan', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', github: { producesPr: true }, emits: ['ready-for-review'], triggers: [] },
+    {
+      id: 'merger',
+      triggers: [{
+        id: 'm', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-to-merge',
+        readinessGate: { ci: true, conflict: false, failureLabel: 'fix-ci' },
+      }],
+    },
+    { id: 'fixer', triggers: [{ id: 'f', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'fix-ci' }] },
+  ]);
+  const codes = lintCodes(g);
+  assert.ok(!codes.includes('gate-failure-label-unheard'));
+  assert.ok(!g.lints.some(x => x.code === 'orphan-listener' && x.label === 'fix-ci'));
+  const e = g.edges.find(x => x.label === 'fix-ci');
+  assert.equal(e.from, 'merger');
+  assert.equal(e.to, 'fixer');
+  assert.equal(e.gateFailure, true);
+});
+
+test('#2795: an ungated flow raises no gate lint', () => {
+  assert.ok(!lintCodes(labelHandoffGraph()).includes('gate-failure-label-unheard'));
+});

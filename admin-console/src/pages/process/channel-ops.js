@@ -14,7 +14,7 @@ export function chLabelKey(label) {
 // same (artifact, from, label) edits in place (updates the gate/wake-prompt); a
 // new label adds a sibling channel. The whole port is rebuilt from the known
 // fields, so a legacy `transport` key (removed in #2578) is dropped on write.
-export function upsertChannel(list, { artifact, from, label, gate, wakePrompt, autoClaim }) {
+export function upsertChannel(list, { artifact, from, label, gate, wakePrompt, autoClaim, readiness }) {
   const art = artifact === 'issue' ? 'issue' : 'pr';
   const lbl = chLabelKey(label);
   const wp = typeof wakePrompt === 'string' && wakePrompt.trim() ? wakePrompt.trim() : '';
@@ -29,6 +29,8 @@ export function upsertChannel(list, { artifact, from, label, gate, wakePrompt, a
     // derived listener itself is regenerated on every reconcile. Only the
     // non-default (`false`) is persisted; anything else means "auto-claim on".
     ...(autoClaim === false ? { autoClaim: false } : {}),
+    // Readiness gate (#2795) — PR channels only; absent = no gate.
+    ...(art === 'pr' && readiness && (readiness.ci || readiness.conflict) ? { readiness } : {}),
   };
   const out = (Array.isArray(list) ? list : []).slice();
   const i = out.findIndex(c => c.artifact === art && c.from === from && chLabelKey(c.label) === lbl);
@@ -62,7 +64,8 @@ export function removeChannelFrom(list, { artifact, from, label }) {
 // when the editor opened, so a routing-label change RENAMES that port instead of
 // upserting a sibling under the new key (which left the old port behind). The
 // port is rebuilt from the known fields, like upsertChannel; `label` and `gate`
-// come from the edit, while `autoClaim` (#958) and `wakePrompt` (#868) are kept
+// come from the edit, while `autoClaim` (#958), `wakePrompt` (#868) and the
+// readiness gate (#2795) are kept
 // from the existing port unless the spec carries the key — the channel editor
 // does not edit the claim opt-out, so a Save must not reset it. Renaming onto a
 // label another channel of the same (artifact, from) already uses throws and
@@ -87,6 +90,7 @@ export function editChannel(list, prevLabel, spec) {
     artifact: art, from, label: newLbl, gate: spec.gate,
     wakePrompt: 'wakePrompt' in spec ? spec.wakePrompt : old.wakePrompt,
     autoClaim: 'autoClaim' in spec ? spec.autoClaim : old.autoClaim,
+    readiness: 'readiness' in spec ? spec.readiness : old.readiness,
   });
   const out = src.slice();
   out[i] = next;

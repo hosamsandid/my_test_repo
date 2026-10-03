@@ -464,6 +464,11 @@ token (replaces webhooks for local stacks).
   the poller reads open PRs + head-commit checks via GraphQL each tick and fans out
   synthetic `PullRequestEvent`s, once per (PR, head SHA, verdict)
   (`orchestrator/pr-readiness.js`, state in `state.json` `readiness`). Spec: `docs/triggers.md`.
+- **Hand-off readiness gate** (#2795): a PR hand-off trigger's `readinessGate`
+  (channel port `readiness`) `{ci, conflict, failureLabel?, timeoutMinutes?}`
+  holds the wake until the head is green/mergeable; failure → label swap +
+  comment, timeout → `needs-human` (`orchestrator/handoff-gate.js`, holds in
+  `state.json`). Spec: `docs/triggers.md`.
 - **Loop protection is frequency-only, no source filtering unless a producer
   filter is set**: a per-`(agent, conversation)` throttle (default 5/h) + a
   per-poll burst-cap digest. A trigger fires on any matching event, including

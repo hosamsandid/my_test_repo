@@ -320,6 +320,36 @@ source of truth: a person re-applying the same label wakes the consumer exactly
 like an agent does, and every wake shows up in the **GitHub Event Log**. (The
 former *Direct (internal)* delivery option was removed in #2578.)
 
+### Holding a PR hand-off until CI is green
+
+A hand-off on a **pull request** — a PR channel, or a label hand-off on pull
+requests — can wait until the PR is actually ready before the next agent is
+woken. The hand-off dialogs (create and edit) offer two switches:
+
+- **Wait for CI** — hold the wake until the PR's checks pass.
+- **Block on merge conflict** — hold the wake until the PR merges cleanly.
+
+With either switch on, two more fields appear: **On failure, set label**
+(default `revisions-required`) and **Timeout (minutes)** (default 60). While a
+hand-off is held, the GitHub Event Log shows *held — waiting for CI /
+conflict-free* and the PR's row on **Flow Control** shows *waiting for CI*.
+
+- **Green**: the next agent is woken as usual.
+- **Failure** (a check failed or the PR conflicts): nobody is woken. The
+  hand-off label is removed, the failure label set and a comment explains why.
+  Wire an agent on the failure label — usually the developer, who fixes the PR
+  and sets the hand-off label again. The Flows editor warns when nobody listens
+  on a failure label.
+- **Timeout**: the hand-off label is removed, `needs-human` set and a comment
+  names what was still pending.
+- A push while the hand-off is held is checked afresh; the timeout keeps
+  counting from the start of the hold.
+
+New PR hand-offs, and the SDLC templates, start with both switches on. Teams
+created before this feature are left as they are: open a hand-off and switch
+the gate on yourself. Issue hand-offs have no gate. Details: the *Hand-off
+readiness gate* section of the triggers documentation.
+
 ## Human gates, brakes and named human roles
 
 The **Label registry** lists, per label, **who sets it and who reacts**. Each

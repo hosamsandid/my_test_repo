@@ -435,6 +435,9 @@ export default function HelperChatPanel() {
   return (
     <div
       aria-hidden={!isOpen}
+      // A closed panel is only slid off-screen, so without `inert` its buttons,
+      // chips, textarea and mic would stay in the keyboard tab order (#2702).
+      inert={!isOpen}
       style={{
         position: 'fixed',
         top: 0,

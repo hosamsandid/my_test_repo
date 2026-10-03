@@ -570,6 +570,8 @@ function BoardTable({ rows, canManage, busy, onRemove }) {
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-sm)' }}>
         <thead>
           <tr style={{ textAlign: 'left', ...mutedStyle }}>
+            <th style={numberCellStyle}>Issue</th>
+            <th style={numberCellStyle}>Pull request</th>
             <th style={cellStyle}>Work item</th>
             <th style={cellStyle}>Progress</th>
             <th style={cellStyle}>Stage</th>
@@ -586,21 +588,36 @@ function BoardTable({ rows, canManage, busy, onRemove }) {
 }
 
 const cellStyle = { padding: 'var(--eb-space-2) var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)', verticalAlign: 'top' };
+// The leading Issue / Pull request columns (#2800): never wrapped and shrunk
+// to their content (`width: 1%`), so the title column takes the remaining width.
+const numberCellStyle = { ...cellStyle, whiteSpace: 'nowrap', width: '1%' };
+const numberTextStyle = { fontFamily: 'var(--eb-font-mono)' };
+
+// An empty Issue/Pull request cell: neutral when the work has no PR yet,
+// warning-toned when a PR has no linked issue (the view sets `empty`).
+function EmptyCell({ cell }) {
+  const style = cell.empty === 'missing'
+    ? { color: 'var(--eb-status-warning, #d97706)', fontWeight: 600 }
+    : mutedStyle;
+  return <span role="img" title={cell.title} aria-label={cell.title} style={style}>{cell.text}</span>;
+}
 
 function BoardRow({ row, canManage, busy, onRemove }) {
   return (
     <tr style={{ opacity: row.done ? 0.65 : 1 }}>
+      <td style={{ ...numberCellStyle, ...numberTextStyle }}>
+        {row.issue.empty ? <EmptyCell cell={row.issue} /> : <Link href={row.issue.url}>{row.issue.text}</Link>}
+      </td>
+      <td style={{ ...numberCellStyle, ...numberTextStyle }}>
+        {row.prEmpty ? <EmptyCell cell={row.prEmpty} /> : row.prs.map((p) => (
+          <div key={p.key}>
+            <Link href={p.url}><span style={p.struck ? { textDecoration: 'line-through' } : undefined}>{p.text}</span></Link>
+          </div>
+        ))}
+      </td>
       <td style={cellStyle}>
         <div style={{ color: 'var(--eb-text-primary)', lineHeight: 1.35 }}>
           <Link href={row.url}>{row.title}</Link>
-        </div>
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap', ...mutedStyle }}>
-          {row.ref && <Link href={row.issueUrl}>{row.ref}</Link>}
-          {row.prs.map((p) => (
-            <span key={p.key} style={p.state !== 'open' ? { textDecoration: p.state === 'closed' ? 'line-through' : 'none' } : undefined}>
-              <Link href={p.url}>{p.label}{p.state === 'merged' ? ' (merged)' : ''}</Link>
-            </span>
-          ))}
         </div>
       </td>
       <td style={cellStyle}><StageProgress steps={row.steps} blocked={row.blocked} /></td>

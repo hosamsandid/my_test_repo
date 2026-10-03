@@ -85,7 +85,38 @@ test("mutation-proved: the pre-fix single-item shape would fail the check above"
 test("#2760 review S2: pool-control's liveInstanceCount counts provisioning instances too, like the cap", () => {
   const sites = SRC.match(/liveInstanceCount:[^\n]*/g) || [];
   assert.equal(sites.length, 1, "exactly one liveInstanceCount site — re-point this guard if that changes");
-  assert.match(sites[0], /liveInstanceCount:\s*_cappedInstanceIdsForRole\(role\.id\)\.length/);
+  assert.match(sites[0], /liveInstanceCount:\s*_cappedInstanceIdsForRole\(role\.id\)\.filter\(\(id\) => !waitingIds\.has\(id\)\)\.length/);
+});
+
+test("#2789 AC9: pool-control counts active instances only and reports the waiting ones apart", () => {
+  const start = SRC.indexOf("liveInstanceCount:");
+  const body = SRC.slice(start - 800, start + 400);
+  assert.match(body, /const waiting = _waitingInstancesForRole\(role\.id, poolWaiting\)/);
+  assert.match(body, /waitingInstanceCount: waiting\.length/);
+  assert.match(body, /waitingInstances: waiting\.map/);
+});
+
+test("#2789 AC1/AC2/AC6: the reap sweep skips waiting instances, takes waited time off the hard timeout, and reaps when the wait ends", () => {
+  const src = fn("poolReapSweepTeam");
+  const skip = src.indexOf("if (rec.waiting) continue;");
+  assert.ok(skip > 0, "a waiting instance is skipped before either reaper");
+  assert.ok(skip < src.indexOf("isInstanceTimedOut"), "skipped before the hard timeout (no needs-human stamp)");
+  assert.ok(skip < src.indexOf("isInstanceIdle"), "skipped before the idle reap");
+  assert.match(src, /waitedMs: agentPool\.waitedMsSoFar\(rec, now\)/);
+  assert.match(src, /agentPool\.waitJustEnded\(prev, rec, idle\)[\s\S]*?_internalSelfDelete/);
+  assert.match(src, /savePoolWaiting\(teamId, nextWaiting\)/);
+  assert.match(src, /agentPool\.linkedOpenPrs\(/);
+});
+
+test("#2789 AC8: a drain settles only once no instance is left waiting on a PR", () => {
+  const src = fn("settlePoolDrains");
+  assert.match(src, /_poolRoleBusyCount\(role\.id\) \+ _waitingInstancesForRole\(role\.id, waiting\)\.length/);
+});
+
+test("#2789 AC3: reusing an instance for its item ends its wait first", () => {
+  const src = fn("routePooledDispatch");
+  assert.match(src, /waitingInstanceIds: itemKey == null \? \[\] : _waitingInstanceIdsForRole\(teamId, agentId\)/);
+  assert.match(src, /_endPoolInstanceWait\(teamId, decision\.instanceId\)/);
 });
 
 test("_liveInstanceIdsForRole scans by role prefix and poolOf, not by a single item key", () => {

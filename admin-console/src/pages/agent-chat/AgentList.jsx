@@ -3,7 +3,7 @@ import { MessageCircle, Bot, Server, Users, ChevronDown, ChevronRight, GripVerti
 
 import { computeReorder, dropPosition } from './agent-list-dnd.js';
 import { groupEnvironmentName, rowEnvironmentName } from './agent-list-env.js';
-import { buildGroups, groupKey, orderModel, filterModel, stubSectionLabel, poolInstancesLabel } from './agent-list-model.js';
+import { buildGroups, groupKey, orderModel, filterModel, stubSectionLabel, poolInstancesLabel, poolInstanceCounts, poolWaitingLabel } from './agent-list-model.js';
 import { poolCapView } from '../process/pool-cap-view.js';
 import { teamMembershipIndicator, membershipsByTeam, fitAdminNames } from './team-membership-view.js';
 import { computeTeamAttention } from '../../context/agent-statuses.js';
@@ -722,9 +722,12 @@ function PoolInstancesSection({ roleAgent, instances, groupEnv, collapsed, onTog
   const [hovered, setHovered] = useState(false);
   // #2760 AC5: the count reads against the role's cap ("5 / 3"), and an
   // over-cap count is marked, its tooltip saying what that means.
+  // #2789 AC9: instances waiting on an open PR are outside the cap and are
+  // counted apart ("2 / 3 active · 4 waiting").
   const cap = roleAgent.poolMaxInstances ?? null;
-  const label = poolInstancesLabel(instances.length, cap);
-  const capView = poolCapView(instances.length, cap);
+  const counts = poolInstanceCounts(instances);
+  const label = poolInstancesLabel(counts.active, cap, counts.waiting);
+  const capView = poolCapView(counts.active, cap, counts.waiting);
   const handleToggle = useCallback(
     () => onToggle({ kind: 'pool', id: roleAgent.id }),
     [onToggle, roleAgent.id],
@@ -1183,6 +1186,8 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
   // vocabulary for this state (AC3) — the same agent must not be called two
   // different things depending on which surface you are looking at.
   const stateBadge = openable ? null : (stub ? 'Not initialised' : 'Disabled');
+  // #2789: a pool instance kept alive for review feedback on its open PR.
+  const waitingLabel = poolWaitingLabel(agent);
 
   const requestMenu = onRequestMenu
     ? anchor => onRequestMenu({ kind: 'agent', agent }, anchor)
@@ -1326,6 +1331,21 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {environmentName}
               </span>
+            </div>
+          )}
+          {waitingLabel && (
+            <div
+              title={`${waitingLabel} — kept alive so review feedback returns to this instance; not counted against the role's instance limit`}
+              style={{
+                marginTop: 2,
+                fontSize: 'var(--eb-text-xs)',
+                color: 'var(--eb-text-muted)',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {waitingLabel}
             </div>
           )}
         </div>

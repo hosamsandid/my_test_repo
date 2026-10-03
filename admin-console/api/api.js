@@ -19424,12 +19424,32 @@ jobs:
 // opt-in changes the default response (AC8), and the admission rule itself is
 // the pure `matrix-agent-list.js`. Visibility scoping (#302) is unchanged, so an
 // opt-in can only ever widen the list within what this caller may already see.
+// #2789: roster fields for a pool instance waiting on an open PR. Only a
+// record for THIS spawn counts (a recycled instance id must not inherit an
+// earlier instance's state); primitives only, the roster diff is shallow.
+function poolWaitingFields(waitingMap, id, spawnedAt) {
+  const rec = waitingMap && typeof waitingMap === 'object' ? waitingMap[id] : null;
+  if (!rec || typeof rec !== 'object' || rec.waiting !== true) return {};
+  if ((rec.spawnedAt || null) !== (spawnedAt || null)) return {};
+  const prs = Array.isArray(rec.prs) ? rec.prs.filter((n) => Number.isInteger(n) && n > 0) : [];
+  return { poolWaiting: true, poolWaitingPr: prs.length ? Math.min(...prs) : null };
+}
+
 app.get('/api/matrix/agents', (req, res) => {
   const scope = getScope(req);
   const includeDisabled = req.query.includeDisabled === '1' || req.query.includeDisabled === 'true';
   const includeStubs = req.query.includeStubs === '1' || req.query.includeStubs === 'true';
   const ids = listAgentDirs();
   const out = [];
+  // #2789: each team's pool-waiting record (orchestrator `poolReapSweepTeam`),
+  // read once per team per request.
+  const poolWaitingByTeam = new Map();
+  const poolWaitingOf = (teamId) => {
+    if (!poolWaitingByTeam.has(teamId)) {
+      poolWaitingByTeam.set(teamId, readJsonFile(controlOrAgentPath(teamId, 'pool-waiting.json'), null));
+    }
+    return poolWaitingByTeam.get(teamId);
+  };
   for (const id of ids) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
     if (!cfg) continue;
@@ -19484,6 +19504,9 @@ app.get('/api/matrix/agents', (req, res) => {
         poolOf: cfg.poolOf || null,
         poolItem: cfg.poolItem != null ? cfg.poolItem : null,
         poolSpawnedAt: cfg.poolSpawnedAt || null,
+        // #2789: idle and kept alive for its open PR — `poolWaitingPr` is the
+        // lowest open PR number (null when GitHub could not be read).
+        ...poolWaitingFields(cfg.parentTeamId ? poolWaitingOf(cfg.parentTeamId) : null, id, cfg.poolSpawnedAt),
       } : {}),
       // #2760 AC5: a pooled role TEMPLATE's "Max parallel instances" cap, so
       // the rail can show its "Instances (n)" count against it ("5 / 3").

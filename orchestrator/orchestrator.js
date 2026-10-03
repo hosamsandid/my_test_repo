@@ -2880,6 +2880,8 @@ async function computeTeamFlowBoard(teamId, { now = Date.now() } = {}) {
   const { removalsToPrune, ...board } = flowBoard.buildFlowBoard({
     members, labels, teamId, config, github, events, prRecords,
     sessions: _flowBoardSessions(members), pools, removed, now,
+    // #2795: PR hand-offs the poller holds behind their CI / conflict gate.
+    gateHolds: githubPollerRef ? githubPollerRef.gateHolds().filter((h) => ours(h.agentId)) : [],
   });
   // Drop removals that were revived or whose row left the snapshot — but only
   // for a repo this sweep actually reached, so an outage never forgets them.

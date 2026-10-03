@@ -127,6 +127,16 @@ test('the open-PR query reads head commit and mergeable', () => {
   assert.match(r.OPEN_PRS_QUERY, /mergeable/);
 });
 
+test('the open-PR query reads each PR\'s labels; parseOpenPrs keeps their names only when returned (#2795)', () => {
+  assert.match(r.OPEN_PRS_QUERY, /labels\(first:\d+\)\{nodes\{name\}\}/);
+  // Balanced braces — the query parses.
+  assert.equal((r.OPEN_PRS_QUERY.match(/\{/g) || []).length, (r.OPEN_PRS_QUERY.match(/\}/g) || []).length);
+  const node = { number: 7, headRefOid: SHA_A, labels: { nodes: [{ name: 'ready-for-review' }, null, { name: 'docs' }] } };
+  const out = r.parseOpenPrs({ repository: { pullRequests: { nodes: [node, { number: 8, headRefOid: SHA_B }] } } });
+  assert.deepEqual(out.prs[0].labels, ['ready-for-review', 'docs']);
+  assert.equal('labels' in out.prs[1], false);
+});
+
 // ── state machine ──────────────────────────────────────────────────────────
 
 const checksFor = (sha, nodes, truncated = false) => new Map([[sha, { checks: nodes, truncated }]]);

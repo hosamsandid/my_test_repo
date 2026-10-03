@@ -53,6 +53,8 @@ function ciGraceMs(env = process.env) {
 
 // Upper bound on open PRs read per repository per cycle (one GraphQL page).
 const MAX_OPEN_PRS = 100;
+// Upper bound on labels read per open PR (#2795, the hand-off gate's cancel check).
+const MAX_LABELS = 50;
 // Upper bound on checks read per head commit (one GraphQL page).
 const MAX_CHECKS = 100;
 
@@ -63,7 +65,9 @@ const STATUS_FAIL = new Set(['FAILURE', 'ERROR']);
 
 const OPEN_PRS_QUERY = 'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){'
   + `pullRequests(states:OPEN,first:${MAX_OPEN_PRS},orderBy:{field:UPDATED_AT,direction:DESC}){`
-  + 'pageInfo{hasNextPage} nodes{number title url headRefName headRefOid baseRefName mergeable isCrossRepository}}}}';
+  + 'pageInfo{hasNextPage} nodes{number title url headRefName headRefOid baseRefName mergeable isCrossRepository '
+  // #2795: the current labels, so a held hand-off sees its wake label removed.
+  + `labels(first:${MAX_LABELS}){nodes{name}}}}}}`;
 
 const SHA_RE = /^[0-9a-f]{40}$/i;
 
@@ -146,6 +150,10 @@ function parseOpenPrs(data) {
       baseRef: typeof n.baseRefName === 'string' ? n.baseRefName : null,
       mergeable: typeof n.mergeable === 'string' ? n.mergeable : null,
       fromFork: n.isCrossRepository === true,
+      // #2795: label names, only when the query returned them (absent ≠ none).
+      ...(n.labels && Array.isArray(n.labels.nodes)
+        ? { labels: n.labels.nodes.map((l) => l && l.name).filter((x) => typeof x === 'string') }
+        : {}),
     });
   }
   return { prs, truncated: !!(conn && conn.pageInfo && conn.pageInfo.hasNextPage) };

@@ -96,6 +96,21 @@ test('AC6: a re-fired row says who and when', () => {
   assert.equal(workItemText({ workItem: { number: 3 } }), '#3');
 });
 
+test('#2799 AC8: a linked PR row and its re-fire dialog name the closing issue(s)', () => {
+  const pr = (closesIssues, extra = {}) => drop('throttle', {
+    workItem: { kind: 'pr', number: 2798, title: 'PR readiness', url: 'u', closesIssues }, ...extra,
+  });
+  assert.equal(workItemText(pr([2794])), '#2798 → closes #2794 PR readiness');
+  assert.equal(workItemText(pr([15, 12, 15])), '#2798 → closes #12, #15 PR readiness');
+  assert.equal(workItemText({ workItem: { kind: 'pr', number: 7, closesIssues: [3] } }), '#7 → closes #3');
+  assert.match(refireDialog(pr([2794])).why, /#2798 → closes #2794 PR readiness had too many events/);
+  // Unlinked / malformed PR rows and issue rows are unchanged.
+  for (const bad of [undefined, [], '2794', [0, -1, 'x']]) {
+    assert.equal(workItemText(pr(bad)), '#2798 PR readiness');
+  }
+  assert.equal(workItemText({ workItem: { kind: 'issue', number: 5, title: 'T', closesIssues: [9] } }), '#5 T');
+});
+
 // ── Drift guard: JSX wiring (JSX itself is not executed under node:test) ────
 
 const RAIL = fs.readFileSync(path.join(HERE, 'RightRail.jsx'), 'utf8');

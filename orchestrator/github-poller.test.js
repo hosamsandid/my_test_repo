@@ -1070,7 +1070,8 @@ test("_fanOutBatch (#2776): a collapsed claim swap is recovered by the <wake>:co
 
 test("_fanOutBatch (#2776): the <wake>:completed add never re-fires the trigger itself (stale snapshot still names the wake)", async () => {
   const origRecord = githubEventLog.record;
-  githubEventLog.record = () => {};
+  const recorded = [];
+  githubEventLog.record = (entry) => recorded.push(entry);
   try {
     const poller = new GitHubPoller();
     const enqueued = [];
@@ -1087,6 +1088,12 @@ test("_fanOutBatch (#2776): the <wake>:completed add never re-fires the trigger 
     await poller._fanOutBatch("org/repo", [ev1, ev2, ev3], reviewerSub(), "tok");
 
     assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["cc2-1"]);
+    // The :completed add must be dropped as self-claim-label, not merely as
+    // wake-already-armed (which also held before the fix).
+    const completed = recorded.find((r) => r.label === "ready-for-review:completed");
+    assert.ok(completed, "the :completed event is recorded");
+    assert.equal(completed.outcomes[0].status, "dropped");
+    assert.equal(completed.outcomes[0].reason, "self-claim-label");
   } finally {
     githubEventLog.record = origRecord;
   }

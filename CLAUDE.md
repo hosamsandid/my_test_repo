@@ -423,7 +423,7 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   once the last instance is gone, #2573) and a per-held-entry Force
   dispatch (`admissionControl.forcePromoteHeld`, promotes past `wipLimit` for
   that one entry). **Pool instance lanes** (#2273): a read-only endpoint (its
-  board panel was folded into "Working now" by #2573), per pooled role's live instances tagged running / held-same-epic /
+  board panel was folded into "Working now" by #2573), per pooled role's live instances tagged running / waiting / held-same-epic /
   timed-out (`pool-instance-lanes.js`, pure, no new persistence — derived
   from live instance configs + the ticket ledger). **Agent Chat rail
   sub-grouping** (#2297): the same live instances, nested under their role as a
@@ -431,7 +431,9 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   flat among the team's members — `poolInstance`/`poolOf`/`poolItem` surfaced on
   `GET /api/matrix/agents`, nested by `agent-list-model.js` `buildGroups`; the
   label reads against the role's cap (*Instances (5 / 3)*, `poolMaxInstances`,
-  #2760 — `pool-cap-view.js`, shared with the Scaling section). **The
+  #2760 — `pool-cap-view.js`, shared with the Scaling section); an idle
+  instance with an open linked PR is kept alive and counted apart (*2 / 3 active
+  · 4 waiting*, `pool-waiting.json`, outside the cap, never reaped, #2789). **The
   rail live-refreshes** (#2311): `AgentRosterContext` polls the same endpoint on
   its own ~5s beat (a shared singleton poll, mirroring `AgentStatusesContext`'s
   #1677 pattern; paused while the tab is hidden), diffed by `roster-diff.js` so

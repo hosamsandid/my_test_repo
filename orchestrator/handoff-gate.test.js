@@ -116,3 +116,14 @@ test('comments: failing checks, merge conflict, timeout — each with the marker
   assert.match(to, /timed out after 60 min — still waiting for CI \/ conflict-free/);
   assert.match(to, /`needs-human` set/);
 });
+
+test('resolutionLabel: a failure label equal to the wake label falls back to needs-human (review B3)', () => {
+  const gate = g.normalizeGate({ ci: true });
+  assert.equal(g.resolutionLabel({ action: 'fail' }, gate, 'ready-for-review'), 'revisions-required');
+  assert.equal(g.resolutionLabel({ action: 'fail' }, gate, 'revisions-required'), g.TIMEOUT_LABEL);
+  assert.equal(g.resolutionLabel({ action: 'fail' }, g.normalizeGate({ ci: true, failureLabel: 'x' }), 'x'), g.TIMEOUT_LABEL);
+  assert.equal(g.resolutionLabel({ action: 'timeout' }, gate, 'ready-for-review'), g.TIMEOUT_LABEL);
+  const hold = { wakeLabel: 'revisions-required', gate };
+  const body = g.failureComment({ decision: { action: 'fail', gate: 'ci', sha: SHA_A, failingChecks: [] }, hold });
+  assert.match(body, /needs-human/, 'the comment names the label actually set');
+});

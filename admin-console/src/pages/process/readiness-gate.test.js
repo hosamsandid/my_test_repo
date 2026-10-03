@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import serverPt from '../../../api/process-template.js';
 import {
   DEFAULT_FAILURE_LABEL, DEFAULT_TIMEOUT_MINUTES, MAX_TIMEOUT_MINUTES, READINESS_EVENTS, NEW_HANDOFF_READINESS,
-  gateable, readinessForm, readinessFormError, readinessFromForm, readinessSummary,
+  gateable, readinessForm, readinessFormError, readinessFromForm, readinessSummary, newHandoffReadiness,
 } from './readiness-gate.js';
 import { upsertChannel, editChannel } from './channel-ops.js';
 import { wireLabelHandoff, updateLabelHandoff, wireChannel, updateChannel } from './wiring-engine.js';
@@ -155,7 +155,7 @@ test('source: every PR hand-off dialog offers the gate and passes it to the engi
   const s = src('./EdgeDialogs.jsx');
   const body = (from, to) => s.slice(s.indexOf(from), s.indexOf(to, s.indexOf(from) + 1));
   const create = body('export function CreateHandoffDialog', 'export function CreateEdgeDialog');
-  assert.match(create, /readinessForm\(null, \{ isNew: true \}\)/);
+  assert.match(create, /readinessForm\(null, \{ isNew: true, wakeLabel: initialLabel \}\)/);
   assert.match(create, /readinessGate: readinessFromForm\(readiness\)/);
   assert.match(create, /<ReadinessGateFields /);
   const channel = body('export function CreateChannelDialog', 'export function AgentToPersonDialog');
@@ -178,10 +178,29 @@ test('source: every PR hand-off dialog offers the gate and passes it to the engi
 test('source: the routing inspector keeps the gate when editing and defaults one-click PR wiring to on', () => {
   const s = src('./RoutingSection.jsx');
   assert.match(s, /readiness: editChannel\.readiness, wakePrompt: editChannel\.wakePrompt/);
-  assert.match(s, /readinessGate: \{ \.\.\.NEW_HANDOFF_READINESS \}/);
+  assert.match(s, /readinessGate: newHandoffReadiness\(wireSpec\.label\)/);
   assert.match(s, /wireSpec\.artifact === 'pr' \? \{ readiness: \{ \.\.\.NEW_HANDOFF_READINESS \} \} : \{\}/);
   // The draft adapter drops a switched-off gate like the live PUT does.
   assert.match(src('./edit-adapters.js'), /if \(t && t\.readinessGate === null\) delete t\.readinessGate;/);
   // The channel edge carries the stored gate to the edit dialog.
   assert.match(src('../../../api/unified-graph.js'), /artifact === 'pr' && ch\.readiness && typeof ch\.readiness === 'object' \? \{ readiness: ch\.readiness \}/);
+});
+
+test('a gate whose default failure label is the wake label is refused, and a new hand-off on it starts ungated (review B3)', () => {
+  const on = { ci: true, conflict: true, failureLabel: '', timeoutMinutes: '' };
+  // Left empty, the failure label is the default — the same as this wake label.
+  assert.match(readinessFormError(on, { wakeLabel: DEFAULT_FAILURE_LABEL }), /must differ/);
+  assert.match(readinessFormError({ ...on, failureLabel: DEFAULT_FAILURE_LABEL }, { wakeLabel: DEFAULT_FAILURE_LABEL }), /must differ/);
+  assert.equal(readinessFormError({ ...on, failureLabel: 'fix-me' }, { wakeLabel: DEFAULT_FAILURE_LABEL }), null);
+  assert.equal(readinessFormError({ ...on, ci: false, conflict: false }, { wakeLabel: DEFAULT_FAILURE_LABEL }), null);
+  // The server agrees.
+  assert.match(serverPt.readinessError({ ci: true }, { wakeLabel: DEFAULT_FAILURE_LABEL }), /must differ/);
+  // One-click and dialog defaults: no loop-prone gate on the default failure label.
+  assert.equal(newHandoffReadiness(DEFAULT_FAILURE_LABEL), null);
+  assert.deepEqual(newHandoffReadiness('ready-for-review'), { ...NEW_HANDOFF_READINESS });
+  const fresh = readinessForm(null, { isNew: true, wakeLabel: DEFAULT_FAILURE_LABEL });
+  assert.equal(fresh.ci || fresh.conflict, false);
+  assert.equal(readinessFormError(fresh, { wakeLabel: DEFAULT_FAILURE_LABEL }), null, 'a brand-new hand-off with all defaults saves');
+  assert.equal(readinessForm(null, { isNew: true, wakeLabel: 'ready-for-review' }).ci, true);
+  assert.match(src('./EdgeDialogs.jsx'), /readinessForm\(null, \{ isNew: true, wakeLabel: initialLabel \}\)/);
 });

@@ -80,6 +80,15 @@ function gatesText(gates) {
   return (Array.isArray(gates) ? gates : []).map((g) => GATE_TEXT[g] || g).join(' / ');
 }
 
+// The label a fail / timeout sets. A failure label equal to the wake label
+// (a gate authored before validation caught it) would re-wake the held listener
+// and fail again on the same head in a loop, so it falls back to `needs-human`.
+function resolutionLabel(decision, gate, wakeLabel = null) {
+  if (!decision || decision.action !== 'fail') return TIMEOUT_LABEL;
+  const label = (gate && gate.failureLabel) || DEFAULT_FAILURE_LABEL;
+  return wakeLabel && label === wakeLabel ? TIMEOUT_LABEL : label;
+}
+
 function holdKey(triggerId, number) {
   return `${triggerId}#${number}`;
 }
@@ -191,7 +200,7 @@ function failureComment({ decision, hold, consumer = null }) {
       for (const c of checks) lines.push(`- ${code(c)}`);
     }
   }
-  lines.push('', consequence({ wakeLabel: hold.wakeLabel, setLabel: gate.failureLabel, consumer }));
+  lines.push('', consequence({ wakeLabel: hold.wakeLabel, setLabel: resolutionLabel(decision, gate, hold.wakeLabel), consumer }));
   return lines.join('\n');
 }
 
@@ -220,6 +229,7 @@ module.exports = {
   gateApplies,
   enabledGates,
   gatesText,
+  resolutionLabel,
   holdKey,
   newHold,
   pendingGates,

@@ -18,6 +18,13 @@ export const TIMEOUT_LABEL = 'needs-human';
 // `pull_request.labeled` listener.
 export const NEW_HANDOFF_READINESS = Object.freeze({ ci: true, conflict: true });
 
+// The gate a NEW hand-off on `wakeLabel` starts with: NEW_HANDOFF_READINESS,
+// except on the default failure label itself — failing back onto the wake label
+// would re-wake the held listener in a loop, so that hand-off starts ungated.
+export function newHandoffReadiness(wakeLabel) {
+  return String(wakeLabel || '').trim() === DEFAULT_FAILURE_LABEL ? null : { ...NEW_HANDOFF_READINESS };
+}
+
 // The PR hand-off events a gate can hold (mirrors READINESS_EVENTS).
 export const READINESS_EVENTS = ['pull_request.labeled', 'pull_request.opened', 'pull_request.reopened'];
 
@@ -28,13 +35,15 @@ export function gateable({ artifact, event } = {}) {
 }
 
 // The dialog's form state for a stored gate. A NEW PR hand-off starts with both
-// gates on (AC11); an existing one shows exactly what is stored — absent = off,
-// so opening and saving an old hand-off never turns a gate on (AC12).
-export function readinessForm(stored, { isNew = false } = {}) {
+// gates on (AC11) — unless its `wakeLabel` is the default failure label (see
+// newHandoffReadiness); an existing one shows exactly what is stored — absent =
+// off, so opening and saving an old hand-off never turns a gate on (AC12).
+export function readinessForm(stored, { isNew = false, wakeLabel = '' } = {}) {
   const r = stored && typeof stored === 'object' && !Array.isArray(stored) ? stored : null;
   if (!r) {
+    const on = isNew && !!newHandoffReadiness(wakeLabel);
     return {
-      ci: isNew, conflict: isNew,
+      ci: on, conflict: on,
       failureLabel: DEFAULT_FAILURE_LABEL, timeoutMinutes: String(DEFAULT_TIMEOUT_MINUTES),
     };
   }
@@ -60,9 +69,11 @@ export function readinessFormError(form, { wakeLabel = '' } = {}) {
   if (fl) {
     const le = labelNameError(fl);
     if (le) return `Failure label: ${le}`;
-    if (wakeLabel && fl === String(wakeLabel).trim()) {
-      return `The failure label must differ from the hand-off label "${fl}" — it would wake the same agent again.`;
-    }
+  }
+  // The EFFECTIVE label: left empty, the default is what the gate sets.
+  const effective = fl || DEFAULT_FAILURE_LABEL;
+  if (wakeLabel && effective === String(wakeLabel).trim()) {
+    return `The failure label must differ from the hand-off label "${effective}" — it would wake the same agent again. Pick another failure label or switch the gate off.`;
   }
   const t = parseTimeout(form.timeoutMinutes);
   if (!Number.isInteger(t) || t < 1 || t > MAX_TIMEOUT_MINUTES) {

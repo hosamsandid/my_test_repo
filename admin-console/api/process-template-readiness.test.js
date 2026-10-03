@@ -165,3 +165,13 @@ test('live PUT /api/agents/:id keeps a channel readiness gate and refuses a malf
   // Both trigger write routes persist the canonical gate.
   assert.equal(src.match(/normalizeReadinessGate\((newTrigger|merged)\);/g).length, 2);
 });
+
+test('the EFFECTIVE failure label is compared with the wake label: an unset one defaults to revisions-required (review B3)', () => {
+  const pr = { type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'revisions-required' };
+  assert.match(rawTriggerError({ ...pr, readinessGate: { ci: true, conflict: true } }), /must differ/);
+  assert.equal(rawTriggerError({ ...pr, readinessGate: { ci: true, failureLabel: 'fix-me' } }), null);
+  assert.equal(rawTriggerError({ ...pr, readinessGate: { ci: false, conflict: false } }), null, 'switched off, no label is set');
+  assert.match(readinessError({ conflict: true }, { wakeLabel: 'revisions-required' }), /defaults to `revisions-required`/);
+  const res = validateProcessTemplate(bundle({ artifact: 'pr', from: 'dev', label: 'revisions-required', readiness: { ci: true } }));
+  assert.match(res.error, /must differ/);
+});

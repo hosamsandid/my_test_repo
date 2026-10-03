@@ -573,7 +573,8 @@ const READINESS_EVENTS = ['pull_request.labeled', 'pull_request.opened', 'pull_r
 
 // Shape errors of a `readiness` / `readinessGate` value, or null when absent or
 // well-formed. `wakeLabel` (optional) is the hand-off's own label: failing back
-// onto it would re-wake the very listener the gate just held back.
+// onto it would re-wake the very listener the gate just held back — checked
+// against the EFFECTIVE failure label, so an unset one (the default) counts.
 function readinessError(r, { wakeLabel = '' } = {}) {
   if (r === undefined || r === null) return null;
   if (typeof r !== 'object' || Array.isArray(r)) return 'readiness gate must be an object';
@@ -584,10 +585,13 @@ function readinessError(r, { wakeLabel = '' } = {}) {
     if (typeof r.failureLabel !== 'string' || !r.failureLabel.trim() || r.failureLabel.trim().length > 50) {
       return 'readiness gate failureLabel must be a label name of at most 50 characters';
     }
-    const wake = typeof wakeLabel === 'string' ? wakeLabel.trim() : '';
-    if (wake && r.failureLabel.trim() === wake) {
-      return `readiness gate failureLabel must differ from the hand-off label \`${wake}\``;
-    }
+  }
+  const wake = typeof wakeLabel === 'string' ? wakeLabel.trim() : '';
+  const explicit = typeof r.failureLabel === 'string' ? r.failureLabel.trim() : '';
+  const effective = explicit || ((r.ci === true || r.conflict === true) ? READINESS_DEFAULT_FAILURE_LABEL : '');
+  if (wake && effective === wake) {
+    return `readiness gate failureLabel must differ from the hand-off label \`${wake}\``
+      + (explicit ? '' : ` (unset, it defaults to \`${READINESS_DEFAULT_FAILURE_LABEL}\`)`);
   }
   if (r.timeoutMinutes !== undefined && r.timeoutMinutes !== null && r.timeoutMinutes !== '') {
     if (!Number.isInteger(r.timeoutMinutes) || r.timeoutMinutes < 1 || r.timeoutMinutes > READINESS_MAX_TIMEOUT_MINUTES) {

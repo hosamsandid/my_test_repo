@@ -126,8 +126,9 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
   const [action, setAction] = useState('labeled');       // labeled | unlabeled
   const [repo, setRepo] = useState('');
   const [prompt, setPrompt] = useState('');
-  // #2795: a NEW PR hand-off waits for CI and a conflict-free PR by default.
-  const [readiness, setReadiness] = useState(() => readinessForm(null, { isNew: true }));
+  // #2795: a NEW PR hand-off waits for CI and a conflict-free PR by default
+  // (not on the default failure label itself, which would loop).
+  const [readiness, setReadiness] = useState(() => readinessForm(null, { isNew: true, wakeLabel: initialLabel }));
 
   useEffect(() => {
     let alive = true;

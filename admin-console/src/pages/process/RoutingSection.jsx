@@ -21,7 +21,7 @@ import {
 } from './outcome-routing.js';
 import { consumeKey } from './humans-registry-ops';
 import { WAKE_NOTE_MAX, clampWakeNote } from './wake-edge-view.js';
-import { readinessSummary, NEW_HANDOFF_READINESS } from './readiness-gate.js';
+import { readinessSummary, NEW_HANDOFF_READINESS, newHandoffReadiness } from './readiness-gate.js';
 
 // The human role currently wired to consume `entry` (or '' if none). #987.
 function humanConsuming(humans, entry) {
@@ -769,8 +769,9 @@ function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [
       await wireLabelHandoff({ ops }, {
         from: node.id, to: targetId, label: wireSpec.label, target: wireSpec.target, labels,
         fromName: node.displayName || node.id, toName: target?.displayName || targetId,
-        // #2795: a new PR hand-off waits for CI and a conflict-free PR.
-        readinessGate: { ...NEW_HANDOFF_READINESS },
+        // #2795: a new PR hand-off waits for CI and a conflict-free PR —
+        // not one on the default failure label itself (it would loop).
+        readinessGate: newHandoffReadiness(wireSpec.label),
       });
     } else {
       await wireChannel({ ops }, {

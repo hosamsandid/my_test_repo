@@ -22,6 +22,9 @@ import { importSuccessNotice } from '../agent-lifecycle/import-agent-view.js';
 import RowContextMenu from '../../components/RowContextMenu.jsx';
 import {
   deleteTargetFor,
+  deleteRequestId,
+  resolveDeleteRequest,
+  teamKeptNotice,
   existingIds as existingIdsOf,
   importedAgentFilterNote,
   mergeAgentConfigs,
@@ -133,6 +136,11 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
 
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  // "Also delete the team" in the delete confirm of a team's last member
+  // (#2685). On by default — an empty team is what the user would otherwise
+  // have to find and delete separately — and reset each time the confirm opens.
+  const [deleteTeamToo, setDeleteTeamToo] = useState(true);
+  useEffect(() => { if (deleteTarget) setDeleteTeamToo(true); }, [deleteTarget]);
   const [deactivateTarget, setDeactivateTarget] = useState(null);
   const [deactivateWarning, setDeactivateWarning] = useState(null);
   const [disableWarning, setDisableWarning] = useState(null);
@@ -285,10 +293,21 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
       // See Agents.jsx: `cascadeWarnings` names the members a team delete could
       // not remove. Same helper on both surfaces so the two never word the same
       // residue differently (#1960 AC2).
-      const result = await apiCall('DELETE', `/api/agents/${encodeURIComponent(deleteTarget.id)}`);
+      // #2685 review B1: the rail's list may lack disabled members, and a team
+      // delete cascades — so a team delete is re-checked against a fresh read
+      // of every config before it is sent.
+      let fresh = null;
+      if (deleteRequestId(deleteTarget, deleteTeamToo) !== deleteTarget.id) {
+        try { fresh = await apiCall('GET', '/api/agents'); } catch { /* resolved as unverified: member only */ }
+      }
+      const { id: deleteId, keptTeam } = resolveDeleteRequest(deleteTarget, deleteTeamToo, fresh);
+      const result = await apiCall('DELETE', `/api/agents/${encodeURIComponent(deleteId)}`);
       setDeleteTarget(null);
       const residue = cascadeResidueNotice(result);
+      const kept = teamKeptNotice(keptTeam);
+      // Mutually exclusive: residue comes from a team delete, `kept` from a member-only one.
       if (residue) setActionError(residue);
+      else if (kept) setActionError(kept);
       refresh();
     } catch (e) {
       setActionError(e.message);
@@ -650,11 +669,11 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
 
       <ConfirmDialog
         open={!!deleteTarget}
-        title={deleteDialogCopy(deleteTarget).title}
-        message={renderDeleteMessage(deleteTarget)}
+        title={deleteDialogCopy(deleteTarget, { deleteTeamToo }).title}
+        message={renderDeleteMessage(deleteTarget, { deleteTeamToo, onDeleteTeamTooChange: setDeleteTeamToo })}
         variant="danger"
-        confirmLabel={deleteDialogCopy(deleteTarget).confirmLabel}
-        maxWidth={deleteDialogCopy(deleteTarget).maxWidth}
+        confirmLabel={deleteDialogCopy(deleteTarget, { deleteTeamToo }).confirmLabel}
+        maxWidth={deleteDialogCopy(deleteTarget, { deleteTeamToo }).maxWidth}
         onConfirm={confirmDelete}
         onCancel={() => setDeleteTarget(null)}
         busy={deleteBusy}

@@ -1555,24 +1555,24 @@ _ASK_USER_QUESTION_TOOL = "AskUserQuestion"
 _ASK_FILE_ENV = "AEE_ASK_FILE"
 # Epoch seconds by which this invocation is killed (#2796, read by aee-wait-ci).
 _RUN_DEADLINE_ENV = "AEE_RUN_DEADLINE"
-# Claude Code's Bash tool stops a command after 2 min by default and never
-# allows more than 10 min, which would kill a foreground `aee-wait-ci` long
-# before its own wait ends (#2796). Raised per turn to the CLI's default /
-# maximum wait (20 / 50 min, see aee-wait-ci) plus slack for its last poll and
-# a 60 s `gh` call. An operator-set larger value is kept.
-_BASH_DEFAULT_TIMEOUT_MS = (20 + 5) * 60 * 1000
+# Claude Code's Bash tool never allows a command more than 10 min, which would
+# kill a foreground `aee-wait-ci` long before its own wait ends (#2796). Only
+# that MAXIMUM is raised per turn — to the CLI's maximum wait (50 min, see
+# aee-wait-ci) plus slack for its last poll and a 60 s `gh` call — so the agent
+# can grant the wait a long tool `timeout` explicitly. The DEFAULT (2 min) is
+# left alone (#2815): raising it made every accidentally blocking command (e.g.
+# a CLI reading stdin) stall the agent silently for the full raised default.
+# An operator-set larger maximum is kept.
 _BASH_MAX_TIMEOUT_MS = (50 + 5) * 60 * 1000
 
 
 def _raise_bash_tool_timeouts(env: dict) -> None:
-    """Make sure the Bash tool lets a foreground `aee-wait-ci` run to its end."""
-    for key, floor in (("BASH_DEFAULT_TIMEOUT_MS", _BASH_DEFAULT_TIMEOUT_MS),
-                       ("BASH_MAX_TIMEOUT_MS", _BASH_MAX_TIMEOUT_MS)):
-        try:
-            current = int(env.get(key) or 0)
-        except ValueError:
-            current = 0
-        env[key] = str(max(current, floor))
+    """Let the Bash tool grant a foreground `aee-wait-ci` its full wait when asked."""
+    try:
+        current = int(env.get("BASH_MAX_TIMEOUT_MS") or 0)
+    except ValueError:
+        current = 0
+    env["BASH_MAX_TIMEOUT_MS"] = str(max(current, _BASH_MAX_TIMEOUT_MS))
 
 
 def _ask_sentinel_path(invocation_id: str) -> Path:

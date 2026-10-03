@@ -11,6 +11,10 @@ need to know, before you continue in this same turn, whether your PR is green
 or conflicting. Never wrap it (or any CI wait) in a background shell or Task:
 background work is killed when your turn ends.
 
+Give the Bash tool call an explicit timeout of the wait plus 5 minutes
+(1500000 ms for the default 20 minutes, at most 3300000): the tool's own
+default stays at 2 minutes (#2815) and would move the wait to the background.
+
 Arguments:
   <pr>                    the pull request: a number (`123`, `#123`) or its URL
   --repo <name>           the repository: a clone directory in your workspace

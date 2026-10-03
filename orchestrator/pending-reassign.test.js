@@ -463,6 +463,30 @@ test("AC8: the description degrades to a sentence rather than throwing on a bare
   assert.match(prOnly.text, /#7/);
 });
 
+test("#2799 AC9: a linked PR's description names its closing issue(s) in the Event Log wording", () => {
+  const prEntry = (closesIssues) => ({
+    github: {
+      repo: "org/repo", event: "pull_request.labeled",
+      payload: { label: { name: "revisions-required" }, pull_request: { number: 2798, closesIssues } },
+    },
+  });
+  const w = describeEntryWorkItem(prEntry([15, 12, 15]));
+  assert.equal(w.text, "org/repo#2798 → closes #12, #15 · label 'revisions-required' · pull_request.labeled");
+  assert.deepEqual(w.closesIssues, [12, 15]);
+  assert.equal(w.number, 2798);
+
+  // Unlinked / malformed → byte-identical to before, no closesIssues key.
+  const plain = "org/repo#2798 · label 'revisions-required' · pull_request.labeled";
+  for (const bad of [undefined, [], "2794", [0, -1, "3", 1.5]]) {
+    const u = describeEntryWorkItem(prEntry(bad));
+    assert.equal(u.text, plain);
+    assert.equal("closesIssues" in u, false);
+  }
+  // An issue entry never gets the suffix.
+  const issue = describeEntryWorkItem({ github: { payload: { issue: { number: 5, closesIssues: [7] } } } });
+  assert.equal(issue.text, "#5");
+});
+
 test("ghEventFromEntry is a rename of the poller's own projection, not a reconstruction", () => {
   const ev = ghEventFromEntry(queuedEntry());
   assert.equal(ev.id, "ev-2102");

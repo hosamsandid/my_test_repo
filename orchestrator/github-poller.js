@@ -1731,7 +1731,22 @@ class GitHubPoller {
 
     for (const plan of plans) {
       if (plan.mode === 'digest') {
-        this._enqueueDigest(plan.agentId, plan.convKey, plan.items);
+        // #2799: name the PR conversation's linked issue(s) in the digest DM.
+        // Enriches through the SAME per-event-id cache the log loop below fills
+        // for every PR event anyway, so this adds no GitHub request.
+        const closes = new Set();
+        for (const it of plan.items) {
+          if (typeof it.key !== 'string' || !it.key.startsWith('pull_request')) continue;
+          if (!enrichedPayloads.has(it.ghEvent.id)) {
+            enrichedPayloads.set(
+              it.ghEvent.id,
+              await this._enrichPullRequestPayload(it.key, it.ghEvent.payload, token),
+            );
+          }
+          const linked = enrichedPayloads.get(it.ghEvent.id)?.pull_request?.closesIssues;
+          if (Array.isArray(linked)) for (const n of linked) closes.add(n);
+        }
+        this._enqueueDigest(plan.agentId, plan.convKey, plan.items, [...closes].sort((a, b) => a - b));
         for (const it of plan.items) {
           it.outcome.status = 'delivered';
           it.outcome.digest = true;
@@ -1850,7 +1865,9 @@ class GitHubPoller {
   // through the Layer-3 throttle: the digest IS the anti-flood response, so it
   // must always reach the agent. The runtime posts it as a plain DM (no LLM
   // call), mirroring the throttle-warning delivery.
-  _enqueueDigest(agentId, convKey, items) {
+  // `closesIssues` (#2799) — the PR conversation's linked issue(s), carried
+  // along because the digest has no payload; omitted when none is known.
+  _enqueueDigest(agentId, convKey, items, closesIssues = []) {
     const events = items.map((it) => ({
       event: it.key,
       eventId: it.ghEvent.id,
@@ -1866,6 +1883,7 @@ class GitHubPoller {
       count: events.length,
       triggerIds,
       events,
+      ...(closesIssues.length ? { closesIssues } : {}),
     });
     console.log(
       `[GH-Poller] burst-digest: ${events.length} events → agent=${agentId} ` +

@@ -204,7 +204,8 @@ You cannot drag a node to a new position — you change the *layout* by changing
 the flow (or by assigning stages, below).
 
 The small control row over the canvas is view-only and changes nothing about
-the flow: **Fit** the whole graph to the view, **Expand all** / **Collapse all**
+the flow: **Fit** the whole graph to the view (above the legend, so the legend
+never covers a node), **Expand all** / **Collapse all**
 agent nodes, flip the flow direction between top-down and left-right, show or
 hide **archived** agents, and turn **stage** banding on or off.
 

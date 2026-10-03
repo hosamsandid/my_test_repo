@@ -674,6 +674,10 @@ dropped with the reason. On a *wake-already-armed*, *throttle* or
 now with the same prompt. Refused if the item is merged/closed, the wake label
 is gone, or it was already re-fired.
 
+A pull request linked to an issue reads `#2798 → closes #2794 <title>` here and
+in the **Fire again** dialog — the same `→ closes #N` the chat's
+`⚡ Trigger fired — …` notice carries — so you can search by the issue number.
+
 ## Outcomes — what the agent signals when a run ends
 
 An **outcome** is the signal a run ends with: a *condition* in plain language

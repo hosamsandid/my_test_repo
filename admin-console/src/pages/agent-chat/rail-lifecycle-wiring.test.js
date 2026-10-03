@@ -472,3 +472,24 @@ test('a team the caller may see but not manage gets a read-only notice, never an
   assert.match(agentChat, /canManage \? \(\s*<AgentSettingsPanel/);
   assert.match(agentChat, /<TeamReadOnlyNotice team=\{team\} \/>/);
 });
+
+test('#2685 review S1/B1 — the delete re-checks a team delete against a fresh config list', () => {
+  const start = host.indexOf('async function confirmDelete(');
+  assert.ok(start > 0, 'confirmDelete not found — re-point this guard');
+  const body = host.slice(start, host.indexOf('\n  async function ', start + 1)).replace(/\s+/g, ' ');
+  // A team delete (the id differs from the target's own) triggers a fresh read…
+  assert.match(body, /if \(deleteRequestId\(deleteTarget, deleteTeamToo\) !== deleteTarget\.id\) \{ try \{ fresh = await apiCall\('GET', '\/api\/agents'\);/);
+  // …the sent id comes from resolveDeleteRequest over that fresh list…
+  assert.match(body, /const \{ id: deleteId, keptTeam \} = resolveDeleteRequest\(deleteTarget, deleteTeamToo, fresh\);/);
+  assert.match(body, /apiCall\('DELETE', `\/api\/agents\/\$\{encodeURIComponent\(deleteId\)\}`\)/);
+  assert.equal((body.match(/apiCall\('DELETE'/g) || []).length, 1, 'exactly one DELETE, and it uses the resolved id');
+  // …and a kept team is reported, not silent.
+  assert.match(body, /const kept = teamKeptNotice\(keptTeam\);/);
+  assert.match(body, /else if \(kept\) setActionError\(kept\);/);
+});
+
+test('#2685 review S1 — the "delete the team too" checkbox resets to ticked whenever the dialog opens', () => {
+  assert.match(host, /const \[deleteTeamToo, setDeleteTeamToo\] = useState\(true\);/);
+  assert.match(host, /useEffect\(\(\) => \{ if \(deleteTarget\) setDeleteTeamToo\(true\); \}, \[deleteTarget\]\);/);
+  assert.match(host, /renderDeleteMessage\(deleteTarget, \{ deleteTeamToo, onDeleteTeamTooChange: setDeleteTeamToo \}\)/);
+});

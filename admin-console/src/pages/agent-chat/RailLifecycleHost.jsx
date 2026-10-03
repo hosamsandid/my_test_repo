@@ -23,6 +23,8 @@ import RowContextMenu from '../../components/RowContextMenu.jsx';
 import {
   deleteTargetFor,
   deleteRequestId,
+  resolveDeleteRequest,
+  teamKeptNotice,
   existingIds as existingIdsOf,
   importedAgentFilterNote,
   mergeAgentConfigs,
@@ -291,10 +293,21 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
       // See Agents.jsx: `cascadeWarnings` names the members a team delete could
       // not remove. Same helper on both surfaces so the two never word the same
       // residue differently (#1960 AC2).
-      const result = await apiCall('DELETE', `/api/agents/${encodeURIComponent(deleteRequestId(deleteTarget, deleteTeamToo))}`);
+      // #2685 review B1: the rail's list may lack disabled members, and a team
+      // delete cascades — so a team delete is re-checked against a fresh read
+      // of every config before it is sent.
+      let fresh = null;
+      if (deleteRequestId(deleteTarget, deleteTeamToo) !== deleteTarget.id) {
+        try { fresh = await apiCall('GET', '/api/agents'); } catch { /* resolved as unverified: member only */ }
+      }
+      const { id: deleteId, keptTeam } = resolveDeleteRequest(deleteTarget, deleteTeamToo, fresh);
+      const result = await apiCall('DELETE', `/api/agents/${encodeURIComponent(deleteId)}`);
       setDeleteTarget(null);
       const residue = cascadeResidueNotice(result);
+      const kept = teamKeptNotice(keptTeam);
+      // Mutually exclusive: residue comes from a team delete, `kept` from a member-only one.
       if (residue) setActionError(residue);
+      else if (kept) setActionError(kept);
       refresh();
     } catch (e) {
       setActionError(e.message);

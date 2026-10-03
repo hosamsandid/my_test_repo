@@ -224,7 +224,10 @@ on hover, a right-click, or the **Menu** / **Shift+F10** keys. It carries:
   the **last member of its team** (e.g. a team of one), the confirm says so and
   offers **Also delete the team** (ticked by default; this also removes the
   team's knowledge); untick it to keep the empty team. Without the rights to
-  delete the team, the confirm says it stays.
+  delete the team, the confirm says it stays. Before deleting the team, the
+  console re-reads every agent config; if the team still has another member
+  (for example a disabled one hidden from the list), only the agent is
+  deleted and a notice says the team was kept.
 - **Clone**, **Export (ZIP)** and **Save as template** — copy this agent, take a
   copy away, or turn it into a reusable template.
 - A group header carries the team-wide equivalents: **Enable/Disable** for the

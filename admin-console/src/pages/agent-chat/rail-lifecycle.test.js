@@ -10,6 +10,8 @@ import {
   existingIds,
   deleteTargetFor,
   deleteRequestId,
+  resolveDeleteRequest,
+  teamKeptNotice,
   isTeamLocked,
   importedAgentFilterNote,
   railMenuItems,
@@ -217,6 +219,38 @@ test('#2685 — deleteRequestId deletes the team (cascading the member) only whe
   assert.equal(deleteRequestId(deleteTargetFor(AGENTS[3], AGENTS), true), 'alpha-dev');
   assert.equal(deleteRequestId(deleteTargetFor(AGENTS[2], AGENTS), true), 'alpha');
   assert.equal(deleteRequestId(null, true), null);
+});
+
+test('#2685 review B1 — a member hidden from the chat list keeps the team delete from resolving to the team', () => {
+  // The rail only has the chat payload (configs not loaded, or the load
+  // failed): the disabled sibling `b` is not in it, so the member LOOKS last.
+  const chat = [{ id: 't', role: 'team', displayName: 'T' }, { id: 'a', role: 'team-member', parentTeamId: 't' }];
+  const target = deleteTargetFor(chat[1], mergeAgentConfigs(chat, null));
+  assert.equal(deleteRequestId(target, true), 't', 'precondition: the stale list alone would delete the team');
+
+  // The fresh full config list shows `b`: only the member is deleted.
+  const onDisk = [...chat, { id: 'b', role: 'team-member', parentTeamId: 't', enabled: false }];
+  const hidden = resolveDeleteRequest(target, true, onDisk);
+  assert.equal(hidden.id, 'a');
+  assert.deepEqual(hidden.keptTeam, { id: 't', displayName: 'T', reason: 'members' });
+
+  // The fresh list could not be read: never guess, delete the member only.
+  const unread = resolveDeleteRequest(target, true, null);
+  assert.equal(unread.id, 'a');
+  assert.equal(unread.keptTeam.reason, 'unverified');
+
+  // The fresh list confirms it really is the last member: one team delete.
+  assert.deepEqual(resolveDeleteRequest(target, true, chat), { id: 't', keptTeam: null });
+  // Unticked, or not a last member: the target itself, no fresh list needed.
+  assert.deepEqual(resolveDeleteRequest(target, false, null), { id: 'a', keptTeam: null });
+  assert.deepEqual(resolveDeleteRequest(deleteTargetFor(AGENTS[3], AGENTS), true, null), { id: 'alpha-dev', keptTeam: null });
+  assert.equal(resolveDeleteRequest(null, true, onDisk), null);
+});
+
+test('#2685 review B1 — teamKeptNotice says why the team stayed', () => {
+  assert.equal(teamKeptNotice(null), null);
+  assert.match(teamKeptNotice({ id: 't', displayName: 'T', reason: 'members' }), /"T" was kept: it still has other members/);
+  assert.match(teamKeptNotice({ id: 't', reason: 'unverified' }), /"t" was kept: its members could not be checked/);
 });
 
 test('isTeamLocked is true only for a member of a listed, disabled team', () => {

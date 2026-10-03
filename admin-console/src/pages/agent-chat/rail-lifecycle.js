@@ -154,6 +154,41 @@ export function deleteRequestId(target, deleteTeamToo) {
 }
 
 /**
+ * What the delete confirm finally sends, re-checked against a FRESH full
+ * config list (`GET /api/agents`, read right before the delete) — #2685
+ * review B1. The target was computed from the rail's list, which can be the
+ * chat payload alone (configs not loaded yet, or the load failed) and then
+ * leaves out disabled members and members without a token. A team delete
+ * cascades on the server, so it is sent only when the fresh list confirms the
+ * member is still the team's last one; otherwise only the member is deleted
+ * and `keptTeam` says why the team stayed (`'members'`: it has other members;
+ * `'unverified'`: the list could not be read).
+ */
+export function resolveDeleteRequest(target, deleteTeamToo, freshAgents) {
+  if (!target) return null;
+  const id = deleteRequestId(target, deleteTeamToo);
+  if (id === target.id) return { id, keptTeam: null };
+  // Recompute from the bare agent: spreading `target` would carry its stale `lastMemberOf` over.
+  const { lastMemberOf: _stale, children: _children, ...agent } = target;
+  const fresh = Array.isArray(freshAgents) ? deleteTargetFor(agent, freshAgents) : null;
+  if (fresh && fresh.lastMemberOf && fresh.lastMemberOf.id === id) return { id, keptTeam: null };
+  return {
+    id: target.id,
+    keptTeam: { id, displayName: target.lastMemberOf.displayName, reason: fresh ? 'members' : 'unverified' },
+  };
+}
+
+/** The sentence shown after the member was deleted but its team was kept by `resolveDeleteRequest`. */
+export function teamKeptNotice(keptTeam) {
+  if (!keptTeam) return null;
+  const name = `"${keptTeam.displayName ?? keptTeam.id}"`;
+  if (keptTeam.reason === 'members') {
+    return `The team ${name} was kept: it still has other members (for example disabled ones not shown in the list).`;
+  }
+  return `The team ${name} was kept: its members could not be checked. Delete it with "Delete team…" if it is empty.`;
+}
+
+/**
  * The team lock (AC5): a member whose parent team is disabled cannot be enabled
  * on its own — the Agents page renders that toggle disabled, and the chat menu
  * must say the same. A team that is not in the list at all (the opt-in is off,

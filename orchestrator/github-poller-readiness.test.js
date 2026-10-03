@@ -125,6 +125,32 @@ test('first cycle baselines: already-final verdicts are recorded, nobody is woke
   assert.equal(enqueued.length, 0);
 }));
 
+test('a backoff gap of more than 15 min does not swallow a tracked verdict: checks_passed is delivered once', withLog(async () => {
+  const { poller, enqueued } = makePoller();
+  const subs = [subscriber(['pull_request.checks_passed'])];
+  openPrs = [prNode(5, SHA_A)];
+  checksBySha = { [SHA_A]: [running('build')] };
+  await cycle(poller, subs); // baseline: pending, nothing final
+  assert.equal(enqueued.length, 0);
+
+  // The events poll backs off (1 → 2 → 4 → 8 → 16 min): readiness is skipped meanwhile.
+  checksBySha = { [SHA_A]: [ok('build')] };
+  poller.state[REPO].skipUntil = new Date(Date.now() + 60_000).toISOString();
+  calls = [];
+  await cycle(poller, subs);
+  assert.equal(calls.length, 0, 'nothing read while backing off');
+  assert.equal(enqueued.length, 0);
+
+  // GitHub is back, the last evaluation is now more than 15 minutes old.
+  delete poller.state[REPO].skipUntil;
+  poller.state[REPO].readiness.lastEvaluatedAt = new Date(Date.now() - 16 * 60_000).toISOString();
+  await cycle(poller, subs);
+  assert.equal(enqueued.length, 1);
+  assert.equal(enqueued[0].entry.github.event, 'pull_request.checks_passed');
+  await cycle(poller, subs);
+  assert.equal(enqueued.length, 1, 'exactly once');
+}));
+
 test('AC6/AC8: checks_passed wakes the subscriber exactly once, with PR, head SHA and verdict, and is logged', withLog(async () => {
   const { poller, enqueued } = makePoller();
   const subs = [subscriber(['pull_request.checks_passed'])];

@@ -155,9 +155,28 @@ test('baseline: the first evaluation records final verdicts without emitting', (
   assert.equal(out.baseline, true);
   assert.deepEqual(out.emits, []);
   assert.deepEqual(out.state.prs[1].emitted.sort(), ['pull_request.checks_passed', 'pull_request.merge_conflict']);
-  // A stale state (orchestrator down a while) is re-baselined as well.
-  assert.equal(r.needsBaseline(live({}, T0), T0 + r.BASELINE_GAP_MS + 1), true);
-  assert.equal(r.needsBaseline(live({}, T0), T0 + 30_000), false);
+  // Only a missing state baselines — never a time gap (see the B1 test below).
+  assert.equal(r.needsBaseline(null), true);
+  assert.equal(r.needsBaseline(live({}, T0)), false);
+});
+
+test('no re-baseline after a gap: a tracked pending head that turned green during a long outage emits exactly once', () => {
+  const state = live({
+    5: { sha: SHA_A, headSeenAt: T0, ci: 'pending', merge: 'clean', failingChecks: [], emitted: [] },
+  }, T0);
+  const later = T0 + 16 * 60_000;
+  const out = r.evaluateReadiness({
+    state, prs: [pr(5, SHA_A)], checks: checksFor(SHA_A, [run('b', 'COMPLETED', 'SUCCESS')]), now: later,
+  });
+  assert.equal(out.baseline, false);
+  assert.equal(out.emits.length, 1);
+  assert.equal(out.emits[0].key, 'pull_request.checks_passed');
+  assert.equal(out.emits[0].sha, SHA_A);
+  // Delivered once — the next pass (however late) stays silent.
+  const again = r.evaluateReadiness({
+    state: out.state, prs: [pr(5, SHA_A)], checks: checksFor(SHA_A, [run('b', 'COMPLETED', 'SUCCESS')]), now: later + 60 * 60_000,
+  });
+  assert.deepEqual(again.emits, []);
 });
 
 test('AC1/AC6: checks complete → one checks_passed for (PR, head), never again', () => {

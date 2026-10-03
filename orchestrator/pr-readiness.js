@@ -51,13 +51,6 @@ function ciGraceMs(env = process.env) {
   return Number.isFinite(n) && n >= 0 ? n : DEFAULT_CI_GRACE_MS;
 }
 
-// A repository whose readiness was last evaluated longer ago than this (or
-// never) is re-baselined: verdicts already final on that pass are recorded as
-// delivered without waking anyone, so subscribing to the keys (or an
-// orchestrator that was down for a while) does not replay the state of every
-// open PR as if it had just happened.
-const BASELINE_GAP_MS = 15 * 60_000;
-
 // Upper bound on open PRs read per repository per cycle (one GraphQL page).
 const MAX_OPEN_PRS = 100;
 // Upper bound on checks read per head commit (one GraphQL page).
@@ -197,11 +190,16 @@ function parseChecks(data, shas) {
   return out;
 }
 
-// Is the stored readiness state too old to continue from (see BASELINE_GAP_MS)?
-function needsBaseline(state, now = Date.now()) {
-  if (!state || typeof state !== 'object' || !state.prs || typeof state.prs !== 'object') return true;
-  const last = Date.parse(state.lastEvaluatedAt || '');
-  return !Number.isFinite(last) || now - last > BASELINE_GAP_MS;
+// A repository with no stored readiness state (first evaluation, or the last
+// subscriber left and the state was dropped) is baselined: verdicts already
+// final on that pass are recorded as delivered without waking anyone, so
+// subscribing to the keys does not replay the state of every open PR as if it
+// had just happened. A stored state is never re-baselined because of a time
+// gap: after an outage or a backoff, a tracked head whose verdict became final
+// meanwhile emits normally (the events poller backfills the same way); the
+// history horizon, throttle and burst digest guard against a flood.
+function needsBaseline(state) {
+  return !state || typeof state !== 'object' || !state.prs || typeof state.prs !== 'object';
 }
 
 // The head commits whose checks must be read this cycle: a head not tracked
@@ -228,7 +226,7 @@ function shasToRead(state, prs) {
 // head, and nothing for a closed/merged PR (it is simply dropped). On a
 // baseline pass (needsBaseline) verdicts are recorded but nothing is emitted.
 function evaluateReadiness({ state, prs, truncated = false, checks = null, now = Date.now(), graceMs = DEFAULT_CI_GRACE_MS } = {}) {
-  const baseline = needsBaseline(state, now);
+  const baseline = needsBaseline(state);
   const prev = (state && state.prs) || {};
   const nextPrs = {};
   const emits = [];
@@ -311,7 +309,6 @@ function readinessEvent(repoFullName, emit, now = Date.now()) {
 module.exports = {
   READINESS_EVENT_KEYS,
   DEFAULT_CI_GRACE_MS,
-  BASELINE_GAP_MS,
   MAX_OPEN_PRS,
   MAX_CHECKS,
   OPEN_PRS_QUERY,

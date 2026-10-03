@@ -1160,3 +1160,26 @@ a fresh instance without the session. An instance now has a persisted
 - **Cost**: a waiting instance keeps its container for as long as the PR stays
   open; there is no upper bound on the wait besides merging/closing the PR or
   a manual delete.
+
+## Amendment 15 — instances are not Flow Editor nodes (#2814)
+
+The live graph builders drew every auto-scaled instance as its own node with a
+copy of its role's inbound edges, so a live pooled team looked as if it had an
+extra role, and the live export carried a phantom role.
+
+- **Server**: `GET /api/process/graph`, `GET /api/flows/graph` and the live
+  export `GET /api/process/template` (also read by *Edit as draft*) share
+  `admin-console/api/live-graph-members.js#isLiveGraphMember`, which leaves out
+  the team holder and any config with `poolInstance: true`. The filter is the
+  config flag, never the id shape — a hand-created member named `…-i3` stays a
+  role. Lints, the human-touchpoint count and Flow Copilot's member list follow.
+- **pool-control**: each `roles[]` row of `GET /internal/teams/:id/pool-control`
+  adds `instances: [{instanceId, item, status}]` — every live instance, sorted
+  by item then id, `item` `null` for an instance without one, `status`
+  `running` / `waiting` / `timed-out`. It is built by
+  `pool-instance-lanes.js#liveInstanceRows` with the same status rule
+  (`instanceStatus`) as the instance lanes and the hard-timeout reaper.
+- **UI**: a pooled role's node carries an **n running** badge (counting all
+  three statuses) and its Node Inspector lists *#item · status* per instance;
+  nothing is shown while the role has no live instance. Flow anomalies
+  attributed to an instance are counted on its role's node (`poolOf`).

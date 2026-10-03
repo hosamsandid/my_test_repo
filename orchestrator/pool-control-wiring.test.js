@@ -194,6 +194,14 @@ test("GET /internal/teams/:teamId/pool-control returns roles (with live control 
   assert.match(body, /admissionControl\.heldIdentity\(h\.agentId, h\.entry\)/);
 });
 
+test("#2814: GET pool-control lists each role's live instances with the lane view's own read and status rule", () => {
+  const start = SRC.indexOf("const poolControlGetMatch =");
+  const body = SRC.slice(start, SRC.indexOf("const poolControlSetMatch ="));
+  assert.match(body, /instances: poolInstanceLanes\.liveInstanceRows\(\{/);
+  assert.match(body, /_liveInstancesForWithWaiting\(role\.id, poolWaiting\)/);
+  assert.match(body, /maxRuntimeMs: role\.pool\.teardown\.maxRuntimeMs/);
+});
+
 test("POST /internal/teams/:teamId/pool-control/:roleId validates the role is actually a pooled role of THIS team before writing", () => {
   const start = SRC.indexOf("const poolControlSetMatch =");
   assert.ok(start > 0, "poolControlSetMatch route not found");

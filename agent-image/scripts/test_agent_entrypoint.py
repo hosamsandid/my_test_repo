@@ -391,6 +391,9 @@ _FAKE_CLAUDE = r'''#!/usr/bin/env python3
 import json, os, subprocess, sys, time
 sys.stdin.read()
 mode = os.environ.get("FAKE_CLAUDE_MODE", "obey")
+if os.environ.get("FAKE_ENV_DUMP"):
+    with open(os.environ["FAKE_ENV_DUMP"], "w") as fh:
+        fh.write(os.environ.get("AEE_RUN_DEADLINE", ""))
 def out(obj):
     sys.stdout.write(json.dumps(obj) + "\n"); sys.stdout.flush()
 def tool_use(tid, cmd):
@@ -562,6 +565,21 @@ class AeeAskEndToEnd(unittest.TestCase):
         q = ctx["_askQuestion"]["questions"][0]
         self.assertIs(q["multiSelect"], True)  # rendered as toggles + Submit
         self.assertEqual([o["label"] for o in q["options"]], ["unit", "e2e"])
+
+    def test_run_deadline_is_handed_to_the_turn_for_aee_wait_ci(self):
+        # #2796: aee-wait-ci caps its wait by AEE_RUN_DEADLINE (epoch seconds
+        # at which this invocation's watchdog kills claude).
+        dump = self.workdir / "deadline"
+        os.environ["FAKE_ENV_DUMP"] = str(dump)
+        try:
+            before = time.time()
+            self._run(["Proceed?", "--option", "yes"])
+            after = time.time()
+        finally:
+            os.environ.pop("FAKE_ENV_DUMP", None)
+        deadline = int(dump.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(deadline, int(before + 60))
+        self.assertLessEqual(deadline, int(after + 60))
 
     def test_turn_is_hard_ended_before_any_follow_up_tool_runs(self):
         marker = self.workdir / "followup-ran"

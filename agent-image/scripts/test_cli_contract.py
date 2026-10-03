@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Shared CLI-contract conformance test (#1522).
 
-Exercises the six built-in agent CLIs — `aee-artifact`, `aee-emit`
-(deprecated shim, #2578), `aee-wake`, `aee-ask`, `knowledge`, `gh-as-agent` — against the one shared contract documented in
+Exercises the built-in agent CLIs — `aee-artifact`, `aee-emit`
+(deprecated shim, #2578), `aee-wake`, `aee-ask`, `aee-wait-ci` (#2796),
+`knowledge`, `gh-as-agent` — against the one shared contract documented in
 `docs/cli-contract.md` (concept `docs/plugin-system-concept.md` §4.5):
 
   * Discovery: `--help` / `-h` / `help` / bare invocation → exit 0 with the
@@ -39,6 +40,7 @@ CLIS = {
     "aee-emit": [sys.executable, str(SCRIPTS / "aee-emit")],
     "aee-wake": [sys.executable, str(SCRIPTS / "aee-wake")],
     "aee-ask": [sys.executable, str(SCRIPTS / "aee-ask")],
+    "aee-wait-ci": [sys.executable, str(SCRIPTS / "aee-wait-ci")],
     "knowledge": [sys.executable, str(SCRIPTS / "knowledge")],
     "gh-as-agent": ["bash", str(SCRIPTS / "gh-as-agent")],
 }
@@ -90,6 +92,7 @@ class UsageErrors(unittest.TestCase):
             ("aee-emit", ["ready"]),            # label but no --issue/--pr target
             ("aee-wake", ["--to"]),             # --to with no value
             ("aee-ask", ["Which?"]),            # question but no --option
+            ("aee-wait-ci", ["7", "--timeout"]),  # --timeout with no value
             ("aee-artifact", ["add", "only-name"]),  # missing <path>
             ("knowledge", ["add"]),             # missing <kind> <text>
             ("gh-as-agent", ["pr"]),            # missing --title (before any network)

@@ -1553,6 +1553,8 @@ _ASK_USER_QUESTION_TOOL = "AskUserQuestion"
 # path) so a concurrent DM turn and trigger run in the same container can never
 # pick up each other's question.
 _ASK_FILE_ENV = "AEE_ASK_FILE"
+# Epoch seconds by which this invocation is killed (#2796, read by aee-wait-ci).
+_RUN_DEADLINE_ENV = "AEE_RUN_DEADLINE"
 
 
 def _ask_sentinel_path(invocation_id: str) -> Path:
@@ -3565,6 +3567,9 @@ def _call_claude_once_inner(prompt: str, room_id: str, correlation_id: str,
     ask_sentinel = _ask_sentinel_path(f"{correlation_id or 'run'}-{uuid.uuid4().hex[:8]}")
     _clear_ask_sentinel(ask_sentinel)
     env[_ASK_FILE_ENV] = str(ask_sentinel)
+    # Run deadline (#2796): `aee-wait-ci` caps its in-turn CI wait so it ends
+    # before this invocation's own timeout, with room left to act on the verdict.
+    env[_RUN_DEADLINE_ENV] = str(int(time.time() + timeout_sec))
 
     # Git context for the usage record (#654): capture HEAD before the run so the
     # record can show what this invocation moved. Best-effort — never blocks the run.

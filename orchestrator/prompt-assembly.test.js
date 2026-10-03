@@ -155,6 +155,32 @@ test('the wait-for-an-external-event advice is autonomous-only', () => {
   assert.ok(auto.startsWith(plain)); // autonomous = core + advice appended
 });
 
+test('#2796: with a repository the section steers an in-turn CI wait to aee-wait-ci', () => {
+  for (const autonomous of [true, false]) {
+    const md = backgroundTasksSection(autonomous, true);
+    assert.match(md, /`aee-wait-ci <pr>` in the \*\*foreground\*\*/);
+    assert.match(md, /Never wait for CI in a background shell/);
+    assert.match(md, /--repo <clone-dir>/);
+    assert.ok(md.startsWith(backgroundTasksSection(autonomous, false).split('\n\nTo wait')[0]));
+  }
+  // Unattended flows are pointed at the hand-off gate (autonomous only).
+  assert.match(backgroundTasksSection(true, true), /readinessGate/);
+  assert.doesNotMatch(backgroundTasksSection(false, true), /readinessGate/);
+  // No repository → no CI-wait steer (nothing to wait for).
+  assert.doesNotMatch(backgroundTasksSection(true, false), /aee-wait-ci/);
+  assert.doesNotMatch(backgroundTasksSection(true), /aee-wait-ci/);
+});
+
+test('#2796: assembleClaudeMd emits the aee-wait-ci steer only when the env has a repository', () => {
+  const withRepo = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', autonomous: true,
+    env: { repositories: [{ url: 'git@github.com:o/r.git' }] },
+  });
+  const noRepo = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null, autonomous: true });
+  assert.match(withRepo, /aee-wait-ci/);
+  assert.doesNotMatch(noRepo, /aee-wait-ci/);
+});
+
 // ---- asking the human (aee-ask, #2523) -------------------------------------
 
 test('Asking the human section is ALWAYS present and steers to aee-ask', () => {

@@ -481,7 +481,12 @@ scripts, stylesheets, fonts and images do not load, and scripts cannot fetch or
 send anything. Ticked, it may load from any
 host. Either way the page runs isolated from Agent Studio: it cannot read your
 session, the console or other agents' data. A banner above the preview says
-so, and also says whether external resources are on. Do not enter passwords
+so, and also says whether external resources are on. Because of that
+isolation the page has no real browser storage; it gets a temporary in-memory
+stand-in instead (local and session storage, cookies), so pages that remember a
+setting such as a light/dark theme still render and work. That storage is
+empty every time you open the preview and is gone when you close it — nothing
+is kept between openings or shared between files. Do not enter passwords
 or credentials into a preview. Relative links to other workspace files (images,
 stylesheets) do not load. A page that navigates away (a link or a redirect)
 closes the preview back to source, but the address it navigated to has

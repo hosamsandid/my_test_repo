@@ -34,6 +34,7 @@ const maintenanceMode = require('./maintenance-mode');
 const { detectRasterImageType, imageContentType } = require('./image-type');
 const {
   HTML_PREVIEW_MAX_BYTES, wantsExternalResources, htmlPreviewHeaders, htmlPreviewRefusal,
+  withStorageShim,
 } = require('./html-preview');
 const { discoverBoundAgents, hiddenBlastRadius, projectRespawnOutcome, respawnWithConcurrency } = require('./respawn-agents');
 const { githubApiBase } = require('./github-api-base');
@@ -6359,8 +6360,9 @@ app.get('/api/agents/:agentId/context/html-preview', apiLimiter, async (req, res
   const size = body.truncated ? Infinity : (typeof body.size === 'number' ? body.size : buf.length);
   const refusal = htmlPreviewRefusal({ relPath: String(body.path || relPath), size, head: buf });
   if (refusal) return res.status(refusal.status).json({ error: refusal.error, code: refusal.code });
-  res.set(htmlPreviewHeaders({ external: wantsExternalResources(req.query), size: buf.length }));
-  res.end(buf);
+  const page = withStorageShim(buf);
+  res.set(htmlPreviewHeaders({ external: wantsExternalResources(req.query), size: page.length }));
+  res.end(page);
 });
 
 // Raw download. Capped by the orchestrator (the bytes travel base64 through an
@@ -20714,8 +20716,9 @@ app.get('/api/agents/:agentId/workspace/html-preview', apiLimiter, (req, res) =>
   const refusal = htmlPreviewRefusal({ relPath: target, size: st.size, head: buf });
   if (refusal) return res.status(refusal.status).json({ error: refusal.error, code: refusal.code });
 
-  res.set(htmlPreviewHeaders({ external: wantsExternalResources(req.query), size: buf.length }));
-  res.end(buf);
+  const page = withStorageShim(buf);
+  res.set(htmlPreviewHeaders({ external: wantsExternalResources(req.query), size: page.length }));
+  res.end(page);
 });
 
 // Raw file download — streams the full file with Content-Disposition: attachment

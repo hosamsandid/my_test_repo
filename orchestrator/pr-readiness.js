@@ -34,6 +34,7 @@
 // file shared with the in-container `aee-wait-ci` CLI (#2796), so the poller,
 // the hand-off gate and an agent's in-turn wait can never disagree.
 const RULES = require('./pr-readiness-rules.json');
+const { parseCloses } = require('./pr-events-log');
 
 const READINESS_EVENT_KEYS = Object.freeze([
   'pull_request.checks_passed',
@@ -73,7 +74,7 @@ const MERGE_CONFLICT = new Set(RULES.mergeable.conflict);
 
 const OPEN_PRS_QUERY = 'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){'
   + `pullRequests(states:OPEN,first:${MAX_OPEN_PRS},orderBy:{field:UPDATED_AT,direction:DESC}){`
-  + 'pageInfo{hasNextPage} nodes{number title url headRefName headRefOid baseRefName mergeable isCrossRepository '
+  + 'pageInfo{hasNextPage} nodes{number title url body headRefName headRefOid baseRefName mergeable isCrossRepository '
   // #2795: the current labels, so a held hand-off sees its wake label removed.
   + `labels(first:${MAX_LABELS}){nodes{name}}}}}}`;
 
@@ -154,6 +155,8 @@ function parseOpenPrs(data) {
       sha: n.headRefOid.toLowerCase(),
       title: typeof n.title === 'string' ? n.title : null,
       url: typeof n.url === 'string' ? n.url : null,
+      // #2799: only read to derive the linked issue(s) for the synthetic event.
+      body: typeof n.body === 'string' ? n.body : null,
       headRef: typeof n.headRefName === 'string' ? n.headRefName : null,
       baseRef: typeof n.baseRefName === 'string' ? n.baseRefName : null,
       mergeable: typeof n.mergeable === 'string' ? n.mergeable : null,
@@ -292,9 +295,15 @@ function evaluateReadiness({ state, prs, truncated = false, checks = null, now =
 // A synthetic Events-API-shaped PullRequestEvent for one emit, so the poller's
 // fan-out keys it (`pull_request.<action>`), routes it to the PR's conversation
 // and logs it like a polled event. The id is unique per (PR, head, verdict).
+//
+// #2799: `closesIssues` is derived here with the shared `parseCloses` (body +
+// `issue-N` branch) from the body the open-PR query already returned, so the
+// notice names the linked issue without an extra request. The body itself is
+// not carried on the event.
 function readinessEvent(repoFullName, emit, now = Date.now()) {
   const action = emit.key.slice('pull_request.'.length);
   const { pr } = emit;
+  const closesIssues = parseCloses(pr.body, pr.headRef);
   return {
     id: `readiness:${pr.number}:${emit.sha}:${action}`,
     type: 'PullRequestEvent',
@@ -309,6 +318,7 @@ function readinessEvent(repoFullName, emit, now = Date.now()) {
         ...(pr.url ? { html_url: pr.url } : {}),
         head: { ref: pr.headRef, sha: emit.sha },
         base: { ref: pr.baseRef },
+        ...(closesIssues.length ? { closesIssues } : {}),
       },
       readiness: {
         headSha: emit.sha,

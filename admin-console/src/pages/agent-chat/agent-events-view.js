@@ -141,11 +141,20 @@ export function sessionCorrelationId(row) {
   return buildTriggerCorrelationId(row.triggerId, row.eventId);
 }
 
-// Work-item cell text: "#42 Title".
+// A PR's linked issue(s) in the GitHub Event Log's wording (#2799):
+// " → closes #12, #15", or '' when the row has no usable link.
+function closesText(wi) {
+  if (wi.kind !== 'pr' || !Array.isArray(wi.closesIssues)) return '';
+  const nums = [...new Set(wi.closesIssues.filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b);
+  return nums.length ? ` → closes ${nums.map((n) => `#${n}`).join(', ')}` : '';
+}
+
+// Work-item cell text: "#42 Title"; a linked PR reads "#42 → closes #7 Title".
 export function workItemText(row) {
   const wi = row && row.workItem;
   if (!wi || wi.number == null) return '';
-  return wi.title ? `#${wi.number} ${wi.title}` : `#${wi.number}`;
+  const ref = `#${wi.number}${closesText(wi)}`;
+  return wi.title ? `${ref} ${wi.title}` : ref;
 }
 
 // The confirm dialog (AC5a): names the reason in plain language; for

@@ -6951,10 +6951,13 @@ class TriggerScheduler:
         if not isinstance(count, int) or count <= 0:
             count = len(events)
         conv = entry.get("convKey") or "?"
+        # #2799: the poller carries the PR conversation's linked issue(s) on the
+        # entry; name them so a search for the issue number finds the digest.
+        closes = self._closes_text(self._closes_issues(entry.get("closesIssues")))
 
         lines = [
             f"⚠️ **Event burst clamped** — {count} GitHub events on "
-            f"`{conv}` in one poll cycle. Collapsing them into this digest "
+            f"`{conv}`{closes} in one poll cycle. Collapsing them into this digest "
             f"instead of starting **{count}** separate sessions.",
             "",
         ]
@@ -7023,6 +7026,29 @@ class TriggerScheduler:
     ])
 
     @staticmethod
+    def _closes_issues(value) -> list[int]:
+        """The PR's linked issue numbers (#2799), normalised for display.
+
+        Reads the ``closesIssues`` list the orchestrator already resolved
+        (poller enrichment, label fast-path, re-fire — pr-events-log.js
+        ``parseCloses``); never derives a link itself. Keeps positive ints only
+        (bools excluded), de-duplicated and ascending, so an absent, empty or
+        malformed value yields ``[]`` and the caller's text stays unchanged.
+        """
+        if not isinstance(value, list):
+            return []
+        nums = {n for n in value if isinstance(n, int) and not isinstance(n, bool) and n > 0}
+        return sorted(nums)
+
+    @staticmethod
+    def _closes_text(numbers: list[int]) -> str:
+        """`` → closes #12, #15`` — the GitHub Event Log's wording (#1833), or
+        ``""`` when there is no linked issue."""
+        if not numbers:
+            return ""
+        return " → closes " + ", ".join(f"#{n}" for n in numbers)
+
+    @staticmethod
     def _github_event_detail(event_key: str, payload: dict) -> tuple[str, str] | None:
         """Best-effort `(plain, html)` detail for a `github-event` trigger notice.
 
@@ -7037,19 +7063,28 @@ class TriggerScheduler:
         ``<a href="url">#N</a>``) and ``: <title>`` is appended only when a title
         is present. A missing title therefore never wipes out the number and
         link (the old all-or-nothing gate); it degrades to ``#N`` + link.
+
+        A PR linked to issue(s) (#2799) carries `` → closes #M`` right after its
+        number (plain ``#N → closes #M (url)``, html ``<a>#N</a> → closes #M``),
+        so a search for the issue number finds the run. Unlinked → unchanged.
         """
         try:
             item = None
+            is_pr = False
             if event_key.startswith("issues."):
                 item = payload.get("issue")
             elif event_key.startswith("pull_request.") or event_key.startswith("pull_request_review."):
                 item = payload.get("pull_request")
+                is_pr = True
             if isinstance(item, dict):
                 number, title, url = item.get("number"), item.get("title"), item.get("html_url")
                 if number is not None and url:
                     nref = f"#{number}"
-                    plain = f"{nref} ({url})"
-                    link_html = f'<a href="{html.escape(str(url), quote=True)}">{html.escape(nref)}</a>'
+                    closes = (TriggerScheduler._closes_text(TriggerScheduler._closes_issues(item.get("closesIssues")))
+                              if is_pr else "")
+                    plain = f"{nref}{closes} ({url})"
+                    link_html = (f'<a href="{html.escape(str(url), quote=True)}">{html.escape(nref)}</a>'
+                                 f'{html.escape(closes)}')
                     if title:
                         plain = f"{plain}: {title}"
                         link_html = f"{link_html}: {html.escape(str(title))}"

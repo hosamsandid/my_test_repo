@@ -419,9 +419,15 @@ gets a thumbnail.
 **Answering a question.** When a run pauses to ask you something, the question
 arrives as a card with the options as buttons — click one instead of typing it.
 A card with several questions walks you through them one at a time and sends a
-single consolidated answer at the end, so the agent resumes once. Only the newest
+single consolidated answer at the end, so the agent resumes once. While such a
+card is waiting, the composer reads *Answer question X of N…*: plain text you
+type and send answers the open question (shown under it as *Your own answer*)
+and the card steps on, just as after a click. A message with an attachment, or
+dictated text, is sent as a normal message instead. **Skip remaining questions**
+sends the answers so far with the rest marked *(skipped)*. Only the newest
 unanswered card is clickable; once a later message arrives it goes inert, and
-your earlier choice stays marked.
+your earlier choice stays marked — a multi-question card left unfinished shows
+the questions you reached and a *Not completed* note.
 
 ## The right rail
 

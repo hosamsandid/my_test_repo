@@ -43,6 +43,7 @@ const labelFastPath = require("./github-label-fastpath");
 const { LabelDedupMarkers } = require("./label-dedup-markers");
 const githubEventLog = require("./github-event-log");
 const githubRefire = require("./github-refire");
+const commentFilter = require("./comment-filter");
 const internalAuth = require("./internal-auth");
 
 // Internal-API authentication for :4002 (#1456, GOV-PLATFORM-2). Resolved ONCE
@@ -2079,7 +2080,11 @@ async function refireGithubEvent({ agentId, eventId, triggerId, actor }) {
     }
 
     const detail = await fetchWorkItemRaw(entry.repo, workItem.kind, workItem.number);
-    const state = githubRefire.checkItemState(detail, { kind: workItem.kind, wakeLabel });
+    // #2822: a comment listener's label condition must still hold now.
+    const commentCond = commentFilter.isCommentEvent(entry.event) ? commentFilter.parseCommentFilter(trigger) : null;
+    const state = githubRefire.checkItemState(detail, {
+      kind: workItem.kind, wakeLabel, requireLabel: commentCond ? commentCond.requireLabel : null,
+    });
     if (!state.ok) return { status: state.status, body: { ok: false, code: state.code, error: state.error } };
 
     const now = new Date().toISOString();

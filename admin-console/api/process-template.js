@@ -30,6 +30,7 @@ const {
   outcomesToGithub, outcomeWakePairs,
 } = require('./outcomes');
 const { branchFilterError, parseBranchFilter } = require('./branch-filter');
+const { commentFilterError, commentFilterFields } = require('./comment-filter');
 const { cronExpressionError } = require('./trigger-validate');
 // Legacy `transport` (#2578) — tolerated on input and dropped, never validated.
 const { withoutTransport } = require('./internal-transport-migration');
@@ -512,6 +513,11 @@ function rawTriggerError(t, prev) {
   // rejected rather than silently matching nothing.
   const bfe = branchFilterError(t.branchFilter);
   if (bfe) return bfe;
+  // Comment filters (#2822): requireLabel / skipAgentComments / target, acted
+  // on for `issue_comment.*` only — a malformed value is rejected rather than
+  // silently ignored by the poller.
+  const cfe = commentFilterError(t);
+  if (cfe) return cfe;
   // Hand-off readiness gate (#2795): a PR hand-off only — anywhere else the
   // poller would ignore it and the author would believe the wake is gated.
   if (t.readinessGate !== undefined && t.readinessGate !== null) {
@@ -733,6 +739,9 @@ function bundleTrigger(t, teamId) {
     // on export would silently widen the trigger to every branch.
     const branches = parseBranchFilter(t.branchFilter);
     if (branches.length) out.branchFilter = branches;
+    // Comment filters (#2822) — dropping them on export would widen a comment
+    // listener back to every comment in the repository.
+    Object.assign(out, commentFilterFields(t));
     // Claim (#958) — carried on the portable bundle so the claim survives
     // export → materialise → edit-as-draft. Derived listeners get it re-stamped
     // by the expanders anyway; a hand-authored claim would otherwise be lost.
@@ -1233,6 +1242,8 @@ function templateToCustomRoles(bundle) {
       labelFilter: t.labelFilter,
       // Push branch filter (#2570) — read by the poller from the member config.
       ...(parseBranchFilter(t.branchFilter).length ? { branchFilter: parseBranchFilter(t.branchFilter) } : {}),
+      // Comment filters (#2822) — read by the poller from the member config.
+      ...commentFilterFields(t),
       // Claim (#958) — MUST survive into the member config: this is the field the
       // container runtime (`_claim_plan` in agent-entrypoint.py, #957) reads to
       // swap the wake label for `<wake>:wip`. Dropping it here made the whole
@@ -2221,6 +2232,11 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
       // or a filtered push trigger silently widens back to every branch.
       const branches = parseBranchFilter(tr.branchFilter);
       if (branches.length) out.branchFilter = branches;
+      // Comment filters (#2822). requireLabel is a label name like labelFilter,
+      // so it gets the same `{{var}}` substitution.
+      const cf = commentFilterFields(tr);
+      if (cf.requireLabel) cf.requireLabel = subst(cf.requireLabel);
+      Object.assign(out, cf);
       // Hand-off readiness gate (#2795) — or a gated hand-off wakes immediately.
       if (cleanReadiness(tr.readinessGate)) out.readinessGate = cleanReadiness(tr.readinessGate);
       // Data-flow (agent dependency) marker so the trigger UI renders it as an

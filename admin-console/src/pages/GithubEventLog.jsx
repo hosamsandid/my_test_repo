@@ -666,6 +666,9 @@ const REFUSAL_COPY = {
   'history-horizon': "the event predates its trigger's subscription window",
   'label-filter': 'its trigger subscribes to a different label',
   'branch-filter': 'its trigger only reacts to pushes on other branches',
+  'comment-target': 'its trigger only reacts to comments on the other kind of item',
+  'agent-comment': 'its trigger ignores comments written by agents',
+  'comment-label': 'its trigger only reacts to comments on items carrying another label',
 };
 
 /* ── Label chip for a pending entry (#2101 AC7) ───────────────────

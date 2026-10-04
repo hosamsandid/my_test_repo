@@ -82,6 +82,13 @@ export function dropReasonText(row) {
       const why = producerFilterText(row && row.producer);
       return `${why.charAt(0).toUpperCase()}${why.slice(1)} — this trigger only wakes on pushes by the agents it names.`;
     }
+    // #2822: the comment-listener filters.
+    case 'comment-target':
+      return "The comment was on the other kind of item — this trigger only listens to comments on issues, or only on PRs.";
+    case 'agent-comment':
+      return 'The comment was written by an agent, and this trigger ignores comments written by agents.';
+    case 'comment-label':
+      return `The commented item did not carry ${row.requireLabel ? `the label '${row.requireLabel}'` : 'the required label'}, so the comment was ignored.`;
     // #2795: the PR hand-off's readiness gate decided not to wake the agent.
     case 'gate-failed': {
       const gates = Array.isArray(row.gates) ? row.gates : [];

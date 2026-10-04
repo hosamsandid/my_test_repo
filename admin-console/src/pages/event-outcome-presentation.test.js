@@ -154,6 +154,14 @@ test('#2602 AC4: a knowledge-branch drop reads as the built-in rule, never as br
   assert.doesNotMatch(l, /branch-filter/);
 });
 
+test('#2822: a comment-label drop names the required label', () => {
+  assert.equal(outcomeLabel({ status: 'dropped', reason: 'comment-label', requireLabel: 'clarifying', agentId: 'dev' }),
+    "dropped (item lacks required label 'clarifying') → dev");
+  assert.equal(outcomeLabel({ status: 'dropped', reason: 'comment-label', agentId: 'dev' }),
+    'dropped (item lacks the required label) → dev');
+  assert.equal(outcomeLabel({ status: 'dropped', reason: 'agent-comment', agentId: 'dev' }), 'dropped (agent-comment) → dev');
+});
+
 // #2596: a pooled delivery names the per-ticket instance that ran it.
 test('a pooled delivery names the instance, falling back to its id (AC3)', () => {
   assert.equal(

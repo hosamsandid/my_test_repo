@@ -2751,3 +2751,46 @@ test('pushedBy (#2571 AC1): a push trigger without a filter round-trips without 
   const member = buildMemberFromTemplate(templateToCustomRoles(b)[0], { teamId: 'acme', memberId: 'acme-dev' });
   assert.equal('pushedBy' in member.triggers[0], false);
 });
+
+// ── #2822: comment filters survive every bundle / materialise path ─────────
+
+test('#2822: rawTriggerError rejects a malformed comment filter, accepts a valid one', () => {
+  const { rawTriggerError } = require('./process-template');
+  const base = { id: 'answer', type: 'github-event', events: ['issue_comment.created'] };
+  assert.equal(rawTriggerError({ ...base, requireLabel: 'clarifying', skipAgentComments: true, target: 'issue' }), null);
+  assert.match(rawTriggerError({ ...base, target: 'everything' }), /target/);
+  assert.match(rawTriggerError({ ...base, skipAgentComments: 'true' }), /skipAgentComments/);
+});
+
+test('#2822: comment filters round-trip export → templateToCustomRoles → buildMemberFromTemplate', () => {
+  const filtered = {
+    id: 'spec-answer', type: 'github-event', enabled: true, events: ['issue_comment.created'],
+    requireLabel: 'clarifying', skipAgentComments: true, target: 'issue', prompt: 'Resume.',
+  };
+  const plain = { id: 'spec-any', type: 'github-event', enabled: true, events: ['issue_comment.created'], prompt: 'x' };
+  const bundle = buildProcessTemplate({
+    name: 'x', level: 'template',
+    roles: [{ id: 'spec', displayName: 'Specifier', systemPrompt: 'S', triggers: [filtered, plain] }],
+  });
+  const exported = bundle.roles[0].triggers;
+  assert.deepEqual(
+    (({ requireLabel, skipAgentComments, target }) => ({ requireLabel, skipAgentComments, target }))(exported[0]),
+    { requireLabel: 'clarifying', skipAgentComments: true, target: 'issue' },
+  );
+  for (const k of ['requireLabel', 'skipAgentComments', 'target']) assert.ok(!(k in exported[1]), `${k} absent when unset`);
+
+  const role = templateToCustomRoles(bundle)[0];
+  const tr = role.triggers.find(t => t.id === 'spec-answer');
+  assert.equal(tr.requireLabel, 'clarifying');
+  assert.equal(tr.skipAgentComments, true);
+  assert.equal(tr.target, 'issue');
+
+  const member = buildMemberFromTemplate(
+    { displayName: 'Specifier', triggers: [{ ...filtered, requireLabel: '{{clarifyLabel}}', promptTemplate: 'Resume.' }] },
+    { teamId: 'acme', memberId: 'acme-spec', memberDisplayName: 'Specifier', vars: { repoFullName: 'acme/app', clarifyLabel: 'clarifying-x1' } },
+  );
+  const mt = member.triggers[0];
+  assert.equal(mt.requireLabel, 'clarifying-x1', 'requireLabel gets {{var}} substitution like labelFilter');
+  assert.equal(mt.skipAgentComments, true);
+  assert.equal(mt.target, 'issue');
+});

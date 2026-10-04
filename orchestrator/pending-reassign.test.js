@@ -647,3 +647,21 @@ test("triggerAccepts (#2570): a push trigger's branchFilter refuses a push to an
   assert.equal(triggerAccepts(pushTrigger({}), ctx).ok, true);
   assert.ok(REFUSAL_REASONS["branch-filter"]);
 });
+
+// ── #2822: comment filters, same rule as the poller ─────────────────────────
+
+test("triggerAccepts (#2822): a comment trigger's filters refuse what the poller would drop", () => {
+  const commentEv = (issue, body = "Option B.") => ghEvent({
+    type: "IssueCommentEvent",
+    payload: { action: "created", issue: { number: 4, labels: [], ...issue }, comment: { body } },
+  });
+  const commentTrigger = (over) => trigger({ events: ["issue_comment.created"], labelFilter: undefined, ...over });
+  const ctx = (ev) => ({ eventKey: "issue_comment.created", ghEvent: ev, repo: "org/repo", triggersMtime: null });
+
+  assert.equal(triggerAccepts(commentTrigger({ target: "issue" }), ctx(commentEv({ pull_request: {} }))).reason, "comment-target");
+  assert.equal(triggerAccepts(commentTrigger({ skipAgentComments: true }), ctx(commentEv({}, "q <!-- agent: a -->"))).reason, "agent-comment");
+  assert.equal(triggerAccepts(commentTrigger({ requireLabel: "clarifying" }), ctx(commentEv({}))).reason, "comment-label");
+  assert.equal(triggerAccepts(commentTrigger({ requireLabel: "clarifying" }), ctx(commentEv({ labels: [{ name: "clarifying" }] }))).ok, true);
+  assert.equal(triggerAccepts(commentTrigger({}), ctx(commentEv({ pull_request: {} }, "<!-- agent: a -->"))).ok, true);
+  for (const r of ["comment-target", "agent-comment", "comment-label"]) assert.ok(REFUSAL_REASONS[r]);
+});

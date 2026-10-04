@@ -129,6 +129,7 @@ const knowledgeLinks = require('./knowledge-links');
 const { applyPushedBy } = require('./push-producer-filter');
 const { isLiveGraphMember } = require('./live-graph-members');
 const { normalizeBranchFilter } = require('./branch-filter');
+const { normalizeCommentFilter } = require('./comment-filter');
 const { newTriggerIdError, annotateTriggerList, stripTriggerAnnotations, resolveTriggerIndex } = require('./trigger-validate');
 const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext, normalizeReadinessGate, cleanReadiness, readinessError } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
@@ -6581,6 +6582,8 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   // Push branch filter (#2570): persisted in its normalized array form (or
   // absent = every branch), validated by rawTriggerError above.
   normalizeBranchFilter(newTrigger);
+  // Comment filters (#2822) — stored form, unset keys removed.
+  normalizeCommentFilter(newTrigger);
   // Hand-off readiness gate (#2795) — canonical form, or cleared.
   normalizeReadinessGate(newTrigger);
   // "Pushed by agent" producer filter (#2571): same-team agent ids on push
@@ -6659,6 +6662,8 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   // Push branch filter (#2570) — normalized as on POST; a blank/null value
   // clears a stored filter.
   normalizeBranchFilter(merged);
+  // Comment filters (#2822) — as on POST; a `null` field clears it.
+  normalizeCommentFilter(merged);
   // Readiness gate (#2795) — as on POST; `null` clears it.
   normalizeReadinessGate(merged);
   // Producer filter (#2571) — same route-level check as POST; `null` clears it.

@@ -5,6 +5,7 @@
 // wording has a single source of truth (#778).
 
 import { parseBranchFilter } from './branch-filter.js';
+import { commentFilterSummary } from './comment-filter.js';
 
 // Subset of GitHub Events API event types most useful for agent workflows.
 // (The Events API does not emit every webhook action — e.g. pull_request
@@ -247,7 +248,9 @@ export function summarizeGithubEventTrigger(trigger) {
   // shown only when the trigger listens on push. null = every branch.
   const branchList = raw.includes('push') ? parseBranchFilter(trigger?.branchFilter) : [];
   const branches = branchList.length ? branchList.join(', ') : null;
-  return { events, label, branches };
+  // #2822: comment-listener filters, only for issue_comment events ([] = none).
+  const comments = commentFilterSummary(trigger);
+  return { events, label, branches, comments };
 }
 
 // The claim payload a TriggersPanel save carries (#1006): the raw layer follows

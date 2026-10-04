@@ -146,6 +146,15 @@ test('#2570: a branch-filter drop names the pushed branch (or tag) in plain lang
   assert.equal(canRefire(drop('branch-filter'), { canManage: true }), false);
 });
 
+test('#2822: comment-filter drops read in plain language and are never re-firable', () => {
+  assert.equal(dropReasonText(drop('comment-label', { requireLabel: 'clarifying' })),
+    "The commented item did not carry the label 'clarifying', so the comment was ignored.");
+  assert.match(dropReasonText(drop('comment-label', {})), /the required label/);
+  assert.match(dropReasonText(drop('agent-comment')), /written by an agent/);
+  assert.match(dropReasonText(drop('comment-target')), /other kind of item/);
+  for (const r of ['comment-label', 'agent-comment', 'comment-target']) assert.equal(canRefire(drop(r), { canManage: true }), false);
+});
+
 test('#2602 AC4: a knowledge-branch drop names the KB branch and is never re-firable', () => {
   assert.equal(dropReasonText(drop('knowledge-branch', { ref: 'refs/heads/agent-knowledge' })),
     "Branch 'agent-knowledge' is a knowledge-base branch — pushes to it never wake push triggers.");

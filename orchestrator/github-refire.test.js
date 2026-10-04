@@ -135,3 +135,13 @@ test('buildRefireEvent + buildRefirePendingEntry produce the poller-shaped deliv
 test('refireKey distinguishes triggers', () => {
   assert.notEqual(r.refireKey({ eventId: '1', agentId: 'a', triggerId: 't1' }), r.refireKey({ eventId: '1', agentId: 'a', triggerId: 't2' }));
 });
+
+test('checkItemState (#2822): a comment listener\'s requireLabel must still be on the item', () => {
+  const issue = (labels) => ({ state: 'open', labels: labels.map((name) => ({ name })) });
+  const gone = r.checkItemState(issue(['bug']), { kind: 'issue', wakeLabel: null, requireLabel: 'clarifying' });
+  assert.equal(gone.ok, false);
+  assert.equal(gone.code, 'label-gone');
+  assert.match(gone.error, /clarifying/);
+  assert.equal(r.checkItemState(issue(['clarifying']), { kind: 'issue', wakeLabel: null, requireLabel: 'clarifying' }).ok, true);
+  assert.equal(r.checkItemState(issue([]), { kind: 'issue', wakeLabel: null }).ok, true);
+});

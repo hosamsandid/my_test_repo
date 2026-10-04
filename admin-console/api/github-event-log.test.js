@@ -263,3 +263,15 @@ test('projectAgentRows (#2795): a readiness-gate row carries its gates and cance
   assert.equal(by.g2.cancelReason, 'closed');
   assert.ok(!('gates' in by.g3) && !('cancelReason' in by.g3));
 });
+
+test('projectAgentRows (#2822): a comment-label drop names the required label', () => {
+  const comment = {
+    ts: '2026-10-04T10:00:00.000Z', eventId: 'c1', repo: 'o/r', event: 'issue_comment.created',
+    workItem: { kind: 'issue', number: 4 },
+    outcomes: [{ agentId: 'dev', triggerId: 'answer', status: 'dropped', reason: 'comment-label', requireLabel: 'clarifying' }],
+  };
+  const [row] = eventLog.projectAgentRows([comment], 'dev');
+  assert.equal(row.reason, 'comment-label');
+  assert.equal(row.requireLabel, 'clarifying');
+  assert.equal('requireLabel' in eventLog.projectAgentRows([armedDrop], DEV)[0], false);
+});

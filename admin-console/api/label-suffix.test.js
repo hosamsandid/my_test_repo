@@ -367,3 +367,12 @@ describe('applyLabelSuffix', () => {
     assert.equal(readyWarnings.length, 1);
   });
 });
+
+describe('requireLabel (#2822)', () => {
+  it('collects and stamps a comment listener\'s required label like labelFilter', () => {
+    const members = [{ id: 'spec', triggers: [{ id: 'a', type: 'github-event', events: ['issue_comment.created'], requireLabel: 'needs-answer' }] }];
+    assert.ok(collectLabelTokens(members).has('needs-answer'));
+    const out = applyLabelSuffix(members, [], 'x1');
+    assert.equal(out.members[0].triggers[0].requireLabel, 'needs-answer-x1');
+  });
+});

@@ -39,6 +39,7 @@ W = _load()
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
+SHA_C = "c" * 40
 REPO = ("acme", "widgets", "github.com")
 
 
@@ -103,8 +104,22 @@ class FakeGitHub:
             "contexts": {"pageInfo": {"hasNextPage": truncated}, "nodes": nodes}}}}}
 
 
-def pr_(sha=SHA_A, mergeable="MERGEABLE", state="OPEN", merged=False):
-    return {"number": 7, "url": "u", "state": state, "merged": merged, "headRefOid": sha, "mergeable": mergeable}
+def pr_(sha=SHA_A, mergeable="MERGEABLE", state="OPEN", merged=False, branch="fix/x"):
+    return {"number": 7, "url": "u", "state": state, "merged": merged, "headRefName": branch,
+            "headRefOid": sha, "mergeable": mergeable}
+
+
+class FakeLocal:
+    """A LocalClone on `branch` at `head`, whose history holds `ancestors`."""
+
+    def __init__(self, head, branch="fix/x", ancestors=()):
+        self.head, self.branch, self.ancestors = head, branch, set(ancestors)
+
+    def expected_head(self, pr_branch):
+        return self.head if pr_branch == self.branch else None
+
+    def is_ancestor(self, sha, of):
+        return of == self.head and sha in self.ancestors
 
 
 class Clock:
@@ -233,6 +248,105 @@ class WaitLoop(unittest.TestCase):
         self.assertEqual(res["status"], "timeout")
 
 
+class ExpectedHead(unittest.TestCase):
+    """#2818: right after a push GitHub may still show the old head; its verdict
+    must not be reported as the pushed commit's."""
+
+    RED = [run_("pytest", conclusion="FAILURE")]
+
+    def test_old_red_head_is_waited_out_until_the_pushed_head_shows(self):
+        res, gh, clock = wait([(pr_(SHA_A), self.RED), (pr_(SHA_A), self.RED),
+                               (pr_(SHA_B), [run_("pytest")])],
+                              local=FakeLocal(SHA_B, ancestors=[SHA_A]))
+        self.assertEqual((res["status"], res["headSha"], res["expectedHead"]), ("passed", SHA_B, SHA_B))
+        self.assertEqual(res["supersededHeads"], [SHA_A])
+        # The old head's checks are never even read, and it is re-read quickly.
+        self.assertEqual([c[0] for c in gh.calls], ["pr", "pr", "pr", "checks"])
+        self.assertEqual(clock.sleeps, [W.HEAD_SYNC_INTERVAL_SEC] * 2)
+
+    def test_old_head_conflict_is_not_reported_either(self):
+        res, _gh, _c = wait([(pr_(SHA_A, mergeable="CONFLICTING"), []), (pr_(SHA_B), [run_("pytest")])],
+                            local=FakeLocal(SHA_B, ancestors=[SHA_A]))
+        self.assertEqual(res["status"], "passed")
+
+    def test_explicit_head_waits_out_any_other_head(self):
+        # --head: even a commit the clone does not know is not the one asked for.
+        res, _gh, _c = wait([(pr_(SHA_A), self.RED), (pr_(SHA_B), [run_("pytest")])], expected_head=SHA_B.upper())
+        self.assertEqual((res["status"], res["headSha"], res["expectedHead"]), ("passed", SHA_B, SHA_B))
+
+    def test_red_on_the_expected_head_is_still_reported(self):
+        res, _gh, _c = wait([(pr_(SHA_B), self.RED)], local=FakeLocal(SHA_B, ancestors=[SHA_A]))
+        self.assertEqual((res["status"], res["headSha"]), ("failed", SHA_B))
+
+    def test_a_head_that_is_not_older_than_local_is_evaluated(self):
+        # A teammate's push the clone has not fetched: not ours to wait out.
+        res, _gh, _c = wait([(pr_(SHA_C), self.RED)], local=FakeLocal(SHA_B, ancestors=[SHA_A]))
+        self.assertEqual((res["status"], res["headSha"], res["expectedHead"]), ("failed", SHA_C, SHA_B))
+
+    def test_clone_on_another_branch_expects_nothing(self):
+        res, _gh, _c = wait([(pr_(SHA_A), self.RED)], local=FakeLocal(SHA_B, branch="main", ancestors=[SHA_A]))
+        self.assertEqual((res["status"], res["expectedHead"]), ("failed", None))
+
+    def test_after_the_sync_the_wait_follows_later_pushes_as_before(self):
+        res, _gh, _c = wait([(pr_(SHA_B), [run_("pytest", "IN_PROGRESS", None)]),
+                             (pr_(SHA_C), [run_("pytest")])], expected_head=SHA_B)
+        self.assertEqual((res["status"], res["headSha"], res["supersededHeads"]), ("passed", SHA_C, [SHA_B]))
+
+    def test_head_never_shown_ends_as_a_stale_head_error(self):
+        res, _gh, clock = wait([(pr_(SHA_A), self.RED)], timeout=1200, local=FakeLocal(SHA_B, ancestors=[SHA_A]))
+        self.assertEqual(res["status"], "error")
+        self.assertTrue(res["staleHead"])
+        self.assertIn("pushed", res["message"])
+        self.assertEqual((res["ci"], res["failingChecks"]), ("pending", []))
+        self.assertLess(clock.t - 1_000_000.0, W.HEAD_SYNC_LIMIT_SEC + 2 * W.HEAD_SYNC_INTERVAL_SEC)
+
+    def test_short_timeout_while_waiting_for_the_head_is_a_timeout(self):
+        res, _gh, _c = wait([(pr_(SHA_A), self.RED)], timeout=30, expected_head=SHA_B)
+        self.assertEqual((res["status"], res["headSha"]), ("timeout", SHA_A))
+        self.assertIn(SHA_B[:7], res["message"])
+
+    def test_no_expected_head_keeps_the_old_behaviour(self):
+        res, _gh, _c = wait([(pr_(SHA_A), self.RED)])
+        self.assertEqual((res["status"], res["expectedHead"]), ("failed", None))
+
+
+class LocalCloneGit(unittest.TestCase):
+    """LocalClone against a real git repository."""
+
+    def test_branch_head_ancestry_and_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = ["git", "-C", tmp, "-c", "user.name=t", "-c", "user.email=t@t"]
+            subprocess.run(["git", "init", "-q", "-b", "fix/x", tmp], check=True)
+            subprocess.run(g + ["commit", "-q", "--allow-empty", "-m", "one"], check=True)
+            old = subprocess.run(g + ["rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+            subprocess.run(g + ["commit", "-q", "--allow-empty", "-m", "two"], check=True)
+            new = subprocess.run(g + ["rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+            lc = W.LocalClone(tmp)
+            self.assertEqual(lc.expected_head("fix/x"), new)
+            self.assertIsNone(lc.expected_head("main"))
+            self.assertIsNone(lc.expected_head(None))
+            self.assertTrue(lc.is_ancestor(old, new))
+            self.assertFalse(lc.is_ancestor(new, old))
+            self.assertFalse(lc.is_ancestor(SHA_C, new))  # unknown commit
+            self.assertEqual(lc.resolve("HEAD~1"), old)
+            self.assertIsNone(lc.resolve("no-such-rev"))
+
+    def test_clone_dir_only_when_its_origin_is_the_pr_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            clone = Path(tmp) / "my-clone"
+            subprocess.run(["git", "init", "-q", str(clone)], check=True)
+            subprocess.run(["git", "-C", str(clone), "remote", "add", "origin", "git@github.com:acme/widgets.git"],
+                           check=True)
+            cwd = os.getcwd()
+            os.chdir(clone)
+            try:
+                self.assertEqual(os.path.realpath(W.local_clone_dir(REPO, None)), os.path.realpath(clone))
+                self.assertIsNone(W.local_clone_dir(("acme", "other", "github.com"), None))
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(os.path.realpath(W.local_clone_dir(REPO, str(clone))), os.path.realpath(clone))
+
+
 class Helpers(unittest.TestCase):
     def test_timeout_default_and_caps(self):
         self.assertEqual(W.DEFAULT_TIMEOUT_MIN, 20)
@@ -356,9 +470,15 @@ class ExitCodes(unittest.TestCase):
                                  "--timeout", "0.003")
         self.assertEqual((code, out["status"]), (6, "timeout"))
 
+    def test_explicit_head_is_never_answered_with_another_heads_verdict(self):
+        code, out = self.run_cli({"pr": pr_(SHA_A), "checks": [run_("pytest", conclusion="FAILURE")]},
+                                 "--head", SHA_B, "--timeout", "0.003")
+        self.assertEqual((code, out["status"], out["expectedHead"]), (6, "timeout", SHA_B))
+
     def test_usage_errors(self):
         env = {**os.environ}
-        for args in (["7", "--timeout", "x"], ["7", "--timeout", "0"], ["7", "8"], ["nope"], ["7", "--bogus"]):
+        for args in (["7", "--timeout", "x"], ["7", "--timeout", "0"], ["7", "8"], ["nope"], ["7", "--bogus"],
+                     ["7", "--head", "not-a-commit"], ["7", "--head"]):
             with self.subTest(args=args):
                 p = subprocess.run([sys.executable, str(SCRIPT), *args, "--repo", "acme/widgets"],
                                    capture_output=True, text=True, env=env, timeout=30)

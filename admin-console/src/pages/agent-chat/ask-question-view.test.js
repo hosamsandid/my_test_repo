@@ -96,7 +96,7 @@ test('indexAskAnswers maps question event ids to their first answer', () => {
 
 test('questionState: last unanswered question is answerable', () => {
   const s = questionState({ index: 2, messageCount: 3, answer: undefined });
-  assert.deepEqual(s, { answerable: true, answeredOptionId: null, answeredLabel: null, answeredOptionIds: null, multiAnswers: null });
+  assert.deepEqual(s, { answerable: true, superseded: false, answeredOptionId: null, answeredLabel: null, answeredOptionIds: null, multiAnswers: null });
 });
 
 test('questionState: a later message makes buttons inert (superseded/answered)', () => {
@@ -156,12 +156,12 @@ test('buildMultiAnswerContent builds consolidated ask-answer payload', () => {
   });
 });
 
-test('multiAnswerText joins labels with newlines', () => {
+test('multiAnswerText numbers each answer on its own line (#2821 AC6)', () => {
   const answers = [
-    { questionId: 'q0', optionId: '0:0', label: 'OAuth' },
+    { questionId: 'q0', optionId: '0:0', label: 'OAuth', header: 'Auth' },
     { questionId: 'q1', optionId: '1:0', label: 'Staging' },
   ];
-  assert.equal(multiAnswerText(answers), 'OAuth\nStaging');
+  assert.equal(multiAnswerText(answers), '1. Auth: OAuth\n2. Staging');
 });
 
 test('multiAnswerText with one answer returns its label', () => {
@@ -292,5 +292,5 @@ test('multiAnswerText shows a multi-select step as its joined labels', () => {
   assert.equal(multiAnswerText([
     { questionId: 'q0', optionId: '0:0', label: 'main' },
     { questionId: 'q1', optionIds: ['1:0', '1:1'], labels: ['unit', 'e2e'], label: 'unit, e2e' },
-  ]), 'main\nunit, e2e');
+  ]), '1. main\n2. unit, e2e');
 });

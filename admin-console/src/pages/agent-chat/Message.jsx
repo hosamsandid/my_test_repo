@@ -401,7 +401,7 @@ function NoticeMessage({ message, onShowInSession }) {
 
 function Message({
   message, agentUserId, thinking, onRelaunchLoop,
-  onAnswerQuestion, questionAnswerable, questionAnswer,
+  onAnswerQuestion, questionAnswerable, questionAnswer, questionProgress,
   viewer, authorDirectory, agentId, onShowInSession,
 }) {
   // "Copy link" (#2310 AC7, nice-to-have): builds a `/chats/:agentId?msg=<event_id>`
@@ -448,6 +448,8 @@ function Message({
           answeredLabel={questionAnswer?.answeredLabel ?? null}
           answeredOptionIds={questionAnswer?.answeredOptionIds ?? null}
           answeredMulti={questionAnswer?.multiAnswers ?? null}
+          progress={questionProgress ?? null}
+          superseded={!!questionAnswer?.superseded}
           onAnswer={(opt) => onAnswerQuestion?.(message.event_id, opt, q)}
           time={formatMessageTime(message.ts)}
         />

@@ -67,7 +67,7 @@ test('noMatchTooltip explains the no-subscriber case with an action', () => {
 
 test('#2525: the legend explains every drop reason the poller stamps', () => {
   const keys = OUTCOME_LEGEND.map(e => e.key);
-  for (const r of ['wake-already-armed', 'internal-dedup', 'self-claim-label', 'push-duplicate', 'throttle', 'label-filter', 'branch-filter', 'history-horizon']) {
+  for (const r of ['wake-already-armed', 'internal-dedup', 'self-claim-label', 'push-duplicate', 'throttle', 'label-filter', 'branch-filter', 'history-horizon', 'comment-target', 'agent-comment', 'comment-label']) {
     assert.ok(keys.includes(r), `legend missing ${r}`);
     assert.equal(outcomeLegendKey({ status: 'dropped', reason: r }), r);
   }

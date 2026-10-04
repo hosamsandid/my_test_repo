@@ -74,6 +74,10 @@ function collectLabelTokens(members, bundleLabels = [], humans = []) {
         if (typeof t.labelFilter === 'string' && t.labelFilter.trim()) {
           tokens.add(t.labelFilter.trim());
         }
+        // A comment listener's required label (#2822) is a label port too.
+        if (typeof t.requireLabel === 'string' && t.requireLabel.trim()) {
+          tokens.add(t.requireLabel.trim());
+        }
       }
     }
     if (Array.isArray(m.channels)) {
@@ -110,7 +114,7 @@ function collectLabelTokens(members, bundleLabels = [], humans = []) {
  * registry in one pass.
  *
  * Rules:
- *  1. Port surfaces (labelFilter, channel.label, setLabel actions, emits, the
+ *  1. Port surfaces (labelFilter, requireLabel, channel.label, setLabel actions, emits, the
  *     label registry, humans emits / consumes[].label) are rewritten directly —
  *     exact string replacement, no parsing needed.
  *  2. Trigger `claim` (#2718): `remove` is stamped when it is a known token;
@@ -240,6 +244,9 @@ function applyLabelSuffix(members, bundleLabels, suffix, humans = []) {
         const nt = { ...t };
         if (typeof t.labelFilter === 'string') {
           nt.labelFilter = stampLabel(t.labelFilter);
+        }
+        if (typeof t.requireLabel === 'string') {
+          nt.requireLabel = stampLabel(t.requireLabel);
         }
         if (t.claim !== undefined) nt.claim = stampClaim(t.claim);
         if (typeof t.promptTemplate === 'string') {

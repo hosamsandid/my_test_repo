@@ -51,6 +51,13 @@ export function outcomeStatus(outcome) {
 // #2602: the readable reason of a knowledge-branch drop.
 export const KNOWLEDGE_BRANCH_TEXT = 'knowledge-base branch — never wakes push triggers';
 
+// #2822: why a comment-label drop happened, naming the required label when known.
+export function commentLabelText(requireLabel) {
+  return typeof requireLabel === 'string' && requireLabel
+    ? `item lacks required label '${requireLabel}'`
+    : 'item lacks the required label';
+}
+
 export function producerFilterText(producer) {
   return typeof producer === 'string' && producer
     ? `pushed by \`${producer}\`, not in producer filter`
@@ -114,6 +121,8 @@ export function outcomeLabel(outcome, { refired = false } = {}) {
   if (o.reason === 'producer-filter') return `dropped (${producerFilterText(o.producer)}) → ${target}`;
   // #2602: built in and not configurable, so it reads as a rule, not a filter.
   if (o.reason === 'knowledge-branch') return `dropped (${KNOWLEDGE_BRANCH_TEXT}) → ${target}`;
+  // #2822: name the label the comment filter wanted.
+  if (o.reason === 'comment-label') return `dropped (${commentLabelText(o.requireLabel)}) → ${target}`;
   const gate = gateDropText(o);
   if (gate) return `not woken (${gate})${wakeSuffix} → ${target}`;
   return `dropped (${o.reason || 'unknown'})${wakeSuffix} → ${target}`;

@@ -60,6 +60,24 @@ export const OUTCOME_LEGEND = [
     whatToDo: "Normal branch routing — the trigger only wakes on pushes to its configured branches. Widen the trigger's Branches field if this branch should wake the agent.",
   },
   {
+    key: 'comment-target',
+    term: 'dropped (comment-target)',
+    meaning: 'A comment on an issue reached a trigger that only listens to comments on pull requests — or the other way round.',
+    whatToDo: "Normal comment routing. Change the trigger's \"Comments on\" field if this kind of item should wake the agent.",
+  },
+  {
+    key: 'agent-comment',
+    term: 'dropped (agent-comment)',
+    meaning: "The comment was written by an agent (its body carries the hidden agent marker), and the trigger ignores comments written by agents.",
+    whatToDo: "Nothing to do — this stops an agent from waking itself or a teammate with its own comments. Untick \"Ignore comments written by agents\" if agent comments should wake it.",
+  },
+  {
+    key: 'comment-label',
+    term: 'dropped (comment-label)',
+    meaning: "The commented issue or PR did not carry the trigger's required label when the comment arrived.",
+    whatToDo: "Normal comment routing — the trigger only wakes on comments on items carrying that label. Add the label to the item, or change the trigger's required label.",
+  },
+  {
     key: 'knowledge-branch',
     term: 'dropped (knowledge-base branch)',
     meaning: "A push to a knowledge-base branch (e.g. agent-knowledge) — the platform's own knowledge sync. Pushes to any team's knowledge-base branch on the repository never wake push triggers.",

@@ -31,6 +31,10 @@ import {
   knowledgeBranchNote, knowledgeBranchesForRepo,
 } from './branch-filter.js';
 import {
+  COMMENT_TARGET_OPTIONS, REQUIRE_LABEL_PLACEHOLDER, REQUIRE_LABEL_HELP, SKIP_AGENT_COMMENTS_HELP,
+  showsCommentFilter, commentFilterToForm, commentFilterBody, commentFilterFormError,
+} from './comment-filter.js';
+import {
   DOW_LABELS, parseCronState, buildCron, describeCron, switchCronMode, validateCronState, cronExpressionError, inCronTime,
 } from './cron-format.js';
 import {
@@ -535,6 +539,7 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
                 </strong>
               </>
             )}
+            {ghSummary.comments.length > 0 && ` · ${ghSummary.comments.join(' · ')}`}
           </span>
         </div>
       )}
@@ -806,6 +811,9 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     // Optional push branch filter (#2570), edited as a comma-separated string and
     // stored as an array. Empty = every branch.
     branchFilter: branchFilterToInput(initialValues?.branchFilter),
+    // Comment-listener filters (#2822): requireLabel / skipAgentComments /
+    // commentTarget (stored as `target`), shown only for issue_comment events.
+    ...commentFilterToForm(initialValues),
     secret:      initialValues?.secret      ?? (initialType === 'http' ? '' : generateSecret()),
     description: initialValues?.description ?? '',
     prompt:      initialValues?.prompt      ?? '',
@@ -853,6 +861,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
   const showLabelFilter = form.type === 'github-event'
     && form.events.some(e => LABEL_FILTERABLE_EVENTS.has(e));
   const showBranchFilter = form.type === 'github-event' && form.events.includes('push');
+  const showCommentFilter = form.type === 'github-event' && showsCommentFilter(form.events);
   const [copyDone, setCopyDone] = useState(null); // 'path' | 'secret' | null
   const [secretVisible, setSecretVisible] = useState(!isEdit);
   const [formError, setFormError] = useState(null);
@@ -1096,6 +1105,8 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       if (form.events.length === 0) { setFormError('Select the event this trigger reacts to.'); return; }
       const branchError = showBranchFilter ? branchFilterFormError(form.branchFilter) : null;
       if (branchError) { setFormError(branchError); return; }
+      const commentError = showCommentFilter ? commentFilterFormError(form) : null;
+      if (commentError) { setFormError(commentError); return; }
     }
     if (isDataFlow) {
       if (!form.repo && !isDraftMode) { setFormError('A repository is required (the team repo agents push to).'); return; }
@@ -1174,6 +1185,8 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       // Branch filter (#2570): an array, or `null` so an edit clears it when
       // the field is blanked or the event is no longer push.
       body.branchFilter = branchFilterBody(form.branchFilter, { show: showBranchFilter });
+      // Comment filters (#2822): each key `null` when unset so an edit clears it.
+      Object.assign(body, commentFilterBody(form, { show: showCommentFilter }));
       // Claim stamping (#1006): the raw layer follows the same convention as
       // the engine paths — a `.labeled` label listener claims its wake label
       // unless the author opted out. On edit, `null` clears a stored claim;
@@ -1746,6 +1759,47 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               </div>
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
                 {knowledgeBranchNote(knowledgeBranchesForRepo(kbStatusRows, form.repo))}
+              </div>
+            </div>
+          )}
+
+          {showCommentFilter && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+              <div>
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                  Comments on
+                </div>
+                <select
+                  value={form.commentTarget}
+                  onChange={e => set('commentTarget', e.target.value)}
+                  style={{ ...FIELD_STYLE, width: '100%' }}
+                >
+                  {COMMENT_TARGET_OPTIONS.map(opt => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                  Required label on the item
+                </div>
+                <input
+                  type="text"
+                  value={form.requireLabel}
+                  onChange={e => set('requireLabel', e.target.value)}
+                  placeholder={REQUIRE_LABEL_PLACEHOLDER}
+                  style={{ ...FIELD_STYLE, width: '100%' }}
+                />
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                  {REQUIRE_LABEL_HELP}
+                </div>
+              </div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', cursor: 'pointer' }}>
+                <input type="checkbox" checked={form.skipAgentComments} onChange={e => set('skipAgentComments', e.target.checked)} />
+                Ignore comments written by agents
+              </label>
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
+                {SKIP_AGENT_COMMENTS_HELP}
               </div>
             </div>
           )}

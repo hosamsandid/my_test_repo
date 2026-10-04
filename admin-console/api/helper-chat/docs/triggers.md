@@ -9,7 +9,7 @@ Agents are driven by triggers defined in a per-agent `triggers.json` file. The s
 | **cron** | Recurring execution on a 5-field cron expression. Skips if the previous run is still in progress. |
 | **once** | Fires once at a specific ISO timestamp, then removes itself automatically. |
 | **http** | Fired by an external `POST /hooks/:agentId/:triggerId` with an `X-Hook-Secret` header — or a GitHub webhook signed with the trigger's secret (`X-Hub-Signature-256`, see below). Every trigger carries its own auto-generated secret — there is no global open mode. |
-| **github-event** | Fired by the built-in GitHub poller when the GitHub Events API reports a matching event (e.g. `pull_request.opened`, `push`). Requires a GitHub token on the environment. The full event payload is appended to the agent prompt as JSON. Supports an optional `claim` field (`{"remove": "<wakeLabel>", "add": "<wakeLabel>:wip"}`) — the runner swaps the labels before invoking the agent so "in progress" is visible on GitHub, and rolls the swap back automatically if the run fails both attempts (which re-fires the chain via the poller). The `add` value **must** follow the `<wakeLabel>:wip` convention (enforced by the bundle validator). For **channel-derived** label listeners (`expandGithubChannels`) the claim is stamped automatically; opt out per channel port with `autoClaim: false`. Push: optional `branchFilter` ([rules](push-branch-filter.md)); knowledge branches never wake. PR hand-off: optional `readinessGate` ([below](#hand-off-readiness-gate-wait-for-ci-block-on-merge-conflict)). |
+| **github-event** | Fired by the built-in GitHub poller when the GitHub Events API reports a matching event (e.g. `pull_request.opened`, `push`). Requires a GitHub token on the environment. The full event payload is appended to the agent prompt as JSON. Supports an optional `claim` field (`{"remove": "<wakeLabel>", "add": "<wakeLabel>:wip"}`) — the runner swaps the labels before invoking the agent so "in progress" is visible on GitHub, and rolls the swap back automatically if the run fails both attempts (which re-fires the chain via the poller). The `add` value **must** follow the `<wakeLabel>:wip` convention (enforced by the bundle validator). For **channel-derived** label listeners (`expandGithubChannels`) the claim is stamped automatically; opt out per channel port with `autoClaim: false`. Push: optional `branchFilter` ([rules](push-branch-filter.md)); knowledge branches never wake. PR hand-off: optional `readinessGate` ([below](#hand-off-readiness-gate-wait-for-ci-block-on-merge-conflict)). Comments: optional `requireLabel`, `skipAgentComments`, `target` ([below](#comment-listeners-requirelabel-skipagentcomments-target)). |
 | **loop** | Runs the agent's prompt repeatedly — each try starts fresh — stopping once the goal is met or the maximum number of tries is reached. See [Loop triggers](#loop-triggers) below. |
 
 Cron format: `Minute Hour Day Month Weekday`
@@ -104,6 +104,22 @@ On a channel port the same object is the channel's `readiness` field; the derive
 Visible in the **GitHub Event Log** (`held — waiting for CI / conflict-free`, then `delivered · gate cleared` or `not woken (gate failed / timed out / cancelled)`), on the agent's **Events** tab, and as **waiting for CI** on the PR's row in **Flow Control**. Only PR hand-offs can be gated; issue hand-offs are not.
 
 Re-fire a dropped wake from Agent Chat → **Events** (#2525).
+
+### Comment listeners: `requireLabel`, `skipAgentComments`, `target`
+
+A role that resumes when a human answers on an issue listens to `issue_comment.created`. Without a filter it wakes on **every** comment in the repository — on any issue or PR, including the comments agents post themselves. Three optional trigger fields narrow it (#2822). They act **only on `issue_comment.*` events**; on any other event they are ignored. Absent = no filter, unchanged behaviour.
+
+```json
+{ "type": "github-event", "repo": "org/repo", "events": ["issue_comment.created"],
+  "requireLabel": "needs-clarification", "skipAgentComments": true, "target": "issue",
+  "prompt": "A human answered your question — continue." }
+```
+
+- **`requireLabel`** — wake only when the commented issue / PR **currently** carries this label. The comment event's own label list is the set when GitHub recorded the event, so the poller reads the item's live labels (one GitHub request per item per poll cycle, shared by all listeners) and falls back to the event's labels only when that read fails. Dropped as **`comment-label`**. Stamped by a team's `labelSuffix` like `labelFilter`.
+- **`skipAgentComments: true`** — drop a comment whose body carries a `gh-as-agent` marker (`<!-- agent: <id> -->`); human comments still wake. All agents share one GitHub token, so the marker is what tells an agent comment apart. Dropped as **`agent-comment`**.
+- **`target: "issue" | "pr"`** — wake only for comments on that kind of item. Dropped as **`comment-target`**.
+
+The filters apply on every delivery path: the poller fan-out, a pending-queue reassign (which uses the queued event's labels) and **Fire again**, which refuses when the required label is no longer on the item. Every drop is shown with its reason in the **GitHub Event Log** and on the agent's **Events** tab. Edit them in the trigger form (Agent Chat → Triggers, and the Flow editor) when the event is *Issue comment*.
 
 ### In-turn wait: `aee-wait-ci`
 

@@ -181,6 +181,9 @@ legend — this is the longer version.
 | **dropped (horizon)** | The event is older than that subscriber's subscription window (its activation time plus a short grace). | Expected right after wiring or reactivating a trigger. A new agent deliberately does not react to history that predates it. |
 | **dropped (label-filter)** | The event carried a label this trigger does not subscribe to. | No — that is label routing working. |
 | **dropped (branch-filter)** | A push went to a branch (or a tag) that this trigger's **Branches** filter does not list. | No — that is branch routing working. Widen the filter if the branch should wake the agent. |
+| **dropped (comment-target)** | A comment on an issue reached a trigger set to **Comments on: pull requests only** — or the other way round. | No — that is comment routing working. |
+| **dropped (agent-comment)** | The comment was posted by an agent, and the trigger has **Ignore comments written by agents** on. | No — it stops agents from waking themselves with their own comments. |
+| **dropped (comment-label)** | The commented issue or PR did not carry the trigger's **Required label on the item** when the comment arrived. The row names the label. | No, unless the label should have been there — add it to the item. |
 | **dropped (knowledge-branch)** | Push to a knowledge-base branch (`agent-knowledge`); never wakes push triggers. | No; built in. |
 | **dropped (internal-dedup)** | The wake was already delivered on the internal fast path; this is GitHub telling us about the same label a second time. | No. |
 | **dropped (wake-already-armed)** | Already woken for this label on this item; a repeat does not wake it again until the label is removed and re-added. | Usually no. Re-fire a lost hand-off from the agent's Events tab. |
@@ -198,6 +201,10 @@ A **dropped (branch-filter)** row comes from a *Push* trigger with a
 **Branches** filter (e.g. `main, feature/*`): `*` matches within one path
 segment, `**` also across `/`, names match exactly, and tag pushes never match.
 Empty means every branch.
+
+The three **comment** drops come from an *Issue comment* trigger's filters
+(#2822). **Required label on the item** is checked against the item's labels at
+the moment the poller sees the comment, not when the comment was written.
 
 A `delivered` or `digested` outcome may carry the **wake label** in brackets: the
 label that actually satisfied the subscriber's filter. No bracket means the

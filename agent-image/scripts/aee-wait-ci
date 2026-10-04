@@ -2,7 +2,7 @@
 """aee-wait-ci — wait, inside this turn, until a pull request's CI has finished
 and report green / red / merge conflict (#2796).
 
-    aee-wait-ci <pr> [--repo <name>] [--timeout <minutes>] [--no-conflict-check]
+    aee-wait-ci <pr> [--repo <name>] [--timeout <minutes>] [--head <sha>] [--no-conflict-check]
 
 Blocks in the FOREGROUND, re-reading the PR's head commit every few seconds,
 until a verdict is reached or the timeout runs out, then prints ONE JSON
@@ -23,6 +23,9 @@ Arguments:
                           clone in your workspace
   --timeout <minutes>     how long to wait (default 20). Capped so the wait
                           always ends before your run's own timeout
+  --head <sha>            the commit you expect CI to run on (a full SHA, or a
+                          revision of your local clone such as `HEAD`). Default:
+                          your local HEAD when your clone is on the PR's branch
   --no-conflict-check     do not wait for / report merge conflicts — CI only
   --json                  accepted for the shared CLI contract; the result is
                           always JSON
@@ -40,8 +43,20 @@ means anything). A push that moves the PR's head during the wait restarts the
 evaluation on the new commit; `headSha` always names the commit the verdict
 belongs to and `supersededHeads` lists the ones left behind.
 
+Right after a push, GitHub can still show the previous commit as the PR's head
+for a few seconds (#2818). While the PR's head is not the expected commit
+(`--head`, or your local HEAD when your clone is on the PR's branch), nothing
+is reported for the old head — not its red CI, not its conflict — and the PR
+is re-read every few seconds. With the local-HEAD default this only applies
+while GitHub's head is an older commit of your branch; a head your clone does
+not have (a teammate's push) is evaluated as before. If GitHub still does not
+show the expected commit after 3 minutes, the result is an error with
+`staleHead: true` — check that the push went through. `expectedHead` names the
+commit that was expected (null when none).
+
 Result (stdout, one line):
   {"ok": true|false, "status": "...", "repo": "o/n", "pr": 7, "headSha": "...",
+   "expectedHead": "..."|null,
    "ci": "passed|failed|none|pending", "merge": "clean|conflict|pending|skipped",
    "failingChecks": [...], "pendingChecks": [...], "supersededHeads": [...],
    "waitedSeconds": 42, "message": "..."}
@@ -49,7 +64,8 @@ Result (stdout, one line):
 Exit codes:
   0  passed — every check passed (status `passed`), or the PR has no CI
      (status `no-ci`); and, unless --no-conflict-check, it merges cleanly
-  1  error — no GitHub token, PR/repo not found, PR closed or merged
+  1  error — no GitHub token, PR/repo not found, PR closed or merged, or
+     GitHub never showed the expected head commit (`staleHead: true`)
   2  usage error — bad arguments, or the repository could not be determined
   3  error — GitHub unreachable (repeated network failures)
   4  failed — at least one check failed (`failingChecks` names them)
@@ -97,6 +113,10 @@ DEFAULT_INTERVAL_SEC = 20.0
 MAX_TRANSIENT_FAILURES = 5
 RATE_LIMIT_BACKOFF_SEC = 60.0
 RATE_LIMIT_BACKOFF_MAX_SEC = 300.0
+# How long GitHub may keep showing an older head than the expected one (a push
+# it has not reflected yet, #2818), and how often it is re-read meanwhile.
+HEAD_SYNC_LIMIT_SEC = 180.0
+HEAD_SYNC_INTERVAL_SEC = 5.0
 
 TIMEOUT_ADVICE = (
     "Do not keep waiting in a background task — it is killed when your turn "
@@ -204,7 +224,7 @@ def pending_check_names(checks):
 # ---- GitHub reads -------------------------------------------------------------
 
 PR_QUERY = ("query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){"
-            "pullRequest(number:$number){number url state merged headRefOid mergeable}}}")
+            "pullRequest(number:$number){number url state merged headRefName headRefOid mergeable}}}")
 
 CHECKS_QUERY = ("query($owner:String!,$name:String!,$oid:GitObjectID!){repository(owner:$owner,name:$name){"
                 "object(oid:$oid){... on Commit{oid statusCheckRollup{"
@@ -307,10 +327,19 @@ def effective_timeout_sec(requested_min, env=None, now=None):
 
 def wait_for_ci(repo, number, timeout_sec, conflict_check=True, interval_sec=DEFAULT_INTERVAL_SEC,
                 grace_ms=DEFAULT_CI_GRACE_MS, gh=gh_graphql, clock=time.time, sleep=time.sleep,
-                log=lambda m: None):
-    """Poll until settled. Returns the result dict (always with `status`)."""
+                log=lambda m: None, expected_head=None, local=None):
+    """Poll until settled. Returns the result dict (always with `status`).
+
+    `expected_head` (from --head) is the commit the caller pushed: any other PR
+    head is waited out, never evaluated. Without it, `local` — a LocalClone —
+    supplies the expected head when the clone is on the PR's branch; then only
+    an older commit of that branch is waited out (#2818)."""
     start = clock()
     deadline = start + timeout_sec
+    expected = expected_head.lower() if expected_head else None
+    explicit = expected is not None
+    synced = False  # the expected head was seen (or the gate gave way)
+    sync_started = None
     head = None
     head_seen_ms = None
     superseded = []
@@ -322,6 +351,7 @@ def wait_for_ci(repo, number, timeout_sec, conflict_check=True, interval_sec=DEF
     def result(status, message, **extra):
         out = {"ok": status in ("passed", "no-ci"), "status": status,
                "repo": f"{repo[0]}/{repo[1]}", "pr": number, "headSha": head,
+               "expectedHead": expected,
                **last, "supersededHeads": superseded,
                "waitedSeconds": int(round(clock() - start)), "message": message}
         out.update(extra)
@@ -339,12 +369,41 @@ def wait_for_ci(repo, number, timeout_sec, conflict_check=True, interval_sec=DEF
             sha = str(pr.get("headRefOid") or "").lower()
             if not SHA_RE.match(sha):
                 raise GhError("transient", "GitHub returned no head commit for the pull request")
+            if expected is None and local is not None and not synced:
+                expected = local.expected_head(pr.get("headRefName"))
+            stale = False
+            if expected and not synced:
+                if sha == expected:
+                    synced = True
+                elif explicit or local.is_ancestor(sha, expected):
+                    stale = True
+                else:
+                    synced = True
+                    log(f"{sha[:7]} is not an older commit of your branch — evaluating it, "
+                        f"not your local {expected[:7]}")
             if sha != head:
                 if head:
                     superseded.append(head)
                     log(f"head moved {head[:7]} → {sha[:7]}; evaluating the new commit")
                 head, head_seen_ms = sha, clock() * 1000
                 last.update(ci="pending", failingChecks=[], pendingChecks=[])
+            if stale:
+                # GitHub has not caught up with the push yet: the old head's
+                # verdict (red CI, a conflict) says nothing about the new one.
+                sync_started = clock() if sync_started is None else sync_started
+                if clock() - sync_started >= HEAD_SYNC_LIMIT_SEC:
+                    return result("error", f"GitHub still shows {sha[:7]} as the head of #{number}, not "
+                                  f"{expected[:7]}, after {int(HEAD_SYNC_LIMIT_SEC // 60)} min — check that "
+                                  f"{expected[:7]} was pushed to the PR's branch, then wait again",
+                                  staleHead=True)
+                log(f"GitHub still shows {sha[:7]} as the head; waiting for {expected[:7]}")
+                pause = min(interval_sec, HEAD_SYNC_INTERVAL_SEC)
+                remaining = deadline - clock()
+                if remaining <= 0:
+                    return result("timeout", f"GitHub did not show {expected[:7]} as the head of #{number} "
+                                  f"within {int(round(timeout_sec / 60))} min. " + TIMEOUT_ADVICE)
+                sleep(min(pause, remaining))
+                continue
             if conflict_check:
                 last["merge"] = merge_verdict(pr.get("mergeable"))
                 if last["merge"] == "conflict":
@@ -387,6 +446,62 @@ def wait_for_ci(repo, number, timeout_sec, conflict_check=True, interval_sec=DEF
             return result("timeout", f"CI on #{number} not settled within {int(round(timeout_sec / 60))} min. "
                           + TIMEOUT_ADVICE)
         sleep(min(pause, remaining))
+
+
+# ---- the local clone (expected head) -------------------------------------------
+
+def _git(directory, *args):
+    try:
+        return subprocess.run(["git", "-C", directory, *args], capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+
+
+class LocalClone:
+    """The caller's clone of the PR's repository: where the pushed commit is."""
+
+    def __init__(self, directory):
+        self.directory = directory
+
+    def head(self):
+        r = _git(self.directory, "rev-parse", "HEAD")
+        sha = r.stdout.strip().lower() if r and r.returncode == 0 else ""
+        return sha if SHA_RE.match(sha) else None
+
+    def branch(self):
+        r = _git(self.directory, "symbolic-ref", "--short", "-q", "HEAD")
+        return r.stdout.strip() if r and r.returncode == 0 and r.stdout.strip() else None
+
+    def expected_head(self, pr_branch):
+        """Local HEAD when the clone is on the PR's head branch, else None."""
+        if not pr_branch or self.branch() != pr_branch:
+            return None
+        return self.head()
+
+    def is_ancestor(self, sha, of):
+        """True when `sha` is an older commit of `of` in this clone (unknown
+        commits — e.g. a teammate's push not fetched — are not)."""
+        r = _git(self.directory, "merge-base", "--is-ancestor", sha, of)
+        return bool(r) and r.returncode == 0
+
+    def resolve(self, rev):
+        r = _git(self.directory, "rev-parse", "--verify", "-q", f"{rev}^{{commit}}")
+        sha = r.stdout.strip().lower() if r and r.returncode == 0 else ""
+        return sha if SHA_RE.match(sha) else None
+
+
+def local_clone_dir(repo, repo_arg):
+    """The clone of `repo` the caller works in: the git repo of the current
+    directory, or the --repo clone directory — only if its origin is `repo`."""
+    candidates = [_git_toplevel(os.getcwd())]
+    if repo_arg and not ("/" in repo_arg and not os.path.isdir(repo_arg)):
+        candidates += [repo_arg] + [os.path.join(r, repo_arg) for r in _workspace_roots()]
+    for d in candidates:
+        if d and os.path.isdir(d):
+            origin = _origin_of(d)
+            if origin and origin[:2] == repo[:2]:
+                return _git_toplevel(d) or d
+    return None
 
 
 # ---- repository / PR resolution ----------------------------------------------
@@ -494,21 +609,22 @@ def emit(obj, code):
 
 def usage_error(msg):
     sys.stderr.write(f"aee-wait-ci: {msg}\n")
-    sys.stderr.write("usage: aee-wait-ci <pr> [--repo <name>] [--timeout <minutes>] [--no-conflict-check]\n")
+    sys.stderr.write("usage: aee-wait-ci <pr> [--repo <name>] [--timeout <minutes>] [--head <sha>] "
+                     "[--no-conflict-check]\n")
     emit({"ok": False, "status": "error", "error": msg}, EXIT_USAGE)
 
 
 def parse_args(argv):
-    opts = {"pr": None, "repo": None, "timeout": DEFAULT_TIMEOUT_MIN, "conflict": True}
+    opts = {"pr": None, "repo": None, "timeout": DEFAULT_TIMEOUT_MIN, "conflict": True, "head": None}
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in ("--repo", "--timeout"):
+        if a in ("--repo", "--timeout", "--head"):
             if i + 1 >= len(argv):
                 usage_error(f"{a} needs a value")
             val = argv[i + 1]
             i += 2
-        elif a.startswith("--repo=") or a.startswith("--timeout="):
+        elif a.startswith(("--repo=", "--timeout=", "--head=")):
             a, val = a.split("=", 1)
             i += 1
         elif a == "--no-conflict-check":
@@ -528,6 +644,10 @@ def parse_args(argv):
             continue
         if a == "--repo":
             opts["repo"] = val
+        elif a == "--head":
+            if not val.strip():
+                usage_error("--head needs a commit")
+            opts["head"] = val.strip()
         else:
             try:
                 opts["timeout"] = float(val)
@@ -550,6 +670,14 @@ def main(argv):
         repo = resolve_repo(opts["repo"]) if (opts["repo"] or not url_repo) else url_repo
     except ValueError as e:
         usage_error(str(e))
+    clone_dir = local_clone_dir(repo, opts["repo"])
+    local = LocalClone(clone_dir) if clone_dir else None
+    expected_head = None
+    if opts["head"]:
+        expected_head = opts["head"].lower() if SHA_RE.match(opts["head"]) else (
+            local.resolve(opts["head"]) if local else None)
+        if not expected_head:
+            usage_error(f"--head {opts['head']!r} is neither a full commit SHA nor a commit of your clone")
     timeout_sec = effective_timeout_sec(opts["timeout"])
     try:
         interval = float(os.environ.get("AEE_WAIT_CI_INTERVAL_SEC") or DEFAULT_INTERVAL_SEC)
@@ -559,7 +687,8 @@ def main(argv):
                      f"{repo[0]}/{repo[1]}#{number}\n")
     res = wait_for_ci(repo, number, timeout_sec, conflict_check=opts["conflict"],
                       interval_sec=max(0.0, interval), grace_ms=ci_grace_ms(),
-                      log=lambda m: sys.stderr.write(f"aee-wait-ci: {m}\n"))
+                      log=lambda m: sys.stderr.write(f"aee-wait-ci: {m}\n"),
+                      expected_head=expected_head, local=local)
     if res["status"] == "error":
         code = EXIT_UNREACHABLE if res.get("unreachable") else EXIT_ERROR
     else:

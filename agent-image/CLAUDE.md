@@ -203,6 +203,9 @@ timeout, `1`/`3` error. **Always give this Bash call an explicit `timeout`**:
 (up to 55 minutes). The Bash tool's default stays at 2 minutes and would move
 the wait to the background. For any other command that might block (e.g. a CLI
 that could read stdin), pass `</dev/null` rather than a long timeout.
+Run it right after `gh-as-agent push` from your clone of the PR's branch: it
+waits until GitHub shows your pushed commit as the PR's head and never reports
+the previous head's result (`--head <sha>` names the commit explicitly).
 Never wait for CI in a background shell or `Task`, and
 do not hand-roll `gh pr checks` loops. On timeout, end your turn; unattended
 flows continue through the gated PR hand-off or a `pull_request.checks_*`

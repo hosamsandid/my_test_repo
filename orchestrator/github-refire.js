@@ -163,7 +163,11 @@ function planRefire({ found, prior, trigger, agentEnabled, retentionCutoffMs }) 
 // from the REST API (`state`, `merged`/`merged_at`, `labels`). A missing detail
 // (fetch failed) refuses rather than guesses: waking an agent on a merged PR is
 // the one outcome this check exists to prevent.
-function checkItemState(detail, { kind, wakeLabel }) {
+//
+// `requireLabel` (#2822): a comment listener's label condition, re-checked on the
+// live labels — a comment wake re-fired after the label was removed would wake
+// the agent for a conversation it no longer owns.
+function checkItemState(detail, { kind, wakeLabel, requireLabel = null }) {
   if (!detail || typeof detail !== 'object') {
     return { ok: false, status: 502, code: 'github-unavailable', error: 'Could not read the item\'s current state from GitHub — try again in a moment.' };
   }
@@ -174,10 +178,16 @@ function checkItemState(detail, { kind, wakeLabel }) {
   if (detail.state && detail.state !== 'open') {
     return { ok: false, status: 409, code: 'item-closed', error: `The ${noun} is closed — reopen it before firing again.` };
   }
+  const labels = Array.isArray(detail.labels)
+    ? detail.labels.map((l) => (typeof l === 'string' ? l : l && l.name)).filter(Boolean)
+    : [];
+  if (requireLabel && !labels.includes(requireLabel)) {
+    return {
+      ok: false, status: 409, code: 'label-gone',
+      error: `The ${noun} no longer carries the label '${requireLabel}' this trigger requires — re-apply it to wake the agent.`,
+    };
+  }
   if (wakeLabel) {
-    const labels = Array.isArray(detail.labels)
-      ? detail.labels.map((l) => (typeof l === 'string' ? l : l && l.name)).filter(Boolean)
-      : [];
     if (!labels.includes(wakeLabel)) {
       const wip = labels.includes(`${wakeLabel}:wip`);
       return {

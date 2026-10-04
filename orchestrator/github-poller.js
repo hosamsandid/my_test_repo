@@ -35,6 +35,7 @@ const wakeArmory = require('./wake-armory');
 const { canonicalEventKey, listensTo } = require('./event-key-aliases');
 const pushAttribution = require('./push-attribution');
 const { parseBranchFilter, pushBranch, branchFilterMatches } = require('./branch-filter');
+const commentFilter = require('./comment-filter');
 const { knowledgeBranchesByRepo, isKnowledgeBranchPush } = require('./knowledge-branch-exclusion');
 const prReadiness = require('./pr-readiness');
 const handoffGate = require('./handoff-gate');
@@ -1320,7 +1321,8 @@ class GitHubPoller {
     // oldest-first (caller sorted), so per-group order stays causal.
     //
     // There is NO source/origin filtering here unless a push trigger opts into
-    // a producer filter (`pushedBy`, #2571): otherwise a trigger fires on any
+    // a producer filter (`pushedBy`, #2571) or a comment trigger into
+    // `skipAgentComments` (#2822): otherwise a trigger fires on any
     // matching event regardless of who caused it (human, another agent, or the
     // subscriber itself). The only backstop against a self-triggering loop is
     // the frequency-based Layer-3 throttle + burst digest in phase 2. The one
@@ -1350,6 +1352,10 @@ class GitHubPoller {
     if (!repoState.pushHeads || typeof repoState.pushHeads !== 'object') repoState.pushHeads = {};
     const pushHeads = repoState.pushHeads;
     gcPushHeads(pushHeads);
+
+    // #2822: commented item number → its current label names, so several
+    // comment events (or listeners) on one item cost a single GET per batch.
+    const itemLabelCache = new Map();
 
     for (const ghEvent of expandPrOpenPushes(ghEvents)) {
       const key = eventKey(ghEvent);
@@ -1591,6 +1597,28 @@ class GitHubPoller {
             );
             outcome.status = 'dropped';
             outcome.reason = 'branch-filter';
+            continue;
+          }
+        }
+
+        // Comment filters for `issue_comment.*` events (#2822). Content routing
+        // like the label / branch filters: target and agent-marker checks read
+        // the event alone; the label condition reads the commented item's
+        // CURRENT labels (one cached GET per item per batch, see
+        // `_currentItemLabels`). Other events are unaffected.
+        if (sub.commentFilter && commentFilter.isCommentEvent(key)) {
+          let verdict = commentFilter.commentPrecheck(sub.commentFilter, ghEvent);
+          if (verdict.ok && sub.commentFilter.requireLabel) {
+            const labels = await this._currentItemLabels(ghEvent, token, itemLabelCache);
+            verdict = commentFilter.requireLabelVerdict(sub.commentFilter, labels);
+          }
+          if (!verdict.ok) {
+            console.log(
+              `[GH-Poller] ${verdict.reason}: ${key} (${ghEvent.id}) → ${sub.agentId} dropped (${verdict.detail})`,
+            );
+            outcome.status = 'dropped';
+            outcome.reason = verdict.reason;
+            if (verdict.reason === 'comment-label') outcome.requireLabel = sub.commentFilter.requireLabel;
             continue;
           }
         }
@@ -1841,7 +1869,7 @@ class GitHubPoller {
           ghEvent: ghEventForLog,
           repoFullName,
           key: entry.key,
-          outcomes: entry.outcomes.map(({ agentId, triggerId, status, reason, digest, wakeLabel, wipLimit, producer, instanceId, gates }) => {
+          outcomes: entry.outcomes.map(({ agentId, triggerId, status, reason, digest, wakeLabel, wipLimit, producer, instanceId, gates, requireLabel }) => {
             const o = { agentId, triggerId, status, reason, digest };
             if (wakeLabel !== undefined) o.wakeLabel = wakeLabel;
             // Held-by-WIP outcomes carry the flow's limit so the log row can read
@@ -1853,6 +1881,8 @@ class GitHubPoller {
             if (instanceId !== undefined) o.instanceId = instanceId;
             // #2795: the hand-off gates a readiness-gate hold waits for.
             if (gates !== undefined) o.gates = gates;
+            // #2822: the label a comment-label drop wanted on the item.
+            if (requireLabel !== undefined) o.requireLabel = requireLabel;
             return o;
           }),
         }),
@@ -1950,6 +1980,28 @@ class GitHubPoller {
       console.log(`[GH-Poller] Queued ${key} (${ghEvent.id}) → agent=${agentId} trigger=${triggerId}`);
     }
     return decision;
+  }
+
+  // #2822: the commented issue / PR's CURRENT label names for a comment
+  // listener's `requireLabel`. The event payload's `issue.labels` is the set at
+  // event time — a label added or removed since then must win — so the item is
+  // read once per batch (`cache`, keyed by item URL). A failed read falls back
+  // to the payload's set rather than dropping a possibly-wanted wake blind.
+  async _currentItemLabels(ghEvent, token, cache) {
+    const issue = ghEvent?.payload?.issue;
+    const url = issue && typeof issue.url === 'string' ? issue.url : null;
+    if (!url || !token) return commentFilter.labelNames(issue);
+    if (!cache.has(url)) {
+      let labels;
+      try {
+        labels = commentFilter.labelNames(await this._fetchJson(url, token));
+      } catch (err) {
+        console.error(`[GH-Poller] label read failed for ${url}: ${err.message} — using the event's label set`);
+        labels = commentFilter.labelNames(issue);
+      }
+      cache.set(url, labels);
+    }
+    return cache.get(url);
   }
 
   // #496: best-effort GET of an arbitrary GitHub API resource (used to fetch
@@ -2413,6 +2465,9 @@ function computePollPlan({ environments = [], agents = [], knowledgeLocations = 
         branchFilter: branchFilter.length ? branchFilter : null,
         // #2795: the hand-off's CI / merge-conflict gate (null = wake at once).
         readinessGate: handoffGate.normalizeGate(t.readinessGate),
+        // #2822: `issue_comment.*` filters — requireLabel / skipAgentComments /
+        // target — or null for none (every comment, legacy behaviour).
+        commentFilter: commentFilter.parseCommentFilter(t),
       });
     }
   }

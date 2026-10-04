@@ -2338,3 +2338,128 @@ test("_fanOutBatch (#2799 AC7): a PR burst digest carries closesIssues from the 
   assert.deepEqual((await run([2794, 12])).closesIssues, [12, 2794]);
   assert.equal("closesIssues" in (await run(null)), false, "no known link → entry unchanged");
 });
+
+// ── Comment filters (#2822) ──────────────────────────────────────────────────
+
+function commentEvent(id, { number = 4, pr = false, body = "Option B, please.", labels = [] } = {}) {
+  return {
+    id,
+    actor: { login: "human" },
+    created_at: new Date().toISOString(),
+    type: "IssueCommentEvent",
+    repo: { name: "org/repo" },
+    payload: {
+      action: "created",
+      issue: {
+        number, title: "Spec", url: `https://api.github.com/repos/org/repo/issues/${number}`,
+        labels: labels.map((name) => ({ name })),
+        ...(pr ? { pull_request: { url: `https://api.github.com/repos/org/repo/pulls/${number}` } } : {}),
+      },
+      comment: { body },
+    },
+  };
+}
+
+const commentSub = (filter, over = {}) => ({
+  agentId: "spec", triggerId: "t-answer",
+  events: new Set(["issue_comment.created"]), labelFilter: null, horizon: null,
+  commentFilter: filter, ...over,
+});
+
+test("computePollPlan (#2822): carries the parsed comment filter, null when none is set", () => {
+  const { computePollPlan } = require("./github-poller");
+  const trig = (id, extra) => ({ id, type: "github-event", enabled: true, repo: "acme/r", events: ["issue_comment.created"], ...extra });
+  const plan = computePollPlan({
+    allowNonGithubHost: false,
+    environments: [{ id: "env", githubTokenId: "tok", repositories: [{ url: "git@github.com:acme/r.git" }] }],
+    agents: [{
+      id: "spec", config: { environmentId: "env" }, triggersMtime: null,
+      triggers: [
+        trig("full", { requireLabel: " clarifying ", skipAgentComments: true, target: "issue" }),
+        trig("none"),
+      ],
+    }],
+  });
+  const byId = new Map(plan.get("acme/r").subscribers.map((s) => [s.triggerId, s.commentFilter]));
+  assert.deepEqual(byId.get("full"), { requireLabel: "clarifying", skipAgentComments: true, target: "issue" });
+  assert.equal(byId.get("none"), null);
+});
+
+test("_fanOutBatch (#2822 AC1): requireLabel reads the item's CURRENT labels, once per item, and drops the rest with a reason", async () => {
+  const poller = new GitHubPoller();
+  const fetched = [];
+  // Item 4 carries the label NOW although the event snapshot does not; item 5
+  // lost it since the event.
+  const current = { 4: ["clarifying"], 5: ["bug"] };
+  poller._fetchJson = async (url) => {
+    fetched.push(url);
+    return { labels: current[url.split("/").pop()].map((name) => ({ name })) };
+  };
+  const { recorded, enqueued } = await runBatch(poller, [[
+    commentEvent("c1", { number: 4 }),
+    commentEvent("c2", { number: 4 }),
+    commentEvent("c3", { number: 5, labels: ["clarifying"] }),
+  ]], [commentSub({ requireLabel: "clarifying", skipAgentComments: false, target: null })]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["c1", "c2"]);
+  const drop = recorded.find((r) => r.eventId === "c3").outcomes[0];
+  assert.equal(drop.status, "dropped");
+  assert.equal(drop.reason, "comment-label");
+  assert.equal(drop.requireLabel, "clarifying");
+  assert.deepEqual(fetched, [
+    "https://api.github.com/repos/org/repo/issues/4",
+    "https://api.github.com/repos/org/repo/issues/5",
+  ], "one GET per item per batch");
+});
+
+test("_fanOutBatch (#2822): a failed label read falls back to the event's label set", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => { throw new Error("HTTP 502"); };
+  const { enqueued } = await runBatch(poller, [[
+    commentEvent("c1", { labels: ["clarifying"] }),
+    commentEvent("c2", { number: 9 }),
+  ]], [commentSub({ requireLabel: "clarifying", skipAgentComments: false, target: null })]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["c1"]);
+});
+
+test("_fanOutBatch (#2822 AC2): skipAgentComments drops marker comments, human comments still wake", async () => {
+  const poller = new GitHubPoller();
+  const { recorded, enqueued } = await runBatch(poller, [[
+    commentEvent("agent", { body: "Which option?\n\n<!-- agent: team-x-spec -->\n" }),
+    commentEvent("human", { body: "Option B." }),
+  ]], [commentSub({ requireLabel: null, skipAgentComments: true, target: null })]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["human"]);
+  assert.equal(recorded.find((r) => r.eventId === "agent").outcomes[0].reason, "agent-comment");
+});
+
+test("_fanOutBatch (#2822 AC3): target drops comments on the other kind of item", async () => {
+  const poller = new GitHubPoller();
+  const both = [commentEvent("on-issue", { number: 4 }), commentEvent("on-pr", { number: 8, pr: true })];
+  const r1 = await runBatch(poller, [both], [commentSub({ requireLabel: null, skipAgentComments: false, target: "issue" })]);
+  assert.deepEqual(r1.enqueued.map((e) => e.entry.github.eventId), ["on-issue"]);
+  assert.equal(r1.recorded.find((r) => r.eventId === "on-pr").outcomes[0].reason, "comment-target");
+  const poller2 = new GitHubPoller();
+  const r2 = await runBatch(poller2, [both], [commentSub({ requireLabel: null, skipAgentComments: false, target: "pr" }, { triggerId: "t-pr" })]);
+  assert.deepEqual(r2.enqueued.map((e) => e.entry.github.eventId), ["on-pr"]);
+});
+
+test("_fanOutBatch (#2822 AC4): without filter fields every comment wakes and nothing is fetched", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => { throw new Error("must not fetch"); };
+  const { enqueued } = await runBatch(poller, [[
+    commentEvent("a", { body: "q <!-- agent: x -->" }), commentEvent("b", { number: 8, pr: true }),
+  ]], [commentSub(null)]);
+  assert.equal(enqueued.length, 2);
+});
+
+test("_fanOutBatch (#2822): the comment filter never gates the trigger's other events", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => { throw new Error("must not fetch"); };
+  const issueOpened = {
+    id: "io-1", actor: { login: "dev" }, created_at: new Date().toISOString(), type: "IssuesEvent",
+    repo: { name: "org/repo" },
+    payload: { action: "opened", issue: { number: 7, title: "x", labels: [] } },
+  };
+  const sub = commentSub({ requireLabel: "clarifying", skipAgentComments: true, target: "pr" }, { events: new Set(["issues.opened"]) });
+  const { enqueued } = await runBatch(poller, [[issueOpened]], [sub]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["io-1"]);
+});

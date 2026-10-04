@@ -1761,7 +1761,10 @@ def _ask_answer_prompt(body: str, content) -> str:
     `answers[]`); its visible body only joins them with ", ", which is ambiguous
     when a label contains a comma. For those, rebuild the prompt from the
     structured labels so every selected answer reaches the model as its own
-    line. Anything malformed falls back to the plain body.
+    line. In a multi-question answer each block is labelled with its question
+    header, a typed answer (`custom`, #2821) keeps its own lines (indented) and
+    a skipped question reads "(skipped)". Anything malformed falls back to the
+    plain body.
     """
     if not isinstance(content, dict):
         return body
@@ -1775,6 +1778,12 @@ def _ask_answer_prompt(body: str, content) -> str:
 
     blocks: list[str] = []
     for e in entries:
+        if e.get("skipped") is True:
+            blocks.append("(skipped)")
+            continue
+        if e.get("custom") is True and isinstance(e.get("text"), str) and e["text"].strip():
+            blocks.append("\n".join(f"  {l}" for l in e["text"].strip().splitlines()))
+            continue
         raw = e.get("labels") if isinstance(e.get("labels"), list) else [e.get("label")]
         labels = [l.strip() for l in raw[:_ASK_ANSWER_MAX_LABELS]
                   if isinstance(l, str) and l.strip()]
@@ -1783,8 +1792,14 @@ def _ask_answer_prompt(body: str, content) -> str:
         blocks.append("\n".join(f"- {l}" for l in labels))
     if len(blocks) == 1:
         return "My answer to your question (selected options):\n" + blocks[0]
+
+    def title(i: int, e: dict) -> str:
+        header = e.get("header")
+        if isinstance(header, str) and header.strip():
+            return f"Question {i} ({header.strip()[:120]}):"
+        return f"Question {i}:"
     return "My answers to your questions (selected options, in question order):\n" + "\n".join(
-        f"Question {i}:\n{b}" for i, b in enumerate(blocks, 1))
+        f"{title(i, e)}\n{b}" for i, (e, b) in enumerate(zip(entries, blocks), 1))
 
 
 # ---- status.json ----

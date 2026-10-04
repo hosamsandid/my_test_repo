@@ -23,6 +23,8 @@ import {
   ASK_QUESTION_FIELD, ASK_ANSWER_FIELD,
   buildAnswerContent, buildMultiAnswerContent, buildSelectionAnswerContent,
   multiAnswerText, indexAskAnswers, questionState,
+  advanceAskProgress, consolidateAskAnswers, buildTypedAnswer, activeMultiQuestionCard,
+  askComposerPlaceholder, EMPTY_ASK_PROGRESS,
 } from './ask-question-view.js';
 import LearningBadge from '../../components/LearningBadge';
 import PageHelpButton from '../../components/PageHelpButton';
@@ -127,6 +129,11 @@ export default function ChatPanel({
   const [creating, setCreating]      = useState(false);
   const [sending, setSending]        = useState(false);
   const [uploading, setUploading]    = useState(false);
+  // Step progress of multi-question cards (#1799), keyed by the question's
+  // event_id: { openIdx, answers: { questionId → answer } }. Held here rather
+  // than in the card so a text typed in the composer can answer the open
+  // question (#2821) and a superseded card still knows how far the user got.
+  const [askProgress, setAskProgress] = useState({});
 
   // Backfill (scroll-up) state. `endToken` is the Matrix `end` field from
   // `dir=b` /messages, which marks the older boundary — pass it back as
@@ -1149,49 +1156,63 @@ export default function ChatPanel({
     }
   }
 
-  /* ─── 5a′. Quick-reply answer (#1663, #1799) ─────────────────────────
+  /* ─── 5a′. Quick-reply answer (#1663, #1799, #2821) ──────────────────
    * Single-question (D1): clicking an option sends its label as the user's
    * reply (unchanged, AC1).
    *
-   * Multi-question (#1799 AC4): the card collects intermediate choices
-   * client-side (no message sent) and calls back here only after the last
-   * question with { isMulti: true, answers: [{questionId,optionId,label}…] }.
-   * We then send one consolidated reply and resume the session. A
-   * multi-select step's entry carries `optionIds`/`labels` instead (#2523).
+   * Multi-question (#1799 AC4): each completed step — a click, a submitted
+   * multi-select, or text typed in the composer (#2821) — arrives as
+   * { isStep, questionIndex, value } and only advances `askProgress` (no
+   * message is sent). The last step sends one consolidated reply and resumes
+   * the session once. { isSkipRemaining } sends the answers given so far with
+   * the remaining questions marked skipped (#2821 AC8). A multi-select step's
+   * entry carries `optionIds`/`labels` (#2523); a typed one `custom`/`text`.
    *
    * Lone multi-select question (#2523): the card toggles options and calls
    * back on Submit with { isMultiSelect: true, answer }.
    *
-   * Selection is final in both cases (AC5/AC6): the optimistic reply lands
+   * Selection is final in every case (AC5/AC6): the optimistic reply lands
    * after the question, so `questionState` immediately marks the card inert.
    * The guard below also rejects a duplicate click once any answer references
    * this question.
    */
-  function handleAnswerQuestion(questionEventId, optOrConsolidated) {
-    if (!questionEventId) return;
-    if (sending) return;
-    const already = messages.some(m => m[ASK_ANSWER_FIELD]?.questionEventId === questionEventId);
-    if (already) return;
+  function sendConsolidatedAnswer(questionEventId, answers) {
+    if (!answers.length) return Promise.resolve(false);
+    return handleSend(multiAnswerText(answers), buildMultiAnswerContent(questionEventId, answers));
+  }
 
-    if (optOrConsolidated?.isMulti && Array.isArray(optOrConsolidated.answers)) {
-      // Multi-question consolidated reply (#1799).
-      const { answers } = optOrConsolidated;
-      const extra = buildMultiAnswerContent(questionEventId, answers);
-      handleSend(multiAnswerText(answers), extra);
-    } else if (optOrConsolidated?.isMultiSelect && optOrConsolidated.answer) {
+  function handleAnswerQuestion(questionEventId, optOrConsolidated, question = null) {
+    if (!questionEventId || readOnly) return false;
+    if (sending) return false;
+    const already = messages.some(m => m[ASK_ANSWER_FIELD]?.questionEventId === questionEventId);
+    if (already) return false;
+
+    const questions = question?.questions;
+    if (optOrConsolidated?.isStep && Array.isArray(questions)) {
+      const { progress, answers } = advanceAskProgress(
+        askProgress[questionEventId], questions,
+        optOrConsolidated.questionIndex, optOrConsolidated.value);
+      setAskProgress(prev => ({ ...prev, [questionEventId]: progress }));
+      return answers ? sendConsolidatedAnswer(questionEventId, answers) : true;
+    }
+    if (optOrConsolidated?.isSkipRemaining && Array.isArray(questions)) {
+      const progress = askProgress[questionEventId] || EMPTY_ASK_PROGRESS;
+      const answers = consolidateAskAnswers(questions, progress.answers, { skipRemaining: true });
+      return sendConsolidatedAnswer(questionEventId, answers);
+    }
+    if (optOrConsolidated?.isMultiSelect && optOrConsolidated.answer) {
       // A lone multi-select question (#2523): every selected option, sent once
       // on Submit. The body joins the labels; the runtime resumes the session
       // from the structured `labels`.
       const { answer } = optOrConsolidated;
-      if (!Array.isArray(answer.labels) || answer.labels.length === 0) return;
-      handleSend(answer.label, buildSelectionAnswerContent(questionEventId, answer));
-    } else {
-      // Single-question (unchanged).
-      const option = optOrConsolidated;
-      if (!option?.label) return;
-      const extra = buildAnswerContent(questionEventId, option);
-      handleSend(option.label, extra);
+      if (!Array.isArray(answer.labels) || answer.labels.length === 0) return false;
+      return handleSend(answer.label, buildSelectionAnswerContent(questionEventId, answer));
     }
+    // Single-question (unchanged).
+    const option = optOrConsolidated;
+    if (!option?.label) return false;
+    const extra = buildAnswerContent(questionEventId, option);
+    return handleSend(option.label, extra);
   }
 
   /* ─── 5b. Attach files ───────────────────────────────────────────────
@@ -1255,6 +1276,24 @@ export default function ChatPanel({
   // answer record, so a rendered AskUserQuestion can show which option was
   // chosen and render its buttons inert (AC5 / AC6).
   const askAnswersByQuestion = useMemo(() => indexAskAnswers(messages), [messages]);
+
+  // The multi-question card a text typed in the composer answers (#2821 AC1):
+  // the newest message, while it is an unanswered card of 2+ questions.
+  const activeAsk = useMemo(
+    () => activeMultiQuestionCard(messages, askAnswersByQuestion),
+    [messages, askAnswersByQuestion],
+  );
+  const activeAskOpenIdx = activeAsk ? (askProgress[activeAsk.eventId] || EMPTY_ASK_PROGRESS).openIdx : 0;
+  // Typed text becomes the answer of the open question; the card advances
+  // exactly like after a click (AC2), and the last one sends the reply (AC3).
+  const handleTypedAnswer = (text) => {
+    if (!activeAsk) return handleSend(text);
+    const q = activeAsk.question.questions[activeAskOpenIdx];
+    const value = buildTypedAnswer(q, text);
+    if (!value) return false;
+    return handleAnswerQuestion(activeAsk.eventId,
+      { isStep: true, questionIndex: activeAskOpenIdx, value }, activeAsk.question);
+  };
 
   /* ─── Thinking indicator: latest message is from user, no agent reply yet */
   // For trigger-initiated runs the last transcript entry is the trigger notice
@@ -1366,6 +1405,7 @@ export default function ChatPanel({
           onAnswerQuestion={handleAnswerQuestion}
           questionAnswerable={qState?.answerable}
           questionAnswer={qState}
+          questionProgress={isQuestion ? askProgress[msg.event_id] : undefined}
           viewer={viewer}
           authorDirectory={authorDirectory}
           onShowInSession={onShowInSession}
@@ -1937,6 +1977,10 @@ export default function ChatPanel({
         onSend={handleSend}
         disabled={composerDisabled}
         readOnly={readOnly}
+        askPlaceholder={activeAsk
+          ? askComposerPlaceholder(activeAskOpenIdx, activeAsk.question.questions.length)
+          : null}
+        onAnswerCard={activeAsk ? handleTypedAnswer : null}
         agentId={agent.id}
         agentDisplayName={agent.displayName || agent.id}
         onUpload={handleUpload}

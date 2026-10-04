@@ -17,6 +17,7 @@ import { decideComposerAction } from './composer-action.js';
 import { CHAT_READ_ONLY_PLACEHOLDER } from './chat-read-only.js';
 import { commandQuery, filterCommands, commandInsertion, nextIndex } from './command-palette.js';
 import { apiCall } from '../../hooks/useApi.js';
+import { composerAnswersCard } from './ask-question-view.js';
 import ComposerAttachments from './ComposerAttachments.jsx';
 import {
   partitionFiles,
@@ -111,8 +112,14 @@ const IS_MAC = isMacPlatform();
  *        `ts` re-fires the effect on repeat clicks (request-object pattern,
  *        mirrors `resumeRequest`); the leading `@` is added here, so `ref` is a
  *        bare workspace-relative path with no `@`.
+ * @param {?string} [askPlaceholder]      Placeholder while a multi-question card
+ *        is active (#2821 AC4), e.g. "Answer question 2 of 5…".
+ * @param {?(text:string)=>(boolean|Promise<boolean>)} [onAnswerCard]  While set, a
+ *        plain-text send answers the active card's open question instead of
+ *        posting a chat message (#2821 AC1); a draft with an attachment or a
+ *        dictated transcript still goes to `onSend` and supersedes the card.
  */
-export default function MessageInput({ onSend, disabled = false, agentId = null, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false, loopTrigger = null, loopProgress = null, busy = false, onStop, stopBusy = false, onStartMeeting, meetingActive = false, insertRefRequest = null, readOnly = false }) {
+export default function MessageInput({ onSend, disabled = false, agentId = null, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false, loopTrigger = null, loopProgress = null, busy = false, onStop, stopBusy = false, onStartMeeting, meetingActive = false, askPlaceholder = null, onAnswerCard = null, insertRefRequest = null, readOnly = false }) {
   // Seed the composer from any persisted draft for this agent (#1388). The
   // component remounts per agent (key={agent.id}) so this initialiser runs
   // fresh with the right agentId on every switch.
@@ -220,7 +227,13 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
     setAttachments(next);
   }, [value, attachments]);
 
+  // Whether the draft holds dictated text (#2821): a voice message keeps
+  // superseding a question card instead of answering it.
+  const dictatedRef = useRef(false);
+  useEffect(() => { if (!value.trim()) dictatedRef.current = false; }, [value]);
+
   const handleTranscription = React.useCallback((text) => {
+    dictatedRef.current = true;
     setValue(prev => {
       if (!prev.trim()) return text;
       return prev + ' ' + text;
@@ -264,7 +277,12 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
     if (!text || disabled || attachmentsUploading) return;
     // A refused send (onSend resolves false — e.g. the chat identity is not
     // ready yet, #2721 AC5) gives the typed text back instead of losing it.
-    Promise.resolve(onSend(text)).then((sent) => {
+    // While a multi-question card is active, plain text answers it (#2821).
+    const toCard = !!onAnswerCard && composerAnswersCard({
+      text, hasAttachments: attachments.length > 0, dictated: dictatedRef.current,
+    });
+    dictatedRef.current = false;
+    Promise.resolve(toCard ? onAnswerCard(text) : onSend(text)).then((sent) => {
       if (sent === false) setValue(v => restoreUnsentText(v, text));
     }, () => {});
     setValue('');
@@ -448,9 +466,11 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
   const sendHint = placeholderSendHint(sendKeybinding, IS_MAC);
   const placeholder = readOnly
     ? CHAT_READ_ONLY_PLACEHOLDER
-    : agentDisplayName
-      ? `Message ${agentDisplayName}…  (${sendHint})`
-      : `Message…  (${sendHint})`;
+    : askPlaceholder
+      ? `${askPlaceholder}  (${sendHint})`
+      : agentDisplayName
+        ? `Message ${agentDisplayName}…  (${sendHint})`
+        : `Message…  (${sendHint})`;
   const canAttach = !!onUpload && !disabled && !uploading;
   // AC11: no send while any attachment (batch or image card) is uploading.
   const attachmentsUploading = uploading || anyUploading(attachments);

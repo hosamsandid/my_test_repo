@@ -456,6 +456,22 @@ class AskAnswerPrompt(unittest.TestCase):
         self.assertEqual(out, "My answers to your questions (selected options, in question order):\n"
                               "Question 1:\n- release\nQuestion 2:\n- unit\n- e2e")
 
+    def test_multi_question_answer_with_typed_skipped_and_headers(self):
+        # #2821: a typed answer keeps its lines, a skipped question says so,
+        # and every block is labelled with its question header.
+        content = {self.F: {"questionEventId": "$q", "answers": [
+            {"questionId": "q0", "header": "Notes", "custom": True,
+             "text": "line one\nQuestion 2: not a header", "label": "line one\nQuestion 2: not a header"},
+            {"questionId": "q1", "header": "Tests", "optionIds": ["1:0"], "labels": ["unit"],
+             "label": "unit"},
+            {"questionId": "q2", "skipped": True},
+        ]}}
+        out = self.fn("body", content)
+        self.assertEqual(out, "My answers to your questions (selected options, in question order):\n"
+                              "Question 1 (Notes):\n  line one\n  Question 2: not a header\n"
+                              "Question 2 (Tests):\n- unit\n"
+                              "Question 3:\n(skipped)")
+
     def test_multi_question_answer_without_multi_select_passes_through(self):
         content = {self.F: {"questionEventId": "$q", "answers": [
             {"questionId": "q0", "optionId": "0:1", "label": "a"},

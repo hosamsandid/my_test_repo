@@ -362,7 +362,7 @@ test('chat link CSS gives hover and keyboard-focus affordances', () => {
 
 test('FlowControl wires the chat links: router Link, stage cell and Working-now line (#651 source guard)', () => {
   const jsx = fs.readFileSync(path.join(here, '..', 'FlowControl.jsx'), 'utf8');
-  assert.match(jsx, /import \{ Link as RouterLink \} from 'react-router';/);
+  assert.match(jsx, /import \{ Link as RouterLink(, [^}]*)? \} from 'react-router';/);
   assert.match(jsx, /<style>\{CHAT_LINK_CSS\}<\/style>/);
   assert.match(jsx, /if \(!chat\) return children;/);
   assert.match(jsx, /<RouterLink to=\{chat\.to\} title=\{chat\.label\} aria-label=\{chat\.label\} className=\{CHAT_LINK_CLASS\}/);

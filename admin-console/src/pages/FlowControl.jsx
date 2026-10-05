@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   AlertTriangle, RefreshCw, ExternalLink, Info, Pause, Play, Waves, Zap, Power, Columns, UserRound, EyeOff, RotateCcw, LockOpen, CheckCircle2,
 } from 'lucide-react';
-import { Link as RouterLink } from 'react-router';
+import { Link as RouterLink, useSearchParams } from 'react-router';
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import PageHelpButton from '../components/PageHelpButton';
@@ -13,6 +13,7 @@ import {
   withoutRows, REMOVE_CONFIRM_TEXT, removeDialogTitle, RELEASE_CONFIRM_TEXT, releaseDialogTitle, releaseNotice, CHAT_LINK_CLASS, CHAT_LINK_CSS,
 } from './process/flow-control-view';
 import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections';
+import { readCurrentTeam, writeCurrentTeam, resolveFlowControlTeam } from './current-team';
 
 // The Flow Control board (#2573, concept `docs/flow-control-concept.md`
 // Amendment 3): who is working on what, where a person is needed, and how far
@@ -53,10 +54,23 @@ export default function FlowControl() {
   const [removedOpen, setRemovedOpen] = useState(false);
   const loadSeq = useRef(0);
 
-  // Default to the first team once the list arrives; never override a choice.
+  const [searchParams] = useSearchParams();
+  const urlTeam = searchParams.get('team') || '';
+
+  // Open on `?team=`, else the team last worked with in Agent Chat or picked
+  // here (#2850), else the first team — once the list arrives, so no other
+  // team's board is fetched first; never override a choice.
   useEffect(() => {
-    if (!teamId && teams.length > 0) setTeamId(teams[0].id);
-  }, [teams, teamId]);
+    if (teamId) return;
+    const resolved = resolveFlowControlTeam({ urlTeam, rememberedTeam: readCurrentTeam(username), teams });
+    if (resolved) setTeamId(resolved);
+  }, [teams, teamId, urlTeam, username]);
+
+  // A pick in the picker becomes the current team for every page.
+  const pickTeam = useCallback((id) => {
+    setTeamId(id);
+    writeCurrentTeam(username, id);
+  }, [username]);
 
   // The preference is per user, and the user record can arrive after mount.
   useEffect(() => { setAutoRefresh(readAutoRefresh(username)); }, [username]);
@@ -227,7 +241,7 @@ export default function FlowControl() {
         ) : (
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
-              <TeamPicker teams={teams} value={teamId} onChange={setTeamId} />
+              <TeamPicker teams={teams} value={teamId} onChange={pickTeam} />
               {view.canManage && (
                 <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 'var(--eb-space-2)' }}>
                   {view.removed.length > 0 && (

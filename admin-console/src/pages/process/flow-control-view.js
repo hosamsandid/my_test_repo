@@ -253,6 +253,7 @@ export function sessionView(s, { now = Date.now(), singleRepo = true } = {}) {
     role,
     instance: s.instance != null ? `#${s.instance}` : null,
     agentId: s.agentId,
+    roleId: s.roleId || null,
     chat: chatLink(s.agentId, role, s.instance != null ? s.instance : null),
     item,
     title: s.title || null,
@@ -306,6 +307,7 @@ export function poolView(p) {
   return {
     key: p.roleId || p.agentId,
     roleId: p.roleId,
+    agentId: p.agentId || null,
     label: p.label || p.roleId,
     occupancy,
     state: p.state || 'running',
@@ -317,6 +319,30 @@ export function poolView(p) {
       nextState: a === 'pause' ? 'paused' : a === 'drain' ? 'draining' : 'running',
     })),
   };
+}
+
+// #2848: each running instance of a pooled role is listed beneath that role's
+// pool line. A session's `roleId` is its role's member id — the pool's
+// `agentId`, the same key the server counts the pool's occupancy by (the pool's
+// own `roleId` is the short role id). A session whose pool is not on the board
+// stays top level, so no run ever disappears. Server order (longest-running
+// first) is kept, so instances do not jump around on refresh.
+export function groupWorkingNow(sessions, pools) {
+  const list = Array.isArray(sessions) ? sessions : [];
+  const byRole = new Map();
+  const grouped = (Array.isArray(pools) ? pools : []).map((p) => {
+    const g = { ...p, instances: [] };
+    const key = p.agentId || p.roleId;
+    if (key && !byRole.has(key)) byRole.set(key, g);
+    return g;
+  });
+  const top = [];
+  for (const s of list) {
+    const pool = s && s.roleId ? byRole.get(s.roleId) : null;
+    if (pool) pool.instances.push(s);
+    else top.push(s);
+  }
+  return { sessions: top, pools: grouped };
 }
 
 // ---------------------------------------------------------------------------
@@ -395,11 +421,15 @@ export function boardView(data, now = Date.now()) {
   const doneRetentionHours = d.doneRetentionHours ?? (d.config && d.config.doneRetentionHours) ?? null;
   const needs = (Array.isArray(d.needsHuman) ? d.needsHuman : []).map((n) => needsYouView(n, opts));
   const removed = (Array.isArray(d.removed) ? d.removed : []).map((r) => removedView(r, opts));
+  const working = groupWorkingNow(
+    (Array.isArray(d.sessions) ? d.sessions : []).map((s) => sessionView(s, opts)),
+    (Array.isArray(d.pools) ? d.pools : []).map(poolView),
+  );
   return {
     stages,
     roles: Array.isArray(d.roles) ? d.roles : [],
-    sessions: (Array.isArray(d.sessions) ? d.sessions : []).map((s) => sessionView(s, opts)),
-    pools: (Array.isArray(d.pools) ? d.pools : []).map(poolView),
+    sessions: working.sessions,
+    pools: working.pools,
     held: Array.isArray(d.held) ? d.held : [],
     needsYou: needs.length ? needs : null,
     activeRows,

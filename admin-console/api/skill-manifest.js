@@ -34,13 +34,22 @@ const HASH_LEN = 12; // 12-hex prefix of the SHA-256
 // The closed set of history actions (concept §2.2).
 const ACTIONS = Object.freeze([
   'created', 'edited', 'imported', 'adopted', 'promoted',
-  'lifted', 'shared', 'moved', 'merged', 'extended', 'resynced',
+  'lifted', 'shared', 'moved', 'merged', 'extended', 'resynced', 'restored',
 ]);
+
+// Version snapshots (#2839): every stamped content state is kept as a full
+// snapshot under `<skill>/_versions/<contentHash>.json`. Snapshots are content-
+// addressed, so a history entry that re-records unchanged content (forceHistory)
+// shares the existing snapshot, and pruning keeps exactly the hashes still
+// referenced by the bounded history (≤ HISTORY_LIMIT). The dir is excluded from
+// the content hash like `_archive`, and never travels with a copy.
+const SNAPSHOT_DIR = '_versions';
+const SNAPSHOT_V = 1;
 
 // Excluded from the content hash: the two sidecars (they describe the content,
 // they are not content) and archived snapshots.
 const EXCLUDED_BASENAMES = new Set([MANIFEST_FILENAME, 'provenance.json']);
-const EXCLUDED_DIRS = new Set(['_archive']);
+const EXCLUDED_DIRS = new Set(['_archive', SNAPSHOT_DIR]);
 
 // Normalize a relative path to forward slashes with no leading slash so the
 // hash is stable across platforms.
@@ -99,6 +108,9 @@ function computeContentHash(files) {
 // editing it (e.g. an import round-trip of a byte-identical skill: the version
 // chain continues, an `imported` entry is appended, nothing is reset). It has no
 // effect when the hash already changed (that path always records + bumps).
+//
+// `opts.restoredFrom` (a version number) is recorded on the new entry of a
+// `restored` stamp so the history shows which old version was brought back.
 function stampManifest(existing, opts) {
   const o = opts || {};
   const contentHash = o.contentHash;
@@ -122,6 +134,7 @@ function stampManifest(existing, opts) {
   if (record) {
     const entry = { version, hash: contentHash, at, by, action };
     if (o.note != null && o.note !== '') entry.note = o.note;
+    if (Number.isInteger(o.restoredFrom)) entry.restoredFrom = o.restoredFrom;
     history.unshift(entry);
   }
 
@@ -181,6 +194,53 @@ function isResyncable(state) {
   return state === 'outdated';
 }
 
+/* ─── Version snapshots (pure) ────────────────────────────────────────────── */
+
+const HASH_RE = new RegExp(`^[0-9a-f]{${HASH_LEN}}$`);
+
+function isContentHash(h) {
+  return typeof h === 'string' && HASH_RE.test(h);
+}
+
+// Serialize a file list into a snapshot document. The hash is recomputed from
+// the files, so a snapshot always names exactly the content it holds.
+function buildSnapshot(files) {
+  const norm = normalizeFiles(files);
+  return {
+    v: SNAPSHOT_V,
+    hash: computeContentHash(norm),
+    files: norm.map(f => ({ path: f.path, b64: f.bytes.toString('base64') })),
+  };
+}
+
+// Parse a snapshot document back into [{path, bytes}]. Returns null unless the
+// document is well-formed AND its files hash to `expectedHash` (when given), so
+// a corrupt or hand-edited snapshot is treated as "content not available".
+function parseSnapshot(doc, expectedHash) {
+  if (!doc || typeof doc !== 'object' || !Array.isArray(doc.files)) return null;
+  const files = [];
+  for (const f of doc.files) {
+    if (!f || typeof f.path !== 'string' || typeof f.b64 !== 'string') return null;
+    const rel = normalizeRelPath(f.path);
+    if (!rel || rel.split('/').some(seg => seg === '..' || seg === '.') || isExcludedPath(rel)) return null;
+    files.push({ path: rel, bytes: Buffer.from(f.b64, 'base64') });
+  }
+  const hash = computeContentHash(files);
+  if (expectedHash != null && hash !== expectedHash) return null;
+  return normalizeFiles(files);
+}
+
+// Which stored snapshot hashes to delete: everything not referenced by the
+// manifest's (bounded) history and not the manifest's current content.
+function planSnapshotPrune(existingHashes, manifest) {
+  const keep = new Set();
+  if (manifest && isContentHash(manifest.contentHash)) keep.add(manifest.contentHash);
+  for (const h of (manifest && Array.isArray(manifest.history) ? manifest.history : [])) {
+    if (h && isContentHash(h.hash)) keep.add(h.hash);
+  }
+  return (Array.isArray(existingHashes) ? existingHashes : []).filter(h => !keep.has(h)).sort();
+}
+
 /* ─── Thin IO wrappers (fs/path injectable for tests) ────────────────────── */
 
 // Read every hashable file of a skill directory as {path (posix-relative), bytes}.
@@ -236,27 +296,105 @@ function writeManifest(dir, manifest, io = {}) {
   return manifest;
 }
 
+// Hashes of the snapshots stored in a skill directory (sorted).
+function listSnapshotHashes(dir, io = {}) {
+  const fsImpl = io.fs || fs;
+  const pathImpl = io.path || path;
+  let names;
+  try { names = fsImpl.readdirSync(pathImpl.join(dir, SNAPSHOT_DIR)); } catch { return []; }
+  return names
+    .filter(n => n.endsWith('.json') && isContentHash(n.slice(0, -5)))
+    .map(n => n.slice(0, -5))
+    .sort();
+}
+
+// Write the snapshot of `files` unless one for its hash already exists
+// (content-addressed → dedup). Returns the snapshot hash.
+function writeSnapshot(dir, files, io = {}) {
+  const fsImpl = io.fs || fs;
+  const pathImpl = io.path || path;
+  const snap = buildSnapshot(files);
+  const sdir = pathImpl.join(dir, SNAPSHOT_DIR);
+  const file = pathImpl.join(sdir, `${snap.hash}.json`);
+  if (fsImpl.existsSync(file)) return snap.hash;
+  fsImpl.mkdirSync(sdir, { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fsImpl.writeFileSync(tmp, JSON.stringify(snap));
+  fsImpl.renameSync(tmp, file);
+  return snap.hash;
+}
+
+// Read a stored snapshot as [{path, bytes}], or null when absent/corrupt.
+function readSnapshot(dir, hash, io = {}) {
+  const fsImpl = io.fs || fs;
+  const pathImpl = io.path || path;
+  if (!isContentHash(hash)) return null;
+  try {
+    const raw = fsImpl.readFileSync(pathImpl.join(dir, SNAPSHOT_DIR, `${hash}.json`), 'utf8');
+    return parseSnapshot(JSON.parse(raw), hash);
+  } catch { return null; }
+}
+
+// Delete the snapshots no longer referenced by `manifest`. Returns the removed hashes.
+function pruneSnapshots(dir, manifest, io = {}) {
+  const fsImpl = io.fs || fs;
+  const pathImpl = io.path || path;
+  const drop = planSnapshotPrune(listSnapshotHashes(dir, io), manifest);
+  for (const h of drop) {
+    try { fsImpl.unlinkSync(pathImpl.join(dir, SNAPSHOT_DIR, `${h}.json`)); } catch { /* best-effort */ }
+  }
+  return drop;
+}
+
+// Ensure the snapshot of the directory's current content exists and prune the
+// unreferenced ones — for copy paths that carry a manifest over without
+// re-stamping (seed/sync of an agent copy). Best-effort: never throws.
+function snapshotSkillDir(dir, opts = {}) {
+  const io = { fs: opts.fs || fs, path: opts.path || path };
+  try {
+    writeSnapshot(dir, readSkillDirFiles(dir, io), io);
+    const manifest = readManifest(dir, io);
+    if (manifest) pruneSnapshots(dir, manifest, io);
+  } catch { /* snapshots are best-effort; the copy itself already succeeded */ }
+}
+
+// cpSync filter that keeps a skill's version snapshots from travelling with a
+// copy (transfer/adopt/move/install/seed/archive) — snapshots belong to ONE copy.
+function snapshotCopyFilter(src) {
+  return path.basename(String(src)) !== SNAPSHOT_DIR;
+}
+
 // The convenience used by every write path: hash the dir's current content,
 // read the existing manifest, stamp the next one, write it back, return it.
 // `name` defaults to the directory basename. Best-effort at the call site: the
 // caller wraps this in try/catch so stamping never breaks the primary write.
+// It also keeps the version snapshot of the stamped content (#2839) and prunes
+// snapshots that fell out of the bounded history; a snapshot failure never
+// fails the stamp (the entry just shows "content not available").
 function stampSkillDir(dir, opts = {}) {
   const io = { fs: opts.fs || fs, path: opts.path || path };
-  const contentHash = hashSkillDir(dir, io);
+  const files = readSkillDirFiles(dir, io);
+  const contentHash = computeContentHash(files);
   const existing = readManifest(dir, io);
   const name = opts.name != null ? opts.name : io.path.basename(dir);
   const manifest = stampManifest(existing, {
     contentHash, name,
     now: opts.now, by: opts.by, action: opts.action, origin: opts.origin, note: opts.note,
-    forceHistory: opts.forceHistory,
+    forceHistory: opts.forceHistory, restoredFrom: opts.restoredFrom,
   });
+  try { writeSnapshot(dir, files, io); } catch { /* best-effort */ }
   writeManifest(dir, manifest, io);
+  try { pruneSnapshots(dir, manifest, io); } catch { /* best-effort */ }
   return manifest;
 }
 
 module.exports = {
   MANIFEST_FILENAME, MANIFEST_V, HISTORY_LIMIT, HASH_LEN, ACTIONS, DRIFT_STATES,
+  SNAPSHOT_DIR, SNAPSHOT_V,
   normalizeRelPath, isExcludedPath, normalizeFiles, computeContentHash,
   stampManifest, classifyDrift, classifyCopyDrift, isResyncable,
+  isContentHash, buildSnapshot, parseSnapshot, planSnapshotPrune,
   readSkillDirFiles, hashSkillDir, readManifest, writeManifest, stampSkillDir,
+  listSnapshotHashes, writeSnapshot, readSnapshot, pruneSnapshots, snapshotSkillDir,
+  snapshotCopyFilter,
 };

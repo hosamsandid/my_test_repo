@@ -523,7 +523,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // scope change from the parent also drops any imported blueprint preview or
   // Copilot proposal preview.
   useEffect(() => { setSelectedId(null); setConnectPair(null); setOutcomeConnect(null); setSelectedEdge(null); setRoutingFocus(null); }, [scope, imported, proposal]);
-  useEffect(() => { setAnomaliesOpen(false); setAnomalyCounts({}); setImprovementsOpen(false); }, [scope]);
+  useEffect(() => { setAnomaliesOpen(false); setAnomalyList([]); setImprovementsOpen(false); }, [scope]);
   useEffect(() => { setImported(null); setImportError(null); setProposal(null); }, [scope]);
 
   // Sidebar-triggered import (#512): seed the read-only preview from the

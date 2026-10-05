@@ -102,7 +102,7 @@ GitHub Personal Access Tokens (PATs) authorize the built-in GitHub poller to wat
 
 To let an agent push commits, open PRs, or run the `gh` CLI:
 
-1. **Admin Console → GitHub Tokens** → paste a PAT with `repo` scope on the repos the agent should touch. Give it any id (e.g. `gh-as-agent`).
+1. **Agent Studio → GitHub Tokens** → paste a PAT with `repo` scope on the repos the agent should touch. Give it any id (e.g. `gh-as-agent`).
 2. **Edit the agent's environment** → set "GitHub Token" to that id and save.
 3. **Toggle the agent's Enabled switch off, then on.** The orchestrator re-spawns the agent and injects a token as `GH_TOKEN` and `GITHUB_TOKEN` into its container — since #2177 (epic #2166 B5) this is a **baseline resolution**, not necessarily the token just set: it prefers the team's current Team Admin's own personal GitHub token when they have one, falling back to the environment's configured token otherwise (no admin action needed either way — see *Rotation and runtime resolution* above). Confirm in `make logs`: look for `[Orchestrator] Agent <id> → GH_TOKEN injected (env=<env>, token=<token-id>)`, where `token-id` names whichever credential actually won.
 

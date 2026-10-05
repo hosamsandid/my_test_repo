@@ -1,6 +1,6 @@
-# Admin Console Reference
+# Agent Studio Reference
 
-The Admin Console at `http://localhost:4000` (configurable via `.env`) is the central management interface for agents, environments, credentials, and integrations.
+Agent Studio (internally the `admin-console` service) at `http://localhost:4000` (configurable via `.env`) is the central management interface for agents, environments, credentials, and integrations.
 
 ## Navigation
 

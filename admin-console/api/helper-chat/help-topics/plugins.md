@@ -84,7 +84,7 @@ sandbox.
 
 ### Platform plugin vs Claude Code agent plugin
 
-Throughout the Admin Console, "plugin" means a **platform plugin** — this
+Throughout Agent Studio, "plugin" means a **platform plugin** — this
 broker-plus-CLI extension of Agent Studio itself. It is *not* a Claude Code
 **agent plugin** (the CLI's own marketplace format that bundles skills, commands
 and hooks for one agent). Unqualified, it is always the platform one.

@@ -2,7 +2,7 @@
 
 A **process template** is a portable, git-committable JSON description of a
 modeled agent orchestration — the export/import format of the **Process Canvas**
-(Admin Console → *Process Canvas*). It captures *what the roles are and how they
+(Agent Studio → *Process Canvas*). It captures *what the roles are and how they
 are wired*, deliberately **not** secrets, repos, or Matrix identities (those are
 supplied when the bundle is materialised into a real team).
 

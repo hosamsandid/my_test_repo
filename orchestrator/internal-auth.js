@@ -159,7 +159,7 @@ function bootRefusal(config) {
   if (config.mode === "enforce" && !config.configured) {
     return "INTERNAL_AUTH_MODE=enforce requires INTERNAL_API_TOKEN (or "
       + "INTERNAL_AGENT_TOKEN_SECRET) to be set — without a token every caller, "
-      + "including the admin console, would be rejected.";
+      + "including the admin-console service, would be rejected.";
   }
   return null;
 }

@@ -61,6 +61,8 @@ import { inheritedMcpPreview, switchMcpMode, memberMcpBlockers } from './member-
 import { TEAM_CONFIG_TABS, ENV_TAB_IDS, resolveTeamConfigTab } from './team-config-tabs-view.js';
 import { parallelismSummary, hasPooledMember } from '../process/parallelism-view.js';
 import ScalingSection from '../process/ScalingSection';
+import MemoryField from '../process/MemoryField';
+import { memoryLimitError } from '../memory-limit-view.js';
 import { poolControlUrl, livePoolCount } from '../process/pool-cap-view.js';
 import ParallelismPanel from '../process/ParallelismPanel';
 
@@ -538,9 +540,14 @@ export default function AgentEditForm({
     mcpEnvId ? `/api/environments/${encodeURIComponent(mcpEnvId)}` : null,
   );
   const mcpBlockers = isMember ? memberMcpBlockers(form.inheritMcp, form.mcpRows) : [];
-  const canSubmit = !!form.displayName && mcpBlockers.length === 0;
-
   const isTeam = agent.role === 'team';
+  // Role memory requirement (#2813): the effective limit (role → toolchain →
+  // platform) and the ceiling come from the server; a team holder runs no
+  // container, so it has none.
+  const { data: memoryInfo } = useApi(!isTeam && agent.id ? `/api/agents/${encodeURIComponent(agent.id)}/memory` : null);
+  const memoryError = isTeam ? null : memoryLimitError(form.memoryLimit, { ceiling: memoryInfo?.ceiling });
+  const canSubmit = !!form.displayName && mcpBlockers.length === 0 && !memoryError;
+
   // Team-axis Parallelism (wipLimit + Flow Supervisor) is now configurable
   // directly from Team Settings, not only the Flow editor. The panel writes
   // through PUT /api/agents/:teamId; onImmediateApply refetches so the summary
@@ -764,6 +771,14 @@ export default function AgentEditForm({
           Team Member routed here sees the list read-only (D9/AC9). */}
       {isTeam && activeTab === 'sharing' && (
         <ShareTeamPanel teamId={agent.id} teamName={agent.displayName || agent.id} />
+      )}
+
+      {!isTeam && (
+        <MemoryField
+          value={form.memoryLimit}
+          onChange={v => update('memoryLimit', v)}
+          info={memoryInfo}
+        />
       )}
 
       {agent.role === 'team-member' && (

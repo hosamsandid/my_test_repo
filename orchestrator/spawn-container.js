@@ -74,7 +74,12 @@ const AGENT_PIDS_LIMIT = Number(process.env.AEE_AGENT_PIDS_LIMIT || 512);
 // fleet-wide default for agents bound to it (e.g. a JVM/Gradle build that would
 // otherwise OOM at AEE_AGENT_MEM_LIMIT). No override, or one that fails to
 // parse -> AGENT_MEM_LIMIT_BYTES, byte-identical to before this field existed.
-function resolveMemLimitBytes(toolchain) {
+//
+// #2813: a role's own `memoryLimit` (already clamped to the operator ceiling
+// by the orchestrator) wins over the toolchain's — role → toolchain → fleet.
+function resolveMemLimitBytes(toolchain, roleMemoryLimit = null) {
+  const roleBytes = roleMemoryLimit ? parseBytes(roleMemoryLimit) : 0;
+  if (roleBytes) return roleBytes;
   const override = toolchain && toolchain.resources && toolchain.resources.memoryLimit;
   if (!override) return AGENT_MEM_LIMIT_BYTES;
   return parseBytes(override) || AGENT_MEM_LIMIT_BYTES;
@@ -599,7 +604,7 @@ async function reseedPerAgentVolume(id, paths) {
 // context of a NON-default image: `resources` (#2282 Band 1) sizes the
 // container's memory limit, the rest words the AC7 refusal; null for the
 // default image.
-function spawnContainer({ id, env, contextMounts, image, toolchain = null }) {
+function spawnContainer({ id, env, contextMounts, image, toolchain = null, memoryLimit = null }) {
   const handle = new EventEmitter();
   handle.stdout = new PassThrough();
   handle.stderr = new PassThrough();
@@ -717,7 +722,7 @@ function spawnContainer({ id, env, contextMounts, image, toolchain = null }) {
           ]
         : [{ Name: WORKSPACE_VOLUME, Dest: '/workspace' }];
       const resourceLimits = {};
-      const memBytes = resolveMemLimitBytes(toolchain);
+      const memBytes = resolveMemLimitBytes(toolchain, memoryLimit);
       if (memBytes) resourceLimits.memory = { limit: memBytes };
       if (AGENT_PIDS_LIMIT) resourceLimits.pids = { limit: AGENT_PIDS_LIMIT };
       // #2601 AC4: the container name is fixed per (instance, agent), so the

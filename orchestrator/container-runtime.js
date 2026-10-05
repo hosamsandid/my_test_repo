@@ -20,7 +20,7 @@
 // process-wide `AGENT_IMAGE` constant — meaning a toolchain for one team could
 // only be given to EVERY agent of the installation. The seam is now
 //
-//   spawnContainer({ id, env, contextMounts, image, toolchain })
+//   spawnContainer({ id, env, contextMounts, image, toolchain, memoryLimit })
 //
 // where `image` is REQUIRED and resolved by the caller (orchestrator.js, via
 // the pure orchestrator/toolchain-registry.js `resolveAgentImage` — Working
@@ -32,6 +32,10 @@
 // without its toolchain and fail confusingly at the first build command. Both
 // therefore also export DEFAULT_AGENT_IMAGE so the resolver reads the default
 // from the active runtime rather than duplicating the env-var lookup.
+//
+// `memoryLimit` (#2813) is the role's own memory requirement, already
+// clamped to the operator ceiling; both runtimes let it win over the
+// toolchain's `resources.memoryLimit` and the fleet default.
 //
 // SEAM DISCIPLINE (#1319): Kubernetes is the target architecture; Podman is
 // the local dev runtime. A new spawn-path feature must land on BOTH

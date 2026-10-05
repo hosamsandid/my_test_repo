@@ -164,11 +164,11 @@ test('never touches the live prompt in draft mode', async () => {
 });
 
 // ── scaling (#2295 AC11: batched via ops.setPool, pre-flighted before anything writes) ─
-test('applies a dirty, valid scaling draft (#2294: workspace forced to git-clean-base)', async () => {
+test('applies a dirty, valid scaling draft (#2813: the chosen workspace is threaded through)', async () => {
   const ops = mockOps();
   const pool = {
-    // A stale/rehydrated `workspace: 'none'` — there is no UI to set it (#2294),
-    // so the save must not thread it back; it lands as git-clean-base.
+    // #2813 AC15 re-exposed the workspace binding, so `none` is saved as chosen
+    // (it was forced to git-clean-base while it had no UI, #2294).
     draft: { enabled: true, maxInstancesText: '4', workspace: 'none', idleText: '', hardText: '', retainText: '' },
     parentWipLimit: 3,
     initialPool: null,
@@ -176,7 +176,7 @@ test('applies a dirty, valid scaling draft (#2294: workspace forced to git-clean
   await applyDetailsSave(ops, { id: 'a', displayName: 'a', stage: '' },
     { name: 'a', id: 'a', stage: '', pool }, { mode: 'live' });
   assert.deepEqual(ops.calls.find(c => c[0] === 'setPool'),
-    ['setPool', 'a', { enabled: true, maxInstances: 4, workspace: 'git-clean-base' }]);
+    ['setPool', 'a', { enabled: true, maxInstances: 4, workspace: 'none' }]);
 });
 
 test('a clean scaling draft never calls setPool', async () => {
@@ -244,4 +244,38 @@ test('every batched write tags its own label on failure', async () => {
       (e) => { assert.match(e.message, new RegExp(`^${c.label}:`)); return true; },
     );
   }
+});
+
+// ── portable role settings (#2813) ────────────────────────────────────────────
+test('draft: prompt mode, model and memory ride on the bundle role', async () => {
+  const ops = mockOps({ setRoleSettings: (...a) => { ops.calls.push(['setRoleSettings', ...a]); return Promise.resolve(); } });
+  await applyDetailsSave(ops, { id: 'a', displayName: 'a', promptMode: 'exclusive', model: '' }, {
+    name: 'a', id: 'a', stage: '', promptMode: 'inherit', model: ' m1 ',
+    memory: { value: '4g', initial: '', ceiling: '8g' },
+  }, { mode: 'draft' });
+  assert.deepEqual(ops.calls.filter(c => c[0] === 'setRoleSettings'), [
+    ['setRoleSettings', 'a', { promptMode: 'inherit' }],
+    ['setRoleSettings', 'a', { model: 'm1' }],
+    ['setRoleSettings', 'a', { memoryLimit: '4g' }],
+  ]);
+});
+
+test('live: memory goes through setMemoryLimit; unchanged memory is not written', async () => {
+  const ops = mockOps({ setMemoryLimit: (...a) => { ops.calls.push(['setMemoryLimit', ...a]); return Promise.resolve(); } });
+  await applyDetailsSave(ops, { id: 'a', displayName: 'a' },
+    { name: 'a', id: 'a', stage: '', memory: { value: '', initial: '4g', ceiling: '8g' } }, { mode: 'live' });
+  assert.deepEqual(ops.calls.find(c => c[0] === 'setMemoryLimit'), ['setMemoryLimit', 'a', ''], 'empty clears');
+  const ops2 = mockOps({ setMemoryLimit: () => { throw new Error('must not be called'); } });
+  await applyDetailsSave(ops2, { id: 'a', displayName: 'a' },
+    { name: 'a', id: 'a', stage: '', memory: { value: '4g', initial: '4g', ceiling: '8g' } }, { mode: 'live' });
+});
+
+test('an invalid memory value blocks the whole save before anything applies', async () => {
+  const ops = mockOps({ setMemoryLimit: () => Promise.resolve() });
+  await assert.rejects(
+    applyDetailsSave(ops, { id: 'a', displayName: 'Old' },
+      { name: 'New', id: 'a', stage: '', memory: { value: '16g', initial: '', ceiling: '8g' } }, { mode: 'live' }),
+    (e) => parseSaveError(e.message).label === 'Memory' && /ceiling of 8g/.test(e.message),
+  );
+  assert.equal(ops.calls.length, 0, 'nothing half-applied');
 });

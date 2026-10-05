@@ -458,7 +458,7 @@ function buildContextHostPathVolumes(contextMounts) {
   return { volumes, volumeMounts };
 }
 
-function buildPodManifest(id, env, podName, contextMounts, image, toolchain = null) {
+function buildPodManifest(id, env, podName, contextMounts, image, toolchain = null, memoryLimit = null) {
   // #2282 Band 1: a toolchain may declare `resources` to override the
   // fleet-wide default for agents bound to it (e.g. a JVM/Gradle build that
   // would otherwise OOM at AEE_AGENT_MEM_LIMIT). No override -> AGENT_MEM_LIMIT
@@ -477,7 +477,11 @@ function buildPodManifest(id, env, podName, contextMounts, image, toolchain = nu
   // suffix means MILLI, not mega, silently requesting ~0 memory instead of
   // 512 megabytes.
   const resources = toolchain && toolchain.resources ? toolchain.resources : null;
-  const memory = parseMemoryQuantity(resources && resources.memoryLimit) || parseMemoryQuantity(AGENT_MEM_LIMIT);
+  // #2813: a role's own `memoryLimit` (clamped to the operator ceiling by the
+  // orchestrator) wins over the toolchain's — role → toolchain → fleet.
+  const memory = parseMemoryQuantity(memoryLimit)
+    || parseMemoryQuantity(resources && resources.memoryLimit)
+    || parseMemoryQuantity(AGENT_MEM_LIMIT);
   const memoryRequest = parseMemoryQuantity(resources && resources.memoryRequest) || '256Mi';
   const cpuRequest = (resources && resources.cpuRequest) || '100m';
   // Seam #3 equivalent: the agent sees ONLY its own slice of the shared
@@ -541,7 +545,7 @@ function buildPodManifest(id, env, podName, contextMounts, image, toolchain = nu
 // NON-default image: an image-pull failure is worded from it as AC7 requires,
 // and `resources` (#2282 Band 1) is passed into buildPodManifest to size the
 // pod's memory/cpu.
-function spawnContainer({ id, env, contextMounts, image, toolchain = null }) {
+function spawnContainer({ id, env, contextMounts, image, toolchain = null, memoryLimit = null }) {
   const handle = new EventEmitter();
   handle._toolchain = toolchain;
   handle._image = image;
@@ -598,7 +602,7 @@ function spawnContainer({ id, env, contextMounts, image, toolchain = null }) {
           'seam requires spawnContainer({ image }) (#1940) — see resolveAgentImage.',
         );
       }
-      const manifest = buildPodManifest(id, env, podName, contextMounts, image, toolchain);
+      const manifest = buildPodManifest(id, env, podName, contextMounts, image, toolchain, memoryLimit);
       for (const vm of manifest.spec.containers[0].volumeMounts) {
         if (!vm.name.startsWith('ctx-')) continue;
         const vol = manifest.spec.volumes.find((v) => v.name === vm.name);

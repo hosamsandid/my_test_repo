@@ -96,7 +96,7 @@ export function poolBadgeText(pool) {
 // state — `null` when pooling is toggled off, clearing the field (A2.4:
 // "clearing it (null) reverts the role to a persistent singleton"), never a
 // half-formed object with `enabled: false` left dangling.
-export function buildPoolPayload({ enabled, maxInstances, workspace, idleTimeoutMs, maxRuntimeMs, retainLogsMs }) {
+export function buildPoolPayload({ enabled, maxInstances, workspace, idleTimeoutMs, maxRuntimeMs, retainLogsMs, workSource, baseBranch }) {
   if (!enabled) return null;
   const teardown = {};
   if (Number.isFinite(idleTimeoutMs) && idleTimeoutMs > 0) teardown.idleTimeoutMs = idleTimeoutMs;
@@ -106,8 +106,28 @@ export function buildPoolPayload({ enabled, maxInstances, workspace, idleTimeout
     enabled: true,
     ...(Number.isInteger(maxInstances) && maxInstances >= 1 ? { maxInstances } : {}),
     workspace: workspaceValue({ workspace }),
+    // `baseBranch` has no UI (out of scope for #2813) but must survive a
+    // Scaling save untouched; `workSource` only means something off
+    // git-clean-base (`poolConfigError` refuses the combination).
+    ...(typeof baseBranch === 'string' && baseBranch.trim() ? { baseBranch: baseBranch.trim() } : {}),
+    ...(workSource && workspaceValue({ workspace }) !== 'git-clean-base' ? { workSource } : {}),
     ...(Object.keys(teardown).length ? { teardown } : {}),
   };
+}
+
+// The recurring-analysis work source (#2248) from the section's three text
+// inputs (#2813 AC15): items one per line, the output directory (the
+// completion signal) and an optional input directory. All blank → no work
+// source (`value: null`). Mirrors `poolConfigError`'s shape rules so the
+// section explains a refusal inline instead of a raw 400.
+export function parseWorkSourceInput({ itemsText, outputDir, inputDir } = {}) {
+  const items = String(itemsText || '').split('\n').map((v) => v.trim()).filter(Boolean);
+  const out = String(outputDir || '').trim();
+  const inp = String(inputDir || '').trim();
+  if (!items.length && !out && !inp) return { value: null, error: null };
+  if (!items.length) return { value: null, error: 'Work items: list at least one item (one per line).' };
+  if (!out) return { value: null, error: 'Output directory is required — an item is done once its output appears there.' };
+  return { value: { items, outputDir: out, ...(inp ? { inputDir: inp } : {}) }, error: null };
 }
 
 /* ── #2295: a controlled draft, so ScalingSection can be embedded without its
@@ -123,6 +143,12 @@ export function scalingDraftFromPool(pool) {
     enabled: !!(pool && pool.enabled === true),
     maxInstancesText: pool && Number.isInteger(pool.maxInstances) ? String(pool.maxInstances) : '',
     workspace: workspaceValue(pool),
+    // Work source (#2248), editable since #2813 for input-copy / none.
+    itemsText: Array.isArray(pool?.workSource?.items) ? pool.workSource.items.join('\n') : '',
+    outputDirText: typeof pool?.workSource?.outputDir === 'string' ? pool.workSource.outputDir : '',
+    inputDirText: typeof pool?.workSource?.inputDir === 'string' ? pool.workSource.inputDir : '',
+    // Not editable here — carried so a Scaling save never drops it.
+    baseBranch: typeof pool?.baseBranch === 'string' ? pool.baseBranch : '',
     idleText: msToMinutesText(pool?.teardown?.idleTimeoutMs),
     hardText: msToMinutesText(pool?.teardown?.maxRuntimeMs),
     retainText: msToMinutesText(pool?.teardown?.retainLogsMs),
@@ -145,21 +171,26 @@ export function scalingSaveDecision(draft, parentWipLimit) {
   const idle = parseMinutesInput(draft.idleText);
   const hard = parseMinutesInput(draft.hardText);
   const retain = parseMinutesInput(draft.retainText);
-  const parseError = maxInstances.error || idle.error || hard.error || retain.error;
+  const workspace = workspaceValue({ workspace: draft.workspace });
+  const workSource = workspace === 'git-clean-base'
+    ? { value: null, error: null }
+    : parseWorkSourceInput({ itemsText: draft.itemsText, outputDir: draft.outputDirText, inputDir: draft.inputDirText });
+  const parseError = maxInstances.error || idle.error || hard.error || retain.error || workSource.error;
   if (parseError) return { payload: undefined, error: parseError };
   if (draft.enabled) {
     const prereq = scalingPrerequisite({ parentWipLimit });
     if (!prereq.ok) return { payload: undefined, error: prereq.reason };
   }
-  // #2294: never thread a variable `workspace` into the save — the Workspace
-  // dropdown is gone from both hosts (`input-copy`/`none` have no UI to
-  // configure the `pool.workSource` they'd need), so a rehydrated
-  // `draft.workspace` must not sneak back into a PUT. `buildPoolPayload`
-  // defaults an omitted workspace to `git-clean-base` (`normalizePool` parity).
+  // #2813 AC15 reverses #2294: the Workspace select is back, together with
+  // the `pool.workSource` fields `input-copy`/`none` need, so the chosen
+  // binding is threaded through (git-clean-base never carries a work source).
   return {
     payload: buildPoolPayload({
       enabled: draft.enabled,
       maxInstances: maxInstances.value,
+      workspace,
+      workSource: workSource.value,
+      baseBranch: draft.baseBranch,
       idleTimeoutMs: idle.value,
       maxRuntimeMs: hard.value,
       retainLogsMs: retain.value,
@@ -171,5 +202,12 @@ export function scalingSaveDecision(draft, parentWipLimit) {
 /** Has the draft changed from what the persisted `pool` field would produce? */
 export function scalingDraftDirty(draft, pool) {
   const initial = scalingDraftFromPool(pool);
-  return Object.keys(initial).some((k) => initial[k] !== draft[k]);
+  // A draft built before a key existed (e.g. the #2813 work-source fields)
+  // reads that key as blank rather than as an edit.
+  return Object.keys(initial).some((k) => (initial[k] ?? '') !== (draft[k] ?? ''));
+}
+
+/** Whether the work-source fields apply to the chosen workspace binding. */
+export function workSourceApplies(draft) {
+  return workspaceValue({ workspace: draft && draft.workspace }) !== 'git-clean-base';
 }

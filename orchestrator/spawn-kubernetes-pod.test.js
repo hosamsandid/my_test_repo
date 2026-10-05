@@ -298,3 +298,14 @@ test('finalizeHandle stops a pending log-retry timer (the immortal-retry bug)', 
     resolve();
   }, 20));
 });
+
+test('buildPodManifest: a role memoryLimit beats the toolchain and the fleet default (#2813 AC3)', () => {
+  const jvm = { toolchainId: 'jvm', resources: { memoryLimit: '6g', memoryRequest: '512Mi' } };
+  const pod = buildPodManifest('a1', {}, 'p', [], 'as-agent-jvm:latest', jvm, '4g');
+  assert.equal(pod.spec.containers[0].resources.limits.memory, '4Gi');
+  assert.equal(pod.spec.containers[0].resources.requests.memory, '512Mi');
+  const plain = buildPodManifest('a1', {}, 'p', [], 'as-agent:latest', null, '512m');
+  assert.equal(plain.spec.containers[0].resources.limits.memory, '512Mi');
+  const none = buildPodManifest('a1', {}, 'p', [], 'as-agent-jvm:latest', jvm, null);
+  assert.equal(none.spec.containers[0].resources.limits.memory, '6Gi');
+});

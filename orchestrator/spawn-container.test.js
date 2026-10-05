@@ -145,3 +145,13 @@ test('reseedPerAgentVolume leaves its helper container unnamed (AC3)', async () 
     assert.equal('name' in creates[0].body, false);
   });
 });
+
+test('resolveMemLimitBytes: a role memoryLimit beats a larger toolchain value and the fleet default (#2813 AC3)', () => {
+  const jvm = { toolchainId: 'jvm', resources: { memoryLimit: '6g' } };
+  assert.equal(resolveMemLimitBytes(jvm, '4g'), 4 * 1024 ** 3);
+  assert.equal(resolveMemLimitBytes(null, '3g'), 3 * 1024 ** 3);
+  // no / unparseable role value -> unchanged toolchain → fleet resolution
+  assert.equal(resolveMemLimitBytes(jvm, null), 6 * 1024 ** 3);
+  assert.equal(resolveMemLimitBytes(jvm, 'garbage'), 6 * 1024 ** 3);
+  assert.equal(resolveMemLimitBytes(null, ''), AGENT_MEM_LIMIT_BYTES);
+});

@@ -44,6 +44,9 @@ role's `{{vars}}` and the target repositories are applied per member.
       "role": "team-member",
       "sessionPolicy": "persistent" | "per-invocation",
       "systemPrompt": "You implement issues…",
+      "promptMode": "inherit" | "additional" | "exclusive", // optional (#2813) — how systemPrompt relates to teamPrompt; absent = legacy (non-empty prompt → exclusive)
+      "model": "claude-sonnet-5",          // optional (#2813) — model pin; omitted = the environment's model provider default
+      "memoryLimit": "4g",                 // optional (#2813) — container memory; omitted = toolchain / platform default
       "outcomes": {                          // structured successor to flat emits (#827/#831)
         "mode": "exactlyOne",                //   "exactlyOne" (switch) | "anyOf" (zero or more per run)
         "options": [
@@ -107,9 +110,28 @@ role's `{{vars}}` and the target repositories are applied per member.
     "maxCardsPerPass": 5,                 // max improvement cards raised per pass (default 5) (#1224)
     "excludeAgents": ["agentId"]          // agent ids excluded from the metrics pass
   },
-  "wipLimit": 1                           // OPTIONAL — admission control: max tickets in flight (#2114)
+  "wipLimit": 1,                          // OPTIONAL — admission control: max tickets in flight (#2114)
+  "teamPrompt": "You work on {{repoFullName}}…" // OPTIONAL (#2813) — the team prompt inherit/additional roles compose from
 }
 ```
+
+### Portable role settings (#2813)
+
+A bundle carries the settings that describe *what a role is*, so a flow that is
+exported, edited as a draft, shared, or turned into a new team keeps them:
+
+| Field | Where | Meaning |
+|---|---|---|
+| `promptMode` | role | `inherit` (team prompt only), `additional` (team prompt + the role's own `systemPrompt`), `exclusive` (the role's `systemPrompt` replaces the team prompt). For `inherit`/`additional`, `systemPrompt` holds only the role's **own** text. A role without `promptMode` (any bundle written before #2813) imports exactly as before: a non-empty prompt makes it exclusive. |
+| `teamPrompt` | bundle | The team prompt those roles compose from. On export, the team's repository and name are replaced by `{{repoFullName}}` / `{{teamName}}`, and the field is omitted when the team still uses the platform's default team prompt. The import preview warns when an `inherit` role meets an empty `teamPrompt`. |
+| `model` | role | The role's model pin, exported from the member's model override and omitted when the role runs on the default. On materialise it is applied only when the new team's model provider offers that model; otherwise the response carries the warning *"model X not available in provider Y — using default"* and the role runs on the default. If no provider is bound yet, the value is kept (pending) with a warning. |
+| `memoryLimit` | role | Container memory as a size with a unit (`512m`, `4g`, `4Gi`). The effective limit is resolved **role → toolchain → platform default**, on Podman, on Kubernetes and for every pool instance the role spawns; a role value wins even over a larger toolchain value. An invalid value is rejected with a message naming the role. A value above the operator ceiling (`AEE_AGENT_MEM_CEILING`, default `8g`) is rejected on save and clamped to the ceiling, with a warning, on materialise. A change applies on the next container start; running containers keep their limit. |
+| `github` | role | The PR/issue producer flags (`producesPr`, `producesIssue`) — now included in a live-team export. |
+| `pool` | role | The agent-pool config, including `workspace` (`git-clean-base` \| `input-copy` \| `none`) and, for a non-git workspace, `workSource` `{items, outputDir, inputDir?}` (see `docs/parallel-workers-concept.md`). |
+
+Infrastructure never rides a bundle: repositories, context mounts, environment
+variables, the model provider, MCP servers, skills and plugins are supplied by
+the target team's Working Environment and grants.
 
 ### Data-flow hand-offs (artifacts & dependencies)
 

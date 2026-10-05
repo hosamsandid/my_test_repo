@@ -12,6 +12,7 @@ import {
   scalingDraftFromPool,
   scalingSaveDecision,
   scalingDraftDirty,
+  parseWorkSourceInput,
 } from './scaling-view.js';
 
 test('POOL_WORKSPACE_OPTIONS: exactly the three normalizePool workspaces, each with a label', () => {
@@ -116,17 +117,20 @@ test('buildPoolPayload: omits teardown entirely when no timeout is set', () => {
 test('scalingDraftFromPool: an absent pool is the disabled/blank draft', () => {
   assert.deepEqual(scalingDraftFromPool(null), {
     enabled: false, maxInstancesText: '', workspace: 'git-clean-base',
+    itemsText: '', outputDirText: '', inputDirText: '', baseBranch: '',
     idleText: '', hardText: '', retainText: '',
   });
 });
 
 test('scalingDraftFromPool: round-trips a persisted pool into editable text fields', () => {
   const draft = scalingDraftFromPool({
-    enabled: true, maxInstances: 4, workspace: 'input-copy',
+    enabled: true, maxInstances: 4, workspace: 'input-copy', baseBranch: 'develop',
+    workSource: { items: ['a', 'b'], outputDir: 'out', inputDir: 'in' },
     teardown: { idleTimeoutMs: 1800000, maxRuntimeMs: 7200000, retainLogsMs: 3600000 },
   });
   assert.deepEqual(draft, {
     enabled: true, maxInstancesText: '4', workspace: 'input-copy',
+    itemsText: 'a\nb', outputDirText: 'out', inputDirText: 'in', baseBranch: 'develop',
     idleText: '30', hardText: '120', retainText: '60',
   });
 });
@@ -151,14 +155,42 @@ test('scalingSaveDecision: a disabled draft never needs the parent wipLimit and 
 });
 
 test('scalingSaveDecision: a valid enabled draft produces buildPoolPayload\'s shape', () => {
-  const draft = { enabled: true, maxInstancesText: '4', workspace: 'input-copy', idleText: '30', hardText: '', retainText: '' };
+  const draft = { enabled: true, maxInstancesText: '4', workspace: 'git-clean-base', idleText: '30', hardText: '', retainText: '' };
   const decision = scalingSaveDecision(draft, 3);
   assert.equal(decision.error, null);
-  // #2294: the save forces git-clean-base — a rehydrated draft.workspace
-  // (here 'input-copy') must never sneak back into the payload.
   assert.deepEqual(decision.payload, {
     enabled: true, maxInstances: 4, workspace: 'git-clean-base', teardown: { idleTimeoutMs: 1800000 },
   });
+});
+
+// #2813 AC15: the workspace binding and its work source round-trip.
+test('scalingSaveDecision: input-copy + work source round-trips through draft and payload', () => {
+  const pool = {
+    enabled: true, workspace: 'input-copy', baseBranch: 'develop',
+    workSource: { items: ['a', 'b'], outputDir: 'out', inputDir: 'in' },
+  };
+  const decision = scalingSaveDecision(scalingDraftFromPool(pool), 3);
+  assert.equal(decision.error, null);
+  assert.deepEqual(decision.payload, pool);
+});
+
+test('scalingSaveDecision: none without a work source is a plain pool; git-clean-base drops a stale work source', () => {
+  assert.deepEqual(scalingSaveDecision({ ...scalingDraftFromPool(null), enabled: true, workspace: 'none' }, 3).payload,
+    { enabled: true, workspace: 'none' });
+  const stale = { ...scalingDraftFromPool(null), enabled: true, workspace: 'git-clean-base', itemsText: 'x', outputDirText: 'o' };
+  assert.deepEqual(scalingSaveDecision(stale, 3).payload, { enabled: true, workspace: 'git-clean-base' });
+});
+
+test('scalingSaveDecision: a half-filled work source blocks the save with a stated reason', () => {
+  const base = { ...scalingDraftFromPool(null), enabled: true, workspace: 'input-copy' };
+  assert.match(scalingSaveDecision({ ...base, outputDirText: 'out' }, 3).error, /at least one item/);
+  assert.match(scalingSaveDecision({ ...base, itemsText: 'a' }, 3).error, /Output directory is required/);
+});
+
+test('parseWorkSourceInput: blank is no work source; items trimmed one per line', () => {
+  assert.deepEqual(parseWorkSourceInput({}), { value: null, error: null });
+  assert.deepEqual(parseWorkSourceInput({ itemsText: ' a \n\nb', outputDir: ' o ' }),
+    { value: { items: ['a', 'b'], outputDir: 'o' }, error: null });
 });
 
 test('scalingDraftDirty: false right after deriving the draft from the pool, true after any edit', () => {

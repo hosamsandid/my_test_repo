@@ -12,6 +12,7 @@ import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
 import { ID_FORMAT_HINT } from '../../components/id-field-view';
 import PromptHistory from '../agent-chat/PromptHistory';
 import ScalingSection from './ScalingSection';
+import MemoryField from './MemoryField';
 import { poolControlUrl, livePoolCount } from './pool-cap-view.js';
 import { poolInstanceHint } from './pool-instance-hint.js';
 import { poolBadgeText, scalingDraftFromPool, scalingDraftDirty, scalingSaveDecision } from './scaling-view.js';
@@ -130,6 +131,23 @@ export default function NodeInspector({
   const [poolDraft, setPoolDraft] = useState(() => scalingDraftFromPool(memberCfg?.pool));
   const [poolBaseline, setPoolBaseline] = useState(() => (memberCfg ? memberCfg.pool : null));
 
+  // Portable role settings (#2813). Memory in both modes — live reads the
+  // agent's value + effective limit, a draft role the platform values only;
+  // prompt mode and model are draft-only here (live has its own editors).
+  const { data: memoryInfo } = useApi(node && node.role !== 'template' && level !== 'template'
+    ? (isLive ? `/api/agents/${encodeURIComponent(node.id)}/memory` : '/api/memory-limits')
+    : null);
+  const [memory, setMemory] = useState(isLive ? '' : (node?.memoryLimit || ''));
+  const [memoryBaseline, setMemoryBaseline] = useState(isLive ? null : (node?.memoryLimit || ''));
+  useEffect(() => {
+    if (isLive && memoryInfo && memoryBaseline === null) {
+      setMemory(memoryInfo.memoryLimit || '');
+      setMemoryBaseline(memoryInfo.memoryLimit || '');
+    }
+  }, [isLive, memoryInfo, memoryBaseline]);
+  const [draftPromptMode, setDraftPromptMode] = useState(node?.promptMode || '');
+  const [model, setModel] = useState(node?.model || '');
+
   if (!node) return null;
   const isTemplate = level === 'template' || node.role === 'template';
   // Warning dot on the Routing tab when any lint it surfaces fires for this node
@@ -164,7 +182,11 @@ export default function NodeInspector({
   const stageDirty = stage !== (node.stage || '') || !!newStage.trim();
   const parentDirty = !!ops.setParent && parent !== (node.parent || '');
   const scalingDirty = isPooledRoleNode && scalingDraftDirty(poolDraft, poolBaseline);
-  const dirty = nameDirty || idDirty || promptDirty || stageDirty || parentDirty || scalingDirty;
+  const memoryDirty = memoryBaseline !== null && memory.trim() !== memoryBaseline;
+  const promptModeDirty = mode === 'draft' && draftPromptMode !== (node.promptMode || '');
+  const modelDirty = mode === 'draft' && model.trim() !== (node.model || '');
+  const dirty = nameDirty || idDirty || promptDirty || stageDirty || parentDirty || scalingDirty
+    || memoryDirty || promptModeDirty || modelDirty;
 
   function markDirty() { setSaved(''); setSaveError(null); }
 
@@ -182,7 +204,12 @@ export default function NodeInspector({
         pool: isPooledRoleNode
           ? { draft: poolDraft, parentWipLimit: parentCfg?.wipLimit, initialPool: poolBaseline }
           : undefined,
+        memory: memoryBaseline !== null
+          ? { value: memory, initial: memoryBaseline, ceiling: memoryInfo?.ceiling }
+          : undefined,
+        ...(mode === 'draft' ? { promptMode: draftPromptMode, model } : {}),
       }, { mode });
+      if (memoryDirty) setMemoryBaseline(memory.trim());
       setNewStage('');
       setStage(res.stage);
       if (res.renamedId) {
@@ -202,6 +229,9 @@ export default function NodeInspector({
       setSaved(savedSummary([
         { label: 'Display name', dirty: nameDirty },
         { label: 'Agent prompt', dirty: promptDirty },
+        { label: 'Prompt mode', dirty: promptModeDirty },
+        { label: 'Model', dirty: modelDirty },
+        { label: 'Memory', dirty: memoryDirty },
         { label: 'Stage', dirty: stageDirty },
         { label: 'Parent', dirty: parentDirty },
         { label: 'Scaling', dirty: scalingDirty },
@@ -329,11 +359,45 @@ export default function NodeInspector({
                     dirty={promptDirty}
                   />
                 ) : (
-                  <textarea value={prompt} onChange={e => { setPrompt(e.target.value); markDirty(); }}
-                    placeholder="What this agent does, its responsibilities and tone…"
-                    style={{ ...input, minHeight: 220, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', lineHeight: 1.5 }} />
+                  <>
+                    {/* #2813: how this role's text relates to the team prompt
+                        once materialised. Blank keeps the legacy rule (a
+                        non-empty prompt runs exclusive, an empty one inherits). */}
+                    <select value={draftPromptMode} aria-label="Prompt mode"
+                      onChange={e => { setDraftPromptMode(e.target.value); markDirty(); }} style={input}>
+                      <option value="">— automatic (text present → exclusive) —</option>
+                      {[PROMPT_MODES.INHERIT, PROMPT_MODES.ADDITIONAL, PROMPT_MODES.EXCLUSIVE].map(m => (
+                        <option key={m} value={m}>{PROMPT_MODE_LABELS[m]}</option>
+                      ))}
+                    </select>
+                    <textarea value={prompt} onChange={e => { setPrompt(e.target.value); markDirty(); }}
+                      placeholder={draftPromptMode === PROMPT_MODES.ADDITIONAL
+                        ? 'Role-specific instructions appended after the team prompt…'
+                        : 'What this agent does, its responsibilities and tone…'}
+                      style={{ ...input, minHeight: 220, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', lineHeight: 1.5 }} />
+                    {saveError?.label === 'Prompt mode' && <span style={{ ...hint, color: 'var(--eb-status-error)' }}>{saveError.message}</span>}
+                  </>
                 )}
               </Field>
+
+              {/* Runtime settings (#2813) — portable with the flow. */}
+              {!isLive && (
+                <Field label="Model (optional)">
+                  <input value={model} onChange={e => { setModel(e.target.value); markDirty(); }}
+                    placeholder="environment default" style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} />
+                  <span style={hint}>A model id the team&apos;s model provider offers. Blank uses the environment default; a model the provider does not offer falls back to the default with a warning when the team is created.</span>
+                  {saveError?.label === 'Model' && <span style={{ ...hint, color: 'var(--eb-status-error)' }}>{saveError.message}</span>}
+                </Field>
+              )}
+              {memoryBaseline !== null && (
+                <MemoryField
+                  value={memory}
+                  onChange={(v) => { setMemory(v); markDirty(); }}
+                  info={memoryInfo}
+                  error={saveError?.label === 'Memory' ? saveError.message : null}
+                  showNextStartNote={isLive}
+                />
+              )}
 
               {/* Structure — static placement (Stage + Parent), not flow. Moved
                   here from the retired Connections tab (#865). #2295 AC3:

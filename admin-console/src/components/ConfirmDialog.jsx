@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { AlertTriangle, Info, Loader2 } from 'lucide-react';
 import { resolveDismissHandler, backdropDismisses, escapeDismisses } from './confirm-dialog-view.js';
 
@@ -84,7 +85,11 @@ export default function ConfirmDialog({
 
   const Icon = variant === 'info' ? Info : AlertTriangle;
 
-  return (
+  // Portaled to <body> so the dialog's zIndex ranks at the document root.
+  // Rendered inline it is trapped in its host's stacking context — e.g. a
+  // SidePanel (z 61) — and paints BEHIND a portaled modal such as the
+  // SkillEditorModal (z 1000) that opened it.
+  const overlay = (
     <div
       ref={dialogRef}
       role="dialog"
@@ -147,6 +152,7 @@ export default function ConfirmDialog({
       {busy && <style>{'@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }'}</style>}
     </div>
   );
+  return typeof document === 'undefined' ? overlay : createPortal(overlay, document.body);
 }
 
 const overlayStyle = {

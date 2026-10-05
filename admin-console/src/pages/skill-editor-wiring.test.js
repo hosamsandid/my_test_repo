@@ -56,6 +56,13 @@ test('the editor overlay stacks below the row context menu (1200) and ConfirmDia
   const m = /zIndex: (\d+), display: 'flex', alignItems: 'center'/.exec(MODAL);
   assert.ok(m, 'overlay zIndex not found');
   assert.ok(Number(m[1]) < 1200, `overlay zIndex ${m[1]} would hide RowContextMenu`);
+  // The numbers only compare at the document root: the editor is portaled out
+  // of the SidePanel (z 61), so its New file / New folder / Rename
+  // ConfirmDialog must be portaled too, or it paints behind the editor.
+  const CONFIRM = fs.readFileSync(path.join(here, '..', 'components', 'ConfirmDialog.jsx'), 'utf8');
+  assert.match(CONFIRM, /createPortal\(overlay, document\.body\)/, 'ConfirmDialog must portal to <body>');
+  const c = /zIndex: (\d+)/.exec(CONFIRM);
+  assert.ok(c && Number(c[1]) > Number(m[1]), 'ConfirmDialog must stack above the editor overlay');
 });
 
 test('side panel: Edit skill / Open buttons replace the inline "Edit file" mode (AC1, AC25)', () => {

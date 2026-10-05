@@ -41,13 +41,48 @@ Clicking a row opens the skill in a side panel with four tabs:
 
 | Tab | What it shows |
 |---|---|
-| **Content** | The files in the skill. Markdown is rendered, other text files are shown as code, binaries are named but not displayed, and anything over 512 KB is truncated and read-only. Pool and team skills can be edited here, one file at a time. |
+| **Content** | A read-only preview of the skill's files. Markdown is rendered (a `SKILL.md` header is shown as a separate metadata block), other text files are shown as code, binaries are named but not displayed, and anything over 512 KB is truncated. **Edit skill** (or **Open**, when you may not edit it) opens the full-screen skill editor described below. |
 | **Versions** | The revision history: a content version and hash prefix (`v4 · a1b2c3`), what produced the revision, who did it and when. The live revision on disk is marked **current**. |
 | **Lineage** | Where this copy came from — its **origin** (the tier, team and action it descends from), its knowledge **provenance** when it was distilled from learnings, and every other known copy of the same name, each one clickable. A hand-authored skill honestly says it has no recorded origin. |
 | **Usage** | Where the skill is actually seeded right now: how many places it lives in, broken down by tier, and every agent whose workspace carries it — each with a **drift** badge saying whether that copy is still *in sync* with the pool version or has gone *outdated*, *diverged*, into *conflict*, or *orphaned*. |
 
 Create a skill with **+ New Skill** (you pick the target pool), or bring one in
 with **Import skill** — see the actions chapter below.
+
+### The skill editor
+
+**Edit skill** opens the whole skill in a full-screen editor. The left side is the
+skill's folder tree (folders first, then files, alphabetical; drag the divider to
+widen it); the right side shows the selected file — markdown rendered, with
+`SKILL.md`'s header as its own metadata block. Switch a file between
+**Preview**, **Edit** (a monospaced editor with line numbers) and, for markdown,
+**Split view** with a live preview next to the editor.
+
+The toolbar and each row's menu (right-click, the **⋮** button, or Shift+F10)
+offer **New file**, **New folder**, **Rename / move** (type a new path to move a
+file or a whole folder), **Delete** and **Upload** — uploads also work by
+dropping files onto the tree, are limited to 2 MB per file, and ask before
+replacing a file of the same name. `SKILL.md` at the skill root is the skill
+itself and cannot be renamed, moved or deleted; the platform's own bookkeeping
+(`skill.json`, `provenance.json`, the `_archive` of older versions) is not shown.
+
+Nothing is written until you press **Save** (or Ctrl/⌘+S). Until then every
+change is pending: changed files and folders carry a dot in the tree and the
+header counts the pending changes. **Save** writes all of them at once — either
+everything lands or nothing does — as exactly **one** new version, and the usual
+resync of agent copies runs once. **Discard** throws all pending changes away
+after a confirmation, and closing the editor (✕, Escape or the browser's back
+button) asks first when something is still unsaved. If someone else changed the
+skill since you opened it, Save is refused and offers to **Reload** instead of
+overwriting their work. **Empty folders are kept**: a folder you create stays
+even with nothing in it, and a folder only disappears when you delete it.
+
+Binary files and files over 512 KB can be viewed by name only and are not
+editable in the editor — replace them by uploading. Agent-tier copies, and
+skills you have no write permission for, open in the same editor **read-only**:
+you can browse and preview, but every editing control is gone and the header
+says why. Editing needs the same rights as before — System Admin or a Team Admin
+for global skills, a Team Admin of the team for team skills.
 
 ## The three tiers, and which one an agent gets
 

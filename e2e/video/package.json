@@ -28,7 +28,7 @@
   "devDependencies": {
     "@revideo/cli": "0.11.0",
     "@revideo/ui": "^0.11.0",
-    "@types/node": "^26.6.3",
+    "@types/node": "^26.6.4",
     "cross-env": "^10.1.0",
     "patch-package": "^8.0.0",
     "tsx": "^4.23.15",

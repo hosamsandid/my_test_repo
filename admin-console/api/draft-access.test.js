@@ -304,13 +304,21 @@ test('an installation with no System Admin record migrates to a null createdBy',
 test('AC16 — the list view distinguishes private from shared, and names a creator', () => {
   const users = new Map([['u-alice', { id: 'u-alice', displayName: 'Alice A' }]]);
   const mine = da.draftAccessView(draftOf(['u-alice'], 'u-alice'), { viewerId: 'u-alice', usersById: users });
-  assert.deepEqual(mine, { shared: false, accessCount: 1, createdByYou: true, createdByName: 'Alice A' });
+  assert.deepEqual(mine, { shared: false, accessCount: 1, createdByYou: true, createdByName: 'Alice A', viewerHasAccess: true });
 
   const theirs = da.draftAccessView(draftOf(['u-alice', 'u-bob'], 'u-alice'), { viewerId: 'u-bob', usersById: users });
   assert.equal(theirs.shared, true);
   assert.equal(theirs.accessCount, 2);
   assert.equal(theirs.createdByYou, false);
   assert.equal(theirs.createdByName, 'Alice A');
+});
+
+test('#2859 — viewerHasAccess tells "shared with me" apart from a System Admin\'s view of every draft', () => {
+  const shared = da.draftAccessView(draftOf(['u-alice', 'u-bob'], 'u-alice'), { viewerId: 'u-bob' });
+  assert.equal(shared.viewerHasAccess, true);
+  const adminOnlySees = da.draftAccessView(draftOf(['u-alice'], 'u-alice'), { viewerId: 'u-root' });
+  assert.equal(adminOnlySees.viewerHasAccess, false);
+  assert.equal(da.draftAccessView(draftOf(['u-alice'], 'u-alice'), { viewerId: null }).viewerHasAccess, false);
 });
 
 test('AC16 — no raw user id is ever returned to the list', () => {

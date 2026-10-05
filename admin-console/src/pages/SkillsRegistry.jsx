@@ -18,6 +18,7 @@ import { isPublishEligible } from './skill-publish-view.js';
 import { useAuth } from '../auth/AuthContext';
 import { adminTeamIdsOf, teamsById } from './credential-scope-view.js';
 import { writableSkillTargets, defaultSkillTarget } from './skill-target-view.js';
+import { groupInstallTargets } from './skill-install-target-view.js';
 import { planLineageResync, copyResyncKind, summarizeResyncResults } from './skill-lineage-resync.js';
 import { warningRows, transferPreviewRequiresAck, warningsSummaryLabel, transferActivationNotice } from './skill-transfer-preview-view.js';
 
@@ -679,7 +680,7 @@ const VIEWER_TABS = [
 ];
 
 /* ─── Skill viewer / inline editor ────────────────────────────────────── */
-function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgents, agentSkills, teams }) {
+function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgents, agentSkills, teams, teamNames }) {
   const isPool = skill.source === 'pool';
   const isTeam = skill.source === 'team';
   const isAgent = skill.source === 'agent';
@@ -1314,10 +1315,16 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
               }}
             >
               <option value="">Select an agent…</option>
-              {(installableAgents ?? []).map(a => (
-                <option key={a.id} value={a.id}>
-                  {a.displayName}{agentsWithSkill.has(a.id) ? ' (already installed)' : ''}
-                </option>
+              {/* Grouped by agent team (#2836) so same-named agents in
+                  different teams can be told apart. */}
+              {groupInstallTargets(installableAgents, teamNames).map(g => (
+                <optgroup key={g.key} label={g.label}>
+                  {g.agents.map(a => (
+                    <option key={a.id} value={a.id}>
+                      {a.displayName}{agentsWithSkill.has(a.id) ? ' (already installed)' : ''}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
             <button onClick={() => install(false)} disabled={!installTarget || installing} style={primaryBtnStyle(!installTarget || installing)}>
@@ -2228,7 +2235,7 @@ export default function SkillsRegistry() {
   // be seen or removed again.
   const installableAgents = (allAgents ?? [])
     .filter(a => a.enabled !== false && a.token && a.role !== 'team' && a.role !== 'agent')
-    .map(a => ({ id: a.id, displayName: a.displayName || a.id }));
+    .map(a => ({ id: a.id, displayName: a.displayName || a.id, parentTeamId: a.parentTeamId || null }));
 
   async function confirmRowDelete(cascade = false) {
     if (!rowDeleteTarget) return;
@@ -2481,6 +2488,7 @@ export default function SkillsRegistry() {
             installableAgents={installableAgents}
             agentSkills={allSkills ?? []}
             teams={teams}
+            teamNames={teamNames}
           />
         )}
       </SidePanel>

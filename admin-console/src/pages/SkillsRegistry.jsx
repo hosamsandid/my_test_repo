@@ -9,6 +9,8 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import IconButton from '../components/IconButton';
 import PageHelpButton from '../components/PageHelpButton';
 import SkillMarkdown from '../components/SkillMarkdown';
+import SkillEditorModal, { MarkdownWithFrontmatter } from './SkillEditorModal.jsx';
+import { skillEditPermission } from './skill-editor-model.js';
 import PublishSkillAction from '../components/PublishSkillAction';
 import { usePageActions } from '../context/PageActionsContext';
 import { useHelpSubject } from '../context/HelperChatContext';
@@ -680,7 +682,7 @@ const VIEWER_TABS = [
 ];
 
 /* ─── Skill viewer / inline editor ────────────────────────────────────── */
-function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgents, agentSkills, teams, teamNames }) {
+function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgents, agentSkills, teams, teamNames, caller }) {
   const isPool = skill.source === 'pool';
   const isTeam = skill.source === 'team';
   const isAgent = skill.source === 'agent';
@@ -706,12 +708,11 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState(null);
 
-  // Per-file editing (pool skills only).
-  const [editing, setEditing] = useState(false);
-  const [editContent, setEditContent] = useState('');
-  const [preview, setPreview] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState(null);
+  // Full-screen skill editor (#2837) — replaces the former inline "Edit file"
+  // mode. `reloadKey` refreshes the side panel's read-only preview after a save.
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const editPerm = skillEditPermission(skill, caller);
 
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -832,7 +833,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
   // Load the file list whenever the selected skill changes.
   useEffect(() => {
     let cancelled = false;
-    setFilesLoading(true); setFilesError(null); setFiles([]); setEditing(false);
+    setFilesLoading(true); setFilesError(null); setFiles([]);
     const params = withScope(new URLSearchParams({ source: skill.source }));
     fetch(`/api/skills/${encodeURIComponent(skill.name)}/files?${params}`)
       .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d; })
@@ -846,13 +847,13 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       .catch(e => { if (!cancelled) setFilesError(e.message); })
       .finally(() => { if (!cancelled) setFilesLoading(false); });
     return () => { cancelled = true; };
-  }, [skillKey]);
+  }, [skillKey, reloadKey]);
 
   // Load the selected file's content.
   useEffect(() => {
     if (!selectedFile) { setFileData(null); return; }
     let cancelled = false;
-    setFileLoading(true); setFileError(null); setFileData(null); setEditing(false);
+    setFileLoading(true); setFileError(null); setFileData(null);
     const params = withScope(new URLSearchParams({ source: skill.source, file: selectedFile }));
     fetch(`/api/skills/${encodeURIComponent(skill.name)}/file?${params}`)
       .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d; })
@@ -860,9 +861,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       .catch(e => { if (!cancelled) setFileError(e.message); })
       .finally(() => { if (!cancelled) setFileLoading(false); });
     return () => { cancelled = true; };
-  }, [skillKey, selectedFile]);
-
-  const fileEditable = isManaged && fileData && !fileData.binary && !fileData.truncated;
+  }, [skillKey, selectedFile, reloadKey]);
 
   function exportSkill() {
     const params = withScope(new URLSearchParams({ source: skill.source }));
@@ -1020,27 +1019,6 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       .map(s => s.agentId),
   );
 
-  async function handleSaveFile() {
-    setSaving(true);
-    setError(null);
-    try {
-      const params = withScope(new URLSearchParams({ source: skill.source, file: selectedFile }));
-      const res = await fetch(`/api/skills/${encodeURIComponent(skill.name)}/file?${params}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: editContent }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      setFileData(fd => ({ ...(fd || {}), content: editContent }));
-      setEditing(false);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setSaving(false);
-    }
-  }
-
   async function handleDelete(cascade = false) {
     setDeleting(true);
     setDeleteError(null);
@@ -1118,21 +1096,28 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       {tab === 'content' && (<>
       {/* toolbar */}
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
-        {!editing && (
-          <button onClick={exportSkill} style={secondaryBtnStyle} title="Download the whole skill directory as a ZIP">
-            Export ZIP
+        {editPerm.editable ? (
+          <button
+            onClick={() => setEditorOpen(true)}
+            style={primaryBtnStyle(false)}
+            title="Open the full-screen skill editor: folder tree, preview / edit, file operations, one Save for everything"
+          >
+            Edit skill
+          </button>
+        ) : (
+          <button
+            onClick={() => setEditorOpen(true)}
+            style={secondaryBtnStyle}
+            title={`Open the skill in the full-screen editor, read-only — ${editPerm.reason}`}
+          >
+            Open
           </button>
         )}
-        {isManaged && !editing && (
+        <button onClick={exportSkill} style={secondaryBtnStyle} title="Download the whole skill directory as a ZIP">
+          Export ZIP
+        </button>
+        {isManaged && (
           <>
-            <button
-              onClick={() => { setEditing(true); setEditContent(fileData?.content ?? ''); setPreview(false); setError(null); }}
-              disabled={!fileEditable}
-              title={fileEditable ? undefined : 'This file cannot be edited here (binary or too large)'}
-              style={fileEditable ? secondaryBtnStyle : { ...secondaryBtnStyle, cursor: 'not-allowed', opacity: 0.5 }}
-            >
-              Edit {files.length > 1 ? 'file' : ''}
-            </button>
             {isTeam && (
               <button
                 onClick={() => beginTransfer({ name: skill.name, from: { tier: 'team', teamId: skill.teamId }, to: { tier: 'global' }, mode: 'copy' })}
@@ -1168,25 +1153,6 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
             </button>
           </>
         )}
-        {isManaged && editing && (
-          <>
-            {isMarkdownPath(selectedFile) && (
-              <button
-                type="button"
-                onClick={() => setPreview(p => !p)}
-                style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
-              >
-                {preview ? 'Edit' : 'Preview'}
-              </button>
-            )}
-            <button onClick={handleSaveFile} disabled={saving} style={primaryBtnStyle(saving)}>
-              {saving ? 'Saving…' : 'Save'}
-            </button>
-            <button onClick={() => { setEditing(false); setError(null); }} disabled={saving} style={secondaryBtnStyle}>
-              Cancel
-            </button>
-          </>
-        )}
         {isAgent && isPublishEligible(skill.drift) && (
           <PublishSkillAction
             name={skill.name}
@@ -1210,27 +1176,21 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
         )}
         {/* The action panel's own "?" — opens the Skills topic at the chapter
             that explains promote / move / distill / merge / import-export
-            (#1990). Hidden while editing a file, where none of those buttons
-            are on screen. */}
-        {!editing && (
-          <PageHelpButton
-            label="What these skill actions do"
-            size={14}
-            style={{ padding: 0, marginLeft: 'auto' }}
-            section={SKILLS_HELP_SECTIONS.actions}
-          />
-        )}
+            (#1990). */}
+        <PageHelpButton
+          label="What these skill actions do"
+          size={14}
+          style={{ padding: 0, marginLeft: 'auto' }}
+          section={SKILLS_HELP_SECTIONS.actions}
+        />
       </div>
 
-      {error && (
-        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{error}</div>
-      )}
       {promoteError && (
         <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{promoteError}</div>
       )}
 
       {/* Adopt a global skill into a team pool (#626, global→team transfer) */}
-      {isPool && !editing && (
+      {isPool && (
         <div style={{
           display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)',
           padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)',
@@ -1285,7 +1245,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       )}
 
       {/* Install pool skill into an existing agent (no full workspace reset) */}
-      {isPool && !editing && (
+      {isPool && (
         <div style={{
           display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)',
           padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)',
@@ -1388,29 +1348,12 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
         <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading {selectedFile}…</div>
       ) : fileError ? (
         <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load file: {fileError}</div>
-      ) : editing && !(preview && isMarkdownPath(selectedFile)) ? (
-        <textarea
-          value={editContent}
-          onChange={e => setEditContent(e.target.value)}
-          style={{
-            flex: 1, minHeight: 300, padding: '8px 10px',
-            border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-sm)',
-            background: 'var(--eb-bg-surface)',
-            color: 'var(--eb-text-primary)',
-            fontFamily: 'var(--eb-font-mono)',
-            fontSize: 'var(--eb-text-sm)',
-            resize: 'vertical',
-            boxSizing: 'border-box',
-            width: '100%',
-          }}
-        />
       ) : fileData?.binary ? (
         <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', fontStyle: 'italic' }}>
           Binary file ({formatBytes(fileData.size)}) — not shown.
         </div>
       ) : isMarkdownPath(selectedFile) ? (
-        <SkillMarkdown content={editing ? editContent : (fileData?.content ?? '')} />
+        <MarkdownWithFrontmatter content={fileData?.content ?? ''} />
       ) : (
         <CodeBlock content={fileData?.content ?? ''} />
       )}
@@ -1419,6 +1362,17 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
           File truncated at 512 KB — shown content is partial and read-only.
         </div>
+      )}
+
+      {editorOpen && (
+        <SkillEditorModal
+          skill={skill}
+          tierLabel={TIER_LABEL[isPool ? 'global' : skill.source] || skill.source}
+          readOnly={!editPerm.editable}
+          readOnlyReason={editPerm.reason}
+          onClose={() => setEditorOpen(false)}
+          onSaved={() => setReloadKey(k => k + 1)}
+        />
       )}
 
       {/* Delete confirmation dialog. A guarded delete (409) surfaces the
@@ -2489,6 +2443,7 @@ export default function SkillsRegistry() {
             agentSkills={allSkills ?? []}
             teams={teams}
             teamNames={teamNames}
+            caller={caller}
           />
         )}
       </SidePanel>

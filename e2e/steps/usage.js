@@ -48,8 +48,11 @@ async function openTokenUsagePage(ctx) {
 
 /**
  * Narrow the page-level Team filter to a seeded team so the figures are
- * deterministic (the fixture logged usage only under this team). Selecting by
- * the option's visible label waits for /api/admin/teams to populate the dropdown.
+ * deterministic (the fixture logged usage only under this team). Since #2694 the
+ * filter lists Agent Teams, whose option label carries an id suffix — e.g.
+ * "Token Usage Demo (token-usage-demo)" — so match the option by its visible
+ * name and select by its value (the team id). Reading the value auto-waits for
+ * /api/agents to populate the dropdown.
  *
  * @param {string} params.teamName - The team's display name as shown in the filter.
  * @example
@@ -58,7 +61,9 @@ async function openTokenUsagePage(ctx) {
  *     teamName: Token Usage Demo
  */
 async function selectTeamFilter(ctx, { teamName }) {
-  await teamSelect(ctx.page).selectOption({ label: teamName });
+  const select = teamSelect(ctx.page);
+  const value = await select.locator('option', { hasText: teamName }).first().getAttribute('value');
+  await select.selectOption(value);
 }
 
 /**

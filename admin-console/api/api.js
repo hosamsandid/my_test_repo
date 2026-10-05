@@ -179,7 +179,7 @@ const skillPoolTeam = require('./skill-pool-team');
 const skillFileBatch = require('./skill-file-batch');
 const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archives');
 const { createTranscribeRoute } = require('./transcribe.js');
-const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix, stampLiveLabels, collectLabelTokens, teamForeignLabels, planSuffixChange } = require('./label-suffix');
+const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix, stampLiveLabels, collectLabelTokens, teamForeignLabels, planSuffixChange, githubRenamesForPlan } = require('./label-suffix');
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
 const { reposFromEnv, repoVars } = require('./team-repo-resolve');
 const { planCreatorMembership, creatorEnvironmentOwnership } = require('./creator-membership');
@@ -6621,7 +6621,8 @@ app.post('/api/agents/:teamId/label-suffix', heavyLimiter, async (req, res) => {
   if (body.retry === true) {
     const pending = Array.isArray(teamCfg.labelSuffixPendingRenames) ? teamCfg.labelSuffixPendingRenames : [];
     if (!pending.length) return res.json({ ok: true, github: { renamed: [], created: [], failed: [] } });
-    const github = await renameGithubLabels(teamCfg.environmentId, pending.map(({ from, to }) => ({ from, to })), teamCfg.labelSuffix || '');
+    const github = await renameGithubLabels(teamCfg.environmentId,
+      pending.map(({ from, to, optional }) => ({ from, to, ...(optional ? { optional: true } : {}) })), teamCfg.labelSuffix || '');
     const fresh = readJsonFile(teamCfgPath, teamCfg);
     if (github.failed.length) fresh.labelSuffixPendingRenames = github.failed;
     else delete fresh.labelSuffixPendingRenames;
@@ -6691,15 +6692,19 @@ app.post('/api/agents/:teamId/label-suffix', heavyLimiter, async (req, res) => {
   await reconcileTeamWakeHandoffs(teamId);
   for (const id of changedAgents) notifyAgentReload(id);
 
-  // 3. GitHub: rename in place. Failures are recorded for a retry. A rename a
-  //    previous change could not apply still sits on GitHub under its old name,
-  //    so it is chained (`a-x` → `a-y` pending, now `a-y` → `a-z`: `a-x` → `a-z`).
+  // 3. GitHub: rename in place — the team labels plus the claim lifecycle
+  //    labels (`<wake>:wip` / `<wake>:completed`) items in flight carry.
+  //    Failures are recorded for a retry. A rename a previous change could not
+  //    apply still sits on GitHub under its old name, so it is chained (`a-x` →
+  //    `a-y` pending, now `a-y` → `a-z`: `a-x` → `a-z`).
   const pending = Array.isArray(teamCfg.labelSuffixPendingRenames) ? teamCfg.labelSuffixPendingRenames : [];
-  const nextName = new Map(plan.renames.map(r => [r.from, r.to]));
+  const planRenames = githubRenamesForPlan(plan, agents);
+  const nextName = new Map(planRenames.map(r => [r.from, r.to]));
   const pendingTo = new Set(pending.map(p => p.to));
   const githubRenames = [
-    ...pending.map(p => ({ from: p.from, to: nextName.get(p.to) || p.to })).filter(r => r.from !== r.to),
-    ...plan.renames.filter(r => !pendingTo.has(r.from)),
+    ...pending.map(p => ({ from: p.from, to: nextName.get(p.to) || p.to, ...(p.optional ? { optional: true } : {}) }))
+      .filter(r => r.from !== r.to),
+    ...planRenames.filter(r => !pendingTo.has(r.from)),
   ];
   const github = await renameGithubLabels(teamCfg.environmentId, githubRenames, suffix);
   const fresh = readJsonFile(teamCfgPath, teamPlan ? teamPlan.config : teamCfg);

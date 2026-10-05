@@ -513,6 +513,47 @@ function planSuffixChange(agents, teamId, newSuffix, { otherTeamLabels = [] } = 
   };
 }
 
+/**
+ * The GitHub renames a suffix change needs (#2858 AC8): the plan's label
+ * renames plus the claim lifecycle labels collectLabelTokens does not see —
+ * each trigger's `claim.add` (`<wake>:wip`) and its completion mirror
+ * `<claim.remove>:completed` (the runner's CLAIM_COMPLETED_SUFFIX). Items in
+ * flight carry those, so they must move with the wake label or the poller,
+ * the claim swap and the Flow Control board stop recognising them.
+ *
+ * Claim labels are created on demand, so they are marked `optional`: a label
+ * that does not exist on GitHub is nothing to rename, never created.
+ *
+ * @param {{ renames: {from: string, to: string}[], agents: { id: string, triggers: object[] }[] }} plan
+ * @param {{ id: string, triggers: object[] }[]} agents - the agents planSuffixChange was given
+ * @returns {{ from: string, to: string, optional?: true }[]}
+ */
+function githubRenamesForPlan(plan, agents) {
+  const out = (plan.renames || []).map(r => ({ from: r.from, to: r.to }));
+  const seen = new Set(out.map(r => r.from));
+  const add = (from, to) => {
+    if (typeof from !== 'string' || typeof to !== 'string') return;
+    from = from.trim(); to = to.trim();
+    if (!from || !to || from === to || seen.has(from)) return;
+    seen.add(from);
+    out.push({ from, to, optional: true });
+  };
+  const before = new Map(agents.map(a => [a.id, Array.isArray(a.triggers) ? a.triggers : []]));
+  for (const a of plan.agents || []) {
+    const old = before.get(a.id) || [];
+    (Array.isArray(a.triggers) ? a.triggers : []).forEach((t, i) => {
+      const was = old[i] && old[i].claim;
+      const now = t && t.claim;
+      if (!was || !now || typeof was !== 'object' || typeof now !== 'object') return;
+      add(was.add, now.add);
+      if (typeof was.remove === 'string' && typeof now.remove === 'string' && was.remove.trim() && now.remove.trim()) {
+        add(`${was.remove.trim()}:completed`, `${now.remove.trim()}:completed`);
+      }
+    });
+  }
+  return out;
+}
+
 function escapeRegex(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -523,5 +564,5 @@ function dedupe(arr) {
 
 module.exports = {
   SUFFIX_RE, SUFFIX_RULE, validateSuffix, suggestSuffix, collectLabelTokens, applyLabelSuffix, stampLiveLabels,
-  renameLabelTokens, isTeamLabel, teamForeignLabels, planSuffixChange,
+  renameLabelTokens, isTeamLabel, teamForeignLabels, planSuffixChange, githubRenamesForPlan,
 };

@@ -13,6 +13,7 @@ const {
   isTeamLabel,
   teamForeignLabels,
   planSuffixChange,
+  githubRenamesForPlan,
 } = require('./label-suffix');
 
 // A small live team stamped with `k3f9`: the team agent (registries + team
@@ -196,5 +197,41 @@ describe('planSuffixChange — collisions (AC10)', () => {
     agents[2].triggers[0].labelFilter = 'ready-prod';
     const plan = planSuffixChange(agents, 't', '');
     assert.deepEqual(plan.collisions, [{ label: 'ready-prod', from: 'ready-prod-k3f9', owner: 'this-team' }]);
+  });
+});
+
+describe('githubRenamesForPlan — claim labels move on GitHub too (AC8)', () => {
+  it('adds the claim `:wip` label and its `:completed` mirror as optional renames', () => {
+    const agents = team();
+    const plan = planSuffixChange(agents, 't', 'x1');
+    const renames = githubRenamesForPlan(plan, agents);
+    const sorted = renames.slice().sort((a, b) => a.from.localeCompare(b.from));
+    assert.deepEqual(sorted, [
+      { from: 'ready-for-review-k3f9', to: 'ready-for-review-x1' },
+      { from: 'ready-prod-k3f9', to: 'ready-prod-x1' },
+      { from: 'ready-prod-k3f9:completed', to: 'ready-prod-x1:completed', optional: true },
+      { from: 'ready-prod-k3f9:wip', to: 'ready-prod-x1:wip', optional: true },
+    ]);
+  });
+
+  it('covers a claim with a non-standard ending and a removed suffix', () => {
+    const agents = [
+      { id: 't', config: { role: 'team', labelSuffix: 'k3f9' }, triggers: [] },
+      { id: 't-a', config: { role: 'team-member', parentTeamId: 't' }, triggers: [{
+        id: 'w', type: 'github-event', labelFilter: 'go-k3f9', claim: { remove: 'go-k3f9', add: 'go-k3f9-busy' },
+      }] },
+    ];
+    const renames = githubRenamesForPlan(planSuffixChange(agents, 't', ''), agents);
+    assert.deepEqual(renames.filter(r => r.optional), [
+      { from: 'go-k3f9-busy', to: 'go-busy', optional: true },
+      { from: 'go-k3f9:completed', to: 'go:completed', optional: true },
+    ]);
+  });
+
+  it('leaves a foreign claim alone', () => {
+    const agents = team();
+    agents[2].triggers[0].claim = { remove: 'external-qa', add: 'external-qa:wip' };
+    const renames = githubRenamesForPlan(planSuffixChange(agents, 't', 'x1'), agents);
+    assert.equal(renames.some(r => r.from.startsWith('external-qa')), false);
   });
 });

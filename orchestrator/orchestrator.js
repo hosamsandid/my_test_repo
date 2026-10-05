@@ -18829,8 +18829,10 @@ async function main() {
     // ── Rename GitHub labels for a team's suffix change (#2858) ──────────────
     // PATCHes each label to its new name in place, so open issues and PRs keep
     // it under the new name (never delete + recreate). A label missing from the
-    // repo is created under the new name. Per-label failures are reported, never
-    // thrown — the caller records them for a retry.
+    // repo is created under the new name — except an `optional` rename (a
+    // derived claim label `<wake>:wip` / `<wake>:completed`, created on demand):
+    // a missing one is nothing to rename and is reported as `skipped`. Per-label
+    // failures are reported, never thrown — the caller records them for a retry.
     const githubLabelsRenameMatch = req.method === 'POST' && req.url.match(/^\/internal\/environments\/([^/]+)\/github-labels\/rename$/);
     if (githubLabelsRenameMatch) {
       const envId = decodeURIComponent(githubLabelsRenameMatch[1]);
@@ -18871,12 +18873,14 @@ async function main() {
           const renamed = [];
           const created = [];
           const failed = [];
+          const skipped = [];
           for (const r of renames) {
             try {
               const resp = await fetch(`${base}/${encodeURIComponent(r.from)}`, {
                 method: 'PATCH', headers, body: JSON.stringify({ new_name: r.to }),
               });
               if (resp.ok) { renamed.push(r); continue; }
+              if (resp.status === 404 && r.optional === true) { skipped.push(r); continue; }
               if (resp.status === 404) {
                 // Never existed on GitHub (or already renamed by an earlier
                 // attempt): make sure the new name exists.
@@ -18897,7 +18901,7 @@ async function main() {
             }
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: failed.length === 0, renamed, created, failed }));
+          res.end(JSON.stringify({ ok: failed.length === 0, renamed, created, skipped, failed }));
         } catch (err) {
           console.error(`[Orchestrator] github-labels rename error for env ${envId}: ${err.message}`);
           res.writeHead(500, { 'Content-Type': 'application/json' });

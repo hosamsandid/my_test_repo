@@ -29,7 +29,7 @@ export default function LabelSuffixSection({ team, onApplied }) {
     try {
       return { ok: true, body: await apiCall('POST', url, body) };
     } catch (e) {
-      return { ok: false, status: e.status, body: { error: e.message } };
+      return { ok: false, status: e.status, body: { error: e.message, ...(e.collisions ? { collisions: e.collisions } : {}) } };
     }
   }
 

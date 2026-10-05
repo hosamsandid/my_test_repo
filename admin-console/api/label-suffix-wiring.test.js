@@ -124,6 +124,12 @@ describe('POST /api/agents/:teamId/label-suffix (#2858)', () => {
     assert.match(r, /fresh\.labelSuffixPendingRenames = github\.failed;/);
     assert.match(r, /if \(body\.retry === true\)/);
   });
+
+  it('renames the claim labels on GitHub too and keeps them optional on retry (AC8)', () => {
+    assert.match(r, /const planRenames = githubRenamesForPlan\(plan, agents\);/);
+    assert.match(r, /\.\.\.planRenames\.filter\(r => !pendingTo\.has\(r\.from\)\)/);
+    assert.equal((r.match(/\.\.\.\((p\.)?optional \? \{ optional: true \} : \{\}\)/g) || []).length, 2);
+  });
 });
 
 test('the console renames GitHub labels via the orchestrator rename route', () => {
@@ -131,4 +137,14 @@ test('the console renames GitHub labels via the orchestrator rename route', () =
   assert.ok(start > 0);
   const body = code(API_SRC.slice(start, API_SRC.indexOf('\n}\n', start)));
   assert.match(body, /\/github-labels\/rename`/);
+});
+
+test('the orchestrator rename route skips a missing optional (claim) label instead of creating it', () => {
+  const src = code(fs.readFileSync(path.join(__dirname, '..', '..', 'orchestrator', 'orchestrator.js'), 'utf8'));
+  const start = src.indexOf('/github-labels\\/rename$/');
+  assert.ok(start > 0, 'rename route not found');
+  const body = src.slice(start, src.indexOf('github-labels rename error', start));
+  const skip = body.indexOf("if (resp.status === 404 && r.optional === true) { skipped.push(r); continue; }");
+  assert.ok(skip > 0 && skip < body.indexOf('method: \'POST\''));
+  assert.match(body, /renamed, created, skipped, failed/);
 });

@@ -1741,6 +1741,29 @@ function loadEnvironment(envId) {
   }
 }
 
+// The GitHub repo + PAT the team label routes (#902 provisioning, #2858 rename)
+// act on: the environment's primary repository and its githubTokenId. Returns
+// `{ notFound: true }`, `{ warning }` when labels cannot be managed (no token,
+// unreadable token, non-GitHub URL), or `{ owner, repo, ghToken }`.
+function resolveEnvGithubRepo(envId) {
+  const env = loadEnvironment(envId);
+  if (!env) return { notFound: true };
+  if (!env.githubTokenId) return { warning: 'No GitHub token on environment — skipping label provisioning' };
+  let ghToken;
+  try {
+    ghToken = fs.readFileSync(path.join(GH_TOKENS_DIR, env.githubTokenId), 'utf8').trim();
+  } catch (err) {
+    return { warning: `Cannot read GitHub token: ${err.message}` };
+  }
+  // Derive owner/repo from the environment's primary repo URL.
+  const repos = Array.isArray(env.repositories) ? env.repositories : (env.repository ? [env.repository] : []);
+  const primaryUrl = repos[0]?.url || '';
+  const repoMatch = primaryUrl.match(/github\.com[/:]([^/]+)\/([^/ .]+?)(?:\.git)?\s*$/);
+  if (!repoMatch) return { warning: 'Cannot parse GitHub owner/repo from environment URL — skipping label provisioning' };
+  const [, owner, repo] = repoMatch;
+  return { owner, repo, ghToken };
+}
+
 // ============================================================
 // Toolchain registry (#1940)
 // ============================================================
@@ -12137,6 +12160,10 @@ class Orchestrator {
         // Flow-Editor dialog pre-fill. Not used at runtime — labels are already
         // stamped in the member configs.
         ...(typeof extra.labelSuffix === 'string' && extra.labelSuffix ? { labelSuffix: extra.labelSuffix } : {}),
+        // Labels that already ended in the suffix and were left unstamped
+        // (#2858) — the console shows them as foreign, never as base + suffix.
+        ...(extra.labelSuffix && Array.isArray(extra.labelSuffixExempt) && extra.labelSuffixExempt.length
+          ? { labelSuffixExempt: extra.labelSuffixExempt.filter(l => typeof l === 'string' && l) } : {}),
         enabled: true,
       };
       saveAgentConfig(id, teamConfig);
@@ -18747,35 +18774,18 @@ async function main() {
           return;
         }
         try {
-          const env = loadEnvironment(envId);
-          if (!env) {
+          const target = resolveEnvGithubRepo(envId);
+          if (target.notFound) {
             res.writeHead(404, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: `Environment '${envId}' not found` }));
             return;
           }
-          if (!env.githubTokenId) {
+          if (target.warning) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true, created: [], skipped: labels, warnings: ['No GitHub token on environment — skipping label provisioning'] }));
+            res.end(JSON.stringify({ ok: true, created: [], skipped: labels, warnings: [target.warning] }));
             return;
           }
-          let ghToken;
-          try {
-            ghToken = fs.readFileSync(path.join(GH_TOKENS_DIR, env.githubTokenId), 'utf8').trim();
-          } catch (err) {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true, created: [], skipped: labels, warnings: [`Cannot read GitHub token: ${err.message}`] }));
-            return;
-          }
-          // Derive owner/repo from the environment's primary repo URL.
-          const repos = Array.isArray(env.repositories) ? env.repositories : (env.repository ? [env.repository] : []);
-          const primaryUrl = repos[0]?.url || '';
-          const repoMatch = primaryUrl.match(/github\.com[/:]([^/]+)\/([^/ .]+?)(?:\.git)?\s*$/);
-          if (!repoMatch) {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true, created: [], skipped: labels, warnings: ['Cannot parse GitHub owner/repo from environment URL — skipping label provisioning'] }));
-            return;
-          }
-          const [, owner, repo] = repoMatch;
+          const { owner, repo, ghToken } = target;
           const created = [];
           const skipped = [];
           const warnings = [];
@@ -18809,6 +18819,87 @@ async function main() {
           res.end(JSON.stringify({ ok: true, created, skipped, warnings }));
         } catch (err) {
           console.error(`[Orchestrator] github-labels error for env ${envId}: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Rename GitHub labels for a team's suffix change (#2858) ──────────────
+    // PATCHes each label to its new name in place, so open issues and PRs keep
+    // it under the new name (never delete + recreate). A label missing from the
+    // repo is created under the new name. Per-label failures are reported, never
+    // thrown — the caller records them for a retry.
+    const githubLabelsRenameMatch = req.method === 'POST' && req.url.match(/^\/internal\/environments\/([^/]+)\/github-labels\/rename$/);
+    if (githubLabelsRenameMatch) {
+      const envId = decodeURIComponent(githubLabelsRenameMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* ignore */ }
+        const renames = (Array.isArray(parsed.renames) ? parsed.renames : [])
+          .filter(r => r && typeof r.from === 'string' && r.from && typeof r.to === 'string' && r.to && r.from !== r.to);
+        const color = typeof parsed.color === 'string' && /^[0-9a-fA-F]{6}$/.test(parsed.color)
+          ? parsed.color : null;
+        if (!renames.length) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'renames ({from, to}[]) required' }));
+          return;
+        }
+        try {
+          const target = resolveEnvGithubRepo(envId);
+          if (target.notFound) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Environment '${envId}' not found` }));
+            return;
+          }
+          if (target.warning) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, renamed: [], created: [], failed: renames.map(r => ({ ...r, error: target.warning })) }));
+            return;
+          }
+          const { owner, repo, ghToken } = target;
+          const headers = {
+            'Authorization': `Bearer ${ghToken}`,
+            'Accept': 'application/vnd.github+json',
+            'Content-Type': 'application/json',
+            'X-GitHub-Api-Version': '2022-11-28',
+          };
+          const base = `https://api.github.com/repos/${owner}/${repo}/labels`;
+          const renamed = [];
+          const created = [];
+          const failed = [];
+          for (const r of renames) {
+            try {
+              const resp = await fetch(`${base}/${encodeURIComponent(r.from)}`, {
+                method: 'PATCH', headers, body: JSON.stringify({ new_name: r.to }),
+              });
+              if (resp.ok) { renamed.push(r); continue; }
+              if (resp.status === 404) {
+                // Never existed on GitHub (or already renamed by an earlier
+                // attempt): make sure the new name exists.
+                const cr = await fetch(base, {
+                  method: 'POST', headers, body: JSON.stringify({ name: r.to, ...(color ? { color } : {}) }),
+                });
+                if (cr.status === 201 || cr.status === 422) { created.push(r); continue; }
+                const errBody = await cr.text().catch(() => '');
+                failed.push({ ...r, error: `GitHub returned ${cr.status} — ${errBody.slice(0, 200)}` });
+                continue;
+              }
+              const errBody = await resp.text().catch(() => '');
+              failed.push({ ...r, error: resp.status === 422
+                ? `a label named '${r.to}' already exists in ${owner}/${repo}`
+                : `GitHub returned ${resp.status} — ${errBody.slice(0, 200)}` });
+            } catch (err) {
+              failed.push({ ...r, error: err.message });
+            }
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: failed.length === 0, renamed, created, failed }));
+        } catch (err) {
+          console.error(`[Orchestrator] github-labels rename error for env ${envId}: ${err.message}`);
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
         }
@@ -21277,6 +21368,7 @@ async function main() {
           // For role: 'team' — label suffix (#902): stored for extend-mode
           // consistency and Flow-Editor dialog pre-fill.
           labelSuffix,
+          labelSuffixExempt,
           // For role: 'team' — hill-climb collector config (#1222): the run-metrics
           // window/floor/cron/excludeAgents, round-tripped with the bundle.
           hillClimb,
@@ -21358,6 +21450,7 @@ async function main() {
         if (Array.isArray(humans)) extra.humans = humans;
         if (Array.isArray(skills)) extra.skills = skills;
         if (typeof labelSuffix === 'string' && labelSuffix) extra.labelSuffix = labelSuffix;
+        if (Array.isArray(labelSuffixExempt)) extra.labelSuffixExempt = labelSuffixExempt;
         if (hillClimb && typeof hillClimb === 'object' && !Array.isArray(hillClimb)) extra.hillClimb = hillClimb;
         if (Number.isInteger(wipLimit) && wipLimit >= 1) extra.wipLimit = wipLimit;
         const result = (role === 'agent' && mintTeamOfOne === true)

@@ -179,7 +179,7 @@ const skillPoolTeam = require('./skill-pool-team');
 const skillFileBatch = require('./skill-file-batch');
 const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archives');
 const { createTranscribeRoute } = require('./transcribe.js');
-const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix, stampLiveLabels } = require('./label-suffix');
+const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix, stampLiveLabels, collectLabelTokens, teamForeignLabels, planSuffixChange } = require('./label-suffix');
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
 const { reposFromEnv, repoVars } = require('./team-repo-resolve');
 const { planCreatorMembership, creatorEnvironmentOwnership } = require('./creator-membership');
@@ -2978,7 +2978,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // channel label, legacy emits) gets the team's stored suffix — before any
   // validation below, so the gate check sees the name that is persisted.
   const liveSuffix = teamLabelSuffixFor(cfg);
-  if (liveSuffix) req.body = stampLiveLabels(req.body || {}, liveSuffix);
+  if (liveSuffix) req.body = stampLiveLabels(req.body || {}, liveSuffix, { keep: teamForeignLabelsFor(id, cfg) });
   const { displayName, role, enabled, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, wipLimit, autoDispatch, pool, github, channels, assistLlmEndpointId } = req.body;
 
   // ── Label registry (#928/#981) ────────────────────────────────────────────
@@ -4511,7 +4511,7 @@ app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
   // team's suffix on its triggers and label ports, like a role created with
   // the team.
   const liveSuffix = teamLabelSuffixFor(teamCfg);
-  if (liveSuffix) outBody = stampLiveLabels(outBody, liveSuffix);
+  if (liveSuffix) outBody = stampLiveLabels(outBody, liveSuffix, { keep: teamForeignLabelsFor(teamId, teamCfg) });
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamId)}/members`, {
@@ -6534,6 +6534,181 @@ function readAgentConfigForFilter(agentId) {
   return readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
 }
 
+// ── Team label suffix change (#2858) ──────────────────────────────────────
+// The one central place a live team's suffix is changed: every stamped label
+// occurrence in the team (triggers, channels, outcomes, emits, the label and
+// humans registries, prompt text) is rewritten in one operation via the pure
+// planSuffixChange, then the labels are renamed on GitHub in place so open
+// issues and PRs keep them. Body: { suffix, dryRun?, retry? }.
+//  - dryRun: the preview the confirmation dialog shows (renames, affected
+//    agents, collisions) — nothing is written.
+//  - retry: re-run only the GitHub renames a previous change could not apply
+//    (recorded on the team as `labelSuffixPendingRenames`).
+// The team config is written FIRST and the GitHub renames second: a failed
+// rename is recorded and reported (with a retry), never left silent.
+function loadSuffixTeamAgents(teamId) {
+  const agents = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg || (id !== teamId && cfg.parentTeamId !== teamId)) continue;
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    agents.push({ id, config: cfg, triggers: Array.isArray(triggers) ? triggers : [] });
+  }
+  return agents;
+}
+
+// Label names the OTHER teams on the same repository use (#2858 AC10) — a
+// suffix change must not rename onto one of them.
+function otherTeamLabelsOnRepo(teamId, repo) {
+  const out = new Set();
+  if (!repo) return out;
+  const teamIds = listAgentDirs().filter((id) => {
+    if (id === teamId) return false;
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    return !!(cfg && cfg.role === 'team' && memberRepoFullName(cfg) === repo);
+  });
+  for (const otherId of teamIds) {
+    const agents = loadSuffixTeamAgents(otherId);
+    const team = agents.find(a => a.id === otherId);
+    const tokens = collectLabelTokens(
+      agents.map(a => ({ ...a.config, triggers: a.triggers })),
+      Array.isArray(team?.config.labels) ? team.config.labels : [],
+      Array.isArray(team?.config.humans) ? team.config.humans : [],
+    );
+    for (const t of tokens) out.add(t);
+  }
+  return out;
+}
+
+async function renameGithubLabels(envId, renames, suffix) {
+  if (!renames.length) return { renamed: [], created: [], failed: [] };
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(
+      `${orchestratorUrl}/internal/environments/${encodeURIComponent(envId)}/github-labels/rename`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ renames, ...(suffix ? { color: suffixLabelColor(suffix) } : {}) }),
+      },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return { renamed: [], created: [], failed: renames.map(r => ({ ...r, error: data.error || `orchestrator HTTP ${resp.status}` })) };
+    return {
+      renamed: Array.isArray(data.renamed) ? data.renamed : [],
+      created: Array.isArray(data.created) ? data.created : [],
+      failed: Array.isArray(data.failed) ? data.failed : [],
+    };
+  } catch (err) {
+    return { renamed: [], created: [], failed: renames.map(r => ({ ...r, error: `Orchestrator unreachable: ${err.message}` })) };
+  }
+}
+
+app.post('/api/agents/:teamId/label-suffix', heavyLimiter, async (req, res) => {
+  const { teamId } = req.params;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const teamDir = path.resolve(agentsBaseDir, teamId);
+  const rel = path.relative(agentsBaseDir, teamDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
+  const teamCfgPath = path.join(teamDir, 'config.json');
+  const teamCfg = readJsonFile(teamCfgPath, null);
+  if (!teamCfg) return res.status(404).json({ error: 'Team not found' });
+  if (teamCfg.role !== 'team') return res.status(400).json({ error: 'The label suffix is a setting of an Agent Team' });
+  if (denyUnlessCanManageAgent(req, res, teamCfg)) return;
+  const body = req.body || {};
+
+  if (body.retry === true) {
+    const pending = Array.isArray(teamCfg.labelSuffixPendingRenames) ? teamCfg.labelSuffixPendingRenames : [];
+    if (!pending.length) return res.json({ ok: true, github: { renamed: [], created: [], failed: [] } });
+    const github = await renameGithubLabels(teamCfg.environmentId, pending.map(({ from, to }) => ({ from, to })), teamCfg.labelSuffix || '');
+    const fresh = readJsonFile(teamCfgPath, teamCfg);
+    if (github.failed.length) fresh.labelSuffixPendingRenames = github.failed;
+    else delete fresh.labelSuffixPendingRenames;
+    writeJsonAtomic(teamCfgPath, fresh);
+    return res.json({ ok: github.failed.length === 0, github });
+  }
+
+  const suffix = typeof body.suffix === 'string' ? body.suffix.trim() : '';
+  const sv = validateSuffix(suffix);
+  if (!sv.ok) return res.status(400).json({ error: sv.error });
+  const oldSuffix = typeof teamCfg.labelSuffix === 'string' ? teamCfg.labelSuffix.trim() : '';
+  if (suffix === oldSuffix) return res.status(400).json({ error: `The team already uses the label suffix '${suffix || '(none)'}'` });
+
+  const agents = loadSuffixTeamAgents(teamId);
+  const plan = planSuffixChange(agents, teamId, suffix, {
+    otherTeamLabels: otherTeamLabelsOnRepo(teamId, memberRepoFullName(teamCfg)),
+  });
+  const changedAgents = plan.agents.filter(a => a.configChanged || a.triggersChanged).map(a => a.id);
+  const preview = {
+    oldSuffix: plan.oldSuffix,
+    newSuffix: plan.newSuffix,
+    renames: plan.renames,
+    agents: changedAgents,
+    collisions: plan.collisions,
+  };
+  if (plan.collisions.length) {
+    const c = plan.collisions[0];
+    return res.status(409).json({
+      ...preview,
+      error: c.owner === 'other-team'
+        ? `Label '${c.label}' is already used by another team on this repository — choose a different suffix.`
+        : `Label '${c.label}' already exists in this team as a label without the suffix — choose a different suffix.`,
+    });
+  }
+  if (body.dryRun === true) return res.json(preview);
+
+  // 1. The team: every changed config + trigger list, the team agent last so
+  //    its new suffix is only stored once its members carry it.
+  const ordered = [...plan.agents.filter(a => a.id !== teamId), ...plan.agents.filter(a => a.id === teamId)];
+  const teamPlan = plan.agents.find(a => a.id === teamId);
+  const templateChanged = teamPlan
+    && (teamPlan.config.systemPromptTemplate || '') !== (teamCfg.systemPromptTemplate || '');
+  try {
+    for (const a of ordered) {
+      if (a.triggersChanged) await putTriggers(a.id, a.triggers);
+      if (a.configChanged) writeJsonAtomic(path.join(AGENTS_DIR, a.id, 'config.json'), a.config);
+    }
+  } catch (err) {
+    return res.status(502).json({ ...preview, error: `Could not save the team: ${err.message}` });
+  }
+  // 2. Prompts and derived wiring: push the team template to inheriting
+  //    members, then re-derive channel listeners, hand-offs and every member's
+  //    AGENT-PROMPT.md from the rewritten ports. A running session picks the
+  //    new prompt up on its next run.
+  if (templateChanged) {
+    const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+    try {
+      await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamId)}/prompt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ systemPromptTemplate: teamPlan.config.systemPromptTemplate || '' }),
+      });
+    } catch { /* best-effort — reconcileTeamOutcomes below rewrites AGENT-PROMPT.md */ }
+  }
+  await reconcileTeamGithubChannels(teamId);
+  await reconcileTeamOutcomes(teamId);
+  await reconcileTeamWakeHandoffs(teamId);
+  for (const id of changedAgents) notifyAgentReload(id);
+
+  // 3. GitHub: rename in place. Failures are recorded for a retry. A rename a
+  //    previous change could not apply still sits on GitHub under its old name,
+  //    so it is chained (`a-x` → `a-y` pending, now `a-y` → `a-z`: `a-x` → `a-z`).
+  const pending = Array.isArray(teamCfg.labelSuffixPendingRenames) ? teamCfg.labelSuffixPendingRenames : [];
+  const nextName = new Map(plan.renames.map(r => [r.from, r.to]));
+  const pendingTo = new Set(pending.map(p => p.to));
+  const githubRenames = [
+    ...pending.map(p => ({ from: p.from, to: nextName.get(p.to) || p.to })).filter(r => r.from !== r.to),
+    ...plan.renames.filter(r => !pendingTo.has(r.from)),
+  ];
+  const github = await renameGithubLabels(teamCfg.environmentId, githubRenames, suffix);
+  const fresh = readJsonFile(teamCfgPath, teamPlan ? teamPlan.config : teamCfg);
+  if (github.failed.length) fresh.labelSuffixPendingRenames = github.failed;
+  else delete fresh.labelSuffixPendingRenames;
+  writeJsonAtomic(teamCfgPath, fresh);
+  res.json({ ...preview, ok: github.failed.length === 0, github });
+});
+
 async function putTriggers(agentId, triggers) {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   const r = await fetch(
@@ -6565,8 +6740,11 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   const triggers = Array.isArray(cur) ? cur : [];
   // Label suffix on live edits (#2718): labelFilter, claim and the label
   // mentions in the trigger's prompt get the team's stored suffix.
-  const liveSuffix = teamLabelSuffixFor(readJsonFile(path.join(agentDir, 'config.json'), null));
-  const reqTrigger = liveSuffix ? stampLiveLabels(req.body || {}, liveSuffix, { trigger: true }) : req.body;
+  const agentCfg = readJsonFile(path.join(agentDir, 'config.json'), null);
+  const liveSuffix = teamLabelSuffixFor(agentCfg);
+  const reqTrigger = liveSuffix
+    ? stampLiveLabels(req.body || {}, liveSuffix, { trigger: true, keep: teamForeignLabelsFor(id, agentCfg) })
+    : req.body;
   const newTrigger = stripTriggerAnnotations({ id: `t${Date.now()}`, ...reqTrigger });
   // Trigger ids (#2626): URL-safe shape (400), unique per agent (409) — a
   // shared id makes DELETE/PUT ambiguous and the agent runs only one of them.
@@ -6644,8 +6822,11 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   const prev = triggers[idx];
   // Label suffix on live edits (#2718) — see the POST handler. Only the edit's
   // own fields are stamped; the stored trigger is merged in as it is.
-  const liveSuffix = teamLabelSuffixFor(readJsonFile(path.join(agentDir, 'config.json'), null));
-  const reqTrigger = liveSuffix ? stampLiveLabels(req.body || {}, liveSuffix, { trigger: true }) : req.body;
+  const agentCfg = readJsonFile(path.join(agentDir, 'config.json'), null);
+  const liveSuffix = teamLabelSuffixFor(agentCfg);
+  const reqTrigger = liveSuffix
+    ? stampLiveLabels(req.body || {}, liveSuffix, { trigger: true, keep: teamForeignLabelsFor(id, agentCfg) })
+    : req.body;
   const merged = stripTriggerAnnotations({ ...prev, ...reqTrigger, id: triggerId });
   // Trigger-level `emits` was removed (#783): the agent/role level is canonical.
   // Ignore any supplied `emits` and drop a legacy field so an edit never
@@ -6835,6 +7016,16 @@ function teamLabelSuffixFor(cfg) {
   }
   const suffix = teamCfg && typeof teamCfg.labelSuffix === 'string' ? teamCfg.labelSuffix.trim() : '';
   return suffix && validateSuffix(suffix).ok ? suffix : '';
+}
+
+// The labels a live write to this agent's suffixed team must leave unstamped
+// (#2858 AC4): the foreign names the team already carries. Only consulted when
+// teamLabelSuffixFor returned a suffix.
+function teamForeignLabelsFor(agentId, cfg) {
+  if (!cfg || typeof cfg !== 'object') return new Set();
+  const teamId = cfg.role === 'team' ? agentId : cfg.parentTeamId;
+  if (typeof teamId !== 'string' || !AGENT_ID_RE.test(teamId)) return new Set();
+  return teamForeignLabels(loadSuffixTeamAgents(teamId), teamId);
 }
 
 function teamLabelRegistry(teamId) {
@@ -17395,6 +17586,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   // is empty (byte-identical output). Warnings surface un-stamped prompt mentions.
   let suffixWarnings = [];
   let suffixTokenSet = null;
+  let suffixExempt = [];
   if (labelSuffix) {
     const stamped = applyLabelSuffix(customRolesRaw, bundleLabels, labelSuffix, bundleHumans);
     customRolesRaw = stamped.members;
@@ -17404,6 +17596,9 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     bundleHumans = stamped.humans;
     suffixWarnings = stamped.warnings;
     suffixTokenSet = stamped.tokenSet;
+    // A label that already ended in the suffix was left as is — record it, so
+    // the console never splits it into base + suffix (#2858).
+    suffixExempt = stamped.skipped.filter(t => !stamped.tokenSet.has(t));
   }
 
   const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
@@ -17704,6 +17899,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           // Label suffix (#902): stored so extend-mode adds roles with the same
           // suffix and Flow-Editor dialogs can pre-fill new label inputs.
           ...(labelSuffix ? { labelSuffix } : {}),
+          ...(suffixExempt.length ? { labelSuffixExempt: suffixExempt } : {}),
           // Human owner (#2077, D8) — the authenticated creator of the team.
           ...ownerFor(req),
         }),
@@ -18123,6 +18319,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // Label-suffix stamping (#902) — see the non-streaming handler.
   let suffixWarnings = [];
   let suffixTokenSet = null;
+  let suffixExempt = [];
   if (labelSuffix) {
     const stamped = applyLabelSuffix(customRolesRaw, bundleLabels, labelSuffix, bundleHumans);
     customRolesRaw = stamped.members;
@@ -18132,6 +18329,9 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
     bundleHumans = stamped.humans;
     suffixWarnings = stamped.warnings;
     suffixTokenSet = stamped.tokenSet;
+    // A label that already ended in the suffix was left as is — record it, so
+    // the console never splits it into base + suffix (#2858).
+    suffixExempt = stamped.skipped.filter(t => !stamped.tokenSet.has(t));
   }
 
   const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
@@ -18454,6 +18654,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           ...(bundleLabels.length ? { labels: bundleLabels } : {}),
           // Label suffix (#902) — see the non-streaming handler.
           ...(labelSuffix ? { labelSuffix } : {}),
+          ...(suffixExempt.length ? { labelSuffixExempt: suffixExempt } : {}),
           // Human owner (#2077, D8) — the authenticated creator of the team.
           ...ownerFor(req),
         }),

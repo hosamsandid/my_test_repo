@@ -72,6 +72,8 @@ test('open: version hash validated; missing snapshot → 404 unavailable; file l
   assert.match(file, /v\.files\.find\(x => x\.path === rel\)/);
   assert.doesNotMatch(file, /safeSkillFilePath|readFileSync/, 'never resolves the query against the disk');
   assert.match(file, /SKILL_FILE_MAX_BYTES/);
+  // raw bytes for "Edit from this version" (binary / over-cap files become uploads)
+  assert.match(file, /req\.query\.encoding === 'base64'[\s\S]*?base64: f\.bytes\.toString\('base64'\)/);
 });
 
 test('snapshots are integrity-checked and the hash parameter is a content hash or "working"', () => {

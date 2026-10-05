@@ -11881,6 +11881,11 @@ app.get('/api/skills/:name/versions/:hash/file', (req, res) => {
   if (!v) return res.status(404).json({ error: 'content not available for this version', unavailable: true });
   const f = v.files.find(x => x.path === rel);
   if (!f) return res.status(404).json({ error: 'not found' });
+  // `encoding=base64` returns the raw bytes (binary / over-cap files) for
+  // "Edit from this version", which turns them into pending uploads.
+  if (req.query.encoding === 'base64') {
+    return res.json({ path: rel, size: f.bytes.length, base64: f.bytes.toString('base64') });
+  }
   const truncated = f.bytes.length > SKILL_FILE_MAX_BYTES;
   const buf = truncated ? f.bytes.subarray(0, SKILL_FILE_MAX_BYTES) : f.bytes;
   const isBinary = buf.subarray(0, Math.min(buf.length, 8192)).includes(0);

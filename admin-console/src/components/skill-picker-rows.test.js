@@ -63,13 +63,13 @@ test('buildRows tolerates junk input', () => {
   assert.deepEqual(buildRows([null, { source: 'pool' }, 3], []), []);
 });
 
-test('driftLineageHref deep-links a global row to the Lineage tab', () => {
+test('driftLineageHref deep-links a global row to the Copies & origin tab', () => {
   const href = driftLineageHref({ name: 'my skill', tier: 'global', drift: 'behind' });
   const url = new URL(href, 'http://x');
   assert.equal(url.pathname, '/skills');
   assert.equal(url.searchParams.get('skill'), 'my skill');
   assert.equal(url.searchParams.get('tier'), 'pool');
-  assert.equal(url.searchParams.get('tab'), 'lineage');
+  assert.equal(url.searchParams.get('tab'), 'copies');
   assert.equal(url.searchParams.get('team'), null);
 });
 
@@ -78,7 +78,7 @@ test('driftLineageHref carries teamId for a team row', () => {
   const url = new URL(href, 'http://x');
   assert.equal(url.searchParams.get('tier'), 'team');
   assert.equal(url.searchParams.get('team'), 't1');
-  assert.equal(url.searchParams.get('tab'), 'lineage');
+  assert.equal(url.searchParams.get('tab'), 'copies');
 });
 
 test('driftLineageHref returns null without a name', () => {

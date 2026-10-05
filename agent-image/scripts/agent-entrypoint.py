@@ -1603,6 +1603,175 @@ def _clear_ask_sentinel(path: Path) -> None:
         print(f"[Runner] could not remove ask sentinel {path}: {exc}", file=sys.stderr)
 
 
+# ---- in-turn status notes (#2841) ----
+#
+# A long in-turn wait (today: `aee-wait-ci`) is invisible in the chat: the agent
+# says nothing until the run ends. The CLI appends one JSON line per wait that
+# has really started to a per-invocation file whose path the runner hands it via
+# AEE_STATUS_FILE; a watcher thread turns each line into ONE short m.notice in
+# the run's room ("Pull request #N is open — waiting for CI…"). Reliable by
+# construction — it never depends on the agent remembering to post — and only a
+# status note: it never replaces the final reply. Per-invocation for the same
+# reason as the ask sentinel above.
+_STATUS_FILE_ENV = "AEE_STATUS_FILE"
+_STATUS_POLL_SEC = 1.0
+_STATUS_NOTE_KEY = "io.aee.status-note"
+_STATUS_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_STATUS_HOST_RE = re.compile(r"^[A-Za-z0-9.-]+$")
+
+# Small stopword sets — enough to tell a German chat message from an English one.
+_DE_WORDS = frozenset((
+    "der die das und ist nicht ich du wir ihr sie es ein eine einen mit auf für "
+    "bitte kannst können noch auch schon aber oder wenn dass wie was warum den dem "
+    "des zu im vom zum bei nach mal jetzt hier gibt mach mache").split())
+_EN_WORDS = frozenset((
+    "the and is not you we they it a an with on for please can could still also "
+    "already but or if that how what why to in at by after now here there make do "
+    "this of are").split())
+
+
+def _guess_language(text) -> str:
+    """'de' when the text reads as German, else 'en' (the fallback)."""
+    if not isinstance(text, str) or not text.strip():
+        return "en"
+    words = re.findall(r"[a-zäöüß]+", text.lower())
+    de = sum(1 for w in words if w in _DE_WORDS) + sum(2 for w in words if any(c in w for c in "äöüß"))
+    en = sum(1 for w in words if w in _EN_WORDS)
+    return "de" if de >= 2 and de > en else "en"
+
+
+def _status_file_path(invocation_id: str) -> Path:
+    """Run-scoped file the in-turn CLIs append status events to."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", invocation_id or "") or uuid.uuid4().hex
+    return _agent_workdir() / STATE_DIR / "status" / f"{safe}.jsonl"
+
+
+def _clear_status_file(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"[Runner] could not remove status file {path}: {exc}", file=sys.stderr)
+
+
+def _ci_wait_note(event, attempt: int, language: str = "en",
+                  correlation_id: str | None = None) -> dict | None:
+    """The m.notice content for one `aee-wait-ci` wait, or None when the event
+    is not a well-formed ci-wait (it is then silently dropped)."""
+    if not isinstance(event, dict) or event.get("kind") != "ci-wait":
+        return None
+    repo, pr, host = event.get("repo"), event.get("pr"), event.get("host") or "github.com"
+    if not (isinstance(repo, str) and _STATUS_REPO_RE.match(repo)):
+        return None
+    if not (isinstance(pr, int) and not isinstance(pr, bool) and pr > 0):
+        return None
+    if not (isinstance(host, str) and _STATUS_HOST_RE.match(host)):
+        host = "github.com"
+    minutes = event.get("timeoutMinutes")
+    minutes = int(minutes) if isinstance(minutes, (int, float)) and not isinstance(minutes, bool) and minutes > 0 else None
+    url = f"https://{host}/{repo}/pull/{pr}"
+    if language == "de":
+        limit = f" (bis zu {minutes} Min.)" if minutes else ""
+        retry = f" (Versuch {attempt})" if attempt > 1 else ""
+        text = "Pull Request {ref} ist offen — ich warte, bis die CI durchgelaufen ist" + limit + "." + retry
+    else:
+        limit = f" (up to {minutes} min)" if minutes else ""
+        retry = f" (attempt {attempt})" if attempt > 1 else ""
+        text = "Pull request {ref} is open — waiting for CI to finish" + limit + "." + retry
+    return {
+        "msgtype": "m.notice",
+        "body": text.format(ref=f"#{pr} ({url})"),
+        "format": "org.matrix.custom.html",
+        "formatted_body": text.format(ref=f'<a href="{html.escape(url, quote=True)}">#{pr}</a>'),
+        _STATUS_NOTE_KEY: {
+            "kind": "ci-wait", "repo": repo, "pr": pr, "attempt": attempt,
+            "timeoutMinutes": minutes, "correlationId": correlation_id or None,
+        },
+    }
+
+
+class _StatusNoteWatcher:
+    """Tails one invocation's AEE_STATUS_FILE while claude runs and posts one
+    status note per event through `run_context["_statusPoster"]` (set by the DM
+    and trigger paths; absent → nothing is posted). Attempts are counted per
+    (repo, pr) on the run_context, so a re-run within the same run names it."""
+
+    def __init__(self, path: Path, run_context: dict | None, correlation_id: str | None,
+                 poll_sec: float = _STATUS_POLL_SEC):
+        self.path = path
+        self.run_context = run_context if isinstance(run_context, dict) else {}
+        self.correlation_id = correlation_id
+        self.poll_sec = poll_sec
+        self._offset = 0
+        self._partial = b""
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def drain(self) -> int:
+        """Post a note for every complete new line. Returns how many were posted."""
+        try:
+            with open(self.path, "rb") as f:
+                f.seek(self._offset)
+                chunk = f.read()
+        except OSError:
+            return 0
+        self._offset += len(chunk)
+        data = self._partial + chunk
+        lines = data.split(b"\n")
+        self._partial = lines.pop()  # an unfinished last line waits for the next look
+        posted = 0
+        for raw in lines:
+            try:
+                event = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                continue
+            if not isinstance(event, dict) or event.get("kind") != "ci-wait":
+                continue
+            attempts = self.run_context.setdefault("_ciWaitAttempts", {})
+            key = f"{event.get('repo')}#{event.get('pr')}"
+            attempt = attempts.get(key, 0) + 1
+            note = _ci_wait_note(event, attempt, self.run_context.get("_statusLanguage") or "en",
+                                 self.correlation_id)
+            poster = self.run_context.get("_statusPoster")
+            if note is None or not callable(poster):
+                continue
+            attempts[key] = attempt
+            try:
+                poster(note)
+                posted += 1
+            except Exception as exc:  # a status note must never break the run
+                print(f"[Runner] status note failed: {exc}", file=sys.stderr)
+        return posted
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.poll_sec):
+            self.drain()
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop watching. Nothing is posted after the turn: a wait that started
+        in its last second has ended along with the turn."""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+
+def _make_status_poster(client, room_id: str, loop, timeout: float = 15.0):
+    """A thread-safe `post(content)` for _StatusNoteWatcher: schedules the send
+    on the runner's event loop (the watcher runs in claude's worker thread)."""
+    def post(content: dict) -> None:
+        fut = asyncio.run_coroutine_threadsafe(
+            client.room_send(room_id=room_id, message_type="m.room.message", content=content),
+            loop,
+        )
+        fut.result(timeout=timeout)
+    return post
+
+
 def _is_ask_user_question_tool(name) -> bool:
     """True for the AskUserQuestion tool by its bare built-in name or its
     MCP-namespaced form (`mcp__<server>__AskUserQuestion`)."""
@@ -3600,6 +3769,15 @@ def _call_claude_once_inner(prompt: str, room_id: str, correlation_id: str,
     ask_sentinel = _ask_sentinel_path(f"{correlation_id or 'run'}-{uuid.uuid4().hex[:8]}")
     _clear_ask_sentinel(ask_sentinel)
     env[_ASK_FILE_ENV] = str(ask_sentinel)
+    # In-turn status notes (#2841): `aee-wait-ci` announces a wait here; the
+    # watcher started with the process posts one note per wait to the room.
+    status_file = _status_file_path(f"{correlation_id or 'run'}-{uuid.uuid4().hex[:8]}")
+    _clear_status_file(status_file)
+    try:
+        status_file.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"[Runner] could not create status dir {status_file.parent}: {exc}", file=sys.stderr)
+    env[_STATUS_FILE_ENV] = str(status_file)
     # Run deadline (#2796): `aee-wait-ci` caps its in-turn CI wait so it ends
     # before this invocation's own timeout, with room left to act on the verdict.
     env[_RUN_DEADLINE_ENV] = str(int(time.time() + timeout_sec))
@@ -3741,6 +3919,8 @@ def _call_claude_once_inner(prompt: str, room_id: str, correlation_id: str,
 
     threading.Thread(target=drain_stderr, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
+    status_watcher = _StatusNoteWatcher(status_file, run_context, correlation_id)
+    status_watcher.start()
 
     try:
         for line in iter(proc.stdout.readline, ""):
@@ -3766,6 +3946,8 @@ def _call_claude_once_inner(prompt: str, room_id: str, correlation_id: str,
                 ask_question_input = queued
                 ask_via_cli = True
         _clear_ask_sentinel(ask_sentinel)
+        status_watcher.stop()
+        _clear_status_file(status_file)
 
     rc = proc.returncode
     stderr_blob = "".join(stderr_chunks)
@@ -7505,6 +7687,11 @@ class TriggerScheduler:
             "conversationKey": conversation_key,
         }
         run_context["github"] = github_block
+        # In-turn status notes (#2841) go to the run's room; a triggered run has
+        # no human message to read the language from, so they are in English.
+        if self._client is not None:
+            run_context["_statusPoster"] = _make_status_poster(
+                self._client, room_id, asyncio.get_running_loop())
 
         cfg = _load_dm_agent_config()
         session_policy = cfg.get("sessionPolicy")
@@ -8269,6 +8456,11 @@ async def run_dm_listener() -> None:
             # Only the event is named; the orchestrator reads its sender from
             # the homeserver, so nothing here can choose whose credential runs.
             dm_run_context["chatEvent"] = {"roomId": room_id, "eventId": getattr(event, "event_id", None)}
+            # In-turn status notes (#2841): posted to this room, in the language
+            # the human wrote in.
+            dm_run_context["_statusPoster"] = _make_status_poster(
+                client, room_id, asyncio.get_running_loop())
+            dm_run_context["_statusLanguage"] = _guess_language(body)
             # A pool instance (#2595) continues its one lifetime session — the
             # same DM pointer its triggered runs resume and move.
             dm_instance_session = _pool_instance_session(_load_dm_agent_config())

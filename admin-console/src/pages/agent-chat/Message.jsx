@@ -19,6 +19,7 @@ import {
 import { parseMessageSegments, hasImageRef } from './chat-image-refs.js';
 import ChatImageThumbnail from './chat-image-thumbnail.jsx';
 import { sessionJumpRef, SHOW_IN_SESSION_LABEL } from './session-jump.js';
+import { isStatusNote, statusNoteMarkdown } from './status-note.js';
 
 /**
  * The actual react-markdown render. Memoized on `body` alone (#1676): the
@@ -385,7 +386,7 @@ function NoticeMessage({ message, onShowInSession }) {
             compact so inline code renders formatted without literal backticks
             while block-level markdown can't blow up the card. */}
         <div className="agent-chat-md">
-          <SafeMarkdown body={message.body || ''} />
+          <SafeMarkdown body={isStatusNote(message) ? statusNoteMarkdown(message) : (message.body || '')} />
         </div>
         <div style={{
           display: 'flex', alignItems: 'center', gap: 4,
@@ -473,7 +474,8 @@ function Message({
       />
     );
   }
-  if (message.msgtype === 'm.notice' && message['io.aee.trigger']) {
+  // A runner status note (#2841) shares the compact notice card.
+  if (message.msgtype === 'm.notice' && (message['io.aee.trigger'] || isStatusNote(message))) {
     return <NoticeMessage message={message} onShowInSession={jumpRef ? showInSession : null} />;
   }
   // Who wrote this, and which side it belongs on (#2065). The two answers come

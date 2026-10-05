@@ -75,6 +75,11 @@ Exit codes:
      `github-event` trigger on `pull_request.checks_passed` /
      `pull_request.checks_failed` / `pull_request.merge_conflict`.
 
+Status note: once the wait really has to wait (an open PR whose verdict is not
+settled on the first look), the runtime posts one short note in your chat room
+("Pull request #N is open — waiting for CI…"). You do not need to announce the
+wait yourself; your final reply still reports the verdict.
+
 Rate limiting is backed off and retried, never reported as a failure. Reads go
 through the GitHub CLI with this container's GitHub token (`GH_TOKEN`).
 """
@@ -327,8 +332,12 @@ def effective_timeout_sec(requested_min, env=None, now=None):
 
 def wait_for_ci(repo, number, timeout_sec, conflict_check=True, interval_sec=DEFAULT_INTERVAL_SEC,
                 grace_ms=DEFAULT_CI_GRACE_MS, gh=gh_graphql, clock=time.time, sleep=time.sleep,
-                log=lambda m: None, expected_head=None, local=None):
+                log=lambda m: None, expected_head=None, local=None, on_waiting=None):
     """Poll until settled. Returns the result dict (always with `status`).
+
+    `on_waiting` is called once, right before the first pause on an open PR —
+    i.e. only when there really is something to wait for (not for a closed PR,
+    a refused read or a verdict that is already settled on the first look).
 
     `expected_head` (from --head) is the commit the caller pushed: any other PR
     head is waited out, never evaluated. Without it, `local` — a LocalClone —
@@ -347,6 +356,18 @@ def wait_for_ci(repo, number, timeout_sec, conflict_check=True, interval_sec=DEF
     rate_backoff = RATE_LIMIT_BACKOFF_SEC
     last = {"ci": "pending", "merge": "pending" if conflict_check else "skipped",
             "failingChecks": [], "pendingChecks": []}
+
+    announced = False
+
+    def pause_for(seconds):
+        nonlocal announced
+        if not announced and head is not None and on_waiting is not None:
+            announced = True
+            try:
+                on_waiting()
+            except Exception:
+                pass  # the note is best-effort, never the wait's problem
+        sleep(seconds)
 
     def result(status, message, **extra):
         out = {"ok": status in ("passed", "no-ci"), "status": status,
@@ -402,7 +423,7 @@ def wait_for_ci(repo, number, timeout_sec, conflict_check=True, interval_sec=DEF
                 if remaining <= 0:
                     return result("timeout", f"GitHub did not show {expected[:7]} as the head of #{number} "
                                   f"within {int(round(timeout_sec / 60))} min. " + TIMEOUT_ADVICE)
-                sleep(min(pause, remaining))
+                pause_for(min(pause, remaining))
                 continue
             if conflict_check:
                 last["merge"] = merge_verdict(pr.get("mergeable"))
@@ -445,7 +466,7 @@ def wait_for_ci(repo, number, timeout_sec, conflict_check=True, interval_sec=DEF
         if remaining <= 0:
             return result("timeout", f"CI on #{number} not settled within {int(round(timeout_sec / 60))} min. "
                           + TIMEOUT_ADVICE)
-        sleep(min(pause, remaining))
+        pause_for(min(pause, remaining))
 
 
 # ---- the local clone (expected head) -------------------------------------------
@@ -599,6 +620,27 @@ def parse_pr_arg(raw):
     raise ValueError(f"not a pull request number or URL: {raw!r}")
 
 
+# ---- status note (#2841) --------------------------------------------------------
+
+def announce_wait(repo, number, timeout_sec, env=None):
+    """Tell the runtime a wait has started: one JSON line appended to the
+    per-turn `AEE_STATUS_FILE`, which the runtime turns into a short status note
+    in the run's chat room ("Pull request #N is open — waiting for CI…"). No
+    file (no runtime, e.g. a local run) → nothing happens. Best-effort."""
+    env = env if env is not None else os.environ
+    path = env.get("AEE_STATUS_FILE")
+    if not path:
+        return False
+    event = {"kind": "ci-wait", "repo": f"{repo[0]}/{repo[1]}", "host": repo[2], "pr": number,
+             "timeoutMinutes": max(1, int(round(timeout_sec / 60)))}
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event) + "\n")
+        return True
+    except OSError:
+        return False
+
+
 # ---- CLI ----------------------------------------------------------------------
 
 def emit(obj, code):
@@ -688,7 +730,8 @@ def main(argv):
     res = wait_for_ci(repo, number, timeout_sec, conflict_check=opts["conflict"],
                       interval_sec=max(0.0, interval), grace_ms=ci_grace_ms(),
                       log=lambda m: sys.stderr.write(f"aee-wait-ci: {m}\n"),
-                      expected_head=expected_head, local=local)
+                      expected_head=expected_head, local=local,
+                      on_waiting=lambda: announce_wait(repo, number, timeout_sec))
     if res["status"] == "error":
         code = EXIT_UNREACHABLE if res.get("unreachable") else EXIT_ERROR
     else:

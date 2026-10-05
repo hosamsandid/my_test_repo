@@ -110,6 +110,11 @@ yet and would be re-seeded from its environment the moment it is enabled — and
 install refuses to clobber a skill the agent already has, unless you confirm the
 overwrite.
 
+The agent list is grouped by **team**, so agents that share a name (several *My
+Assistant*s, say) can be told apart. Teams and the agents in each are sorted by
+name; two teams with the same name show their team id as well, and agents that
+belong to no team come last under *No team*.
+
 ## The actions: promote, move, adopt, distill, merge, import and export
 
 Everything else on this page moves a skill between the tiers or reshapes it:

@@ -460,54 +460,49 @@ function removeUsageFiles() {
     'sh', ...USAGE_DAYS]);
 }
 
-// The page's Team filter is populated from GET /api/admin/teams, i.e. the
-// teams/index.json scope records (teams-store.listTeams). #2081 retired the only
-// public writer of that store (POST /api/admin/teams → 410), and a self-service
-// POST /api/teams records a membership but no scope record — so neither creates
-// a listable team. Seed the record directly on the shared /workspace volume, the
-// same mechanism the usage files use (execInConsole), idempotently merging with
-// the existing records (e.g. `default`). No agent, no clone, no delete race.
-function seedTeamRecord(teamId, teamName) {
+// The page's Team filter is populated from the Agent Teams in GET /api/agents —
+// agents with role:'team' (agentTeamFilterOptions, #2694) — NOT the legacy
+// teams/index.json scope records it read before. So seed a minimal team-role
+// agent directly on the shared /workspace volume, the same execInConsole vantage
+// the usage files use: disabled, so the orchestrator never hosts a container for
+// it (a `team` hosts no agent anyway), carrying only the fields the filter reads
+// (id from its dir name, role, displayName). No Matrix user, no clone.
+function seedTeamAgent(teamId, teamName) {
   execInConsole(['node', '-e', `
     const fs = require('fs');
-    const p = '/workspace/teams/index.json';
-    let a = [];
-    try { a = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { /* first write */ }
-    if (!Array.isArray(a)) a = [];
     // node -e has no script element in argv, so the passed args start at [1].
     const [, id, name] = process.argv;
+    if (!id) process.exit(0);
+    const dir = '/workspace/agents/' + id;
+    fs.mkdirSync(dir, { recursive: true });
     const now = new Date().toISOString();
-    const i = a.findIndex((t) => t && t.id === id);
-    if (i >= 0) a[i] = { ...a[i], name };
-    else a.push({ id, name, description: '', createdAt: now, updatedAt: now });
-    fs.mkdirSync('/workspace/teams', { recursive: true });
-    fs.writeFileSync(p, JSON.stringify(a, null, 2));
+    fs.writeFileSync(dir + '/config.json', JSON.stringify(
+      { role: 'team', displayName: name, enabled: false, createdAt: now, updatedAt: now },
+      null, 2,
+    ));
   `, teamId, teamName]);
 }
 
-function removeTeamRecord(teamId) {
+function removeTeamAgent(teamId) {
   execInConsole(['node', '-e', `
     const fs = require('fs');
-    const p = '/workspace/teams/index.json';
-    let a = [];
-    try { a = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { a = []; }
-    if (Array.isArray(a)) {
-      // node -e has no script element in argv, so the passed arg is at [1].
-      const [, id] = process.argv;
-      fs.writeFileSync(p, JSON.stringify(a.filter((t) => !(t && t.id === id)), null, 2));
-    }
+    // node -e has no script element in argv, so the passed arg is at [1].
+    const [, id] = process.argv;
+    if (!id) process.exit(0); // never let an empty id rm the whole agents dir
+    fs.rmSync('/workspace/agents/' + id, { recursive: true, force: true });
   `, teamId]);
 }
 
 /**
  * usageData: the Token Usage journey's precondition (#1505). Seeds deterministic
- * usage records under a dedicated human Team and creates that Team, so the page's
+ * usage records under a dedicated Agent Team and creates that team (a disabled
+ * role:'team' agent, since #2694 the filter lists Agent Teams), so the page's
  * Team filter can narrow to it and the figures stay stable across re-runs on the
  * same stack (other usage the stack logs carries a different teamId and is
  * filtered out). Setup pre-cleans a leftover team + seed files; teardown removes
  * both — one idempotent, re-runnable surface.
  *
- * @param {string} params.teamId - Team slug id to create and tag the seeded records with.
+ * @param {string} params.teamId - Agent Team id to create and tag the seeded records with.
  * @param {string} params.teamName - Team display name (shown in the page's Team filter).
  * @example
  * fixtures:
@@ -522,12 +517,12 @@ const usageData = {
     if (!teamId || !teamName) {
       throw new Error('usageData fixture requires { teamId, teamName }');
     }
-    // Pre-clean: drop leftover seed files + the scope record from a crashed run,
-    // then seed the scope record so the page's Team filter lists it (see
-    // seedTeamRecord — the standalone create endpoint is retired since #2081).
+    // Pre-clean: drop leftover seed files + the team agent from a crashed run,
+    // then seed a disabled role:'team' agent so the page's Team filter lists it
+    // (see seedTeamAgent — since #2694 the filter lists Agent Teams).
     removeUsageFiles();
-    removeTeamRecord(teamId);
-    seedTeamRecord(teamId, teamName);
+    removeTeamAgent(teamId);
+    seedTeamAgent(teamId, teamName);
     for (const [day, content] of Object.entries(usageSeed(teamId))) {
       seedUsageFile(day, content);
     }
@@ -536,7 +531,7 @@ const usageData = {
   async teardown(ctx, params = {}) {
     const { teamId } = params;
     removeUsageFiles();
-    if (teamId) removeTeamRecord(teamId);
+    if (teamId) removeTeamAgent(teamId);
   },
 };
 

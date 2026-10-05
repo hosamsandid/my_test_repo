@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { createTtlCache } = require('./ttl-cache');
+const { createTtlCache, ttlMsFromEnv } = require('./ttl-cache');
 
 // Deterministic injectable clock.
 function fakeClock(start = 1000) {
@@ -99,4 +99,62 @@ test('clear: drops cached values', () => {
   cache.clear();
   assert.equal(cache.get('a'), undefined);
   assert.equal(cache.size, 0);
+});
+
+// #566 — a clear() during an async compute (a mutation landing mid-build) must
+// not let the superseded compute cache its pre-mutation value, nor evict the
+// newer compute's in-flight entry when it settles.
+test('clear: a compute in flight across a clear() neither caches nor evicts the newer compute', async () => {
+  const cache = createTtlCache({ ttlMs: 1000, now: fakeClock().now });
+  const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
+  const first = deferred();
+  const second = deferred();
+  let calls = 0;
+
+  const p1 = cache.getOrCompute('k', () => { calls++; return first.promise; });
+  await Promise.resolve(); // let the first compute start
+  cache.clear();
+  const p2 = cache.getOrCompute('k', () => { calls++; return second.promise; });
+  await Promise.resolve();
+
+  first.resolve('stale');
+  assert.equal(await p1, 'stale', 'a caller already waiting still gets its result');
+  assert.equal(cache.get('k'), undefined, 'the superseded value is not cached');
+  // The newer compute is still the shared one — a third caller joins it.
+  const p3 = cache.getOrCompute('k', () => { calls++; return 'third'; });
+
+  second.resolve('fresh');
+  assert.equal(await p2, 'fresh');
+  assert.equal(await p3, 'fresh');
+  assert.equal(cache.get('k'), 'fresh');
+  assert.equal(calls, 2);
+});
+
+test('clear: a rejection from a superseded compute does not evict the newer one', async () => {
+  const cache = createTtlCache({ ttlMs: 1000, now: fakeClock().now });
+  let rejectFirst;
+  const p1 = cache.getOrCompute('k', () => new Promise((_, rej) => { rejectFirst = rej; }));
+  await Promise.resolve();
+  cache.clear();
+  let resolveSecond;
+  const p2 = cache.getOrCompute('k', () => new Promise((r) => { resolveSecond = r; }));
+  await Promise.resolve();
+  rejectFirst(new Error('old'));
+  await assert.rejects(p1, /old/);
+  let joined = false;
+  const p3 = cache.getOrCompute('k', () => { joined = true; return 'x'; });
+  resolveSecond('new');
+  assert.equal(await p3, 'new');
+  assert.equal(joined, false, 'the third caller joined the newer in-flight compute');
+  await p2;
+});
+
+test('ttlMsFromEnv honours an explicit 0 and falls back on unset or junk', () => {
+  assert.equal(ttlMsFromEnv(undefined, 2000), 2000);
+  assert.equal(ttlMsFromEnv('', 2000), 2000);
+  assert.equal(ttlMsFromEnv(' ', 2000), 2000);
+  assert.equal(ttlMsFromEnv('0', 2000), 0, 'not collapsed to the fallback');
+  assert.equal(ttlMsFromEnv('1500', 2000), 1500);
+  assert.equal(ttlMsFromEnv('-1', 2000), 2000);
+  assert.equal(ttlMsFromEnv('soon', 2000), 2000);
 });

@@ -24,6 +24,10 @@ function createTtlCache({ ttlMs = 5000, now = Date.now, maxEntries = 500 } = {})
   const store = new Map();
   // key -> Promise (compute in flight); never expires on its own, cleared on settle
   const inflight = new Map();
+  // Bumped by clear(). A compute started before a clear() settles into a world
+  // that has moved on: it must neither cache its (possibly pre-mutation) value
+  // nor delete a newer in-flight entry for the same key.
+  let generation = 0;
 
   function get(key) {
     const entry = store.get(key);
@@ -56,16 +60,19 @@ function createTtlCache({ ttlMs = 5000, now = Date.now, maxEntries = 500 } = {})
     const pending = inflight.get(key);
     if (pending) return pending;
 
+    const gen = generation;
     const p = Promise.resolve()
       .then(compute)
       .then(
         (value) => {
-          inflight.delete(key);
-          set(key, value);
+          if (gen === generation) {
+            inflight.delete(key);
+            set(key, value);
+          }
           return value;
         },
         (err) => {
-          inflight.delete(key);
+          if (gen === generation) inflight.delete(key);
           throw err;
         },
       );
@@ -73,7 +80,11 @@ function createTtlCache({ ttlMs = 5000, now = Date.now, maxEntries = 500 } = {})
     return p;
   }
 
+  // Drop every cached value and detach in-flight computes: callers already
+  // awaiting one still get its result, but it is not cached, and the next
+  // getOrCompute starts a fresh compute.
   function clear() {
+    generation += 1;
     store.clear();
     inflight.clear();
   }
@@ -81,4 +92,13 @@ function createTtlCache({ ttlMs = 5000, now = Date.now, maxEntries = 500 } = {})
   return { get, set, getOrCompute, clear, get size() { return store.size; } };
 }
 
-module.exports = { createTtlCache };
+// A cache TTL from an env var. Unset, blank or invalid ⇒ `fallback`; an
+// explicit `0` is honoured (caching off) instead of collapsing to the fallback
+// the way `Number(raw) || fallback` does.
+function ttlMsFromEnv(raw, fallback) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+module.exports = { createTtlCache, ttlMsFromEnv };

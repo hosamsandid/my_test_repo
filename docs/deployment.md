@@ -332,6 +332,16 @@ A practical starting point for a pilot of ~10 agents: 8 vCPU, 32 GiB RAM, 100 Gi
 then measure, because real usage depends entirely on how busy the agents are. (The GCP VM
 runbook pilots ~5 concurrent agents on an `e2-standard-4` — 4 vCPU / 16 GB / 64 GB disk.)
 
+The chat rail's roster (`GET /api/matrix/agents`) is built once per `AGENT_ROSTER_TTL_MS`
+(default `2000`) and shared by every tab and user. A successful roster-affecting console
+mutation (create, rename, enable/disable, delete, environment rename, a new DM room)
+clears it; changes the orchestrator makes on its own (pool spawn/reap, idle reclaim)
+show within one TTL. `AGENT_ROSTER_TTL_MS=0` turns the cache off: every request then
+runs its own full, unscoped fleet sweep, which is more work than the pre-#566 per-caller
+sweep, so it is a kill switch rather than a faithful "before" baseline.
+`AGENT_STATUSES_TTL_MS` (the `/api/agents/statuses` cache, default `2000`) reads `0` the
+same way.
+
 ---
 
 ## C. Hosted Kubernetes / GKE (pilot)

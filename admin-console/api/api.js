@@ -38,7 +38,7 @@ const {
 } = require('./html-preview');
 const { discoverBoundAgents, hiddenBlastRadius, projectRespawnOutcome, respawnWithConcurrency } = require('./respawn-agents');
 const { githubApiBase } = require('./github-api-base');
-const { createTtlCache } = require('./ttl-cache');
+const { createTtlCache, ttlMsFromEnv } = require('./ttl-cache');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, isTeamAdminOfAny, canManageAgent,
         visibleEnvironment, canManageEnvironment, canCreateEnvironment, canRetierEnvironment,
         visibleUser, describeAuthz,
@@ -188,7 +188,9 @@ const { planCreatorMembership, creatorEnvironmentOwnership } = require('./creato
 const { validateTeamProviderAvailability } = require('./team-provider-check');
 const { pruneTeamFromProviders } = require('./provider-team-prune');
 const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
-const { admitsToChatList } = require('./matrix-agent-list');
+const {
+  buildRosterEntries, projectRoster, mutationInvalidatesRoster, rosterTtlMsFromEnv,
+} = require('./matrix-agent-roster');
 const { parseMemberMaterialize } = require('./member-materialize');
 const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentBaseId } = require('./quickstart-llm');
 const { validatePluginManifest } = require('./plugin-manifest');
@@ -469,6 +471,28 @@ auth.registerAuthRoutes(app, {
   usersSeeded: () => readJsonFile(USERS_INDEX, []).length > 0,
 });
 app.use('/api', auth.gate);
+
+// The chat roster's shared cache (#566) is cleared when a roster-affecting
+// console mutation succeeds, so a create/rename/enable done here shows on the
+// next roster fetch instead of one TTL later. Behind the auth gate (an
+// unauthenticated request never reaches it) and decided on the real final
+// status: a refused or failed write (`>= 400`) leaves the cache alone.
+//
+// Decided when the HANDLER responds (`res.end`), not on a socket event: a
+// client that disconnects mid-request emits `close` before the handler's write
+// has landed (clearing then lets a concurrent poll re-cache the old state), and
+// the destroyed socket never emits `finish` once it does. `res.end` runs after
+// the write either way. The allowlist is `mutationInvalidatesRoster`.
+app.use('/api', (req, res, next) => {
+  if (!mutationInvalidatesRoster(req.method, req.originalUrl)) return next();
+  const end = res.end;
+  res.end = function endAndInvalidateRoster(...args) {
+    res.end = end;
+    if (res.statusCode < 400) invalidateRosterCache();
+    return end.apply(this, args);
+  };
+  next();
+});
 
 // Team-share room sync (#2174, epic #2166 B2). Mirrors the `auditMutations`
 // pattern above: mounted before the two routes it watches and listening for
@@ -2372,7 +2396,8 @@ async function buildAllAgentStatuses() {
 // TTL collapses those onto one filesystem + orchestrator sweep. Caching the
 // in-flight promise also dedups concurrent rebuilds.
 let _statusCache = null; // { builtAt, promise }
-const STATUS_CACHE_TTL_MS = Number(process.env.AGENT_STATUSES_TTL_MS) || 2000;
+// `0` turns the cache off, like AGENT_ROSTER_TTL_MS (#566).
+const STATUS_CACHE_TTL_MS = ttlMsFromEnv(process.env.AGENT_STATUSES_TTL_MS, 2000);
 
 function agentStatusEntries() {
   const now = Date.now();
@@ -20184,99 +20209,60 @@ jobs:
 // opt-in changes the default response (AC8), and the admission rule itself is
 // the pure `matrix-agent-list.js`. Visibility scoping (#302) is unchanged, so an
 // opt-in can only ever widen the list within what this caller may already see.
-// #2789: roster fields for a pool instance waiting on an open PR. Only a
-// record for THIS spawn counts (a recycled instance id must not inherit an
-// earlier instance's state); primitives only, the roster diff is shallow.
-function poolWaitingFields(waitingMap, id, spawnedAt) {
-  const rec = waitingMap && typeof waitingMap === 'object' ? waitingMap[id] : null;
-  if (!rec || typeof rec !== 'object' || rec.waiting !== true) return {};
-  if ((rec.spawnedAt || null) !== (spawnedAt || null)) return {};
-  const prs = Array.isArray(rec.prs) ? rec.prs.filter((n) => Number.isInteger(n) && n > 0) : [];
-  return { poolWaiting: true, poolWaitingPr: prs.length ? Math.min(...prs) : null };
+// #566: the fleet is read ONCE per TTL into caller-independent entries (pure
+// `matrix-agent-roster.js` `buildRosterEntries`), shared by every tab and every
+// query variant behind a single-flight cache — the same shape as
+// `/api/agents/statuses`. Admission, scoping and the caller-specific fields are
+// applied per request (`projectRoster`), so a member still sees only their
+// Agent Teams. A successful roster-affecting console mutation clears the cache
+// (`mutationInvalidatesRoster`, wired behind the auth gate) so a
+// create/rename/enable shows on the next fetch; orchestrator-side changes (a
+// pool spawn/reap, an idle reclaim) surface within the TTL.
+// `AGENT_ROSTER_TTL_MS=0` turns caching off (a full unscoped sweep per request).
+const ROSTER_CACHE_TTL_MS = rosterTtlMsFromEnv(process.env);
+const rosterCache = createTtlCache({ ttlMs: ROSTER_CACHE_TTL_MS, maxEntries: 1 });
+
+function invalidateRosterCache() {
+  rosterCache.clear();
 }
 
-app.get('/api/matrix/agents', (req, res) => {
+// An agent skipped from the build is logged once per (agent, error), not on
+// every 2 s rebuild.
+const rosterEntryErrorsLogged = new Set();
+
+function buildRoster() {
+  return buildRosterEntries(listAgentDirs(), {
+    readConfig: (id) => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null),
+    readDmRoomId: (id) => matrix.getAgentDmRoom(id)?.roomId || null,
+    readEnvironmentName: (envId) => loadEnvironment(envId)?.name || null,
+    // #2789: each team's pool-waiting record (orchestrator `poolReapSweepTeam`).
+    readPoolWaiting: (teamId) => readJsonFile(controlOrAgentPath(teamId, 'pool-waiting.json'), null),
+    agentMetaForScope,
+    onEntryError: (id, err) => {
+      const key = `${id}\u0000${err && err.message}`;
+      if (rosterEntryErrorsLogged.has(key)) return;
+      rosterEntryErrorsLogged.add(key);
+      console.error(`[Admin] Chat roster skipped agent ${id}: ${err && err.message}`);
+    },
+  });
+}
+
+const ROSTER_ACCESS = { visibleAgent, canManageAgent, canChatAgent, canManageTeam };
+
+app.get('/api/matrix/agents', async (req, res) => {
   const scope = getScope(req);
   const includeDisabled = req.query.includeDisabled === '1' || req.query.includeDisabled === 'true';
   const includeStubs = req.query.includeStubs === '1' || req.query.includeStubs === 'true';
-  const ids = listAgentDirs();
-  const out = [];
-  // #2789: each team's pool-waiting record (orchestrator `poolReapSweepTeam`),
-  // read once per team per request.
-  const poolWaitingByTeam = new Map();
-  const poolWaitingOf = (teamId) => {
-    if (!poolWaitingByTeam.has(teamId)) {
-      poolWaitingByTeam.set(teamId, readJsonFile(controlOrAgentPath(teamId, 'pool-waiting.json'), null));
-    }
-    return poolWaitingByTeam.get(teamId);
-  };
-  for (const id of ids) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
-    if (!cfg) continue;
-    if (!admitsToChatList(cfg, { includeDisabled, includeStubs })) continue;
-    if (!visibleAgent(scope, agentMetaForScope(cfg))) continue; // team + visibility scoping (#302)
-    const dm = matrix.getAgentDmRoom(id);
-    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-    out.push({
-      id,
-      displayName: cfg.displayName || id,
-      role: cfg.role || 'agent',
-      userId: cfg.userId || `@${id}:local`,
-      enabled: cfg.enabled !== false,
-      // Whether the agent has ever been provisioned — never the token itself.
-      // Shipped so the shared `agentState()` can tell "paused" from "stub" on
-      // this payload too; since #1957 it is the field that *identifies* the stub
-      // rows `?includeStubs=1` admits (it was always true before that).
-      hasToken: !!cfg.token,
-      // Whether THIS caller may run management actions on the agent — the same
-      // boundary the mutating routes enforce (#989), so the chat's lifecycle
-      // menu can disable what the server would reject (mirrors `canSwitch` on
-      // GET /api/agents/:id/model).
-      canManage: canManageAgent(scope, agentMetaForScope(cfg)),
-      // Whether THIS caller may WRITE in the agent's chat (#2713) — false only
-      // for a System Admin outside the agent's team (scope.js `canChatAgent`,
-      // the predicate the send and chat-upload routes enforce). The composer
-      // renders read-only on false instead of re-deriving the rule.
-      canChat: canChatAgent(scope, agentMetaForScope(cfg)),
-      // Whether THIS caller may change the team's MEMBER LIST — the predicate
-      // `POST`/`DELETE /api/admin/memberships` enforce, shipped so the Share
-      // panel (#2082) can offer a read-only list instead of buttons that 403.
-      // For a `role: 'team'` row `canManage` above happens to resolve to the
-      // same thing (`agentMetaForScope().teamId === cfg.id`, so `canManageAgent`
-      // falls through to `canManageTeam`), and that coincidence is exactly why
-      // this is a separate field: a later change to the agent predicate must
-      // not silently open the member list (#2041 §7.1). Only on team rows —
-      // absent elsewhere, so a caller cannot read it as "not permitted".
-      ...(cfg.role === 'team' ? { canManageTeam: canManageTeam(scope, id) } : {}),
-      dmRoomId: dm?.roomId || null,
-      environmentId: cfg.environmentId || null,
-      environmentName: env?.name || cfg.environmentId || null,
-      parentTeamId: cfg.parentTeamId || null,
-      parentOrchestratorId: cfg.parentOrchestratorId || null,
-      // Pool instance markers (#2297): present only on an ephemeral
-      // `<team>-<role>-i<item>` spawned from a pooled role — `poolOf` names the
-      // role template's own agent id, which is what lets the rail
-      // (`agent-list-model.js` `buildGroups`) nest the instance under it
-      // instead of listing it as a flat sibling. Absent on every other row, same
-      // shape convention as `canManageTeam` above.
-      ...(cfg.poolInstance ? {
-        poolInstance: true,
-        poolOf: cfg.poolOf || null,
-        poolItem: cfg.poolItem != null ? cfg.poolItem : null,
-        poolSpawnedAt: cfg.poolSpawnedAt || null,
-        // #2789: idle and kept alive for its open PR — `poolWaitingPr` is the
-        // lowest open PR number (null when GitHub could not be read).
-        ...poolWaitingFields(cfg.parentTeamId ? poolWaitingOf(cfg.parentTeamId) : null, id, cfg.poolSpawnedAt),
-      } : {}),
-      // #2760 AC5: a pooled role TEMPLATE's "Max parallel instances" cap, so
-      // the rail can show its "Instances (n)" count against it ("5 / 3").
-      // `null` = no per-role cap; absent on every non-pooled row.
-      ...(!cfg.poolInstance && cfg.pool && typeof cfg.pool === 'object' && cfg.pool.enabled === true ? {
-        poolMaxInstances: Number.isInteger(cfg.pool.maxInstances) && cfg.pool.maxInstances >= 1 ? cfg.pool.maxInstances : null,
-      } : {}),
-    });
+  let entries;
+  try {
+    entries = await rosterCache.getOrCompute('roster', buildRoster);
+  } catch (err) {
+    // Only a fleet-wide failure gets here (one bad agent is skipped inside the
+    // build); the detail stays in the server log.
+    console.error(`[Admin] Chat roster build failed: ${err && err.message}`);
+    return res.status(500).json({ error: 'Failed to read the agent roster' });
   }
-  res.json(out);
+  res.json(projectRoster(entries, scope, { includeDisabled, includeStubs }, ROSTER_ACCESS));
 });
 
 // 2. Idempotent create-or-get DM room with an agent.
@@ -20344,6 +20330,8 @@ async function ensureAgentDmRoom(agentId) {
     createdAt: new Date().toISOString(),
     createdBy: adminUserId,
   });
+  // The roster ships `dmRoomId` (#566): show the new room on the next fetch.
+  invalidateRosterCache();
   // Nudge a running agent to re-pull dm-room.json now, so an isolated agent
   // learns its DM room for trigger/claim posts without waiting for the next
   // 60s sync (#185 Phase 2). No-op if the agent isn't running yet.

@@ -38,6 +38,14 @@ The untouched backlog, Dependabot pull requests and other people's PRs are not
 shown. When no work item is active, the **In progress** area says
 **Nothing in progress**.
 
+**Which team opens.** The board opens on the team you last worked with: the
+team of the agent (or the team entry) you last selected in **Agent Chat**, or
+the team you last picked here — whichever you did most recently. Picking a
+standalone agent in Agent Chat does not change it. A link with
+`?team=<team id>` opens that team instead. If the remembered team is gone or
+not visible to you, the board opens on the first team in the list. The choice
+is remembered for you on this browser.
+
 **Refreshing.** The board refreshes itself every 30 seconds while
 **Auto-refresh** is on (your choice is remembered for you on this browser).
 The header shows when it was last updated; **Refresh** fetches a new snapshot

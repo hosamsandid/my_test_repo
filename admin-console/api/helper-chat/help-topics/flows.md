@@ -327,6 +327,23 @@ source of truth: a person re-applying the same label wakes the consumer exactly
 like an agent does, and every wake shows up in the **GitHub Event Log**. (The
 former *Direct (internal)* delivery option was removed in #2578.)
 
+### Team labels: the base and the suffix chip
+
+On a live team created with a **label suffix**, every label field — the
+hand-off, channel, gate and rejection labels, event filters, an outcome's
+*set label* action, a human role's labels and the label registry — shows the
+editable **base** (`ready-for-review`) with the suffix as a muted, read-only
+chip (`-k3f9`). You type only the base; the field saves `ready-for-review-k3f9`.
+Typing or pasting the full name (`ready-for-review-k3f9`) is fine — it is
+trimmed back to the base. A claimed wake label reads as base, chip and `:wip`.
+
+A label that does not carry the team's suffix (one you wired by hand, or one
+that already ended in it when the template was created) is shown as-is, with
+no chip, and is never stamped behind your back. A team without a suffix looks
+exactly as before. Drafts and templates have no suffix, so their fields are
+plain. To change the suffix itself, use **Team Settings → General → Label
+suffix** in Agent Chat.
+
 ### Holding a PR hand-off until CI is green
 
 A hand-off on a **pull request** — a PR channel, or a label hand-off on pull

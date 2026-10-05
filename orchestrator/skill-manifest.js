@@ -329,8 +329,14 @@ function readSnapshot(dir, hash, io = {}) {
   const fsImpl = io.fs || fs;
   const pathImpl = io.path || path;
   if (!isContentHash(hash)) return null;
+  // path.relative containment — the CodeQL-legible traversal barrier for the
+  // caller-supplied hash (isContentHash alone is not recognised as one).
+  const sdir = pathImpl.resolve(dir, SNAPSHOT_DIR);
+  const file = pathImpl.resolve(sdir, `${hash}.json`);
+  const rel = pathImpl.relative(sdir, file);
+  if (rel.startsWith('..') || pathImpl.isAbsolute(rel)) return null;
   try {
-    const raw = fsImpl.readFileSync(pathImpl.join(dir, SNAPSHOT_DIR, `${hash}.json`), 'utf8');
+    const raw = fsImpl.readFileSync(file, 'utf8');
     return parseSnapshot(JSON.parse(raw), hash);
   } catch { return null; }
 }

@@ -1,6 +1,6 @@
 # Agent Chat troubleshooting — "no reply" runbook
 
-When a message sent in the Admin Console **Agent Chat** (or any Matrix client) gets
+When a message sent in Agent Studio's **Agent Chat** (or any Matrix client) gets
 **no reply** from an agent, work through this runbook. The most common cause is a
 **half-migrated local install**: an environment that was running the older
 in-orchestrator child-process agents and was not cleanly restarted onto the

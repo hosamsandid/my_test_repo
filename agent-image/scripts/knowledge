@@ -25,13 +25,13 @@ Inspect:
     knowledge path "<id>"          # which file holds an entry
 
 Nominate a durable fact to become a reusable team skill (raises a suggestion
-card; a human confirms the promotion in the Admin Console — never automatic):
+card; a human confirms the promotion in Agent Studio — never automatic):
 
     knowledge promote <id>
     knowledge promote <id> --note "worth generalising into a skill"
 
 Keep a fact as your OWN private skill (agent tier — no human needed; lift it to
-the team later from the Admin Console):
+the team later from Agent Studio):
 
     knowledge promote <id> --to agent
     knowledge promote <id> --to agent --name my-private-skill
@@ -465,7 +465,7 @@ def build_agent_skill(entry, *, name=None, agent_id="", team_id="", now=_default
 
     The agent tier is the bottom rung of the Agent → Team → Global ladder: a
     personal specialisation the agent keeps in its own pool, later liftable to the
-    team (agent→team) from the Admin Console. Provenance is MANDATORY and carried
+    team (agent→team) from Agent Studio. Provenance is MANDATORY and carried
     on `provenance.json` (entryIds present) so the lift + the graph's promoted
     edge resolve. Returns {name, skill_md, provenance}. Raises ValueError on bad
     input so a caller can never write an unprovenanced skill.
@@ -1008,12 +1008,12 @@ def cmd_promote(argv):
     agent-tier skill.
 
     Default (team-ward): RAISES a suggestion card; a human confirms the actual
-    promotion in the Admin Console (autonomy level 2). It never promotes to the
+    promotion in Agent Studio (autonomy level 2). It never promotes to the
     team autonomously.
 
     `--to agent`: writes a PRIVATE skill into this agent's own pool right away (no
     human needed — the agent owns its private tier). Lift it to the team later
-    (agent→team) from the Admin Console.
+    (agent→team) from Agent Studio.
     """
     note = None
     to = None
@@ -1072,7 +1072,7 @@ def cmd_promote(argv):
             print(skill["name"])
         sys.stderr.write(
             f'knowledge: wrote private agent skill "{skill["name"]}" ({dst}); '
-            "lift it to the team (agent→team) from the Admin Console when it is team-ready.\n"
+            "lift it to the team (agent→team) from Agent Studio when it is team-ready.\n"
         )
         return
     if to not in (None, "team"):
@@ -1092,7 +1092,7 @@ def cmd_promote(argv):
         print(cid)
     sys.stderr.write(
         f"knowledge: nominated {entry_id} for promotion (suggestion {cid}); "
-        "a human confirms in the Admin Console.\n"
+        "a human confirms in Agent Studio.\n"
     )
 
 

@@ -15,6 +15,7 @@ import { buildFlowsRailMenu, intentForMenuKey, parseFlowIntent } from './process
 import { downloadBundle } from './process/bundle-download.js';
 import { canSubmitRename, nextUntitledName, BLANK_RENAME_HINT } from './process/draft-names.js';
 import { flowScopeStatus, flowNotFoundCopy } from './process/flow-scope-status.js';
+import { railSectionState, RAIL_SECTION_LOADING_TEXT, RAIL_SECTION_ERROR_TEXT } from './process/rail-section-state.js';
 import SidePanel from '../components/SidePanel';
 import { useHelpSubject } from '../context/HelperChatContext';
 import { OVERLAY_DRAFT_SHARE } from '../context/page-help-view.js';
@@ -540,12 +541,16 @@ export default function Briefings() {
   }, [proc, staleFlowParam, setSearchParams]);
 
   const navigate = useNavigate();
-  const { data: agents, refetch: refetchAgents } = useApi('/api/agents');
+  const { data: agents, error: agentsError, refetch: refetchAgents } = useApi('/api/agents');
   const { data: environments } = useApi('/api/environments');
-  const { data: draftsList, refetch: refetchDrafts } = useApi('/api/process/drafts');
+  const { data: draftsList, error: draftsError, refetch: refetchDrafts } = useApi('/api/process/drafts');
 
   const teams = (agents || []).filter(a => a.role === 'team');
   const drafts = Array.isArray(draftsList) ? draftsList : [];
+  // Loading / error / empty / list per rail section (#2847) — the `[]` above
+  // must not read as "empty" while the first load is still in flight.
+  const teamsSection = railSectionState({ data: agents, error: agentsError, items: teams });
+  const draftsSection = railSectionState({ data: draftsList, error: draftsError, items: drafts });
   const envNameById = new Map((environments || []).map(e => [e.id, e.name]));
 
   // An unknown `?proc=` (old `/process/<team>` bookmark, deleted team/draft,
@@ -1102,7 +1107,15 @@ export default function Briefings() {
 
               {/* Teams — each team is a process (live orchestration graph) */}
               <SectionHeader>Teams</SectionHeader>
-              {teams.length === 0 ? (
+              {teamsSection === 'loading' ? (
+                <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                  {RAIL_SECTION_LOADING_TEXT}
+                </div>
+              ) : teamsSection === 'error' ? (
+                <div role="alert" style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error-text)' }}>
+                  {RAIL_SECTION_ERROR_TEXT.teams}
+                </div>
+              ) : teamsSection === 'empty' ? (
                 <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
                   No teams yet.
                 </div>
@@ -1124,7 +1137,15 @@ export default function Briefings() {
 
               {/* Drafts — processes being authored, not yet materialised */}
               <SectionHeader>Drafts</SectionHeader>
-              {drafts.length === 0 ? (
+              {draftsSection === 'loading' ? (
+                <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                  {RAIL_SECTION_LOADING_TEXT}
+                </div>
+              ) : draftsSection === 'error' ? (
+                <div role="alert" style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error-text)' }}>
+                  {RAIL_SECTION_ERROR_TEXT.drafts}
+                </div>
+              ) : draftsSection === 'empty' ? (
                 <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
                   No drafts. Use “New flow”.
                 </div>

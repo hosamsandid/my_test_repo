@@ -283,15 +283,18 @@ export function revealEntryKey(agent, selection) {
 }
 
 /**
- * Reorder gates (AC11): group/single drag-and-drop needs every entry shown;
- * member reorder inside a team is also fine when exactly one team is visible
- * (it then shows the team's complete, ordered member set — #1725).
+ * Reorder gates (AC11): group/single drag-and-drop needs every entry shown —
+ * with an entry hidden, a move between visible neighbours would be ambiguous.
+ * Member reorder inside a team only needs that team shown: the filter picks
+ * whole teams and never hides a shown team's members, so each visible team
+ * holds its complete, ordered member set however many other teams are shown
+ * (#1725, #2846). Hidden teams are not rendered, so one boolean suffices.
  */
 export function reorderAllowed(entries, selection) {
   const everything = isEverythingShown(entries, selection);
   const shown = shownEntries(entries, selection);
   return {
     groups: everything,
-    members: everything || (shown.length === 1 && shown[0].kind === 'team'),
+    members: everything || shown.some(e => e.kind === 'team'),
   };
 }

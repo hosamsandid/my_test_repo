@@ -77,8 +77,9 @@ skill since you opened it, Save is refused and offers to **Reload** instead of
 overwriting their work. **Empty folders are kept**: a folder you create stays
 even with nothing in it, and a folder only disappears when you delete it.
 
-Binary files and files over 512 KB can be viewed by name only and are not
-editable in the editor — replace them by uploading. Agent-tier copies, and
+Binary files are shown by name only; text files over 512 KB show their first
+512 KB with a notice. Neither can be edited in the editor — replace them by
+uploading. Agent-tier copies, and
 skills you have no write permission for, open in the same editor **read-only**:
 you can browse and preview, but every editing control is gone and the header
 says why. Editing needs the same rights as before — System Admin or a Team Admin

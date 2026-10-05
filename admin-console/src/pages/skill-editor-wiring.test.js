@@ -69,3 +69,17 @@ test('side panel: Edit skill / Open buttons replace the inline "Edit file" mode 
   assert.match(src, /<MarkdownWithFrontmatter /, 'side panel preview shows frontmatter as a block (AC6)');
   assert.match(REGISTRY, /<SkillViewer[\s\S]*?caller=\{caller\}/);
 });
+
+test('opening a different file from the tree resets the view to preview (AC5)', () => {
+  assert.match(MODAL, /const openPath = \(p\) => \{ if \(p !== selected\) setMode\('preview'\); selectPath\(p\); \};/);
+  assert.match(MODAL, /onSelect=\{r => openPath\(r\.path\)\}/, 'row click must go through openPath');
+  assert.match(MODAL, /case ' ':\s*e\.preventDefault\(\);\s*openPath\(row\.path\);/, 'Enter/Space must go through openPath');
+  // New file deliberately opens in edit mode.
+  assert.match(MODAL, /selectPath\(r\.path\); if \(!readOnly\) setMode\('edit'\);/);
+});
+
+test('upload commit keeps the setModel call free of side effects', () => {
+  const start = MODAL.indexOf('function commitUploads(');
+  const body = MODAL.slice(start, MODAL.indexOf('\n  }\n', start));
+  assert.doesNotMatch(body, /setModel\(m =>/, 'compute the new state first, then set model and notice');
+});

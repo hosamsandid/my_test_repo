@@ -288,6 +288,8 @@ export default function SkillEditorModal({ skill, tierLabel, readOnly = false, r
   const pending = changes.length;
   const pendingRef = useRef(0);
   pendingRef.current = pending;
+  const modelRef = useRef(null);                       // latest model for async callers (uploads)
+  modelRef.current = model;
   const tree = useMemo(() => (model ? buildFileTree(model) : []), [model]);
   const rows = useMemo(() => visibleRows(tree, expanded), [tree, expanded]);
 
@@ -491,6 +493,9 @@ export default function SkillEditorModal({ skill, tierLabel, readOnly = false, r
   });
 
   const selectPath = (p) => { setSelected(p); setFocusPath(p); };
+  // AC5: a file the user opens always starts in preview, whatever mode the
+  // previous file was left in.
+  const openPath = (p) => { if (p !== selected) setMode('preview'); selectPath(p); };
 
   function openNameDialog(kind, dir, current) {
     setDialog({ kind, dir, value: current ?? '', from: kind === 'rename' ? current : undefined });
@@ -567,16 +572,14 @@ export default function SkillEditorModal({ skill, tierLabel, readOnly = false, r
   }
 
   function commitUploads(dir, files) {
-    setModel(m => {
-      let s = m;
-      for (const f of files) {
-        const r = uploadFile(s, dir, f.name, { base64: f.base64, size: f.size });
-        if (r.error) { setNotice({ ok: false, text: r.error }); return m; }
-        s = r.state;
-      }
-      setNotice({ ok: true, text: `${files.length} file${files.length === 1 ? '' : 's'} added — pending until Save.` });
-      return s;
-    });
+    let s = modelRef.current;
+    for (const f of files) {
+      const r = uploadFile(s, dir, f.name, { base64: f.base64, size: f.size });
+      if (r.error) { setNotice({ ok: false, text: r.error }); setDialog(null); return; }
+      s = r.state;
+    }
+    setModel(s);
+    setNotice({ ok: true, text: `${files.length} file${files.length === 1 ? '' : 's'} added — pending until Save.` });
     if (dir) expandTo(`${dir}/x`);
     setDialog(null);
   }
@@ -642,7 +645,7 @@ export default function SkillEditorModal({ skill, tierLabel, readOnly = false, r
       case 'Enter':
       case ' ':
         e.preventDefault();
-        setSelected(row.path);
+        openPath(row.path);
         if (isFolder) toggleFolder(row.path);
         break;
       case 'F2':
@@ -829,7 +832,7 @@ export default function SkillEditorModal({ skill, tierLabel, readOnly = false, r
                     mark={marks.get(row.path)}
                     readOnly={readOnly}
                     rowRef={el => { if (el) rowRefs.current.set(row.path, el); else rowRefs.current.delete(row.path); }}
-                    onSelect={r => { setSelected(r.path); setFocusPath(r.path); }}
+                    onSelect={r => openPath(r.path)}
                     onToggle={toggleFolder}
                     onMenu={(r, anchor) => { setFocusPath(r.path); setMenu({ row: r, anchor }); }}
                   />

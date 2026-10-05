@@ -87,7 +87,10 @@ A **pooled** role (one that starts a separate instance per work item) shows
 how busy it is — for example **2 of 3 busy** — and its controls. Instances that
 have finished their run but are kept alive because their pull request is still
 open are added as **· n waiting on a PR** (see *Instances waiting on a pull
-request* below); they do not count toward the limit.
+request* below); they do not count toward the limit. Each running instance of a
+pooled role is listed **indented directly beneath** that role's line, so you can
+see at a glance which pool is doing what. Runs of roles that are not pooled
+keep their own line above the pooled roles.
 
 ## Pause, Drain and Switch on
 

@@ -37,14 +37,13 @@ inside individual **agents**. A skill name may use letters, digits, `-` and `_`,
 optionally in dotted or colon-separated segments (`review.security`) — that name
 is also the directory name, so it cannot be changed by renaming a heading.
 
-Clicking a row opens the skill in a side panel with four tabs:
+Clicking a row opens the skill in a side panel with three tabs:
 
 | Tab | What it shows |
 |---|---|
 | **Content** | A read-only preview of the skill's files. Markdown is rendered (a `SKILL.md` header is shown as a separate metadata block), other text files are shown as code, binaries are named but not displayed, and anything over 512 KB is truncated. **Edit skill** (or **Open**, when you may not edit it) opens the full-screen skill editor described below. |
 | **Versions** | The revision history: a content version and hash prefix (`v4 · a1b2c3`), what produced the revision, who did it and when. Exactly one entry — the one whose content is on disk right now — is marked **current**. Each version can be opened, compared and restored — see *Versions: open, compare and restore* below. |
-| **Lineage** | Where this copy came from — its **origin** (the tier, team and action it descends from), its knowledge **provenance** when it was distilled from learnings, and every other known copy of the same name, each one clickable. A hand-authored skill honestly says it has no recorded origin. |
-| **Usage** | Where the skill is actually seeded right now: how many places it lives in, broken down by tier, and every agent whose workspace carries it — each with a **drift** badge saying whether that copy is still *in sync* with the pool version or has gone *outdated*, *diverged*, into *conflict*, or *orphaned*. |
+| **Copies & origin** | Where this copy came from, followed by every place the skill lives today, grouped by team — each copy with its version, a **drift** badge and the update actions. Described in detail below. |
 
 Create a skill with **+ New Skill** (you pick the target pool), or bring one in
 with **Import skill** — see the actions chapter below.
@@ -143,6 +142,44 @@ agent's team). Agent copies cannot be edited here, so they offer **Restore** but
 not **Edit from this version**. If someone changed the skill after you opened the
 old version, the restore is refused and asks you to reload.
 
+### Copies & origin
+
+This tab answers two questions in one place: *where did this copy come from?*
+and *where does this skill live today?* (It replaces the former **Lineage** and
+**Usage** tabs; old links to either open this tab.)
+
+- **Origin** says in plain words what this copy was taken from — e.g. *Taken
+  from agent Onboarding Skill Creator (team Onboarding), version v1 · e663de* —
+  and adds *this source no longer exists* when it is gone. A skill written by
+  hand says *No recorded origin (hand-authored)*. Below it you see the
+  knowledge **provenance** when the skill was distilled from learnings.
+- A **summary line** counts the places the skill lives in, per tier, and names
+  the worst drift among them.
+- The **copies list** shows every copy exactly once. The copy you are viewing is
+  marked *viewing* and listed first; then the **Global pool**, then one group
+  per team (alphabetical), with the team pool's copy before the team's agents.
+  Agents are shown by display name and team name, with the agent id in muted
+  text; two agents of the same name in the same team get their id added. Agents
+  whose team cannot be resolved are listed under **No team**. With more than
+  ten copies a filter over team and agent names and ids appears. Click a copy to
+  open it.
+- **Update** (per copy, or **Update all outdated**) resyncs untouched copies to
+  the current source; **Overwrite…** (per copy, or **Overwrite all edited**)
+  replaces locally edited copies after a confirmation.
+
+Each drift badge has a tooltip; **What do the statuses mean?** shows them all:
+
+| Badge | Meaning | What to do |
+|---|---|---|
+| *in sync* | The copy matches the skill it was taken from. | Nothing. |
+| *outdated* | The source has changed since; the copy is untouched. | **Update** — nothing is lost. |
+| *diverged* | The copy was edited locally; the source has not changed. | Keep the edits, or **Overwrite** to discard them. |
+| *conflict* | Both the copy and the source have changed. | Compare and decide; **Overwrite** discards the local edits. |
+| *orphaned* | The skill the copy was taken from no longer exists (*source gone*). | Nothing — the copy keeps working; remove it only if unwanted. |
+| *unknown* | The copy predates version tracking and cannot be compared. | Nothing; it cannot be updated automatically. |
+
+A copy with nothing to compare against — a hand-authored skill — shows no badge.
+
 ## The three tiers, and which one an agent gets
 
 The filter strip above the table switches between the tiers, because the same
@@ -170,7 +207,7 @@ team, and promoting it to global is a separate, deliberate step.
 not a pool entry — editing one would be overwritten by the next seeding. To share
 one, lift it into a team pool first (from the **Knowledge** page), then promote
 that team skill to global. Both steps write provenance and `skill.json` lineage,
-so the Lineage tab can always show where a skill came from.
+so the **Copies & origin** tab can always show where a skill came from.
 
 ## Grant, activation and Install into agent
 

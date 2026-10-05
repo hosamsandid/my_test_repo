@@ -475,6 +475,6 @@ test('#2737 — the import banner counts agents from the bundle, not graph nodes
 
 test('#2737 — a created team refreshes the Flows rail', () => {
   assert.match(canvas, /onCreated=\{\(result\) => \{[^}]*refetchAgents\(\);[^}]*onTeamsChanged\?\.\(\);/);
-  assert.match(briefings, /const \{ data: agents, refetch: refetchAgents \} = useApi\('\/api\/agents'\);/);
+  assert.match(briefings, /const \{ data: agents,[^}]*\brefetch: refetchAgents \} = useApi\('\/api\/agents'\);/);
   assert.match(briefings, /<ProcessGraphPanel[\s\S]*?onTeamsChanged=\{refetchAgents\}[\s\S]*?\/>/);
 });

@@ -427,6 +427,12 @@ const lineStyle = {
   fontSize: 'var(--eb-text-sm)',
 };
 
+const nestedLineStyle = {
+  ...lineStyle,
+  marginLeft: 'var(--eb-space-6)',
+  borderLeft: '3px solid var(--eb-border-default)',
+};
+
 const mutedStyle = { color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' };
 
 // In-console link to the chat of the agent working right now (#2723): a real
@@ -457,26 +463,32 @@ function Link({ href, children }) {
 
 /* ── area ①: working now ───────────────────────────────────────────── */
 
+// One running run. `nested` (#2848): an instance listed beneath its pool line.
+function SessionLine({ s, nested = false }) {
+  return (
+    <div style={nested ? nestedLineStyle : lineStyle}>
+      <span style={{ color: 'var(--eb-text-primary)', fontWeight: 500 }}>
+        <ChatLink chat={s.chat}>
+          {s.role}{s.instance && <span style={mutedStyle}> {s.instance}</span>}
+        </ChatLink>
+      </span>
+      <span style={{ fontFamily: 'var(--eb-font-mono)', ...mutedStyle }}>{s.item}</span>
+      {s.title && <span style={{ color: 'var(--eb-text-primary)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.title}</span>}
+      <span style={{ marginLeft: 'auto', ...mutedStyle }} title="Running for">{s.running}</span>
+    </div>
+  );
+}
+
 function WorkingNow({ view, busy, onSetState, onForceDispatch }) {
   const nothing = view.sessions.length === 0 && view.pools.length === 0 && view.held.length === 0;
   return (
     <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
       <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.working} helpLabel="What Working now shows">Working now</AreaHeading>
       {nothing && <p style={{ margin: 0, ...mutedStyle }}>No agent is running.</p>}
-      {view.sessions.map((s) => (
-        <div key={s.id} style={lineStyle}>
-          <span style={{ color: 'var(--eb-text-primary)', fontWeight: 500 }}>
-            <ChatLink chat={s.chat}>
-              {s.role}{s.instance && <span style={mutedStyle}> {s.instance}</span>}
-            </ChatLink>
-          </span>
-          <span style={{ fontFamily: 'var(--eb-font-mono)', ...mutedStyle }}>{s.item}</span>
-          {s.title && <span style={{ color: 'var(--eb-text-primary)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.title}</span>}
-          <span style={{ marginLeft: 'auto', ...mutedStyle }} title="Running for">{s.running}</span>
-        </div>
-      ))}
+      {view.sessions.map((s) => <SessionLine key={s.id} s={s} />)}
       {view.pools.map((p) => (
-        <div key={p.key} style={lineStyle}>
+        <React.Fragment key={p.key}>
+        <div style={lineStyle}>
           <span style={{ color: 'var(--eb-text-primary)', fontWeight: 500 }}>{p.label}</span>
           <span style={mutedStyle}>{p.occupancy}</span>
           {p.stateText && (
@@ -501,6 +513,8 @@ function WorkingNow({ view, busy, onSetState, onForceDispatch }) {
             <PageHelpButton label="Pause, Drain and Switch on" size={12} section={FLOW_CONTROL_HELP_SECTIONS.poolControls} style={{ padding: 0 }} />
           </span>
         </div>
+        {p.instances.map((s) => <SessionLine key={s.id} s={s} nested />)}
+        </React.Fragment>
       ))}
       {view.held.map((h) => (
         <div key={h.id} style={lineStyle}>

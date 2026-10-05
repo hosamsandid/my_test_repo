@@ -170,6 +170,7 @@ const { resolveAgentStateDir } = require('./agent-state-dir');
 const skillDrift = require('./skill-drift');
 const skillLineage = require('./skill-lineage');
 const skillTransfer = require('./skill-transfer');
+const skillVersionDiff = require('./skill-version-diff');
 const skillInjectionScan = require('./skill-injection-scan');
 const skillDeletion = require('./skill-deletion');
 const skillMerge = require('./skill-merge');
@@ -11351,11 +11352,20 @@ function commitSkillWrite({ destDir, overwrite, copyFrom, skillMd, provenance, s
   const underPool = !!relFromPool && !relFromPool.startsWith('..') && !path.isAbsolute(relFromPool);
   if (!underTeams && !underPool) return { error: 'skill destination escapes the skills root' };
   destDir = resolvedDest;
+  // #2839: an overwrite that continues the destination's own chain keeps the
+  // destination's version snapshots (they belong to that chain); a fresh-chain
+  // overwrite drops them with the rest of the old dir.
+  const keepSnapshots = !!(overwrite && stamp && stamp.continueFrom && typeof stamp.continueFrom === 'object');
+  let parkedSnapshots = null;
   try {
+    if (keepSnapshots && fs.existsSync(path.join(destDir, skillManifest.SNAPSHOT_DIR))) {
+      parkedSnapshots = `${destDir}.versions-${process.pid}-${Date.now()}`;
+      try { fs.renameSync(path.join(destDir, skillManifest.SNAPSHOT_DIR), parkedSnapshots); } catch { parkedSnapshots = null; }
+    }
     if (overwrite) fs.rmSync(destDir, { recursive: true, force: true });
     if (copyFrom) {
       fs.mkdirSync(path.dirname(destDir), { recursive: true });
-      fs.cpSync(copyFrom, destDir, { recursive: true });
+      fs.cpSync(copyFrom, destDir, { recursive: true, filter: skillManifest.snapshotCopyFilter });
     } else {
       fs.mkdirSync(destDir, { recursive: true });
     }
@@ -11366,7 +11376,12 @@ function commitSkillWrite({ destDir, overwrite, copyFrom, skillMd, provenance, s
       fs.writeFileSync(path.join(destDir, 'provenance.json'), JSON.stringify(provenance, null, 2));
     }
   } catch (err) {
+    if (parkedSnapshots) { try { fs.rmSync(parkedSnapshots, { recursive: true, force: true }); } catch { /* best effort */ } }
     return { error: err.message };
+  }
+  if (parkedSnapshots) {
+    try { fs.renameSync(parkedSnapshots, path.join(destDir, skillManifest.SNAPSHOT_DIR)); }
+    catch { try { fs.rmSync(parkedSnapshots, { recursive: true, force: true }); } catch { /* best effort */ } }
   }
   if (stamp) {
     const s = { name: stamp.name, by: stamp.by, action: stamp.action };
@@ -11738,6 +11753,43 @@ app.get('/api/skills/:name/content', (req, res) => {
   res.json({ content, ...skillManifestSummary(dir) });
 });
 
+// Resolve the ONE skill copy a lineage/version request is about —
+// `?source=pool|team|agent` (+ `teamId`/`agentId`) — with the same scope gate
+// the lineage view has always applied per tier: an agent copy needs a visible
+// agent, a team copy a visible team (both 404 otherwise, never leaking
+// existence); the global pool is visible to every caller. Returns
+// { scope, viewed, dir, cfg? } or { status, error }.
+function resolveViewedSkillCopy(req, name) {
+  if (!SKILL_NAME_RE.test(name || '')) return { status: 400, error: 'Invalid skill name' };
+  const scope = getScope(req);
+  const source = typeof req.query.source === 'string' ? req.query.source : 'pool';
+  const qTeamId = typeof req.query.teamId === 'string' ? req.query.teamId : undefined;
+  const qAgentId = typeof req.query.agentId === 'string' ? req.query.agentId : undefined;
+
+  let viewed;
+  let dir;
+  let cfg = null;
+  if (source === 'agent') {
+    if (!qAgentId || !AGENT_ID_RE.test(qAgentId)) return { status: 400, error: 'Invalid agent id' };
+    cfg = readJsonFile(path.join(AGENTS_DIR, qAgentId, 'config.json'), null);
+    if (!cfg || !visibleAgent(scope, agentMetaForScope(cfg))) return { status: 404, error: 'Skill not found' };
+    viewed = { tier: 'agent', agentId: qAgentId, teamId: cfg.teamId };
+    dir = safeAgentSkillDir(qAgentId, name);
+    if (!dir) return { status: 400, error: 'Invalid agent id or skill name' };
+  } else if (source === 'team') {
+    dir = safeTeamSkillDir(qTeamId, name);
+    if (!dir) return { status: 400, error: 'Invalid team id or skill name' };
+    if (!visibleTeam(scope, qTeamId)) return { status: 404, error: 'Skill not found' };
+    viewed = { tier: 'team', teamId: qTeamId };
+  } else {
+    dir = safeGlobalSkillDir(name);
+    if (!dir) return { status: 400, error: 'Invalid skill name' };
+    viewed = { tier: 'global' };
+  }
+  if (!fs.existsSync(path.join(dir, 'SKILL.md'))) return { status: 404, error: 'Skill not found' };
+  return { scope, viewed, dir, cfg };
+}
+
 // Full lineage view for one skill copy (#632, epic #624 phase 5) — the data the
 // Skills detail panel's Versions + Lineage tabs render: the viewed copy's
 // version history + origin (its skill.json), its knowledge provenance
@@ -11746,40 +11798,219 @@ app.get('/api/skills/:name/content', (req, res) => {
 // copy; visibility is scope-gated per tier. The pure assembler shapes the view.
 app.get('/api/skills/:name/lineage', (req, res) => {
   const { name } = req.params;
-  if (!SKILL_NAME_RE.test(name)) return res.status(400).json({ error: 'Invalid skill name' });
-  const scope = getScope(req);
-
-  const source = typeof req.query.source === 'string' ? req.query.source : 'pool';
-  const qTeamId = typeof req.query.teamId === 'string' ? req.query.teamId : undefined;
-  const qAgentId = typeof req.query.agentId === 'string' ? req.query.agentId : undefined;
-
-  let viewed;
-  let viewedDir;
-  if (source === 'agent') {
-    if (!qAgentId || !AGENT_ID_RE.test(qAgentId)) return res.status(400).json({ error: 'Invalid agent id' });
-    const cfg = readJsonFile(path.join(AGENTS_DIR, qAgentId, 'config.json'), null);
-    if (!cfg || !visibleAgent(scope, agentMetaForScope(cfg))) return res.status(404).json({ error: 'Skill not found' });
-    viewed = { tier: 'agent', agentId: qAgentId, teamId: cfg.teamId };
-    viewedDir = safeAgentSkillDir(qAgentId, name);
-    if (!viewedDir) return res.status(400).json({ error: 'Invalid agent id or skill name' });
-  } else if (source === 'team') {
-    viewedDir = safeTeamSkillDir(qTeamId, name);
-    if (!viewedDir) return res.status(400).json({ error: 'Invalid team id or skill name' });
-    if (!visibleTeam(scope, qTeamId)) return res.status(404).json({ error: 'Skill not found' });
-    viewed = { tier: 'team', teamId: qTeamId };
-  } else {
-    viewedDir = safeGlobalSkillDir(name);
-    if (!viewedDir) return res.status(400).json({ error: 'Invalid skill name' });
-    viewed = { tier: 'global' };
-  }
-  if (!fs.existsSync(path.join(viewedDir, 'SKILL.md'))) return res.status(404).json({ error: 'Skill not found' });
+  const r = resolveViewedSkillCopy(req, name);
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  const { scope, viewed, dir: viewedDir } = r;
 
   let manifest = null;
   try { manifest = skillManifest.readManifest(viewedDir); } catch { manifest = null; }
   const provenance = readSkillProvenance(viewedDir);
   const copies = gatherSkillCopies(name, scope);
+  // #2839: the working hash picks the ONE current entry (and surfaces an agent
+  // copy's unversioned edits); the snapshot hashes say which entries can be
+  // opened / compared / restored.
+  let workingHash = null;
+  try { workingHash = skillManifest.hashSkillDir(viewedDir); } catch { workingHash = null; }
+  const availableHashes = skillManifest.listSnapshotHashes(viewedDir);
 
-  res.json(skillLineage.assembleLineage({ name, viewed, manifest, provenance, copies }));
+  res.json(skillLineage.assembleLineage({ name, viewed, manifest, provenance, copies, workingHash, availableHashes }));
+});
+
+/* ─── Skill version snapshots (#2839) ─────────────────────────────────── */
+// Every stamped content state of a copy is kept as a full snapshot in
+// `<skill>/_versions/<hash>.json` (skill-manifest.js). These routes let any
+// caller who can SEE the copy open an old version read-only and compare any two
+// versions; restoring needs the same permission as editing that copy.
+// `working` stands for the copy's current on-disk content.
+
+// The files of one version of a copy as [{path, bytes}], or null when that
+// content is not available (no snapshot, or a corrupt one).
+function readSkillVersionFiles(dir, hash) {
+  let workingHash = null;
+  try { workingHash = skillManifest.hashSkillDir(dir); } catch { workingHash = null; }
+  if (hash === 'working' || (hash && hash === workingHash)) {
+    return { hash: workingHash, files: skillManifest.normalizeFiles(skillManifest.readSkillDirFiles(dir)) };
+  }
+  if (!skillManifest.isContentHash(hash)) return null;
+  const files = skillManifest.readSnapshot(dir, hash);
+  return files ? { hash, files } : null;
+}
+
+// The newest history entry recording `hash` (what "v3" means for that content).
+function skillVersionEntry(dir, hash) {
+  const man = skillManifest.readManifest(dir);
+  const hist = man && Array.isArray(man.history) ? man.history : [];
+  return hist.find(h => h && h.hash === hash) || null;
+}
+
+function versionHashParam(req) {
+  const h = req.params.hash;
+  return h === 'working' || skillManifest.isContentHash(h) ? h : null;
+}
+
+// File listing of one version (same shape as GET …/files; snapshots keep files
+// only, so `dirs` is empty — an empty folder is not content).
+app.get('/api/skills/:name/versions/:hash/files', (req, res) => {
+  const r = resolveViewedSkillCopy(req, req.params.name);
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  const hash = versionHashParam(req);
+  if (!hash) return res.status(400).json({ error: 'Invalid version hash' });
+  const v = readSkillVersionFiles(r.dir, hash);
+  if (!v) return res.status(404).json({ error: 'content not available for this version', unavailable: true });
+  const entry = skillVersionEntry(r.dir, v.hash);
+  res.json({
+    hash: v.hash,
+    entry,
+    files: v.files.map(f => ({ path: f.path, size: f.bytes.length }))
+      .sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: 'base' })),
+    dirs: [],
+  });
+});
+
+// One file of one version (same shape + caps as GET …/file). The file is looked
+// up inside the snapshot by its normalized path — nothing on disk is resolved
+// from the query, so there is no path to escape.
+app.get('/api/skills/:name/versions/:hash/file', (req, res) => {
+  const r = resolveViewedSkillCopy(req, req.params.name);
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  const hash = versionHashParam(req);
+  if (!hash) return res.status(400).json({ error: 'Invalid version hash' });
+  const rel = skillManifest.normalizeRelPath(req.query.file);
+  if (!rel || rel.split('/').includes('..')) return res.status(400).json({ error: 'invalid path' });
+  const v = readSkillVersionFiles(r.dir, hash);
+  if (!v) return res.status(404).json({ error: 'content not available for this version', unavailable: true });
+  const f = v.files.find(x => x.path === rel);
+  if (!f) return res.status(404).json({ error: 'not found' });
+  const truncated = f.bytes.length > SKILL_FILE_MAX_BYTES;
+  const buf = truncated ? f.bytes.subarray(0, SKILL_FILE_MAX_BYTES) : f.bytes;
+  const isBinary = buf.subarray(0, Math.min(buf.length, 8192)).includes(0);
+  res.json({ path: rel, size: f.bytes.length, truncated, binary: isBinary, content: isBinary ? null : buf.toString('utf8') });
+});
+
+// Compare two versions of a copy (`from`/`to` = hash or `working`). The order is
+// normalised older → newer by the copy's history so either pick order reads the
+// same; the working copy is always the newest side.
+app.get('/api/skills/:name/versions/diff', (req, res) => {
+  const r = resolveViewedSkillCopy(req, req.params.name);
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  const valid = h => h === 'working' || skillManifest.isContentHash(h);
+  let from = typeof req.query.from === 'string' ? req.query.from : '';
+  let to = typeof req.query.to === 'string' ? req.query.to : 'working';
+  if (!valid(from) || !valid(to)) return res.status(400).json({ error: 'from/to must be a version hash or "working"' });
+  const a = readSkillVersionFiles(r.dir, from);
+  const b = readSkillVersionFiles(r.dir, to);
+  if (!a || !b) return res.status(404).json({ error: 'content not available for this version', unavailable: true });
+  const man = skillManifest.readManifest(r.dir);
+  const hist = man && Array.isArray(man.history) ? man.history : [];
+  // Age rank: the working copy is newest (-1); otherwise the index of the newest
+  // history entry with that hash (newest-first, so a smaller index is newer).
+  const rank = (side, raw) => {
+    if (raw === 'working') return -1;
+    const i = hist.findIndex(h => h && h.hash === side.hash);
+    return i < 0 ? hist.length : i;
+  };
+  let older = a;
+  let newer = b;
+  if (rank(a, from) < rank(b, to)) { older = b; newer = a; [from, to] = [to, from]; }
+  const diff = skillVersionDiff.diffSkillVersions(older.files, newer.files);
+  res.json({
+    from: { hash: older.hash, working: from === 'working', entry: skillVersionEntry(r.dir, older.hash) },
+    to: { hash: newer.hash, working: to === 'working', entry: skillVersionEntry(r.dir, newer.hash) },
+    ...diff,
+  });
+});
+
+// Restore an old version: the copy's content is REPLACED by the snapshot's
+// files (sidecars, _archive and the snapshots themselves stay) and stamped as a
+// NEW version with action `restored` — history is never rewritten. Same
+// permission as editing that copy (pool: System Admin / Team Admin via the
+// edit rule; agent copy: the install permission), same `baseHash` 409 as the
+// editor's save-all, staging swap so a failure writes nothing, and exactly one
+// auto-resync for a global/team skill.
+app.post('/api/skills/:name/versions/:hash/restore', (req, res) => {
+  const { name } = req.params;
+  const r = resolveViewedSkillCopy(req, name);
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  const { scope, viewed, dir: root } = r;
+  if (viewed.tier === 'agent') {
+    if (!canManageAgent(scope, agentMetaForScope(r.cfg))) {
+      return res.status(403).json({ error: 'forbidden: restoring an agent copy requires permission to manage that agent' });
+    }
+  } else {
+    const permit = skillTransfer.permitTransfer(
+      skillTransfer.requiredPoolWritePermission(viewed.tier, viewed.teamId),
+      { systemAdmin: !!scope.all, isTeamAdmin: (tid) => canManageTeam(scope, tid), isTeamAdminOfAny: () => isTeamAdminOfAny(scope) },
+      'restore',
+    );
+    if (!permit.ok) return res.status(403).json({ error: permit.error });
+  }
+  const hash = req.params.hash;
+  if (!skillManifest.isContentHash(hash)) return res.status(400).json({ error: 'Invalid version hash' });
+
+  const body = req.body || {};
+  const currentHash = skillManifest.hashSkillDir(root);
+  if (typeof body.baseHash !== 'string' || body.baseHash !== currentHash) {
+    return res.status(409).json({ error: 'The skill was changed in the meantime. Reload it and try again.', conflict: true, currentHash });
+  }
+  if (hash === currentHash) {
+    return res.json({ restored: false, unchanged: true, hash: currentHash });
+  }
+  const files = skillManifest.readSnapshot(root, hash);
+  if (!files) return res.status(404).json({ error: 'content not available for this version', unavailable: true });
+  const entry = skillVersionEntry(root, hash);
+  const restoredFrom = entry && Number.isInteger(entry.version) ? entry.version : undefined;
+
+  const parent = path.dirname(root);
+  const tag = `${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  const staging = path.join(parent, `.${path.basename(root)}.restore-${tag}`);
+  const backup = path.join(parent, `.${path.basename(root)}.prev-${tag}`);
+  try {
+    fs.mkdirSync(staging);
+    // Carry what is not content (sidecars, _archive, _versions) unchanged.
+    for (const e of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!skillManifest.isExcludedPath(e.name)) continue;
+      fs.cpSync(path.join(root, e.name), path.join(staging, e.name), { recursive: true, verbatimSymlinks: true });
+    }
+    for (const f of files) {
+      const target = path.resolve(staging, f.path);
+      const rel = path.relative(staging, target);
+      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error(`invalid path in snapshot: ${f.path}`);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, f.bytes);
+    }
+  } catch (err) {
+    try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ }
+    return res.status(500).json({ error: `Restore failed, nothing was written: ${err.message}` });
+  }
+  try {
+    fs.renameSync(root, backup);
+    try {
+      fs.renameSync(staging, root);
+    } catch (err) {
+      fs.renameSync(backup, root);
+      throw err;
+    }
+  } catch (err) {
+    try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ }
+    return res.status(500).json({ error: `Restore failed, nothing was written: ${err.message}` });
+  }
+  try { fs.rmSync(backup, { recursive: true, force: true }); } catch { /* best effort */ }
+
+  const manifest = stampSkill(root, {
+    name, by: skillActor(req), action: 'restored', restoredFrom,
+    note: restoredFrom != null ? `restored from v${restoredFrom}` : `restored from ${hash}`,
+  });
+  if (viewed.tier !== 'agent') {
+    autoResyncOnEdit(name, viewed.tier === 'team' ? { tier: 'team', teamId: viewed.teamId } : { tier: 'global' });
+  }
+  let newHash = null;
+  try { newHash = skillManifest.hashSkillDir(root); } catch { newHash = null; }
+  res.json({
+    restored: true,
+    restoredFrom: restoredFrom != null ? restoredFrom : null,
+    version: manifest && manifest.version != null ? manifest.version : null,
+    hash: newHash,
+  });
 });
 
 /* ─── Skill directory contents (multi-file browser/editor) ───────────── */
@@ -11835,6 +12066,8 @@ function listSkillFiles(rootDir) {
       const relPath = rel ? `${rel}/${d.name}` : d.name;
       const full = path.join(dir, d.name);
       if (d.isDirectory()) {
+        // #2839: version snapshots are not skill files (hidden from the editor tree).
+        if (!rel && d.name === skillManifest.SNAPSHOT_DIR) continue;
         walk(full, relPath);
       } else if (d.isFile()) {
         let size = 0;
@@ -11927,6 +12160,7 @@ app.put('/api/skills/:name/file', (req, res) => {
   if (!permit.ok) return res.status(403).json({ error: permit.error });
   const root = skillRootDir(source, name, undefined, teamId);
   if (!root) return res.status(400).json({ error: 'Invalid skill name or team id' });
+  if (skillManifest.normalizeRelPath(file).split('/')[0] === skillManifest.SNAPSHOT_DIR) return res.status(400).json({ error: 'invalid path' });
   const target = safeSkillFilePath(root, file);
   if (!target) return res.status(400).json({ error: 'invalid path' });
   if (!fs.statSync(target).isFile()) return res.status(400).json({ error: 'not a file' });
@@ -12049,7 +12283,8 @@ app.get('/api/skills/:name/export', heavyLimiter, async (req, res) => {
     // Scratch zip lives in /tmp so `zip -r` doesn't try to archive its own output.
     zipDir = fs.mkdtempSync(path.join('/tmp', 'skill-zip-'));
     const zipPath = path.join(zipDir, 'skill.zip');
-    const zipResult = await runArchiveTool('zip', ['-r', '-q', zipPath, dirName], { cwd: parentDir });
+    // #2839: version snapshots stay with this copy — never exported.
+    const zipResult = await runArchiveTool('zip', ['-r', '-q', zipPath, dirName, '-x', path.posix.join(dirName, skillManifest.SNAPSHOT_DIR, '*')], { cwd: parentDir });
     if (zipResult.code !== 0) {
       throw new Error(describeArchiveFailure('zip', zipResult));
     }
@@ -12190,7 +12425,7 @@ app.post('/api/skills/import', heavyLimiter, _skillImportUpload.single('file'), 
     // forward by cpSync).
     if (plan.onCollision === 'overwrite') fs.rmSync(dst.dir, { recursive: true, force: true });
     fs.mkdirSync(path.dirname(dst.dir), { recursive: true });
-    fs.cpSync(skillRoot, dst.dir, { recursive: true });
+    fs.cpSync(skillRoot, dst.dir, { recursive: true, filter: skillManifest.snapshotCopyFilter });
 
     // Identity round-trip (AC3/AC4): honour an embedded skill.json — the version
     // chain continues and an `imported` event is appended (forceHistory records
@@ -12305,7 +12540,7 @@ app.post('/api/skills/promote', (req, res) => {
   const srcId = skillSourceIdentity(srcDir);
   try {
     if (overwrite) fs.rmSync(dstDir, { recursive: true, force: true });
-    fs.cpSync(srcDir, dstDir, { recursive: true });
+    fs.cpSync(srcDir, dstDir, { recursive: true, filter: skillManifest.snapshotCopyFilter });
   } catch (err) {
     return res.status(500).json({ error: `Failed to promote skill: ${err.message}` });
   }
@@ -12546,7 +12781,7 @@ function archiveDeletedSkill(srcDir, plan, name, srcId, req, now = Date.now()) {
     const rel = path.relative(base, dst);
     if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
     fs.mkdirSync(path.dirname(dst), { recursive: true });
-    fs.cpSync(srcDir, dst, { recursive: true });
+    fs.cpSync(srcDir, dst, { recursive: true, filter: skillManifest.snapshotCopyFilter });
     fs.writeFileSync(path.join(dst, 'archive-meta.json'), JSON.stringify({
       id, tier: plan.tier, name, teamId: plan.teamId, agentId: plan.agentId,
       hash: srcId.sourceHash || null, version: srcId.sourceVersion,
@@ -12712,7 +12947,7 @@ app.post('/api/skills/archive/restore', heavyLimiter, (req, res) => {
   try {
     if (overwrite) fs.rmSync(dst.dir, { recursive: true, force: true });
     fs.mkdirSync(path.dirname(dst.dir), { recursive: true });
-    fs.cpSync(srcDir, dst.dir, { recursive: true, filter: (s) => path.basename(s) !== 'archive-meta.json' });
+    fs.cpSync(srcDir, dst.dir, { recursive: true, filter: (s) => path.basename(s) !== 'archive-meta.json' && skillManifest.snapshotCopyFilter(s) });
   } catch (err) {
     return res.status(500).json({ error: `Failed to restore skill: ${err.message}` });
   }
@@ -12793,7 +13028,7 @@ app.post('/api/skills/promote-to-global', (req, res) => {
   const srcId = skillSourceIdentity(srcDir);
   try {
     if (overwrite) fs.rmSync(dstDir, { recursive: true, force: true });
-    fs.cpSync(srcDir, dstDir, { recursive: true });
+    fs.cpSync(srcDir, dstDir, { recursive: true, filter: skillManifest.snapshotCopyFilter });
   } catch (err) {
     return res.status(500).json({ error: `Failed to promote skill: ${err.message}` });
   }
@@ -12873,7 +13108,7 @@ function archiveSkillDir(srcDir, fromRef, name, hash) {
     const rel = path.relative(base, dst);
     if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
     fs.mkdirSync(path.dirname(dst), { recursive: true });
-    fs.cpSync(srcDir, dst, { recursive: true });
+    fs.cpSync(srcDir, dst, { recursive: true, filter: skillManifest.snapshotCopyFilter });
     return dst;
   } catch { return null; }
 }

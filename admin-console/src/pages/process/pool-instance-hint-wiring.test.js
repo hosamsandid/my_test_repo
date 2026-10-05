@@ -34,3 +34,24 @@ test('AC5: the Node Inspector lists the role\'s instances from its own pool-cont
   assert.match(src, /poolInstanceHint\(poolControl, memberCfg\.id\)/);
   assert.match(src, /poolHint\.instances\.map\(/);
 });
+
+// Regression guard: #2814 turned `anomalyCounts` into a value derived from
+// `anomalyList` (useMemo) but left one `setAnomalyCounts({})` in the scope-reset
+// effect. That effect runs on mount, so the whole Flows page threw
+// "setAnomalyCounts is not defined". The reset now clears the source list.
+test('the scope reset clears the anomaly list, the counts follow from it', () => {
+  const src = sourceOf('../ProcessCanvas.jsx');
+  assert.doesNotMatch(src, /\bsetAnomalyCounts\b/);
+  assert.match(src, /setAnomaliesOpen\(false\); setAnomalyList\(\[\]\);/);
+});
+
+// The general form of the same bug: every bare state-setter call in the canvas
+// must have a matching useState declaration (method calls like
+// graphRef.current.setSelected(...) are not state setters and are skipped).
+test('every state setter ProcessCanvas calls is declared', () => {
+  const src = sourceOf('../ProcessCanvas.jsx');
+  const declared = new Set([...src.matchAll(/\[\s*\w+\s*,\s*(set[A-Z]\w*)\s*\]\s*=\s*use(?:State|Reducer)\b/g)].map((m) => m[1]));
+  const called = new Set([...src.matchAll(/(?<![.\w])(set[A-Z]\w*)\s*\(/g)].map((m) => m[1]));
+  const missing = [...called].filter((name) => !declared.has(name));
+  assert.deepEqual(missing, [], `undeclared state setters: ${missing.join(', ')}`);
+});

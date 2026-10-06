@@ -694,6 +694,13 @@ dropped with the reason. On a *wake-already-armed*, *throttle* or
 now with the same prompt. Refused if the item is merged/closed, the wake label
 is gone, or it was already re-fired.
 
+A *history-horizon* drop — a label added before the trigger was activated, for
+example just before the flow was re-applied or the team moved to another
+instance — can be fired again too, but only while that wake label is **still
+on the open item**. It is offered only for an event that added the trigger's
+own wake label; the dialog says that the event predates the trigger. The
+poller itself still ignores such events on its own.
+
 A pull request linked to an issue reads `#2798 → closes #2794 <title>` here and
 in the **Fire again** dialog — the same `→ closes #N` the chat's
 `⚡ Trigger fired — …` notice carries — so you can search by the issue number.

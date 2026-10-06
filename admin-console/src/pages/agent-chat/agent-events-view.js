@@ -12,6 +12,9 @@ import { producerFilterText, outcomeStatus, gateWaitText } from '../event-outcom
 // The only drops a human may override (mirrors orchestrator/github-refire.js
 // REFIRABLE_REASONS — the server re-checks, this only decides whether to offer).
 export const REFIRABLE_REASONS = Object.freeze(['wake-already-armed', 'throttle', 'internal-dedup']);
+// Offered only for a label being added (#2874, mirrors LABEL_PRESENT_REASONS):
+// the server then refuses unless the label is still on the open item.
+export const LABEL_PRESENT_REASONS = Object.freeze(['history-horizon']);
 
 // Selectable time windows (AC2). The log keeps 7 days, so that is the widest.
 export const EVENT_RANGES = Object.freeze([
@@ -130,7 +133,10 @@ export function outcomeView(row) {
 }
 
 export function isRefirable(row) {
-  return !!(row && row.status === 'dropped' && REFIRABLE_REASONS.includes(row.reason));
+  if (!row || row.status !== 'dropped') return false;
+  if (REFIRABLE_REASONS.includes(row.reason)) return true;
+  return LABEL_PRESENT_REASONS.includes(row.reason)
+    && typeof row.event === 'string' && row.event.endsWith('.labeled') && !!row.label;
 }
 
 // Whether to OFFER Fire again (AC5/AC7): a refirable drop, not yet re-fired,
@@ -180,6 +186,9 @@ export function refireDialog(row) {
       break;
     case 'internal-dedup':
       why = `This event was already processed once — the console or supervisor woke the agent for ${q(wake)} on ${item} directly, so the poller skipped its own copy.`;
+      break;
+    case 'history-horizon':
+      why = `This event predates the trigger: ${q(wake)} was added to ${item} before the trigger was activated (for example before the flow was re-applied or the team moved to another instance), so the poller ignored it. It is only fired again while ${q(wake)} is still on the item.`;
       break;
     default:
       why = 'This event was dropped.';

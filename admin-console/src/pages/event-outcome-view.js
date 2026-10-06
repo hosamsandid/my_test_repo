@@ -45,7 +45,7 @@ export const OUTCOME_LEGEND = [
     key: 'history-horizon',
     term: 'dropped (horizon)',
     meaning: "The event is older than the trigger's subscription window (its activation time plus a short grace).",
-    whatToDo: 'Expected right after wiring or reactivating a trigger; a brand-new agent never reacts to activity that predates it. Persistent drops mean the event is simply older than the subscriber.',
+    whatToDo: 'Expected right after wiring or reactivating a trigger; a brand-new agent never reacts to activity that predates it. Persistent drops mean the event is simply older than the subscriber. If the label is a hand-off that is still on the item (the flow was re-applied or the team moved), an agent manager can Fire again from the agent\u2019s Events tab.',
   },
   {
     key: 'label-filter',

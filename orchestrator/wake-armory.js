@@ -119,6 +119,54 @@ function disarmAbsent(armed, { kind, number, presentLabels }) {
   return armed;
 }
 
+// ---------------------------------------------------------------------------
+// A removal seen without its label name (#2876, follow-up to #2776).
+// ---------------------------------------------------------------------------
+//
+// THE GAP. On a PR the Events API delivers `unlabeled` WITHOUT `payload.label`
+// (and, for a collapsed change, without a usable snapshot), so neither the
+// named `unlabeled` disarm nor the presence-based one fires. A human's natural
+// "re-trigger" — remove the wake label, add it again — is then dropped as
+// `wake-already-armed` for good (observed on #2863, 2026-10-06).
+//
+// THE FIX. Remember, per armed key, that SOME label was removed from its
+// object since the key was armed (`removedSince`, persisted beside `armed`).
+// A later `*.labeled` event that NAMES the armed wake label itself is then a
+// genuine re-add — a rising edge — and fires once (re-arming clears the mark).
+// It stays immune to the #2152 double-fire cases: the agent's claim swap names
+// its `:wip` / `:completed` label, never the wake, and unrelated churn names
+// some other label; a full-set match on a stale snapshot still never fires.
+
+// Mark every armed key of (kind, number): a label was removed from it.
+function markRemovalSeen(removedSince, armed, { kind, number }, atMs) {
+  if (!removedSince || !armed) return removedSince;
+  for (const k of Object.keys(armed)) {
+    const p = parseArmedKey(k);
+    if (p && p.kind === kind && p.number === number) removedSince[k] = atMs;
+  }
+  return removedSince;
+}
+
+// Is this armed key's event a re-add after a removal? Only for an event that
+// names the wake label as the label it added.
+function isReAddAfterRemoval(removedSince, key, { attributedLabel, wakeLabel }) {
+  return !!removedSince && Object.prototype.hasOwnProperty.call(removedSince, key)
+    && typeof attributedLabel === 'string' && attributedLabel === wakeLabel;
+}
+
+// Forget the mark — on (re-)arming, so the NEXT re-add needs a new removal.
+function clearRemovalSeen(removedSince, key) {
+  if (removedSince) delete removedSince[key];
+  return removedSince;
+}
+
+// Marks only matter for keys still armed; drop the rest.
+function gcRemovalSeen(removedSince, armed) {
+  if (!removedSince) return removedSince;
+  for (const k of Object.keys(removedSince)) if (!isArmed(armed, k)) delete removedSince[k];
+  return removedSince;
+}
+
 // Drop armed entries past the TTL, then enforce the per-repo cap by evicting
 // the oldest. Cheap for the handful of live entries a stack ever holds.
 function gcArmed(armed, { now = Date.now(), ttlMs = ARMED_TTL_MS, maxEntries = ARMED_MAX } = {}) {
@@ -145,6 +193,10 @@ module.exports = {
   disarmObject,
   disarmAbsent,
   gcArmed,
+  markRemovalSeen,
+  isReAddAfterRemoval,
+  clearRemovalSeen,
+  gcRemovalSeen,
   ARMED_TTL_MS,
   ARMED_MAX,
 };

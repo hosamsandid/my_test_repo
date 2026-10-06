@@ -1346,6 +1346,10 @@ class GitHubPoller {
     if (!repoState.armed || typeof repoState.armed !== 'object') repoState.armed = {};
     const armed = repoState.armed;
     if (this._wakeEdgeDedup) wakeArmory.gcArmed(armed);
+    // #2876: armed keys whose object lost SOME label since they were armed.
+    if (!repoState.removedSince || typeof repoState.removedSince !== 'object') repoState.removedSince = {};
+    const removedSince = repoState.removedSince;
+    if (this._wakeEdgeDedup) wakeArmory.gcRemovalSeen(removedSince, armed);
 
     // #2529: push heads already seen on this repo, for the synthetic-vs-real
     // push de-dup below. Same persistence/self-heal contract as `armed`.
@@ -1397,6 +1401,18 @@ class GitHubPoller {
           const removed = ghEvent.payload?.label?.name;
           if (key.endsWith('.unlabeled') && removed) {
             wakeArmory.disarmLabel(armed, { kind, number: num, label: removed });
+          } else if (key.endsWith('.unlabeled')) {
+            // #2876: a PR's `unlabeled` arrives without the label's name. With a
+            // snapshot, disarm what is gone; either way, remember that a label
+            // was removed, so a later add that names the wake re-fires.
+            const labelsArr = Array.isArray(ghEvent.payload?.labels) ? ghEvent.payload.labels : null;
+            if (labelsArr) {
+              const present = new Set(
+                labelsArr.map((l) => (typeof l === 'string' ? l : l?.name)).filter(Boolean),
+              );
+              wakeArmory.disarmAbsent(armed, { kind, number: num, presentLabels: present });
+            }
+            wakeArmory.markRemovalSeen(removedSince, armed, { kind, number: num }, Date.now());
           } else if (key.endsWith('.closed')) {
             wakeArmory.disarmObject(armed, { kind, number: num });
           } else if (key.endsWith('.labeled')) {
@@ -1677,7 +1693,10 @@ class GitHubPoller {
                 `[GH-Poller] internal-dedup: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
                 `(already delivered internally, ${repoFullName}#${num} +${wl})`,
               );
-              if (wakeArmKey) wakeArmory.arm(armed, wakeArmKey, Date.now());
+              if (wakeArmKey) {
+                wakeArmory.arm(armed, wakeArmKey, Date.now());
+                wakeArmory.clearRemovalSeen(removedSince, wakeArmKey);
+              }
               outcome.status = 'dropped';
               outcome.reason = 'internal-dedup';
               continue;
@@ -1694,7 +1713,12 @@ class GitHubPoller {
         // self-claim-label guard). Drop it; otherwise arm the rising edge. Disarm
         // happens in the outer loop on the label's removal or the object's close.
         if (wakeArmKey) {
-          if (wakeArmory.isArmed(armed, wakeArmKey)) {
+          // #2876: an add that names the armed wake after a removal on the
+          // object (seen even without its label name) is a genuine re-add.
+          const reAdd = wakeArmory.isReAddAfterRemoval(removedSince, wakeArmKey, {
+            attributedLabel: ghEvent.payload?.label?.name, wakeLabel: sub.labelFilter,
+          });
+          if (wakeArmory.isArmed(armed, wakeArmKey) && !reAdd) {
             console.log(
               `[GH-Poller] wake-already-armed: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
               `(${repoFullName} ${sub.labelFilter} still present on the object, no fresh add)`,
@@ -1704,6 +1728,7 @@ class GitHubPoller {
             continue;
           }
           wakeArmory.arm(armed, wakeArmKey, Date.now());
+          wakeArmory.clearRemovalSeen(removedSince, wakeArmKey);
         }
 
         // #2795: a gated PR hand-off is HELD until the PR's current head is
@@ -2190,7 +2215,9 @@ class GitHubPoller {
     if (!this._wakeEdgeDedup || !repo || !triggerId || !label || number == null) return false;
     const repoState = this.state[repo] || (this.state[repo] = {});
     if (!repoState.armed || typeof repoState.armed !== 'object') repoState.armed = {};
-    wakeArmory.arm(repoState.armed, wakeArmory.armedKey({ triggerId, kind, number, label }), Date.now());
+    const k = wakeArmory.armedKey({ triggerId, kind, number, label });
+    wakeArmory.arm(repoState.armed, k, Date.now());
+    wakeArmory.clearRemovalSeen(repoState.removedSince, k); // #2876
     this._saveState();
     return true;
   }
@@ -2214,7 +2241,9 @@ class GitHubPoller {
     }
     if (this._wakeEdgeDedup && label && key.endsWith('.labeled')) {
       if (!repoState.armed || typeof repoState.armed !== 'object') repoState.armed = {};
-      wakeArmory.arm(repoState.armed, wakeArmory.armedKey({ triggerId, kind: 'pr', number, label }), Date.now());
+      const k = wakeArmory.armedKey({ triggerId, kind: 'pr', number, label });
+      wakeArmory.arm(repoState.armed, k, Date.now());
+      wakeArmory.clearRemovalSeen(repoState.removedSince, k); // #2876
     }
     this._saveState();
     return handoffGate.enabledGates(gate);

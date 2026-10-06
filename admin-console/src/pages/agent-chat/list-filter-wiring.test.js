@@ -61,7 +61,11 @@ test('AC13 — labelled checkboxes, Escape closes and returns focus', () => {
   assert.match(control, /type="checkbox"[\s\S]*?aria-label=\{entry\.subtitle \? `\$\{entry\.label\} \(\$\{entry\.subtitle\}\)` : entry\.label\}/);
   assert.match(control, /if \(e\.key === 'Escape'\) \{[\s\S]*?close\(\);/);
   assert.match(control, /buttonRef\.current\?\.focus\(\)/);
-  assert.match(control, /aria-label="Search teams"/);
+  // The wording is a prop since the Flows rail reuses the control (#2859);
+  // Agent Chat passes none, so the defaults are its copy.
+  assert.match(control, /searchLabel: 'Search teams'/);
+  assert.match(control, /aria-label=\{copy\.searchLabel\}/);
+  assert.doesNotMatch(chat, /<ListFilterControl[^>]*copy=/);
 });
 
 test('AC4/AC5 — Select all / Deselect all act on the listed keys; quick filters disable with a reason', () => {

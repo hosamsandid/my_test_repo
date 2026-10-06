@@ -306,7 +306,7 @@ test('AC16 — the list view distinguishes private from shared, and names a crea
   const mine = da.draftAccessView(draftOf(['u-alice'], 'u-alice'), { viewerId: 'u-alice', usersById: users });
   assert.deepEqual(mine, {
     shared: false, accessCount: 1, createdByYou: true, createdByName: 'Alice A',
-    visibleToEveryone: false, canEdit: true,
+    visibleToEveryone: false, canEdit: true, viewerHasAccess: true,
   });
 
   const theirs = da.draftAccessView(draftOf(['u-alice', 'u-bob'], 'u-alice'), { viewerId: 'u-bob', usersById: users });
@@ -314,6 +314,14 @@ test('AC16 — the list view distinguishes private from shared, and names a crea
   assert.equal(theirs.accessCount, 2);
   assert.equal(theirs.createdByYou, false);
   assert.equal(theirs.createdByName, 'Alice A');
+});
+
+test('#2859 — viewerHasAccess tells "shared with me" apart from a System Admin\'s view of every draft', () => {
+  const shared = da.draftAccessView(draftOf(['u-alice', 'u-bob'], 'u-alice'), { viewerId: 'u-bob' });
+  assert.equal(shared.viewerHasAccess, true);
+  const adminOnlySees = da.draftAccessView(draftOf(['u-alice'], 'u-alice'), { viewerId: 'u-root' });
+  assert.equal(adminOnlySees.viewerHasAccess, false);
+  assert.equal(da.draftAccessView(draftOf(['u-alice'], 'u-alice'), { viewerId: null }).viewerHasAccess, false);
 });
 
 test('AC16 — no raw user id is ever returned to the list', () => {

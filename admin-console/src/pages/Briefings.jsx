@@ -25,6 +25,14 @@ import {
   filterCandidates, selectAllIds, pruneSelection, pickerState, shareResultNotice, bulkShareError,
   VISIBLE_TO_EVERYONE_LABEL, VISIBLE_TO_EVERYONE_CONFIRM, duplicateDraftBody,
 } from './process/draft-share-view.js';
+import ListFilterControl from './agent-chat/ListFilterControl.jsx';
+import { quickFiltersDisabledReason } from './agent-chat/list-selection.js';
+import { useTeamMemberships } from '../hooks/useTeamMemberships.js';
+import {
+  FLOWS_FILTER_COPY, FLOWS_QUICK_FILTERS, NO_FLOWS_SELECTED_HINT,
+  normalizeSelection, flowsFilterEntries, flowsSelectionSummary,
+  applyFlowsFilterAction, revealKeyForProc, flowsRailView,
+} from './process/flows-rail-filter.js';
 import {
   IMPORT_BRIEFINGS_COPY, importCandidates, importSubmitState, importRequestBody, importErrorText,
 } from './process/import-briefings-view';
@@ -35,6 +43,9 @@ const ProcessGraphPanel = lazy(() =>
   import('./ProcessCanvas').then(m => ({ default: m.ProcessGraphPanel })));
 
 const LAST_SELECTED_KEY_PREFIX = 'flows.lastSelected';
+// Same debounce as the Agent Chat rail filter's preference write (#2740).
+const FILTER_SAVE_DEBOUNCE_MS = 400;
+const RAIL_HINT_STYLE = { padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' };
 const SIDEBAR_WIDTH_KEY = 'flowsPaneWidth';
 const SIDEBAR_MIN = 160;
 const SIDEBAR_MAX = 600;
@@ -585,7 +596,7 @@ function FlowNotFound({ proc, onBack }) {
 }
 
 export default function Briefings() {
-  const { user } = useAuth();
+  const { user, patchUser } = useAuth();
   const lastSelectedKey = user ? `${LAST_SELECTED_KEY_PREFIX}.${user.username}` : null;
   const [searchParams, setSearchParams] = useSearchParams();
   const [navCollapsed, setNavCollapsed] = useState(false);
@@ -711,6 +722,75 @@ export default function Briefings() {
   const teamsSection = railSectionState({ data: agents, error: agentsError, items: teams });
   const draftsSection = railSectionState({ data: draftsList, error: draftsError, items: drafts });
   const envNameById = new Map((environments || []).map(e => [e.id, e.name]));
+
+  // Rail filter (#2859): the Agent Chat rail filter (#2740) applied to this
+  // list. Stored as the hidden `team:<id>` / `draft:<id>` keys, per user, on
+  // the server (`flowsListFilter`, via PUT /api/me/preferences); every decision
+  // lives in process/flows-rail-filter.js.
+  const { memberships, directory, loaded: membershipsLoaded } = useTeamMemberships();
+  const viewerId = user?.userId || null;
+  const [flowsFilter, setFlowsFilter] = useState(() => normalizeSelection(user?.flowsListFilter));
+  const filterEntries = useMemo(
+    () => flowsFilterEntries({
+      teams: (agents || []).filter(a => a.role === 'team'),
+      drafts: Array.isArray(draftsList) ? draftsList : [],
+      envNameById: new Map((environments || []).map(e => [e.id, e.name])),
+      draftSubtitle,
+    }),
+    [agents, draftsList, environments],
+  );
+  const railView = flowsRailView({ teams, drafts, selection: flowsFilter });
+  // The page-level hint replaces both sections only once neither is loading,
+  // so a slow section never hides behind "No flows selected".
+  const showNoFlowsHint = railView.nothingSelected && teamsSection !== 'loading' && draftsSection !== 'loading';
+
+  const filterSaveTimerRef = useRef(null);
+  const pendingFilterSaveRef = useRef(null);
+  const flushFilterSave = useCallback(() => {
+    clearTimeout(filterSaveTimerRef.current);
+    const next = pendingFilterSaveRef.current;
+    if (!next) return;
+    pendingFilterSaveRef.current = null;
+    apiCall('PUT', '/api/me/preferences', { flowsListFilter: next }).catch(() => {});
+  }, []);
+  useEffect(() => flushFilterSave, [flushFilterSave]);
+  const persistFilter = useCallback((next) => {
+    setFlowsFilter(next);
+    // Keep the session copy current so a remount restores what was just picked.
+    patchUser({ flowsListFilter: next });
+    pendingFilterSaveRef.current = next;
+    clearTimeout(filterSaveTimerRef.current);
+    filterSaveTimerRef.current = setTimeout(flushFilterSave, FILTER_SAVE_DEBOUNCE_MS);
+  }, [patchUser, flushFilterSave]);
+
+  const filterRef = useRef(null);
+  filterRef.current = {
+    selection: flowsFilter,
+    entries: filterEntries,
+    membership: { memberships, directory, viewerId },
+    // Only a loaded section may prune its keys (a failed drafts fetch must not
+    // un-hide every draft on the next write).
+    loaded: {
+      teamsLoaded: teamsSection === 'list' || teamsSection === 'empty',
+      draftsLoaded: draftsSection === 'list' || draftsSection === 'empty',
+    },
+  };
+  const handleFilterAction = useCallback((action) => {
+    const f = filterRef.current;
+    persistFilter(applyFlowsFilterAction(f.selection, action, f.entries, f.membership, f.loaded));
+  }, [persistFilter]);
+
+  // Reveal on open (AC11): whenever the open flow changes — deep link,
+  // last-selected restore, New flow, Create team, a rail menu action — a flow
+  // hidden by the filter is ticked back in, so it is never invisible in the
+  // rail. On arrival only: unticking the flow that is already open is honoured.
+  const revealedProcRef = useRef(undefined);
+  useEffect(() => {
+    if (revealedProcRef.current === proc) return;
+    revealedProcRef.current = proc;
+    const key = revealKeyForProc(proc, filterRef.current.selection);
+    if (key) handleFilterAction({ type: 'reveal', key });
+  }, [proc, handleFilterAction]);
 
   // An unknown `?proc=` (old `/process/<team>` bookmark, deleted team/draft,
   // shared link without access) gets a "not found" state instead of an empty
@@ -1239,8 +1319,11 @@ export default function Briefings() {
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
+              gap: 'var(--eb-space-2)',
+              // Anchors the filter panel to the header's width (#2859).
+              position: 'relative',
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', minWidth: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', minWidth: 0, flex: 1 }}>
                 {/* The Welcome banner and this page's own help drawer moved into
                     the `flows` help topic (#1876) — the "?" opens the Help panel
                     on its "This page" face.
@@ -1257,6 +1340,19 @@ export default function Briefings() {
                   section={FLOWS_HELP_SECTIONS.overview}
                   style={{ padding: 2, flexShrink: 0 }}
                 />
+                {/* Rail filter (#2859) — the Agent Chat control with this list's
+                    wording, quick filters and summary. */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <ListFilterControl
+                    entries={filterEntries}
+                    selection={flowsFilter}
+                    onAction={handleFilterAction}
+                    quickFiltersDisabledReason={quickFiltersDisabledReason({ membershipsLoaded, viewerId })}
+                    copy={FLOWS_FILTER_COPY}
+                    quickFilters={FLOWS_QUICK_FILTERS}
+                    summary={flowsSelectionSummary(filterEntries, flowsFilter)}
+                  />
+                </div>
               </div>
               <button
                 onClick={() => setNavCollapsed(true)}
@@ -1279,6 +1375,15 @@ export default function Briefings() {
                   used to sit here, above the list. They moved into the unified
                   top-bar header (#1912) — see `headerAction` below. */}
 
+              {/* Nothing selected in the filter (#2859 AC5): one hint pointing
+                  at it instead of two sections of "hidden" notes. */}
+              {showNoFlowsHint && (
+                <div role="status" style={{ ...RAIL_HINT_STYLE, paddingTop: 'var(--eb-space-3)' }}>
+                  {NO_FLOWS_SELECTED_HINT}
+                </div>
+              )}
+              {!showNoFlowsHint && (<>
+
               {/* Teams — each team is a process (live orchestration graph) */}
               <SectionHeader>Teams</SectionHeader>
               {teamsSection === 'loading' ? (
@@ -1293,8 +1398,10 @@ export default function Briefings() {
                 <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
                   No teams yet.
                 </div>
+              ) : railView.teamsHint ? (
+                <div style={RAIL_HINT_STYLE}>{railView.teamsHint}</div>
               ) : (
-                teams.map(t => (
+                railView.teams.map(t => (
                   <ListRow
                     key={t.id}
                     icon={Users}
@@ -1323,8 +1430,10 @@ export default function Briefings() {
                 <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
                   No drafts. Use “New flow”.
                 </div>
+              ) : railView.draftsHint ? (
+                <div style={RAIL_HINT_STYLE}>{railView.draftsHint}</div>
               ) : (
-                drafts.map(d => (
+                railView.drafts.map(d => (
                   <ListRow
                     key={d.id}
                     icon={FileText}
@@ -1342,6 +1451,7 @@ export default function Briefings() {
                   />
                 ))
               )}
+              </>)}
 
             </div>
           </>

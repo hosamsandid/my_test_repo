@@ -312,6 +312,10 @@ function draftAccessView(draft, { viewerId = null, usersById = new Map(), canEdi
     // reader up front that it will open read-only.
     visibleToEveryone: isVisibleToEveryone(draft),
     canEdit: canEdit !== false,
+    // Is the viewer in the access set? A System Admin lists every draft (DD7),
+    // so "visible" is not "shared with me" — the Flows rail filter's
+    // membership quick filter needs the difference (#2859).
+    viewerHasAccess: !!(viewerId && accessUserIds.includes(viewerId)),
   };
 }
 

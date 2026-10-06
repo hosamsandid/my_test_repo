@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { createTeamsStore, DEFAULT_TEAM_ID, normalizeGithubHandle, coerceGithubHandle, coerceChatFontSize, coerceChatNotifyOnBack, coerceChatListFilter, isValidEmail, INVALID_EMAIL_REASON } = require('./teams-store');
+const { createTeamsStore, DEFAULT_TEAM_ID, normalizeGithubHandle, coerceGithubHandle, coerceChatFontSize, coerceChatNotifyOnBack, coerceChatListFilter, coerceFlowsListFilter, isValidEmail, INVALID_EMAIL_REASON } = require('./teams-store');
 
 function freshStore() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'teams-store-'));
@@ -368,6 +368,24 @@ test('chatListFilter: update stores it, leaves it alone when absent, blank clear
   assert.deepEqual(store.updateUser(u.id, { chatListFilter: { hidden: [], extra: 1 } }).chatListFilter, { hidden: [] });
   assert.equal(store.updateUser(u.id, { chatListFilter: null }).chatListFilter, undefined);
   assert.throws(() => store.updateUser(u.id, { chatListFilter: { hidden: [1] } }), /non-empty strings/);
+});
+
+// ---- Flows rail selection (#2859) -----------------------------------------
+
+test('flowsListFilter: same shape and bounds as chatListFilter, stored separately', () => {
+  assert.deepEqual(coerceFlowsListFilter({ hidden: ['draft:a', 'team:b', 'draft:a'] }), { hidden: ['draft:a', 'team:b'] });
+  assert.equal(coerceFlowsListFilter(null), undefined);
+  assert.throws(() => coerceFlowsListFilter({ hidden: 'draft:a' }), /flowsListFilter must be an object/);
+  assert.throws(() => coerceFlowsListFilter({ hidden: [''] }), /flowsListFilter\.hidden entries/);
+  assert.throws(() => coerceFlowsListFilter({ hidden: Array(2001).fill('x') }), /at most 2000/);
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'flows@corp.com' });
+  store.updateUser(u.id, { chatListFilter: { hidden: ['team:c'] } });
+  assert.deepEqual(store.updateUser(u.id, { flowsListFilter: { hidden: ['draft:x'] } }).flowsListFilter, { hidden: ['draft:x'] });
+  // The two preferences never overwrite each other.
+  assert.deepEqual(store.getUser(u.id).chatListFilter, { hidden: ['team:c'] });
+  assert.deepEqual(store.updateUser(u.id, { chatListFilter: null }).flowsListFilter, { hidden: ['draft:x'] });
+  assert.equal(store.updateUser(u.id, { flowsListFilter: '' }).flowsListFilter, undefined);
 });
 
 test('users: delete cascades memberships', () => {

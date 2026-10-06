@@ -166,24 +166,35 @@ function coerceChatNotifyOnBack(raw) {
 const CHAT_LIST_FILTER_MAX_KEYS = 2000;
 const CHAT_LIST_FILTER_MAX_KEY_LENGTH = 512;
 
-function coerceChatListFilter(raw) {
+// The same `{ hidden: string[] }` shape backs the Flows rail filter
+// (`flowsListFilter`, #2859: `team:<id>` / `draft:<id>` keys), so one coercer
+// serves both; `field` only names the preference in the error text.
+function coerceListFilter(raw, field) {
   if (raw === undefined || raw === null || raw === '') return undefined;
   if (typeof raw !== 'object' || Array.isArray(raw) || !Array.isArray(raw.hidden)) {
-    throw badRequest('chatListFilter must be an object with a hidden array');
+    throw badRequest(`${field} must be an object with a hidden array`);
   }
   // Bound the raw array before touching its entries: request bodies are not
   // size-capped on the orchestrator, so the cap must hold ahead of the loop.
   if (raw.hidden.length > CHAT_LIST_FILTER_MAX_KEYS) {
-    throw badRequest(`chatListFilter.hidden may hold at most ${CHAT_LIST_FILTER_MAX_KEYS} entries`);
+    throw badRequest(`${field}.hidden may hold at most ${CHAT_LIST_FILTER_MAX_KEYS} entries`);
   }
   const hidden = new Set();
   for (const key of raw.hidden) {
     if (typeof key !== 'string' || !key || key.length > CHAT_LIST_FILTER_MAX_KEY_LENGTH) {
-      throw badRequest(`chatListFilter.hidden entries must be non-empty strings of at most ${CHAT_LIST_FILTER_MAX_KEY_LENGTH} characters`);
+      throw badRequest(`${field}.hidden entries must be non-empty strings of at most ${CHAT_LIST_FILTER_MAX_KEY_LENGTH} characters`);
     }
     hidden.add(key);
   }
   return { hidden: [...hidden] };
+}
+
+function coerceChatListFilter(raw) {
+  return coerceListFilter(raw, 'chatListFilter');
+}
+
+function coerceFlowsListFilter(raw) {
+  return coerceListFilter(raw, 'flowsListFilter');
 }
 
 // A membership's `teamId` may name an **Agent Team** as well as a legacy access
@@ -392,6 +403,12 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
       // A blank value clears the selection back to "everything shown" (#2740).
       if (clf === undefined) delete user.chatListFilter;
       else user.chatListFilter = clf;
+    }
+    if (patch.flowsListFilter !== undefined) {
+      const flf = coerceFlowsListFilter(patch.flowsListFilter);
+      // Blank clears the Flows rail selection back to "everything shown" (#2859).
+      if (flf === undefined) delete user.flowsListFilter;
+      else user.flowsListFilter = flf;
     }
     user.updatedAt = nowIso();
     users[idx] = user;
@@ -795,6 +812,7 @@ module.exports = {
   coerceChatFontSize,
   coerceChatNotifyOnBack,
   coerceChatListFilter,
+  coerceFlowsListFilter,
   CHAT_FONT_SIZE_MIN,
   CHAT_FONT_SIZE_MAX,
   CHAT_FONT_SIZE_DEFAULT,

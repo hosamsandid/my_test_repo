@@ -59,6 +59,14 @@ test("board removals (#2637) are stored per team and pruned only for repos the s
   assert.match(compute, /saveFlowBoardRemoved\(teamId, current\)/);
 });
 
+test("the board learns of queued and lane-held dispatches, so a delivered wake never reads as lost (#2872)", () => {
+  const compute = body("async function computeTeamFlowBoard(");
+  assert.match(compute, /members\.flatMap\(\(m\) => readPendingEntries\(m\.id\)\)/);
+  assert.match(compute, /lane\.held\.map\(\(h\) => h\.entry\)/);
+  assert.match(compute, /admissionControl\.entryTicketRef\(entry\)/);
+  assert.match(compute, /pools, queued, removed, now,/);
+});
+
 test("the flow-board-removed route checks removability on the board and never writes to GitHub", () => {
   const i = SRC.indexOf("const flowBoardRemovedMatch");
   assert.ok(i > 0);

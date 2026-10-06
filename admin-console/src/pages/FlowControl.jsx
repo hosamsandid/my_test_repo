@@ -544,7 +544,7 @@ function NeedsYou({ items, canManage, busy, onRelease }) {
         Needs you ({items.length})
       </AreaHeading>
       {items.map((n) => (
-        <div key={n.id} style={{ ...lineStyle, borderLeft: '3px solid var(--eb-status-warning, #d97706)' }}>
+        <div key={n.id} style={{ ...lineStyle, flexWrap: 'wrap', borderLeft: '3px solid var(--eb-status-warning, #d97706)' }}>
           <UserRound size={13} style={{ flexShrink: 0, color: 'var(--eb-text-secondary)' }} />
           <span style={{ fontFamily: 'var(--eb-font-mono)', ...mutedStyle }}>{n.ref}</span>
           <Link href={n.url}>{n.title}</Link>
@@ -552,6 +552,19 @@ function NeedsYou({ items, canManage, busy, onRelease }) {
           <span style={{ marginLeft: 'auto', ...mutedStyle }} title="Waiting for">{n.waiting}</span>
           {canManage && n.release.length > 0 && (
             <SmallButton icon={LockOpen} label="Release claim" title={`Release the stale claim (${n.release.map((c) => c.text).join(', ')})`} disabled={busy} onClick={() => onRelease(n)} />
+          )}
+          {/* #2872: which wake label never reached its agent, and why — the
+              cause links to the GitHub Event Log row that recorded it. */}
+          {n.wakes.length > 0 && (
+            <ul style={{ flexBasis: '100%', margin: 0, paddingLeft: 'calc(13px + var(--eb-space-3))', listStyle: 'none', ...mutedStyle }}>
+              {n.wakes.map((w) => (
+                <li key={`${w.ref}:${w.label}`}>
+                  {w.ref}: <code>{w.label}</code> — {w.href
+                    ? <RouterLink to={w.href} className={CHAT_LINK_CLASS} style={{ textDecoration: 'underline' }} title="Open this event in the GitHub Event Log">{w.text}</RouterLink>
+                    : w.text}
+                </li>
+              ))}
+            </ul>
           )}
         </div>
       ))}

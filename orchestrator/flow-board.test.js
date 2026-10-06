@@ -141,7 +141,8 @@ test('buildFlowBoard: issue and the PR the woken agent opened form one row, no C
 test('buildFlowBoard: a non-pooled role woken by a platform-minted event id (int:/intlbl:/refire:) links its PR to the issue', () => {
   for (const eventId of ['int:abcdef012345', 'intlbl:0123abcd', 'refire:feedbeef']) {
     const b = board({
-      github: { issues: [issue(8, { updatedAt: iso(90) })], prs: [pr(80, { labels: ['ready-for-review'] })] },
+      github: { issues: [issue(8, { updatedAt: iso(90) })], // Labelled just now — inside the parked-wake window (#2872).
+      prs: [pr(80, { labels: ['ready-for-review'], updatedAt: iso(5) })] },
       events: [{ ...delivered(8, 't-developer', 90), eventId }],
       prRecords: [{ kind: 'pr-created', agentId: 't-developer', repo: 'o/r', prNumber: 80, correlationId: `trigger:t-ready:gh:${eventId}`, ts: iso(60) }],
     });
@@ -255,7 +256,7 @@ test('buildFlowBoard: human blocks carry a plain reason; an agent already queued
     github: {
       prs: [
         pr(61, { mergeable: 'CONFLICTING' }),
-        pr(62, { mergeable: 'CONFLICTING', labels: ['merge-conflict'] }),
+        pr(62, { mergeable: 'CONFLICTING', labels: ['merge-conflict'], updatedAt: iso(5) }), // just queued (#2872)
         pr(63, { reviewDecision: 'APPROVED', checks: 'passing' }),
         pr(64, { checks: 'failing' }),
         pr(65, { labels: ['needs-human', 'ready-for-review'] }),
@@ -632,4 +633,199 @@ test('buildFlowBoard: a PR hand-off held by its CI / conflict gate shows what it
   assert.deepEqual(row.gateHold, { number: 70, waitingFor: ['ci', 'conflict'], since: iso(8), agentIds: ['t-reviewer', 't-security'] });
   // No hold → null, as before.
   assert.equal(board(base).rows.find((r) => r.id === 'o/r#7').gateHold, null);
+});
+
+// ---------------------------------------------------------------------------
+// Parked on an undelivered wake (#2872)
+// ---------------------------------------------------------------------------
+
+// One Event Log entry: `created` is when it happened on GitHub, `logged` when
+// the poller recorded it (hours later for a late Events API delivery).
+const logged = (n, { kind = 'pr', action = 'labeled', label, created, logged: at = created, outcomes = [] }) => ({
+  ts: iso(at), createdAt: iso(created), eventId: `ev-${n}-${label}-${created}`, repo: 'o/r',
+  event: `${kind === 'pr' ? 'pull_request' : 'issues'}.${action}`, label,
+  workItem: { kind, number: n }, outcomes,
+});
+const dropped = (agentId, reason) => ({ agentId, status: 'dropped', reason });
+const got = (agentId, wakeLabel) => ({ agentId, status: 'delivered', wakeLabel });
+
+// The 2026-10-06 incident on agent-studio-3-0, one PR per constellation. The
+// Developer opened each PR for its issue earlier; the wake label is on it now.
+function incident(extra = {}) {
+  const prOf = (n, issueN, labels) => pr(n, { labels, closes: [issueN], body: '<!-- agent: t-developer -->', updatedAt: iso(1000) });
+  return board({
+    github: {
+      issues: [issue(2859), issue(2819), issue(2813), issue(2858)],
+      prs: [
+        prOf(2863, 2859, ['ready-for-review']),
+        prOf(2820, 2819, ['ready-for-review']),
+        prOf(2844, 2813, ['ready-for-review']),
+        prOf(2862, 2858, ['changes-requested']),
+      ],
+    },
+    events: [
+      // #2863: reviewed once, then the manual re-add dropped as already armed.
+      logged(2863, { label: 'ready-for-review', created: 1500, outcomes: [got('t-reviewer', 'ready-for-review')] }),
+      logged(2863, { label: 'ready-for-review:wip', created: 1499, outcomes: [dropped('t-reviewer', 'self-claim-label')] }),
+      logged(2863, { label: 'ready-for-review', created: 1100, outcomes: [dropped('t-reviewer', 'wake-already-armed')] }),
+      // #2820 / #2844: the add predates the moved team's triggers and arrived ~5 h late.
+      logged(2820, { label: 'ready-for-review', created: 1094, logged: 784, outcomes: [dropped('t-reviewer', 'history-horizon')] }),
+      logged(2844, { label: 'ready-for-review', created: 1087, logged: 780, outcomes: [dropped('t-reviewer', 'history-horizon')] }),
+      // #2862: an earlier rework round, then only the swaps — the bare re-add never surfaced.
+      logged(2862, { label: 'changes-requested', created: 1400, outcomes: [got('t-reworker', 'changes-requested')] }),
+      logged(2862, { label: 'changes-requested:wip', created: 1399, outcomes: [dropped('t-reworker', 'self-claim-label')] }),
+      logged(2862, { label: 'changes-requested:completed', created: 1300, outcomes: [dropped('t-reworker', 'self-claim-label')] }),
+    ],
+    ...extra,
+  });
+}
+
+test('PARKED_WAKE_MS / wakeLost: one exported threshold and reason (#2872)', () => {
+  assert.equal(fb.PARKED_WAKE_MS, 30 * 60 * 1000);
+  assert.equal(fb.REASONS.wakeLost, 'wake never delivered');
+});
+
+test('buildFlowBoard: every constellation of the 2026-10-06 incident is flagged with its cause (#2872)', () => {
+  const b = incident();
+  const flag = (issueN) => b.rows.find((r) => r.id === `o/r#${issueN}`).needsHuman;
+  for (const n of [2859, 2819, 2813, 2858]) {
+    assert.equal(b.rows.find((r) => r.id === `o/r#${n}`).status, 'queued', `#${n} reads up next`);
+    assert.equal(flag(n).reason, 'wake never delivered', `#${n}`);
+  }
+  assert.deepEqual(flag(2859).wakes, [{
+    repo: 'o/r', number: 2863, kind: 'pr', label: 'ready-for-review',
+    cause: 'wake-already-armed', eventId: 'ev-2863-ready-for-review-1100', since: iso(1100),
+  }]);
+  assert.deepEqual(flag(2819).wakes.map((w) => [w.number, w.cause, w.eventId, w.since]), [
+    [2820, 'history-horizon', 'ev-2820-ready-for-review-1094', iso(1094)],
+  ]);
+  assert.equal(flag(2813).wakes[0].cause, 'history-horizon');
+  // Never seen: no event to link, and the clock starts at the item's last update.
+  assert.deepEqual(flag(2858).wakes, [{
+    repo: 'o/r', number: 2862, kind: 'pr', label: 'changes-requested',
+    cause: 'not-seen', eventId: null, since: iso(1000),
+  }]);
+  // The rows also land in "Needs you", with the per-label causes.
+  const n = b.needsHuman.find((x) => x.id === 'o/r#2819');
+  assert.equal(n.reason, 'wake never delivered');
+  assert.equal(n.wakes[0].cause, 'history-horizon');
+});
+
+test('buildFlowBoard: two PRs of one issue parked on the same wake are both listed (#2820 + #2842, #2872)', () => {
+  const b = board({
+    github: {
+      issues: [issue(2819)],
+      prs: [
+        pr(2820, { labels: ['ready-for-review'], closes: [2819], updatedAt: iso(900) }),
+        pr(2842, { labels: ['ready-for-review'], closes: [2819], updatedAt: iso(900) }),
+      ],
+    },
+    events: [
+      logged(2820, { label: 'ready-for-review', created: 1094, logged: 784, outcomes: [dropped('t-reviewer', 'history-horizon')] }),
+      logged(2842, { label: 'ready-for-review', created: 1100, logged: 784, outcomes: [dropped('t-reviewer', 'history-horizon')] }),
+    ],
+  });
+  const row = b.rows.find((r) => r.id === 'o/r#2819');
+  assert.deepEqual(row.needsHuman.wakes.map((w) => [w.number, w.cause]).sort(), [[2820, 'history-horizon'], [2842, 'history-horizon']]);
+  assert.equal(row.needsHuman.since, iso(1100)); // the oldest parked wake
+});
+
+test('buildFlowBoard: any other drop reads as dropped with its reason; no consumer outcome as no-subscriber (#2872)', () => {
+  const b = board({
+    github: { prs: [pr(80, { labels: ['ready-for-review'], body: '<!-- agent: t-developer -->' }), pr(81, { labels: ['ready-for-review'], body: '<!-- agent: t-developer -->' })] },
+    events: [
+      logged(80, { label: 'ready-for-review', created: 200, outcomes: [dropped('t-reviewer', 'throttle')] }),
+      logged(81, { label: 'ready-for-review', created: 200, outcomes: [got('t-developer', null)] }),
+    ],
+  });
+  const w = (n) => b.rows.find((r) => r.id === `o/r#${n}`).needsHuman.wakes[0];
+  assert.deepEqual([w(80).cause, w(80).dropReason], ['dropped', 'throttle']);
+  assert.deepEqual([w(81).cause, w(81).dropReason], ['dropped', 'no-subscriber']);
+});
+
+test('buildFlowBoard: a delivered wake is never flagged, nor a re-add after a delivered round (#2872)', () => {
+  const base = { github: { prs: [pr(90, { labels: ['ready-for-review'], body: '<!-- agent: t-developer -->' })] } };
+  // Delivered on the label's own add.
+  assert.equal(board({ ...base, events: [logged(90, { label: 'ready-for-review', created: 300, outcomes: [got('t-reviewer', 'ready-for-review')] })] }).rows[0].needsHuman, null);
+  // Delivered through a collapsed multi-label event (attributed to another label).
+  assert.equal(board({ ...base, events: [logged(90, { label: 'ux', created: 300, outcomes: [got('t-reviewer', 'ready-for-review')] })] }).rows[0].needsHuman, null);
+  // Delivered to a pool instance of the consumer role.
+  const pooled = SDLC.map((m) => (m.id === 't-reviewer' ? { ...m } : m)).concat([
+    { id: 't-reviewer-i90', poolInstance: true, poolOf: 't-reviewer', poolItem: 90, poolRepo: 'o/r' },
+  ]);
+  assert.equal(board({ ...base, members: pooled, events: [logged(90, { label: 'ready-for-review', created: 300, outcomes: [got('t-reviewer-i90', 'ready-for-review')] })] }).rows[0].needsHuman, null);
+  // Held by the WIP lane or a readiness gate counts as reached, too.
+  assert.equal(board({ ...base, events: [logged(90, { label: 'ready-for-review', created: 300, outcomes: [{ agentId: 't-reviewer', status: 'held', reason: 'wip' }] })] }).rows[0].needsHuman, null);
+  // A delivery to some other role does not vouch for the consumer.
+  assert.equal(board({ ...base, events: [logged(90, { label: 'ready-for-review', created: 300, outcomes: [got('t-developer', 'ready-for-review'), dropped('t-reviewer', 'history-horizon')] })] }).rows[0].needsHuman.wakes[0].cause, 'history-horizon');
+});
+
+test('buildFlowBoard: a legacy delivered entry with no label stamp counts as delivered (#2872)', () => {
+  // The pre-#1846 log shape — no event key, no label, no wakeLabel.
+  const q = board({ github: { issues: [issue(23, { labels: ['ready-for-review'], updatedAt: iso(300) })] }, events: [delivered(23, 't-reviewer', 300)] });
+  assert.equal(q.rows[0].needsHuman, null);
+  // A comment delivered to the consumer is not a delivery of the wake.
+  const c = board({
+    github: { issues: [issue(24, { labels: ['ready-for-review'], updatedAt: iso(300) })] },
+    events: [{ ...delivered(24, 't-reviewer', 300), event: 'issue_comment.created' }],
+  });
+  assert.equal(c.rows[0].needsHuman.wakes[0].cause, 'not-seen');
+});
+
+test('buildFlowBoard: a running, queued, gate-held or pooled consumer keeps the row unflagged (#2872)', () => {
+  const ev = [logged(2820, { label: 'ready-for-review', created: 1094, logged: 784, outcomes: [dropped('t-reviewer', 'history-horizon')] })];
+  const github = { issues: [issue(2819)], prs: [pr(2820, { labels: ['ready-for-review'], closes: [2819], updatedAt: iso(900) })] };
+  const flagOf = (extra) => board({ github, events: ev, ...extra }).rows.find((r) => r.id === 'o/r#2819').needsHuman;
+  assert.equal(flagOf({}).reason, 'wake never delivered');
+  // A dispatch waiting in a queue (or held in the lane) for the issue or the PR.
+  assert.equal(flagOf({ queued: [{ repo: 'o/r', numbers: [2819, 2820] }] }), null);
+  assert.equal(flagOf({ queued: [{ repo: 'o/r', numbers: [2820] }] }), null);
+  assert.equal(flagOf({ queued: [{ repo: 'o/other', numbers: [2820] }] }).reason, 'wake never delivered');
+  // A hand-off held by its readiness gate.
+  assert.equal(flagOf({ gateHolds: [{ repo: 'o/r', number: 2820, agentId: 't-reviewer', waitingFor: ['ci'], heldAt: iso(5) }] }), null);
+  // A live pool instance for the item.
+  const members = SDLC.concat([{ id: 't-reviewer-i2820', poolInstance: true, poolOf: 't-reviewer', poolItem: 2820, poolRepo: 'o/r' }]);
+  assert.equal(flagOf({ members, pools: [{ agentId: 't-reviewer', roleId: 'reviewer', instances: [{ instanceId: 't-reviewer-i2820' }] }] }), null);
+  // A running session on the PR (the row then reads working, not parked).
+  const s = flagOf({ sessions: [{ agentId: 't-reviewer', session: { id: 's', startedAt: iso(2), workItem: { repo: 'o/r', number: 2820 } } }] });
+  assert.equal(s, null);
+});
+
+test('buildFlowBoard: a wake within the threshold, or carrying its claim, is not parked (#2872)', () => {
+  const at = (mins) => board({
+    github: { prs: [pr(95, { labels: ['ready-for-review'], body: '<!-- agent: t-developer -->', updatedAt: iso(mins) })] },
+    events: [logged(95, { label: 'ready-for-review', created: mins, outcomes: [dropped('t-reviewer', 'wake-already-armed')] })],
+  }).rows[0].needsHuman;
+  assert.equal(at(30), null);
+  assert.equal(at(31).reason, 'wake never delivered');
+  // Not seen and just updated: the Events API may still be on its way.
+  const fresh = board({ github: { prs: [pr(96, { labels: ['ready-for-review'], body: '<!-- agent: t-developer -->', updatedAt: iso(10) })] } });
+  assert.equal(fresh.rows[0].needsHuman, null);
+  // A claimed wake is the needs-help case, never this one.
+  const claimed = board({
+    github: { prs: [pr(97, { labels: ['ready-for-review', 'ready-for-review:wip'], body: '<!-- agent: t-developer -->', updatedAt: iso(300) })] },
+    events: [logged(97, { label: 'ready-for-review', created: 300, outcomes: [dropped('t-reviewer', 'history-horizon')] })],
+  });
+  assert.notEqual(claimed.rows[0].needsHuman && claimed.rows[0].needsHuman.reason, 'wake never delivered');
+});
+
+test('buildFlowBoard: a wake whose consumer is off stays "nobody picks it up", not parked (#2872)', () => {
+  const offReviewer = SDLC.map((m) => (m.id === 't-reviewer' ? { ...m, enabled: false } : m));
+  const b = board({
+    members: offReviewer,
+    github: { prs: [pr(98, { labels: ['ready-for-review'], body: '<!-- agent: t-developer -->', updatedAt: iso(300) })] },
+    events: [logged(98, { label: 'ready-for-review', created: 300, outcomes: [dropped('t-reviewer', 'history-horizon')] })],
+  });
+  assert.equal(b.rows[0].needsHuman.reason, fb.REASONS.noConsumer);
+});
+
+test('buildFlowBoard: a removed-then-re-added wake whose re-add was never seen is not-seen (#2872)', () => {
+  const b = board({
+    github: { prs: [pr(99, { labels: ['ready-for-review'], body: '<!-- agent: t-developer -->', updatedAt: iso(200) })] },
+    events: [
+      logged(99, { label: 'ready-for-review', created: 500, outcomes: [got('t-reviewer', 'ready-for-review')] }),
+      logged(99, { action: 'unlabeled', label: 'ready-for-review', created: 400, outcomes: [dropped('t-reviewer', 'label-filter')] }),
+    ],
+  });
+  assert.deepEqual([b.rows[0].needsHuman.wakes[0].cause, b.rows[0].needsHuman.since], ['not-seen', iso(200)]);
 });

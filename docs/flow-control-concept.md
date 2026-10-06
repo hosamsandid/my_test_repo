@@ -736,3 +736,44 @@ because releasing would wake nobody. The flow lint
 the same on the Flows page; the graph endpoints now carry `enabled: false` on
 switched-off nodes. A label with no consumer at all stays with
 `dead-end-emitter` / `outcome-without-consumer`.
+
+## Amendment 6 — wakes that were never delivered (#2872, epic #2880)
+
+**A6.1 — the problem.** Label wakes are edge-triggered on the GitHub Events
+API: the poller wakes a consumer on the one `labeled` event. If that event is
+dropped or never arrives, the wake label stays on the item, the row reads
+*<stage> / up next* for good, and nothing re-checks it. On 2026-10-06 five PRs
+of `agent-studio-3-0` sat like this for ~18 h, for three different causes.
+
+**A6.2 — detection (report-only).** `buildFlowBoard` flags a row with the new
+reason *wake never delivered* (`REASONS.wakeLost`) when its position is
+`queued` and:
+- no session or live pool instance is behind any of its items;
+- no dispatch for any of its items waits in a member's pending queue or the
+  team's admission lane (`queued` input, from `entryTicketRef` over both);
+- no readiness gate holds its PR hand-off (#2795);
+- one of its open items carries a wake label (`consumersOf`) without that
+  label's `:wip` claim, with at least one live consumer (otherwise A5.3's
+  *nobody picks it up* applies), whose Event Log trail shows it never reached a
+  consumer role — for longer than `PARKED_WAKE_MS` (30 min).
+
+The trail is every log entry on the item about that label: its own add/remove,
+its `:wip`/`:completed` swaps, or an outcome stamped with it as `wakeLabel`.
+The latest entry decides (`parkedWakes`):
+
+| Latest entry | Cause | Clock starts |
+|---|---|---|
+| the label's add; a consumer outcome got through (delivered, held, digest) | — not parked | — |
+| the label's add; the consumer was dropped as `history-horizon` | `history-horizon` | the event's `createdAt` |
+| the label's add; dropped as `wake-already-armed` | `wake-already-armed` | the event's `createdAt` |
+| the label's add; dropped for another reason / no consumer outcome | `dropped` + `dropReason` (`no-subscriber`) | the event's `createdAt` |
+| none, or a later swap / removal | `not-seen` — the add that put the label back never surfaced | the item's `updatedAt` (or the trail's last entry, the later) |
+
+The clock uses GitHub's own `createdAt`, so a `history-horizon` drop logged
+hours late flags at once. A delivered outcome with no label stamp at all
+(entries from before #1846) on a label event counts as delivered, so an old
+log never raises the flag. Each flagged wake is listed on the row's
+`needsHuman.wakes` (`{repo, number, kind, label, cause, dropReason?, eventId,
+since}`), and the board's **Needs you** area shows `label — cause`, linked to
+the GitHub Event Log row (`/github-events?event=<id>`, which shows that one
+event over the 7-day retention). The action that restarts such a row is #2873.

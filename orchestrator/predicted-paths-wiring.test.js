@@ -60,7 +60,7 @@ test("mutation-proved: a sweep with the gate removed would fire prediction uncon
 test("only UNCLAIMED (about-to-dispatch) candidates trigger a new prediction — not every ticket in the ledger", () => {
   const src = fn("flowSupervisorSweepTeam");
   assert.match(src, /unclaimedCandidates = pooledCandidates\.filter\(\(t\) => t\.blocker === flowSupervisor\.AUTO_DISPATCH_BLOCKER\)/);
-  assert.match(src, /_ensurePredictedPaths\(teamId, unclaimedCandidates, pathsCache\)/);
+  assert.match(src, /_ensurePredictedPaths\(teamId, unclaimedCandidates, pathsCache, fleet\)/);
 });
 
 test("busy path sets are read from the CACHE for active tickets, never trigger a fresh prediction for them", () => {

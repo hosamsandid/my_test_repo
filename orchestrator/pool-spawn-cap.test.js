@@ -55,7 +55,7 @@ function harness({ maxInstances = 3, existing = [], waiting = [] } = {}) {
     poolSpawns: poolSpawnSlots.createSpawnSlots(),
     console: { log() {}, warn() {}, error() {} },
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return {}; },
-    listAgentIds: () => [...configs.keys()],
+    listAgentIds: (prefix = '') => [...configs.keys()].filter((id) => id.startsWith(prefix)), // #569: prefix-narrowed
     loadAgentConfig: (id) => configs.get(id) || null,
     loadPoolControl: () => ({}),
     loadPausedHold: () => ({}),

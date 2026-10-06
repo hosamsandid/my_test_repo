@@ -236,7 +236,7 @@ test("#2301: gracefulPoolTeardown stamps archived-at.json so the prune pass neve
 
 test("#2301: poolReapSweepTeam invokes the archive-prune pass every tick, best-effort", () => {
   const src = fn("poolReapSweepTeam");
-  assert.match(src, /_pruneArchivedPoolLogs\(teamId, now\)/);
+  assert.match(src, /_pruneArchivedPoolLogs\(teamId, now, fleet\)/); // #569: the tick's snapshot rides along
 });
 
 test("#2301: _pruneArchivedPoolLogs reads the archived-at.json stamp, not fs.statSync mtime", () => {

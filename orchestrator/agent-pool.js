@@ -521,6 +521,46 @@ function waitJustEnded(prev, next, idle) {
   return !!(idle && prev && prev.waiting && next && !next.waiting && !next.unknown);
 }
 
+// #569: whether two `pool-waiting.json` maps hold the same records, key order
+// aside — the reap sweep skips the write when nothing changed (for a team with
+// no pooled instance that is `{}` → `{}` on every tick).
+function sameWaitingMap(a, b) {
+  return canonicalJson(a || {}) === canonicalJson(b || {});
+}
+
+// #569 review: `pool-waiting.json` as read from disk. `text` is the file's
+// contents, or null when there is no file. `intact` is false when the file
+// would not parse or holds anything its normalized form drops — the console
+// reads the RAW file, so comparing only the normalized map would leave a torn
+// file (normalized to `{}`) on disk forever next to an equally empty
+// `nextWaiting`. A missing file is intact: it reads as "none" everywhere.
+function parsePoolWaitingFile(text) {
+  if (text == null) return { waiting: {}, intact: true };
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { waiting: {}, intact: false };
+  }
+  const waiting = normalizePoolWaiting(raw);
+  const isMap = !!raw && typeof raw === 'object' && !Array.isArray(raw);
+  return { waiting, intact: isMap && sameWaitingMap(raw, waiting) };
+}
+
+// Whether the reap sweep must (re)write `pool-waiting.json`: the records
+// changed, or what is on disk is not a clean copy of what it read.
+function poolWaitingNeedsWrite({ intact, prev, next }) {
+  return intact !== true || !sameWaitingMap(prev, next);
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value === undefined ? null : value);
+}
+
 module.exports = {
   POOL_WORKSPACES,
   POOL_CONTROL_STATES,
@@ -549,4 +589,7 @@ module.exports = {
   nextWaitRecord,
   endWait,
   waitJustEnded,
+  sameWaitingMap,
+  parsePoolWaitingFile,
+  poolWaitingNeedsWrite,
 };

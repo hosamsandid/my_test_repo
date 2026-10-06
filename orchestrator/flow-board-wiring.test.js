@@ -26,7 +26,7 @@ function body(marker) {
 }
 
 test("poolReapSweepTeam settles finished drains", () => {
-  assert.match(body("async function poolReapSweepTeam("), /settlePoolDrains\(teamId\)/);
+  assert.match(body("async function poolReapSweepTeam("), /settlePoolDrains\(teamId, fleet\)/);
   assert.match(body("function settlePoolDrains("), /agentPool\.settleDrain\(/);
 });
 

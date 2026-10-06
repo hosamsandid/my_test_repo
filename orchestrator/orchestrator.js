@@ -129,7 +129,9 @@ const {
 } = require("./agent-repositories");
 const { computeTeamRoster, createVerdictStore } = require("./loop-verify");
 const { assembleClaudeMd, buildMemoryHint, SCOPED_KNOWLEDGE_FILENAME } = require("./prompt-assembly");
-const { readMaintenanceState } = require("./maintenance-state-reader");
+const { readMaintenanceState, readMaintenanceStateCached } = require("./maintenance-state-reader");
+const fleetSnapshot = require("./fleet-snapshot");
+const sweepTick = require("./sweep-tick");
 // Browsing the read-only host-folder context mount (#1286): the pure path /
 // program / parsing rules, plus the one-shot exec that runs them where the
 // folder actually exists — inside the agent's own container.
@@ -2223,10 +2225,16 @@ function _flowLiftEmits(cfgEmits, triggers) {
 // The team's members (+ their triggers) and the environments they are bound to.
 // Extracted so the flow-anomaly sweep and admission control (#2114) derive the
 // same flow model from the same walk rather than keeping two copies of it.
-function _flowTeamMembers(teamId) {
+//
+// `fleet` — a sweep tick's `buildFleetSnapshot` (#569 review): the team's
+// member ids come from its parent index instead of a whole-fleet scan, but
+// each member's config (and triggers.json) is still read fresh from disk —
+// the admission sweep and the supervisor act on this model.
+function _flowTeamMembers(teamId, fleet = null) {
   const members = [];
   const envIds = new Set();
-  for (const id of listAgentIds()) {
+  const candidateIds = fleet ? fleetSnapshot.childrenOf(fleet, teamId).map((c) => c.id) : listAgentIds();
+  for (const id of candidateIds) {
     let cfg = null;
     try {
       cfg = loadAgentConfig(id);
@@ -2428,12 +2436,15 @@ const TICKET_PR_ENRICH_LIMIT = Math.max(
 // ledger's precision, never turn the endpoint into a 500. A PR whose enrichment
 // failed keeps `mergeable: 'UNKNOWN'`, and every rule that would need it
 // declines rather than guesses.
-async function computeTeamTicketLedger(teamId, { now = Date.now() } = {}) {
+//
+// `fleet` (#569 review): a sweep tick's snapshot, so the supervisor's ledger
+// read enumerates the team's members from it instead of scanning the fleet.
+async function computeTeamTicketLedger(teamId, { now = Date.now(), fleet = null } = {}) {
   const teamCfg = loadAgentConfig(teamId) || {};
   const labels = Array.isArray(teamCfg.labels) ? teamCfg.labels : [];
   const thresholds = ticketReconcileSweep.resolveTicketThresholds(teamCfg.ticketThresholds);
 
-  const { members, envIds } = _flowTeamMembers(teamId);
+  const { members, envIds } = _flowTeamMembers(teamId, fleet);
   const model = buildFlowModel(members, { labels });
   const repoToken = _flowRepoTokens(envIds);
 
@@ -2855,11 +2866,11 @@ function _waitingInstanceIdsForRole(teamId, roleFullId) {
 // settles to `off` only once the waiting instances are gone (their PRs merged
 // or closed). Reaping them on drain would throw away the very context this
 // keep-alive exists for.
-function settlePoolDrains(teamId) {
+function settlePoolDrains(teamId, fleet = null) {
   const control = loadPoolControl(teamId);
   let changed = false;
   let waiting = null;
-  for (const role of _teamPooledRoles(teamId)) {
+  for (const role of _teamPooledRoles(teamId, fleet)) {
     const roleId = agentPool.roleIdFromMemberId(role.id, teamId);
     const state = agentPool.poolControlState(control, roleId);
     if (state !== "draining") continue;
@@ -3144,20 +3155,53 @@ function _internalSelfDelete(agentId) {
 }
 
 // Every pooled-role TEMPLATE of a team (not an instance — see `isPooledRole`).
-function _teamPooledRoles(teamId) {
+// `fleet` — a sweep tick's `buildFleetSnapshot` (#569): the team's children
+// come from its parent index instead of a full scan per call. Without one
+// (board reads, routes, dispatch) it reads the disk as before. A role's `cfg`
+// from a snapshot is frozen — re-read it before handing it to a write path.
+function _teamPooledRoles(teamId, fleet = null) {
   const roles = [];
-  for (const id of listAgentIds()) {
-    let cfg = null;
-    try {
-      cfg = loadAgentConfig(id);
-    } catch {
-      continue;
-    }
+  const candidates = fleet
+    ? fleetSnapshot.childrenOf(fleet, teamId)
+    : listAgentIds().map((id) => {
+      try {
+        return { id, cfg: loadAgentConfig(id) };
+      } catch {
+        return { id, cfg: null };
+      }
+    });
+  for (const { id, cfg } of candidates) {
     if (!cfg || (cfg.parentTeamId || null) !== teamId) continue;
     if (!agentPool.isPooledRole(cfg)) continue;
     roles.push({ id, cfg, pool: agentPool.normalizePoolConfig(cfg.pool) });
   }
   return roles;
+}
+
+// One pooled role template re-read from disk, in `_teamPooledRoles`' shape —
+// or null once it is gone, moved to another team, or no longer pooled. The
+// sweeps that act irreversibly (delete an instance, stamp needs-human, prune
+// an archive) judge on this right before acting (#569 review): the tick's
+// snapshot can be minutes of GitHub awaits old by then, and a raised budget
+// or a switched-off pool must win over it. One config read per decision.
+function _rereadPooledRole(teamId, roleId) {
+  let cfg = null;
+  try {
+    cfg = loadAgentConfig(roleId);
+  } catch {
+    return null;
+  }
+  if (!cfg || (cfg.parentTeamId || null) !== teamId || !agentPool.isPooledRole(cfg)) return null;
+  return { id: roleId, cfg, pool: agentPool.normalizePoolConfig(cfg.pool) };
+}
+
+// A team's pooled roles for a sweep that dispatches or reaps: with a tick
+// snapshot, the snapshot only names the candidates and each role is re-read
+// (`_rereadPooledRole`) — one config per role, never a fleet scan. Without
+// one, `_teamPooledRoles` reads the disk anyway.
+function _freshTeamPooledRoles(teamId, fleet = null) {
+  if (!fleet) return _teamPooledRoles(teamId);
+  return _teamPooledRoles(teamId, fleet).map((r) => _rereadPooledRole(teamId, r.id)).filter(Boolean);
 }
 
 // Every LIVE instance of a pooled role template (any work item, not just one)
@@ -3169,8 +3213,7 @@ function _teamPooledRoles(teamId) {
 function _liveInstanceIdsForRole(roleFullId) {
   const prefix = `${roleFullId}-i`;
   const ids = [];
-  for (const id of listAgentIds()) {
-    if (!id.startsWith(prefix)) continue;
+  for (const id of listAgentIds(prefix)) {
     let cfg = null;
     try {
       cfg = loadAgentConfig(id);
@@ -3206,8 +3249,7 @@ function _cappedInstanceIdsForRole(roleFullId) {
 function _liveInstancesForRole(roleFullId) {
   const prefix = `${roleFullId}-i`;
   const out = [];
-  for (const id of listAgentIds()) {
-    if (!id.startsWith(prefix)) continue;
+  for (const id of listAgentIds(prefix)) {
     let cfg = null;
     try {
       cfg = loadAgentConfig(id);
@@ -3294,19 +3336,28 @@ function _readInstanceStatus(id) {
 // reaped, its waiting time is left out of the runtime budget, and once its
 // last PR is merged or closed an idle instance is reaped straight away (AC6).
 // The records land in `pool-waiting.json` for the cap check and the UI.
-async function poolReapSweepTeam(teamId, now = Date.now()) {
-  const prevWaiting = loadPoolWaiting(teamId);
+//
+// `fleet` — the tick's `buildFleetSnapshot` (#569): the pooled roles and their
+// instance candidates come from it, but each candidate's config is re-read
+// from disk before anything is decided about it, and so is its role's (the
+// teardown budgets, the pooled status) right before any reap — a snapshot is
+// up to a tick of GitHub awaits old by the time a later team's sweep runs.
+async function poolReapSweepTeam(teamId, now = Date.now(), fleet = null) {
+  const { waiting: prevWaiting, intact: prevWaitingIntact } = loadPoolWaitingFile(teamId);
   const nextWaiting = {};
   const openPrsByRepo = new Map(); // repo -> Promise<{ok, prs}>, one read per sweep
   const openPrsFor = (repo) => {
     if (!openPrsByRepo.has(repo)) openPrsByRepo.set(repo, _openPullsForRepo(repo));
     return openPrsByRepo.get(repo);
   };
-  for (const role of _teamPooledRoles(teamId)) {
-    const { maxRuntimeMs, idleTimeoutMs } = role.pool.teardown;
+  for (const role of _teamPooledRoles(teamId, fleet)) {
     const prefix = `${role.id}-i`;
-    for (const id of listAgentIds()) {
-      if (!id.startsWith(prefix)) continue;
+    // The snapshot only narrows the candidates by name; the identity check
+    // below runs on the fresh read.
+    const candidateIds = fleet
+      ? fleetSnapshot.idsWithPrefix(fleet, prefix).map(({ id }) => id)
+      : listAgentIds(prefix);
+    for (const id of candidateIds) {
       let cfg = null;
       try {
         cfg = loadAgentConfig(id);
@@ -3332,6 +3383,14 @@ async function poolReapSweepTeam(teamId, now = Date.now()) {
       nextWaiting[id] = rec;
 
       if (rec.waiting) continue; // AC1/AC2: never reaped while waiting
+
+      // #569 review: every reap below is irreversible, so the role's budgets
+      // and its pooled status come from a fresh read taken after the open-PR
+      // await above — never from the tick's snapshot, which a later team's
+      // sweep sees minutes old. A role switched off or moved since: no reap.
+      const live = _rereadPooledRole(teamId, role.id);
+      if (!live) continue;
+      const { maxRuntimeMs, idleTimeoutMs } = live.pool.teardown;
 
       if (agentPool.isInstanceTimedOut({ spawnedAt, maxRuntimeMs, waitedMs: agentPool.waitedMsSoFar(rec, now) }, now)) {
         console.warn(`[AgentPool] ${teamId}: ${id} exceeded its ${maxRuntimeMs}ms runtime budget — reaping`);
@@ -3391,17 +3450,24 @@ async function poolReapSweepTeam(teamId, now = Date.now()) {
   // with "waiting" here; harmless, since every reader also checks the
   // instance is not busy (`_waitingInstancesForRole`) and the next sweep
   // sees it working.
-  savePoolWaiting(teamId, nextWaiting);
+  //
+  // #569: written only when it changed — for the ~all teams with no pooled
+  // instance this is `{}` → `{}` every minute, one state-file write per team.
+  // A torn or otherwise unclean file is rewritten regardless: the console
+  // reads it raw, so "the normalized maps are equal" is not "the file is fine".
+  if (agentPool.poolWaitingNeedsWrite({ intact: prevWaitingIntact, prev: prevWaiting, next: nextWaiting })) {
+    savePoolWaiting(teamId, nextWaiting);
+  }
   // #2573: a finished drain switches its role off.
   try {
-    settlePoolDrains(teamId);
+    settlePoolDrains(teamId, fleet);
   } catch (err) {
     console.warn(`[AgentPool] ${teamId}: drain settle failed: ${err.message}`);
   }
   // Gap 4: prune archived pool session logs past retainLogsMs. Best-effort,
   // same tick — a failure here never blocks the reap above.
   try {
-    _pruneArchivedPoolLogs(teamId, now);
+    _pruneArchivedPoolLogs(teamId, now, fleet);
   } catch (err) {
     console.warn(`[AgentPool] ${teamId}: archive prune failed: ${err.message}`);
   }
@@ -3414,7 +3480,7 @@ async function poolReapSweepTeam(teamId, now = Date.now()) {
 // (never the directory's mtime — `fs.cpSync` can leave it carrying the
 // copied files' own, older mtimes). Best-effort per entry: one unreadable
 // stamp or failed `rmSync` never blocks the rest.
-function _pruneArchivedPoolLogs(teamId, now = Date.now()) {
+function _pruneArchivedPoolLogs(teamId, now = Date.now(), fleet = null) {
   const seg = knowledgeFeed.safeTeamSegment(teamId || "");
   if (!seg) return;
   const archiveRoot = path.join(HILL_CLIMB_TEAMS_DIR, seg, "pool-archive");
@@ -3424,9 +3490,14 @@ function _pruneArchivedPoolLogs(teamId, now = Date.now()) {
   } catch {
     return;
   }
-  for (const role of _teamPooledRoles(teamId)) {
-    const retainLogsMs = role.pool.teardown.retainLogsMs;
+  for (const role of _teamPooledRoles(teamId, fleet)) {
     const prefix = `${role.id}-i`;
+    if (!entries.some((e) => e.isDirectory() && e.name.startsWith(prefix))) continue;
+    // #569 review: the rmSync below is irreversible — `retainLogsMs` comes
+    // from the role as it is on disk now, not from the tick's snapshot.
+    const live = _rereadPooledRole(teamId, role.id);
+    if (!live) continue;
+    const retainLogsMs = live.pool.teardown.retainLogsMs;
     for (const e of entries) {
       if (!e.isDirectory() || !e.name.startsWith(prefix)) continue;
       const dir = path.join(archiveRoot, e.name);
@@ -3459,7 +3530,10 @@ function _pruneArchivedPoolLogs(teamId, now = Date.now()) {
 // Costs nothing for a flow at rest: a team with no `wipLimit`, or one whose lane
 // holds neither an in-flight ticket nor a held dispatch, returns before the first
 // request. Returns null when it did nothing.
-async function admissionSweepTeam(teamId) {
+//
+// `fleet` (#569 review): the tick's snapshot — only the member enumeration
+// uses it; the team and every member config are read fresh.
+async function admissionSweepTeam(teamId, { fleet = null } = {}) {
   let teamCfg = null;
   try {
     teamCfg = loadAgentConfig(teamId);
@@ -3472,7 +3546,7 @@ async function admissionSweepTeam(teamId) {
   const lane = loadAdmissionLane(teamId);
   if (!admissionControl.laneNeedsRefresh(lane)) return null;
 
-  const { members, envIds } = _flowTeamMembers(teamId);
+  const { members, envIds } = _flowTeamMembers(teamId, fleet);
   const model = buildFlowModel(members, { labels: Array.isArray(teamCfg.labels) ? teamCfg.labels : [] });
   const activeLabels = admissionControl.activeFlowLabels(model);
   const repoToken = _flowRepoTokens(envIds);
@@ -3726,13 +3800,13 @@ async function _predictTicketPaths(teamId, ticket, repoToken, repoTreeCache) {
 // once cached, a ticket never needs predicting again (see
 // `loadPredictedPathsCache`).
 const PREDICTED_PATHS_MAX_NEW_PER_TICK = 50;
-async function _ensurePredictedPaths(teamId, candidates, cache) {
+async function _ensurePredictedPaths(teamId, candidates, cache, fleet = null) {
   const pending = candidates
     .filter((t) => !cache[t.ticketId])
     .sort((a, b) => (b.ageInStateMs || 0) - (a.ageInStateMs || 0))
     .slice(0, PREDICTED_PATHS_MAX_NEW_PER_TICK);
   if (pending.length === 0) return cache;
-  const { envIds } = _flowTeamMembers(teamId);
+  const { envIds } = _flowTeamMembers(teamId, fleet);
   const repoToken = _flowRepoTokens(envIds);
   const repoTreeCache = new Map();
   for (const t of pending) {
@@ -3761,7 +3835,11 @@ const FLOW_SUPERVISOR_ACTIVE_STATES = new Set(['ready', 'in-dev', 'in-review', '
  * action per (ticket, blocker) per window. Returns `null` when there is
  * nothing this team opted into or nothing to do.
  */
-async function flowSupervisorSweepTeam(teamId, { now = Date.now() } = {}) {
+//
+// `fleet` (#569 review): the tick's snapshot — it narrows the role and member
+// enumerations only; each pooled role is re-read before it can be dispatched
+// to (`_freshTeamPooledRoles`), and the team config is read fresh below.
+async function flowSupervisorSweepTeam(teamId, { now = Date.now(), fleet = null } = {}) {
   let teamCfg = null;
   try {
     teamCfg = loadAgentConfig(teamId);
@@ -3782,7 +3860,7 @@ async function flowSupervisorSweepTeam(teamId, { now = Date.now() } = {}) {
   // SDLC label path gets the same hold independently, in `routePooledDispatch`.)
   const poolControl = loadPoolControl(teamId);
   const pooledRoleIds = new Set(
-    _teamPooledRoles(teamId)
+    _freshTeamPooledRoles(teamId, fleet)
       .filter((r) => agentPool.poolControlState(poolControl, agentPool.roleIdFromMemberId(r.id, teamId)) === 'running')
       .map((r) => r.id),
   );
@@ -3793,7 +3871,7 @@ async function flowSupervisorSweepTeam(teamId, { now = Date.now() } = {}) {
 
   let ledger;
   try {
-    ledger = await computeTeamTicketLedger(teamId, { now });
+    ledger = await computeTeamTicketLedger(teamId, { now, fleet });
   } catch (err) {
     console.warn(`[FlowSupervisor] ${teamId}: ledger read failed: ${err.message}`);
     return null;
@@ -3819,7 +3897,7 @@ async function flowSupervisorSweepTeam(teamId, { now = Date.now() } = {}) {
   if (usePathContention) {
     pathsCache = loadPredictedPathsCache(teamId);
     const unclaimedCandidates = pooledCandidates.filter((t) => t.blocker === flowSupervisor.AUTO_DISPATCH_BLOCKER);
-    await _ensurePredictedPaths(teamId, unclaimedCandidates, pathsCache);
+    await _ensurePredictedPaths(teamId, unclaimedCandidates, pathsCache, fleet);
     for (const t of unclaimedCandidates) {
       t.predictedPaths = pathsCache[t.ticketId] ? pathsCache[t.ticketId].paths : [];
     }
@@ -3952,7 +4030,12 @@ function _seedRecurringInput(dest, inputDir, itemId, warnings) {
  * binding (§5), which this function never touches (no GitHub call anywhere
  * in this path).
  */
-async function recurringPoolSweepTeam(teamId, { now = Date.now() } = {}) {
+//
+// `fleet` (#569 review): the tick's snapshot narrows the role enumeration;
+// every role is re-read before it is reaped for or spawned from
+// (`_freshTeamPooledRoles`) — its cfg feeds `startPoolSpawn`, so it must be
+// the live, unfrozen config, never the snapshot's.
+async function recurringPoolSweepTeam(teamId, { now = Date.now(), fleet = null } = {}) {
   let teamCfg = null;
   try {
     teamCfg = loadAgentConfig(teamId);
@@ -3964,7 +4047,7 @@ async function recurringPoolSweepTeam(teamId, { now = Date.now() } = {}) {
   const poolControl = loadPoolControl(teamId);
   const reaped = [];
   const dispatched = [];
-  for (const role of _teamPooledRoles(teamId)) {
+  for (const role of _freshTeamPooledRoles(teamId, fleet)) {
     const workSource = role.pool.workSource;
     if (!workSource) continue; // this pooled role is the SDLC binding, not Phase 3
 
@@ -4059,10 +4142,16 @@ const PROVISIONING_STUCK_MS = Math.max(
 // from two layers: the tick's overlap guard (a slow sweep never stacks) and the
 // DELETE route removing config.json in its fast phase, so the next scan no longer
 // sees a record whose teardown is still finishing in the background.
-async function provisioningReapSweep(now = Date.now(), { thresholdMs = PROVISIONING_STUCK_MS } = {}) {
+//
+// `fleet` (#569): the tick's snapshot picks the candidates — only a config the
+// snapshot read as `_provisioning:true` is re-read and judged below, so the
+// sweep no longer reads every config a second time each minute.
+async function provisioningReapSweep(now = Date.now(), { thresholdMs = PROVISIONING_STUCK_MS, fleet = null } = {}) {
   let ids = [];
   try {
-    ids = listAgentIds();
+    ids = fleet
+      ? fleet.ids.filter((id) => { const c = fleet.configById.get(id); return c && c._provisioning === true; })
+      : listAgentIds();
   } catch (err) {
     console.warn(`[Provisioning] agent enumeration failed: ${err.message}`);
     return;
@@ -6233,10 +6322,14 @@ async function reseedAgent(id, paths) {
   }
 }
 
-function listAgentIds() {
+// The agent ids on disk — every dir holding a config.json, in readdir order.
+// `prefix` (#569) narrows by dir name BEFORE the per-dir existsSync, so a
+// pooled role's instance lookup (`<role>-i`) costs one readdir plus a stat per
+// instance, not one per agent in the fleet.
+function listAgentIds(prefix = "") {
   if (!fs.existsSync(AGENTS_DIR)) return [];
   return fs.readdirSync(AGENTS_DIR).filter((f) =>
-    fs.existsSync(path.join(AGENTS_DIR, f, "config.json"))
+    f.startsWith(prefix) && fs.existsSync(path.join(AGENTS_DIR, f, "config.json"))
   );
 }
 
@@ -11187,20 +11280,36 @@ function poolWaitingPath(teamId) {
 }
 
 function loadPoolWaiting(teamId) {
-  try {
-    return agentPool.normalizePoolWaiting(JSON.parse(fs.readFileSync(poolWaitingPath(teamId), "utf8")));
-  } catch {
-    return {};
-  }
+  return loadPoolWaitingFile(teamId).waiting;
 }
 
+// `{ waiting, intact }` (`agentPool.parsePoolWaitingFile`): the reap sweep
+// also needs to know whether the file on disk is a clean copy of what it
+// read, so a torn one gets rewritten even when nothing changed (#569 review).
+// An unreadable file (other than a missing one) reads as not intact.
+function loadPoolWaitingFile(teamId) {
+  let text = null;
+  try {
+    text = fs.readFileSync(poolWaitingPath(teamId), "utf8");
+  } catch (err) {
+    if (!err || err.code !== "ENOENT") return { waiting: {}, intact: false };
+  }
+  return agentPool.parsePoolWaitingFile(text);
+}
+
+// Written atomically (tmp + rename, like `saveAgentConfig`): the console and
+// the cap check read this file while the sweep rewrites it, and a reader
+// seeing a half-written file would read every instance as not waiting.
 function savePoolWaiting(teamId, waiting) {
   const p = poolWaitingPath(teamId);
+  const tmp = `${p}.${process.pid}.${savePoolWaiting._n = (savePoolWaiting._n || 0) + 1}.tmp`;
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, JSON.stringify(waiting, null, 2));
+    fs.writeFileSync(tmp, JSON.stringify(waiting, null, 2));
+    fs.renameSync(tmp, p);
     return true;
   } catch (err) {
+    try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
     console.error(`[AgentPool] cannot persist pool-waiting for ${teamId}: ${err.message}`);
     return false;
   }
@@ -18610,8 +18719,9 @@ async function main() {
     // The state file lives outside any agent's own workspace subtree, which
     // the default SubPath / per-agent-volume isolation doesn't mount — every
     // agent (isolated or not) asks us instead of reading it directly.
+    // Served from a ~2 s memo (#569): every agent polls this several times a minute.
     if (req.method === 'GET' && req.url === '/internal/maintenance-mode') {
-      const state = readMaintenanceState();
+      const state = readMaintenanceStateCached();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, active: !!state.active }));
       return;
@@ -22096,6 +22206,47 @@ async function main() {
   if (typeof anomalyHistoryTimer.unref === "function") anomalyHistoryTimer.unref();
 
   // ============================================================
+  // #569 — shared plumbing of the five 60 s sweep ticks below (admission,
+  // pool reap, provisioning reap, flow supervisor, recurring pool).
+  // - `buildTickFleet`: one read of every config per tick (fleet-snapshot.js),
+  //   instead of one full scan per tick plus 2–3 per team.
+  // - `startSweepTick`: registers a tick in its slot; once all five are in,
+  //   `armSweepTicks` (after the last section) times their first runs from
+  //   one common base (sweep-tick.js `sweepTickSchedule`), so the five no
+  //   longer fire in the same event-loop turn and no first run comes later
+  //   than its own interval after start-up.
+  // - `logSlowTick`: `[perf] tick=<name> ms=<n>` past AEE_SLOW_REQUEST_MS.
+  // ============================================================
+  const SWEEP_TICK_SLOTS = 5;
+  const sweepTickSlots = new Array(SWEEP_TICK_SLOTS).fill(null);
+  // One reporter for all five ticks: a torn config warns once, not 5×/min.
+  const reportUnreadableConfigs = fleetSnapshot.createUnreadableConfigReporter({
+    warn: (line) => console.warn(line),
+  });
+  const buildTickFleet = (tick) => {
+    const fleet = fleetSnapshot.buildFleetSnapshot(listAgentIds(), { loadConfig: loadAgentConfig });
+    reportUnreadableConfigs(fleet, tick);
+    return fleet;
+  };
+  // `run` fires once at the slot's first-run time, then `start` sets up the
+  // tick's own setInterval.
+  const startSweepTick = (slot, intervalMs, run, start) => {
+    sweepTickSlots[slot] = { intervalMs, run, start };
+  };
+  const armSweepTicks = () => {
+    const schedule = sweepTick.sweepTickSchedule(sweepTickSlots.map((s) => (s ? s.intervalMs : 0)));
+    sweepTickSlots.forEach((s, i) => {
+      if (!s) return;
+      const t = setTimeout(() => { void s.run(); s.start(); }, schedule[i].firstRunMs);
+      if (typeof t.unref === "function") t.unref();
+    });
+  };
+  const logSlowTick = sweepTick.createSlowTickLogger({
+    ...sweepTick.slowTickConfigFromEnv(process.env),
+    log: (line) => console.log(line),
+  });
+
+  // ============================================================
   // Admission control (#2114): the reconcile tick that releases finished
   // tickets and promotes held dispatches. Frequency is a LATENCY choice — it
   // bounds how long a queued ticket waits after the previous one finishes — so
@@ -22113,20 +22264,22 @@ async function main() {
   const runAdmissionTick = async () => {
     if (admissionBusy) return; // overlap guard — a slow sweep must not stack
     admissionBusy = true;
+    const tickStartedAt = Date.now();
     try {
-      let teamIds = [];
+      let fleet = null;
       try {
-        teamIds = listAgentIds().filter((id) => {
-          try { const c = loadAgentConfig(id); return c && c.role === "team"; }
-          catch { return false; }
-        });
+        fleet = buildTickFleet("admission");
       } catch (err) {
         console.warn(`[Admission] team enumeration failed: ${err.message}`);
         return;
       }
+      // #569: `admissionSweepTeam` returns before its first request for a
+      // team with no wipLimit, so only those are swept; the sweep re-reads
+      // the team's config itself.
+      const teamIds = fleet.teamIds.filter((id) => fleetSnapshot.wantsAdmissionSweep(fleet, id));
       for (const teamId of teamIds) {
         try {
-          await admissionSweepTeam(teamId);
+          await admissionSweepTeam(teamId, { fleet });
         } catch (err) {
           // Never let one team's failure stop the others, and never let it
           // escape the timer — the lane is untouched, so the next tick retries.
@@ -22135,10 +22288,13 @@ async function main() {
       }
     } finally {
       admissionBusy = false;
+      logSlowTick("admission", tickStartedAt);
     }
   };
-  const admissionTimer = setInterval(runAdmissionTick, ADMISSION_TICK_INTERVAL_MS);
-  if (typeof admissionTimer.unref === "function") admissionTimer.unref();
+  startSweepTick(0, ADMISSION_TICK_INTERVAL_MS, runAdmissionTick, () => {
+    const admissionTimer = setInterval(runAdmissionTick, ADMISSION_TICK_INTERVAL_MS);
+    if (typeof admissionTimer.unref === "function") admissionTimer.unref();
+  });
 
   // ============================================================
   // Agent Pools — the hard-timeout/idle/archive-prune reap tick (#2301).
@@ -22157,20 +22313,19 @@ async function main() {
   const runPoolReapTick = async () => {
     if (poolReapBusy) return; // overlap guard — a slow sweep must not stack
     poolReapBusy = true;
+    const tickStartedAt = Date.now();
     try {
-      let teamIds = [];
+      let fleet = null;
       try {
-        teamIds = listAgentIds().filter((id) => {
-          try { const c = loadAgentConfig(id); return c && c.role === "team"; }
-          catch { return false; }
-        });
+        fleet = buildTickFleet("pool-reap");
       } catch (err) {
         console.warn(`[AgentPool] reap team enumeration failed: ${err.message}`);
         return;
       }
+      const teamIds = fleet.teamIds;
       for (const teamId of teamIds) {
         try {
-          await poolReapSweepTeam(teamId);
+          await poolReapSweepTeam(teamId, Date.now(), fleet);
         } catch (err) {
           // Never let one team's failure stop the others or escape the timer.
           console.warn(`[AgentPool] ${teamId}: reap sweep failed: ${err.message}`);
@@ -22178,10 +22333,13 @@ async function main() {
       }
     } finally {
       poolReapBusy = false;
+      logSlowTick("pool-reap", tickStartedAt);
     }
   };
-  const poolReapTimer = setInterval(runPoolReapTick, POOL_REAP_TICK_INTERVAL_MS);
-  if (typeof poolReapTimer.unref === "function") poolReapTimer.unref();
+  startSweepTick(1, POOL_REAP_TICK_INTERVAL_MS, runPoolReapTick, () => {
+    const poolReapTimer = setInterval(runPoolReapTick, POOL_REAP_TICK_INTERVAL_MS);
+    if (typeof poolReapTimer.unref === "function") poolReapTimer.unref();
+  });
 
   // ============================================================
   // #2493 — stuck-`_provisioning` reaper tick. Detects agent configs that have
@@ -22200,17 +22358,30 @@ async function main() {
   const runProvisioningReapTick = async () => {
     if (provisioningReapBusy) return; // overlap guard — a slow sweep must not stack (edge case 2: no double-act)
     provisioningReapBusy = true;
+    const tickStartedAt = Date.now();
     try {
-      await provisioningReapSweep();
+      // Built here, not in the sweep's argument list: an enumeration failure
+      // keeps the sweep's own `agent enumeration failed` line (#569 review).
+      let fleet = null;
+      try {
+        fleet = buildTickFleet("provisioning-reap");
+      } catch (err) {
+        console.warn(`[Provisioning] agent enumeration failed: ${err.message}`);
+        return;
+      }
+      await provisioningReapSweep(Date.now(), { fleet });
     } catch (err) {
       // Never let the sweep escape the timer — the next tick retries.
       console.warn(`[Provisioning] reap sweep failed: ${err.message}`);
     } finally {
       provisioningReapBusy = false;
+      logSlowTick("provisioning-reap", tickStartedAt);
     }
   };
-  const provisioningReapTimer = setInterval(runProvisioningReapTick, PROVISIONING_REAP_TICK_INTERVAL_MS);
-  if (typeof provisioningReapTimer.unref === "function") provisioningReapTimer.unref();
+  startSweepTick(2, PROVISIONING_REAP_TICK_INTERVAL_MS, runProvisioningReapTick, () => {
+    const provisioningReapTimer = setInterval(runProvisioningReapTick, PROVISIONING_REAP_TICK_INTERVAL_MS);
+    if (typeof provisioningReapTimer.unref === "function") provisioningReapTimer.unref();
+  });
 
   // ============================================================
   // Agent Pools — Phase 2 (#2247): the Flow Supervisor's reconcile tick.
@@ -22226,22 +22397,25 @@ async function main() {
   const runFlowSupervisorTick = async () => {
     if (flowSupervisorBusy) return; // overlap guard — a slow sweep must not stack
     flowSupervisorBusy = true;
+    const tickStartedAt = Date.now();
     try {
       const maint = readMaintenanceState();
       if (maint && maint.active) return; // human owns readiness; the supervisor only owns timing, and pauses like every other scheduled dispatcher during maintenance
-      let teamIds = [];
+      let fleet = null;
       try {
-        teamIds = listAgentIds().filter((id) => {
-          try { const c = loadAgentConfig(id); return c && c.role === "team"; }
-          catch { return false; }
-        });
+        fleet = buildTickFleet("flow-supervisor");
       } catch (err) {
         console.warn(`[FlowSupervisor] team enumeration failed: ${err.message}`);
         return;
       }
+      // #569: only teams that opted into autoDispatch, have a wipLimit AND
+      // hold a pooled role — `flowSupervisorSweepTeam` returns null for every
+      // other team before its first request, re-reading the team's config
+      // itself (fleet-snapshot.js `wantsFlowSupervisorSweep`).
+      const teamIds = fleet.teamIds.filter((id) => fleetSnapshot.wantsFlowSupervisorSweep(fleet, id));
       for (const teamId of teamIds) {
         try {
-          await flowSupervisorSweepTeam(teamId);
+          await flowSupervisorSweepTeam(teamId, { fleet });
         } catch (err) {
           // Never let one team's failure stop the others or escape the timer.
           console.warn(`[FlowSupervisor] ${teamId}: sweep failed: ${err.message}`);
@@ -22249,10 +22423,13 @@ async function main() {
       }
     } finally {
       flowSupervisorBusy = false;
+      logSlowTick("flow-supervisor", tickStartedAt);
     }
   };
-  const flowSupervisorTimer = setInterval(runFlowSupervisorTick, FLOW_SUPERVISOR_TICK_INTERVAL_MS);
-  if (typeof flowSupervisorTimer.unref === "function") flowSupervisorTimer.unref();
+  startSweepTick(3, FLOW_SUPERVISOR_TICK_INTERVAL_MS, runFlowSupervisorTick, () => {
+    const flowSupervisorTimer = setInterval(runFlowSupervisorTick, FLOW_SUPERVISOR_TICK_INTERVAL_MS);
+    if (typeof flowSupervisorTimer.unref === "function") flowSupervisorTimer.unref();
+  });
 
   // ============================================================
   // Agent Pools — Phase 3 (#2248): the recurring-analysis binding's tick.
@@ -22266,22 +22443,24 @@ async function main() {
   const runRecurringPoolTick = async () => {
     if (recurringPoolBusy) return; // overlap guard — a slow sweep must not stack
     recurringPoolBusy = true;
+    const tickStartedAt = Date.now();
     try {
       const maint = readMaintenanceState();
       if (maint && maint.active) return; // pauses like every other scheduled dispatcher during maintenance
-      let teamIds = [];
+      let fleet = null;
       try {
-        teamIds = listAgentIds().filter((id) => {
-          try { const c = loadAgentConfig(id); return c && c.role === "team"; }
-          catch { return false; }
-        });
+        fleet = buildTickFleet("recurring-pool");
       } catch (err) {
         console.warn(`[AgentPool] recurring-pool team enumeration failed: ${err.message}`);
         return;
       }
+      // #569: only teams with a pooled role that configured a workSource —
+      // `recurringPoolSweepTeam` touches no other team, and re-reads every
+      // config it acts on.
+      const teamIds = fleet.teamIds.filter((id) => fleetSnapshot.wantsRecurringPoolSweep(fleet, id));
       for (const teamId of teamIds) {
         try {
-          await recurringPoolSweepTeam(teamId);
+          await recurringPoolSweepTeam(teamId, { fleet });
         } catch (err) {
           // Never let one team's failure stop the others or escape the timer.
           console.warn(`[AgentPool] ${teamId}: recurring-pool sweep failed: ${err.message}`);
@@ -22289,10 +22468,15 @@ async function main() {
       }
     } finally {
       recurringPoolBusy = false;
+      logSlowTick("recurring-pool", tickStartedAt);
     }
   };
-  const recurringPoolTimer = setInterval(runRecurringPoolTick, RECURRING_POOL_TICK_INTERVAL_MS);
-  if (typeof recurringPoolTimer.unref === "function") recurringPoolTimer.unref();
+  startSweepTick(4, RECURRING_POOL_TICK_INTERVAL_MS, runRecurringPoolTick, () => {
+    const recurringPoolTimer = setInterval(runRecurringPoolTick, RECURRING_POOL_TICK_INTERVAL_MS);
+    if (typeof recurringPoolTimer.unref === "function") recurringPoolTimer.unref();
+  });
+  // #569: all five sweep ticks are registered — time their first runs.
+  armSweepTicks();
 
   // ============================================================
   // Hill-climbing loop Phase 1 (#1222): daily per-team metrics collector.

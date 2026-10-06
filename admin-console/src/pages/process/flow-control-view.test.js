@@ -20,6 +20,8 @@ import {
   poolView,
   groupWorkingNow,
   needsYouView,
+  wakeCauseText,
+  WAKE_CAUSE_TEXT,
   boardView,
   EMPTY_TEXT,
   retentionHint,
@@ -445,6 +447,32 @@ test('help-topics/flow-control.md quotes every tooltip verbatim', () => {
 test('needsYouView: plain reason and waiting time', () => {
   const v = needsYouView({ id: 'o/r#61', title: 'Fix', issue: null, prs: [{ repo: 'o/r', number: 61 }], reason: 'conflict with base', since: ago(130) }, { now: NOW });
   assert.deepEqual({ ref: v.ref, reason: v.reason, waiting: v.waiting }, { ref: 'PR #61', reason: 'conflict with base', waiting: '2h 10m' });
+});
+
+test('needsYouView: a wake never delivered names each label, its cause and the Event Log row (#2872)', () => {
+  const v = needsYouView({
+    id: 'o/r#2819', title: 'Release button', issue: { repo: 'o/r', number: 2819 }, prs: [],
+    reason: 'wake never delivered', since: ago(1094),
+    wakes: [
+      { repo: 'o/r', number: 2820, kind: 'pr', label: 'ready-for-review', cause: 'history-horizon', eventId: '123', since: ago(1094) },
+      { repo: 'o/r', number: 2862, kind: 'pr', label: 'changes-requested', cause: 'not-seen', eventId: null, since: ago(1000) },
+    ],
+  }, { now: NOW });
+  assert.equal(v.reason, 'wake never delivered');
+  assert.deepEqual(v.wakes, [
+    { ref: 'PR #2820', label: 'ready-for-review', cause: 'history-horizon', text: WAKE_CAUSE_TEXT['history-horizon'], href: '/github-events?event=123' },
+    { ref: 'PR #2862', label: 'changes-requested', cause: 'not-seen', text: 'never reported by the GitHub Events API', href: null },
+  ]);
+  assert.deepEqual(needsYouView({ id: 'x', reason: 'conflict with base' }, { now: NOW }).wakes, []);
+});
+
+test('wakeCauseText: the four causes the board reports (#2872)', () => {
+  assert.equal(wakeCauseText({ cause: 'history-horizon' }), 'older than its agent\u2019s trigger (flow re-applied or team moved)');
+  assert.equal(wakeCauseText({ cause: 'wake-already-armed' }), 're-add dropped as already armed');
+  assert.equal(wakeCauseText({ cause: 'not-seen' }), 'never reported by the GitHub Events API');
+  assert.equal(wakeCauseText({ cause: 'dropped', dropReason: 'throttle' }), 'dropped (throttle)');
+  assert.equal(wakeCauseText({ cause: 'dropped' }), 'dropped (unknown)');
+  assert.equal(wakeCauseText(null), '');
 });
 
 test('boardView: an orphaned claim flagged needs-help shows amber on its working row and in Needs you with its waiting time (#2734)', () => {

@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback } from 'react';
-import { useNavigate } from 'react-router';
+import { useNavigate, useSearchParams } from 'react-router';
 import { RefreshCw, MoreVertical } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
@@ -19,6 +19,7 @@ import { workItemTypeLabel } from './github-event-log-type';
 import { isHandoffRow, handoffNote, handoffNoteDisplay, handoffTitleHint } from './github-event-handoff-view';
 import { GITHUB_EVENTS_HELP_SECTIONS } from './github-events-help-sections';
 import GithubRepoStatus from './GithubRepoStatus';
+import { EVENT_PARAM, FOCUS_RANGE_KEY, focusedEventRows, focusNotice } from './github-event-focus';
 
 /* ── Time-range presets ────────────────────────────────────────────── */
 const RANGE_PRESETS = [
@@ -382,7 +383,16 @@ function OutcomeLegend() {
 /* ── Processed-events history (the original view, fed by /api/github-events) ─ */
 function ProcessedEventsView() {
   const navigate = useNavigate();
-  const [rangeKey, setRangeKey] = useState('24h');
+  // `?event=<id>` (#2872, e.g. from the Flow Control board's "wake never
+  // delivered" flag) shows that one event, over the log's whole retention.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const focusEventId = searchParams.get(EVENT_PARAM) || null;
+  const [rangeKey, setRangeKey] = useState(focusEventId ? FOCUS_RANGE_KEY : '24h');
+  const clearFocus = useCallback(() => {
+    const next = new URLSearchParams(searchParams);
+    next.delete(EVENT_PARAM);
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   // Deep-link into the agent chat's Sessions tab, preselecting the session the
   // delivered event triggered (reconstructed correlationId passed via `?session`).
@@ -426,6 +436,8 @@ function ProcessedEventsView() {
     // (#1848), consistent with the Work item / Title columns.
     workItemType: workItemTypeLabel(e.workItem),
   })), [data]);
+  const shownRows = useMemo(() => focusedEventRows(rows, focusEventId), [rows, focusEventId]);
+  const focusText = loading ? null : focusNotice(focusEventId, shownRows.length);
 
   const COLS = [
     // Show a scannable relative phrase ("2 minutes ago") with the exact local
@@ -537,6 +549,12 @@ function ProcessedEventsView() {
         />
         {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
       </div>
+      {focusText && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+          <span>{focusText}</span>
+          <button onClick={clearFocus} style={{ ...controlStyle, cursor: 'pointer' }}>Show all events</button>
+        </div>
+      )}
 
       <GithubRepoStatus data={repoStatus.data} error={repoStatus.error} />
 
@@ -545,7 +563,7 @@ function ProcessedEventsView() {
       ) : (
         <DataTable
           columns={COLS}
-          data={rows}
+          data={shownRows}
           pageSize={25}
           getRowKey={(r, i) => `${r.eventId}/${i}`}
           emptyText="No GitHub events recorded in this time range."

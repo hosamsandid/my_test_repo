@@ -2931,9 +2931,20 @@ async function computeTeamFlowBoard(teamId, { now = Date.now() } = {}) {
   });
 
   const removed = loadFlowBoardRemoved(teamId);
+  const lane = loadAdmissionLane(teamId);
+  // #2872: a dispatch already waiting in a member's queue or held in the lane
+  // means the wake was delivered, so its row is never "wake never delivered".
+  const queued = [];
+  for (const entry of [
+    ...members.flatMap((m) => readPendingEntries(m.id)),
+    ...lane.held.map((h) => h.entry),
+  ]) {
+    const ref = admissionControl.entryTicketRef(entry);
+    if (ref) queued.push({ repo: ref.repo, numbers: ref.refs });
+  }
   const { removalsToPrune, ...board } = flowBoard.buildFlowBoard({
     members, labels, teamId, config, github, events, prRecords,
-    sessions: _flowBoardSessions(members), pools, removed, now,
+    sessions: _flowBoardSessions(members), pools, queued, removed, now,
     // #2795: PR hand-offs the poller holds behind their CI / conflict gate.
     gateHolds: githubPollerRef ? githubPollerRef.gateHolds().filter((h) => ours(h.agentId)) : [],
   });
@@ -2949,7 +2960,6 @@ async function computeTeamFlowBoard(teamId, { now = Date.now() } = {}) {
       console.warn(`[Orchestrator] flow-board: could not prune removals for ${teamId}: ${err.message}`);
     }
   }
-  const lane = loadAdmissionLane(teamId);
   const held = lane.held.map((h) => ({
     id: admissionControl.heldIdentity(h.agentId, h.entry),
     agentId: h.agentId,

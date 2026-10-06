@@ -15,6 +15,7 @@
 //     maintenance }
 
 import { absoluteWhen } from '../../components/format-when.js';
+import { eventLogHref } from '../github-event-focus.js';
 
 // ---------------------------------------------------------------------------
 // Durations
@@ -367,6 +368,21 @@ export function releaseNotice(res, ref) {
   return `${what}${ref ? ` on ${ref}` : ''} — its agent picks it up on the next poll (within about a minute).`;
 }
 
+// "Wake never delivered" (#2872): why each parked wake label never reached its
+// agent, as the GitHub Event Log recorded it. `help-topics/flow-control.md`
+// explains the same four causes.
+export const WAKE_CAUSE_TEXT = Object.freeze({
+  'history-horizon': 'older than its agent\u2019s trigger (flow re-applied or team moved)',
+  'wake-already-armed': 're-add dropped as already armed',
+  'not-seen': 'never reported by the GitHub Events API',
+});
+
+export function wakeCauseText(w) {
+  if (!w || typeof w !== 'object') return '';
+  if (WAKE_CAUSE_TEXT[w.cause]) return WAKE_CAUSE_TEXT[w.cause];
+  return `dropped (${w.dropReason || 'unknown'})`;
+}
+
 export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}) {
   const ref = entry.issue
     ? itemRef(entry.issue.repo, entry.issue.number, singleRepo)
@@ -381,6 +397,15 @@ export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}
       wake: c.wake,
       text: `${c.claim} → ${c.wake}`,
     }));
+  const wakes = (Array.isArray(entry.wakes) ? entry.wakes : [])
+    .filter((w) => w && typeof w.label === 'string')
+    .map((w) => ({
+      ref: `${w.kind === 'pr' ? 'PR ' : ''}${itemRef(w.repo, w.number, singleRepo)}`,
+      label: w.label,
+      cause: w.cause,
+      text: wakeCauseText(w),
+      href: eventLogHref(w.eventId),
+    }));
   return {
     id: entry.id,
     ref,
@@ -389,6 +414,7 @@ export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}
     reason: entry.reason || (entry.needsHuman && entry.needsHuman.reason) || '',
     waiting: since(entry.since || (entry.needsHuman && entry.needsHuman.since), now),
     release,
+    wakes,
   };
 }
 

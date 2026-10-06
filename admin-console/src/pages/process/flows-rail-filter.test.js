@@ -138,6 +138,25 @@ test('edge — a draft shared with me by someone else is "member", not "private"
   assert.equal(draftMatchesQuickFilter('private', fromAnn, ME), false);
 });
 
+test('#2870 AC12 — my unshared draft made Visible to everyone is not "only my private"', () => {
+  const [global] = flowsFilterEntries({ drafts: [
+    { id: 'my-global', name: 'Shown', shared: false, accessCount: 1, createdByYou: true, viewerHasAccess: true, visibleToEveryone: true },
+  ] });
+  assert.equal(global.visibleToEveryone, true);
+  assert.equal(draftMatchesQuickFilter('private', global, ME), false);
+  assert.equal(draftMatchesQuickFilter('member', global, ME), true, 'I still hold it');
+  assert.equal(entries.find(e => e.key === 'draft:my-private').visibleToEveryone, false);
+});
+
+test('#2870 — a draft I only see because it is Visible to everyone is not "Flows I am a member of"', () => {
+  const [readOnly] = flowsFilterEntries({ drafts: [
+    { id: 'bobs-global', name: 'Global', shared: false, accessCount: 1, createdByYou: false, viewerHasAccess: false, visibleToEveryone: true, canEdit: false },
+  ] });
+  for (const q of FLOWS_QUICK_FILTERS) {
+    assert.equal(draftMatchesQuickFilter(q.id, readOnly, ME), false, q.id);
+  }
+});
+
 test('edge — a System Admin\'s view of a team or draft they do not belong to matches no quick filter', () => {
   for (const q of FLOWS_QUICK_FILTERS) {
     const s = applyFlowsQuickFilter(q.id, entries, CTX);

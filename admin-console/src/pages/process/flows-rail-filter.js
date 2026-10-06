@@ -82,7 +82,7 @@ export function procEntryKey(proc) {
  * the page's view helpers.
  *
  * A draft also carries the access facts the quick filters read (`createdByYou`,
- * `shared`, `viewerHasAccess`) — the rail already holds them.
+ * `shared`, `viewerHasAccess`, `visibleToEveryone`) — the rail already holds them.
  */
 export function flowsFilterEntries({ teams = [], drafts = [], envNameById = new Map(), draftSubtitle = () => '' } = {}) {
   const entries = [];
@@ -109,6 +109,7 @@ export function flowsFilterEntries({ teams = [], drafts = [], envNameById = new 
       createdByYou: !!d.createdByYou,
       shared: !!d.shared,
       viewerHasAccess: d.viewerHasAccess === true || !!d.createdByYou,
+      visibleToEveryone: d.visibleToEveryone === true,
     });
   }
   return entries;
@@ -125,14 +126,15 @@ export function flowsSelectionSummary(entries, selection) {
 
 /**
  * Does a draft match a quick filter (AC6)? Drafts have no roles, so the two
- * role filters never match one. "Private" is the viewer's own unshared draft;
- * "member" is any draft the viewer is in the access set of — not merely one a
- * System Admin can see.
+ * role filters never match one. "Private" is the viewer's own unshared draft
+ * that is not Visible to everyone (#2870 AC12 marks those "instead of
+ * private"); "member" is any draft the viewer is in the access set of — not
+ * merely one a System Admin or the Visible-to-everyone flag lets them see.
  */
 export function draftMatchesQuickFilter(filterId, entry, viewerId) {
   if (!viewerId || !entry) return false;
   switch (filterId) {
-    case 'private': return !!entry.createdByYou && !entry.shared;
+    case 'private': return !!entry.createdByYou && !entry.shared && !entry.visibleToEveryone;
     case 'member': return !!entry.viewerHasAccess;
     default: return false;
   }

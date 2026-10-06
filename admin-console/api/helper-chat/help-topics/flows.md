@@ -175,8 +175,26 @@ has access, and a picker of the colleagues you can add. It offers existing
 accounts only — there are no invitations — and shows each person by display
 name and email, nothing else.
 
+The picker is a checklist, so you can share with many colleagues in one step:
+type in the filter box to narrow the list by name or email, tick the people
+you want (or use **Select all**, which picks only the people the filter
+currently shows; **Clear selection** starts over), then press **Share with N**.
+The whole selection is shared at once or not at all: if someone you ticked has
+had their account deleted in the meantime, nothing is shared, the panel says
+so and refreshes the list.
+
+**Visible to everyone.** The switch at the top of the panel makes the draft
+readable by every platform user — today's and anyone added later. Turning it
+on asks for confirmation first; turning it off takes effect immediately and
+leaves the access list exactly as it was. Readers who reach a draft only this
+way see it in their Drafts list marked *Visible to everyone · read-only*, and
+can open, export and create a team from it, or use **Duplicate to my drafts**
+to get their own editable copy. They cannot edit, rename, share or delete it,
+and they do not count towards the access list. The setting belongs to the
+stored draft: it is not part of an exported file and an import never sets it.
+
 **Everyone you share with becomes a full equal.** There are no roles, no
-read-only mode and no privileges kept back for whoever created the draft.
+read-only mode for them and no privileges kept back for whoever created the draft.
 Anyone with access can:
 
 - open, edit, rename and export it,

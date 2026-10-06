@@ -76,7 +76,8 @@ test('AC1 — exactly one button in the toolbar is primary, and it is the create
 
 test('AC4 — the import banner renders the same component, not a raw button', () => {
   // Two call sites, one component: the toolbar and the import-preview banner.
-  assert.equal((canvas.match(/<CreateTeamButton/g) || []).length, 2);
+  // Three since #2870: the read-only draft toolbar has its own instance.
+  assert.equal((canvas.match(/<CreateTeamButton/g) || []).length, 3);
   // The banner's own hardcoded string and its native `title=` (which skipped
   // the #1999 tooltip migration) are gone.
   assert.doesNotMatch(canvas, /title="Create a real team and its agents from this imported design"/);
@@ -108,7 +109,7 @@ test('AC3 — the create action is fenced off and sits ahead of Export', () => {
 // ─── B2: the draft says its next step (AC6, AC7) ────────────────────────────
 
 test('AC6 — the draft carries a persistent status line, guarded like the live strip', () => {
-  assert.match(canvas, /\{isDraft && draftBundle && !imported && !proposal && \(/);
+  assert.match(canvas, /\{isDraft && draftBundle && (?:!draftReadOnly && )?!imported && !proposal && \(/);
   assert.match(canvas, /draftStatusText\(draftBundle\?\.roles\?\.length \|\| 0\)/);
   // Not a Tooltip: the whole point is that it is readable without hovering.
   assert.doesNotMatch(canvas, /<Tooltip[^>]*draftStatusText/);
@@ -196,7 +197,7 @@ test('AC8 — both row kinds report a menu request, with their own target shape'
   // per-row affordance at all before this ticket.
   assert.equal((briefings.match(/onRequestMenu=\{\(anchor\) => handleRequestMenu\(/g) || []).length, 2);
   assert.match(briefings, /\{ kind: 'team', id: t\.id, name: t\.displayName \|\| t\.id \}/);
-  assert.match(briefings, /\{ kind: 'draft', id: d\.id, name: d\.name, roleCount: d\.roleCount \}/);
+  assert.match(briefings, /\{ kind: 'draft', id: d\.id, name: d\.name, roleCount: d\.roleCount, canEdit: d\.canEdit \}/);
   // The draft target carries roleCount because that is what makes the menu's
   // create entry inert on an empty design; dropping it would silently enable it.
   assert.match(buildFlowsRailMenu({ kind: 'draft', name: 'x', roleCount: 0 }).items[0].title, /agent/);
@@ -329,7 +330,7 @@ test('the draft status strip waits for the bundle before stating a reason', () =
   // Without the guard a six-agent draft reads "add at least one agent" for the
   // duration of the GET — a strip that replaces a hover-only reason must not
   // state a false one.
-  assert.match(canvas, /\{isDraft && draftBundle && !imported && !proposal && \(/);
+  assert.match(canvas, /\{isDraft && draftBundle && (?:!draftReadOnly && )?!imported && !proposal && \(/);
 });
 
 test('a rename that does NOT re-key still reaches the open canvas', () => {

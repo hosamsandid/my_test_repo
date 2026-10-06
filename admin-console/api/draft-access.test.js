@@ -304,7 +304,10 @@ test('an installation with no System Admin record migrates to a null createdBy',
 test('AC16 — the list view distinguishes private from shared, and names a creator', () => {
   const users = new Map([['u-alice', { id: 'u-alice', displayName: 'Alice A' }]]);
   const mine = da.draftAccessView(draftOf(['u-alice'], 'u-alice'), { viewerId: 'u-alice', usersById: users });
-  assert.deepEqual(mine, { shared: false, accessCount: 1, createdByYou: true, createdByName: 'Alice A', viewerHasAccess: true });
+  assert.deepEqual(mine, {
+    shared: false, accessCount: 1, createdByYou: true, createdByName: 'Alice A',
+    visibleToEveryone: false, canEdit: true, viewerHasAccess: true,
+  });
 
   const theirs = da.draftAccessView(draftOf(['u-alice', 'u-bob'], 'u-alice'), { viewerId: 'u-bob', usersById: users });
   assert.equal(theirs.shared, true);
@@ -404,4 +407,168 @@ test('AC18 — A creates, B is refused, A shares, B takes over, B is left alone'
   assert.equal(selfRemoval.ok, false);
   assert.equal(selfRemoval.status, 409);
   assert.match(selfRemoval.error, /Delete draft/i);
+});
+
+
+// ── #2870 Part A — bulk share ───────────────────────────────────────────────
+
+const KNOWN = new Set(['u-alice', 'u-bob', 'u-carol', 'u-dave']);
+
+test('#2870 AC5 — a bulk share adds every selected colleague in one result', () => {
+  const r = da.addAccessMany(draftOf(['u-alice']), ['u-bob', 'u-carol'], { knownUserIds: KNOWN });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.accessUserIds, ['u-alice', 'u-bob', 'u-carol']);
+  assert.equal(r.changed, true);
+  assert.equal(r.added, 2);
+  assert.equal(r.skipped, 0);
+});
+
+test('#2870 AC5 — already-present and duplicated ids are skipped without error', () => {
+  const r = da.addAccessMany(draftOf(['u-alice', 'u-bob']), ['u-bob', 'u-carol', 'u-carol', 'u-alice'], { knownUserIds: KNOWN });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.accessUserIds, ['u-alice', 'u-bob', 'u-carol']);
+  assert.equal(r.added, 1);
+  assert.equal(r.skipped, 2);
+  const none = da.addAccessMany(draftOf(['u-alice', 'u-bob']), ['u-bob'], { knownUserIds: KNOWN });
+  assert.equal(none.ok, true);
+  assert.equal(none.changed, false, 'nothing to write');
+});
+
+test('#2870 AC6 — one unknown id refuses the WHOLE request (all-or-nothing)', () => {
+  // E.g. a colleague deleted between selecting and clicking Share.
+  const d = draftOf(['u-alice']);
+  const r = da.addAccessMany(d, ['u-bob', 'u-ghost', 'u-carol'], { knownUserIds: KNOWN });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 400);
+  assert.equal(r.code, 'unknown_user');
+  assert.equal(r.unknownCount, 1);
+  assert.match(r.error, /Nothing was shared/);
+  assert.equal('accessUserIds' in r, false, 'no partial set is handed back to write');
+  assert.deepEqual(da.normalizeAccess(d).accessUserIds, ['u-alice'], 'the stored set is untouched');
+});
+
+test('#2870 — an empty or oversized selection is a 400', () => {
+  for (const empty of [[], null, undefined, ['', '  ', 7]]) {
+    const r = da.addAccessMany(draftOf(['u-alice']), empty, { knownUserIds: KNOWN });
+    assert.equal(r.ok, false);
+    assert.equal(r.status, 400);
+  }
+  const many = Array.from({ length: da.MAX_BULK_SHARE + 1 }, (_, i) => `u-${i}`);
+  const r = da.addAccessMany(draftOf(['u-alice']), many, { knownUserIds: new Set(many) });
+  assert.equal(r.status, 400);
+});
+
+test('#2870 — the single-user share shape still works through the bulk path', () => {
+  // The route wraps a legacy `{ userId }` body as `[userId]`.
+  const r = da.addAccessMany(draftOf(['u-alice']), ['u-bob'], { knownUserIds: KNOWN });
+  assert.deepEqual(r.accessUserIds, ['u-alice', 'u-bob']);
+  const unknown = da.addAccessMany(draftOf(['u-alice']), [undefined], { knownUserIds: KNOWN });
+  assert.equal(unknown.status, 400);
+});
+
+// ── #2870 Part B — "Visible to everyone" ────────────────────────────────────
+
+const globalDraft = (accessUserIds = ['u-alice']) => ({ ...draftOf(accessUserIds), visibleToEveryone: true });
+
+test('#2870 AC9 — a global draft is listed for and readable by a non-holder', () => {
+  const d = globalDraft();
+  assert.equal(da.canViewDraft(bob, d), true);
+  assert.equal(da.canAccessDraft(bob, d), false, 'viewing is not holding');
+  assert.deepEqual(da.filterVisibleDrafts(bob, [d, draftOf(['u-alice'])]), [d]);
+  const read = da.authorizeDraftRead(bob, d);
+  assert.equal(read.ok, true);
+  assert.equal(read.canEdit, false);
+  assert.equal(da.authorizeDraftRead(alice, d).canEdit, true);
+});
+
+test('#2870 AC9 — a user created AFTER the switch was turned on sees it too', () => {
+  // Nothing is written per user: the predicate is evaluated against the flag
+  // on every request, so a brand-new id is covered with no migration.
+  const d = globalDraft();
+  const newcomer = { all: false, userId: 'u-joined-tomorrow', teamIds: new Set() };
+  assert.equal(da.canViewDraft(newcomer, d), true);
+  assert.deepEqual(da.normalizeAccess(d).accessUserIds, ['u-alice'], 'no one was added to the set');
+});
+
+test('#2870 AC11 — a global-only reader is refused by the write gate with READ_ONLY', () => {
+  const r = da.authorizeDraft(bob, globalDraft());
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 403);
+  assert.equal(r.code, 'read_only');
+  assert.match(r.error, /Duplicate to my drafts/);
+  // A holder of a global draft keeps full rights (DD2 unchanged).
+  assert.equal(da.authorizeDraft(alice, globalDraft()).ok, true);
+  // A global draft also shared explicitly with Carol: Carol is a full holder.
+  assert.equal(da.authorizeDraft(carol, globalDraft(['u-alice', 'u-carol'])).ok, true);
+});
+
+test('#2870 AC11 — a NON-global draft still answers the AC7 404 to a stranger', () => {
+  assert.deepEqual(da.authorizeDraft(bob, draftOf(['u-alice'])), da.NOT_FOUND);
+  assert.deepEqual(da.authorizeDraftRead(bob, draftOf(['u-alice'])), da.NOT_FOUND);
+  assert.deepEqual(da.authorizeDraftRead(bob, null), da.NOT_FOUND);
+});
+
+test('#2870 — only a strictly-true flag counts, and an ownerless caller stays out', () => {
+  for (const v of ['true', 1, 'yes', {}, false, null]) {
+    assert.equal(da.canViewDraft(bob, { ...draftOf(['u-alice']), visibleToEveryone: v }), false, String(v));
+  }
+  assert.equal(da.canViewDraft({ all: false, userId: null }, globalDraft()), false);
+  assert.equal(da.canViewDraft(null, globalDraft()), false);
+  assert.equal(da.canViewDraft(SYSADMIN, draftOf(['u-alice'])), true, 'DD7 unchanged');
+});
+
+test('#2870 AC13 — turning the switch off removes global visibility, the set unchanged', () => {
+  const on = da.setVisibility(draftOf(['u-alice', 'u-bob']), true);
+  assert.equal(on.ok, true);
+  assert.equal(on.changed, true);
+  assert.equal(on.draft.visibleToEveryone, true);
+  assert.equal(da.canViewDraft(carol, on.draft), true);
+
+  const off = da.setVisibility(on.draft, false);
+  assert.equal(off.ok, true);
+  assert.equal(off.changed, true);
+  assert.equal('visibleToEveryone' in off.draft, false, 'off removes the field');
+  assert.deepEqual(off.draft.accessUserIds, ['u-alice', 'u-bob'], 'explicit set unchanged');
+  assert.equal(da.canViewDraft(carol, off.draft), false, 'Carol loses it immediately');
+  assert.equal(da.canViewDraft(bob, off.draft), true, 'Bob is on the list and keeps it');
+
+  assert.equal(da.setVisibility(off.draft, false).changed, false, 'idempotent');
+  assert.equal(da.setVisibility(off.draft, 'yes').status, 400);
+});
+
+test('#2870 AC14 — "Visible to everyone" does not count as an access holder', () => {
+  const r = da.removeAccess(globalDraft(['u-alice']), 'u-alice');
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'last_holder');
+});
+
+test('#2870 AC15 — the flag is stripped on import/save and carried from storage', () => {
+  const forged = { name: 'Plan', roles: [], visibleToEveryone: true, viewerCanEdit: true };
+  const stripped = da.stripAccessFields(forged);
+  assert.equal('visibleToEveryone' in stripped, false);
+  assert.equal('viewerCanEdit' in stripped, false, 'the response-only annotation is never stored');
+  // A normal save cannot turn it ON...
+  const privateSave = { ...stripped, ...da.carryAccessFields(draftOf(['u-alice'])) };
+  assert.equal('visibleToEveryone' in privateSave, false);
+  // ...nor OFF: the stored flag is carried, the incoming copy ignored.
+  const globalSave = { ...da.stripAccessFields({ name: 'Plan', visibleToEveryone: false }), ...da.carryAccessFields(globalDraft()) };
+  assert.equal(globalSave.visibleToEveryone, true);
+});
+
+test('#2870 AC12 — the list view marks a global draft and a read-only row', () => {
+  const view = da.draftAccessView(globalDraft(), { viewerId: 'u-bob', usersById: new Map(), canEdit: false });
+  assert.equal(view.visibleToEveryone, true);
+  assert.equal(view.canEdit, false);
+  assert.equal(view.shared, false, 'global is not "shared with N people"');
+});
+
+test('#2870 AC2 — the new gates do not read createdBy either', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'draft-access.js'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+  for (const name of ['canViewDraft', 'isVisibleToEveryone', 'authorizeDraftRead', 'addAccessMany', 'setVisibility']) {
+    const start = src.indexOf(`function ${name}(`);
+    assert.ok(start > 0, `${name} not found`);
+    assert.ok(!src.slice(start, src.indexOf('\n}\n', start)).includes('createdBy'), `${name} reads createdBy`);
+  }
 });

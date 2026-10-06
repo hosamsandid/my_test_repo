@@ -1,6 +1,8 @@
 import React, { useState, useMemo } from 'react';
-import { Loader2, Check, X, ChevronRight, Circle, CircleDot } from 'lucide-react';
+import { Loader2, Check, X, ChevronRight, Circle, CircleDot, Clock, Square } from 'lucide-react';
 import { isTaskTool, formatTodoSummary } from './task-todo.js';
+import { toolRunView, taskStartedRows, formatElapsed } from './tool-progress.js';
+import { ciWaitCard, toolHeaderText } from './ci-wait-view.js';
 import { computeLineDiff } from './edit-diff.js';
 import { renderableRows } from './tool-value-view.js';
 import { SafeMarkdown } from './Message';
@@ -24,14 +26,39 @@ import { SafeMarkdown } from './Message';
  *                                              list as of this event, so the
  *                                              summary/checklist reflect the
  *                                              whole list, not one increment.
+ *   run: object | null                       — the call's folded tool_progress
+ *                                              heartbeats / task_started row
+ *                                              (tool-progress.js, #2841): a
+ *                                              live "running · 6m 00s" cue,
+ *                                              then "took 6m 12s"
+ *   repoDirectory: array                     — the agent's repositories, for a
+ *                                              CI-wait card's PR link (#2841)
  */
-export default function ToolBlock({ toolUse, toolResult, taskSnapshot }) {
+const TONE_COLOR = {
+  ok: 'var(--eb-status-success)',
+  warn: 'var(--eb-status-warning)',
+  error: 'var(--eb-status-error)',
+};
+
+export default function ToolBlock({ toolUse, toolResult, taskSnapshot, run = null, repoDirectory }) {
   const [open, setOpen] = useState(false);
 
   const tool = toolUse?.tool || 'tool';
   const input = toolUse?.input;
   const pending = !toolResult;
   const ok = toolResult?.ok !== false;
+  // Live elapsed-time cue from the folded heartbeats (#2841). A pending call
+  // whose run is over (aborted, historical) keeps its last time, no spinner.
+  const runView = toolRunView(run, !pending);
+  const stopped = pending && !!run?.ended;
+  // An `aee-wait-ci` Bash call renders as a CI-wait card (#2841): readable
+  // header, PR link, verdict — the command and raw JSON stay on expand.
+  // A result whose verdict cannot be read keeps the normal rendering.
+  const ci = useMemo(() => {
+    const card = ciWaitCard(toolUse, toolResult, repoDirectory);
+    return card && !card.unreadable ? card : null;
+  }, [toolUse, toolResult, repoDirectory]);
+  const verdict = ci?.verdict || null;
 
   // Task-tracking tools render as a live checklist. Prefer the folded snapshot
   // assembled from the incremental Task* events; fall back to a legacy
@@ -53,7 +80,15 @@ export default function ToolBlock({ toolUse, toolResult, taskSnapshot }) {
   let StatusIcon = Loader2;
   let statusColor = 'var(--eb-accent-primary)';
   let statusAnimate = true;
-  if (!pending) {
+  if (stopped) {
+    StatusIcon = Square;
+    statusColor = 'var(--eb-text-muted)';
+    statusAnimate = false;
+  } else if (verdict) {
+    StatusIcon = verdict.tone === 'ok' ? Check : verdict.tone === 'warn' ? Clock : X;
+    statusColor = TONE_COLOR[verdict.tone];
+    statusAnimate = false;
+  } else if (!pending) {
     statusAnimate = false;
     if (ok) {
       StatusIcon = Check;
@@ -64,9 +99,15 @@ export default function ToolBlock({ toolUse, toolResult, taskSnapshot }) {
     }
   }
 
-  const borderColor = pending
-    ? 'var(--eb-accent-muted)'
-    : (ok ? 'var(--eb-border-default)' : 'var(--eb-status-error)');
+  const borderColor = verdict
+    ? (verdict.tone === 'ok' ? 'var(--eb-border-default)' : TONE_COLOR[verdict.tone])
+    : pending
+      ? (stopped ? 'var(--eb-border-default)' : 'var(--eb-accent-muted)')
+      : (ok ? 'var(--eb-border-default)' : 'var(--eb-status-error)');
+
+  const { label: headerLabel, trailing } = toolHeaderText({ tool, ci, runView, pending, stopped });
+  const headerColor = verdict ? TONE_COLOR[verdict.tone] : 'var(--eb-text-primary)';
+  const runDetail = run && (run.heartbeats > 0 || run.task) ? runDetailValue(run) : null;
 
   const resultContent = toolResult?.content;
   const hasResultContent = resultContent !== null && resultContent !== undefined && resultContent !== '';
@@ -81,15 +122,20 @@ export default function ToolBlock({ toolUse, toolResult, taskSnapshot }) {
       transition: 'border-color 0.2s',
       fontSize: 'var(--eb-text-xs)',
     }}>
-      {/* Summary row */}
+      {/* Summary row. The CI-wait card's PR link is a sibling of the toggle
+          button, never nested inside it (no interactive-in-interactive). */}
+      <div style={{ display: 'flex', alignItems: 'center' }}>
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
         style={{
           display: 'flex',
           alignItems: 'center',
           gap: 6,
-          width: '100%',
+          // A CI-wait card's header continues after the button (PR link, time).
+          flex: ci ? '0 1 auto' : 1,
+          minWidth: 0,
           padding: '6px 8px',
           background: 'transparent',
           border: 'none',
@@ -123,23 +169,53 @@ export default function ToolBlock({ toolUse, toolResult, taskSnapshot }) {
         <span style={{
           fontFamily: 'var(--eb-font-mono)',
           fontWeight: 'var(--eb-font-semibold)',
-          color: 'var(--eb-text-primary)',
+          color: headerColor,
           flexShrink: 0,
         }}>
-          {tool}
+          {headerLabel}
         </span>
-        <span style={{
-          fontFamily: 'var(--eb-font-mono)',
-          color: 'var(--eb-text-muted)',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-          flex: 1,
-          minWidth: 0,
-        }}>
-          {summary}
-        </span>
+        {!ci && (
+          <span style={{
+            fontFamily: 'var(--eb-font-mono)',
+            color: 'var(--eb-text-muted)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            flex: 1,
+            minWidth: 0,
+          }}>
+            {summary}
+          </span>
+        )}
+        {ci && ci.pr != null && (
+          <span style={{ fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-secondary)', flexShrink: 0 }}>
+            {ci.url ? '·' : `· PR #${ci.pr}`}
+          </span>
+        )}
+        {!ci && trailing && <RunCue text={trailing} live={runView.state === 'running'} />}
       </button>
+      {ci && ci.url && (
+        <a
+          href={ci.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            fontFamily: 'var(--eb-font-mono)',
+            fontSize: 'var(--eb-text-xs)',
+            color: 'var(--eb-accent-primary)',
+            flexShrink: 0,
+            padding: '6px 4px',
+          }}
+        >
+          PR #{ci.pr}
+        </a>
+      )}
+      {ci && trailing && (
+        <span style={{ padding: '6px 8px 6px 4px', flexShrink: 0 }}>
+          <RunCue text={`· ${trailing}`} live={pending && !stopped} />
+        </span>
+      )}
+      </div>
 
       {open && (
         <div style={{
@@ -171,6 +247,20 @@ export default function ToolBlock({ toolUse, toolResult, taskSnapshot }) {
             </>
           )}
 
+          {runDetail && (
+            <>
+              <div style={{
+                fontSize: 10,
+                fontWeight: 'var(--eb-font-semibold)',
+                color: 'var(--eb-accent-primary)',
+                margin: '6px 0 4px',
+                textTransform: 'uppercase',
+                letterSpacing: 0.4,
+              }}>Run</div>
+              <ValueRows value={runDetail} />
+            </>
+          )}
+
           {isTasky ? null : toolResult ? (
             <>
               <div style={{
@@ -196,13 +286,43 @@ export default function ToolBlock({ toolUse, toolResult, taskSnapshot }) {
               color: 'var(--eb-text-muted)',
               fontStyle: 'italic',
             }}>
-              Waiting for tool response…
+              {stopped ? 'No tool response — the run ended first.' : 'Waiting for tool response…'}
             </div>
           )}
         </div>
       )}
     </div>
   );
+}
+
+/** Quiet elapsed-time cue at the end of the header (#2841). */
+function RunCue({ text, live }) {
+  return (
+    <span style={{
+      fontFamily: 'var(--eb-font-mono)',
+      color: live ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)',
+      flexShrink: 0,
+      whiteSpace: 'nowrap',
+      marginLeft: 6,
+    }}>
+      {text}
+    </span>
+  );
+}
+
+/** Expand-only detail of a call's run: elapsed time, the folded task_started
+ *  info (task id, type, foreground/background) and the latest raw heartbeat. */
+function runDetailValue(run) {
+  const out = {};
+  if (run.heartbeats > 0) {
+    out.heartbeats = run.heartbeats;
+    const elapsed = formatElapsed(run.durationSeconds ?? run.elapsedSeconds);
+    if (elapsed) out.elapsed = elapsed;
+  }
+  for (const [k, v] of taskStartedRows(run.task)) out[k] = v;
+  if (run.task?.description) out.description = run.task.description;
+  if (run.lastHeartbeat) out['latest heartbeat'] = run.lastHeartbeat;
+  return out;
 }
 
 /**

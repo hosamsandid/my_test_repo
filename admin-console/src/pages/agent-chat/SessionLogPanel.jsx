@@ -12,6 +12,8 @@ import { sumContextTokens, resolveContextTokensForResult } from './context-windo
 import { mergeThinkingTokens } from './system-event.js';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
 import { annotateTaskRows } from './task-todo.js';
+import { mergeToolPairs } from './tool-progress.js';
+import { buildRepoDirectory, parseCiWaitCommand } from './ci-wait-view.js';
 import { firstRowKeyForCorrelation, revealStatus, jumpHighlightCss, JUMP_HIGHLIGHT_MS } from './session-jump.js';
 import {
   HOVER_CORRELATION_COACHMARK,
@@ -271,12 +273,26 @@ export default function SessionLogPanel({
   // incremental task-tracking events (TaskCreate/TaskUpdate/…, #1662) into a
   // running list: `annotated.rows` carry a per-row `taskSnapshot` for the
   // inline checklist/summary, and `annotated.{todos,lastToolId,…}` drive the
-  // pinned TODO panel below.
+  // pinned TODO panel below. Tool pairing also folds each call's tool_progress
+  // heartbeats and task_started row into its block (#2841); a historical view
+  // has no live run left, so nothing in it keeps spinning.
   const annotated = useMemo(
-    () => annotateTaskRows(mergeToolPairs(mergeThinkingTokens(scopedEvents))),
-    [scopedEvents],
+    () => annotateTaskRows(mergeToolPairs(mergeThinkingTokens(scopedEvents), { ended: staticOnly })),
+    [scopedEvents, staticOnly],
   );
   const renderable = annotated.rows;
+
+  // CI-wait cards (#2841) link the PR on GitHub; a `--repo <clone-dir>` or a
+  // bare PR number is resolved through the agent's repositories, read only
+  // once the log actually contains an aee-wait-ci call.
+  const hasCiWait = useMemo(
+    () => renderable.some(r => r.kind === 'tool' && r.toolUse?.tool === 'Bash'
+      && parseCiWaitCommand(r.toolUse.input?.command) !== null),
+    [renderable],
+  );
+  const { data: repoData } = useApi(hasCiWait && agentId
+    ? `/api/agents/${encodeURIComponent(agentId)}/repositories` : null);
+  const repoDirectory = useMemo(() => buildRepoDirectory(repoData?.repositories), [repoData]);
 
   /* ─── 4b. "Show in session log" reveal (#2603) ─────────────────────────
    * A request is settled once: scroll to the run's first row (VirtualList
@@ -636,7 +652,7 @@ export default function SessionLogPanel({
                   marginLeft: 'var(--eb-space-1)',
                 }}
               >
-                <LogEvent event={ev} authorDirectory={authorDirectory} />
+                <LogEvent event={ev} authorDirectory={authorDirectory} repoDirectory={repoDirectory} />
               </div>
               </EventErrorBoundary>
             );
@@ -668,55 +684,6 @@ export default function SessionLogPanel({
 /** Stable row key for the VirtualList and the #2603 reveal seek. */
 function logKeyOf(ev, i) {
   return ev._key ?? `e${i}`;
-}
-
-/**
- * Walk the event list once and pair each `tool_use` with its matching
- * `tool_result` (same `toolId`). Pairs are emitted as a single
- * { kind: 'tool', toolUse, toolResult, correlationId, ts, _key } element.
- * Unpaired uses keep `toolResult: null`. Orphan results (result with no
- * prior use) are emitted as standalone events — LogEvent renders them via
- * a single-sided ToolBlock.
- */
-function mergeToolPairs(events) {
-  const out = [];
-  // Map: toolId → index in `out` of the merged tool entry awaiting its result
-  const pendingByToolId = new Map();
-
-  events.forEach((ev, idx) => {
-    if (!ev || typeof ev !== 'object') {
-      out.push({ ...ev, _key: `e${idx}` });
-      return;
-    }
-    if (ev.type === 'tool_use' && ev.toolId) {
-      const merged = {
-        kind: 'tool',
-        ts: ev.ts,
-        correlationId: ev.correlationId,
-        toolUse: { tool: ev.tool, toolId: ev.toolId, input: ev.input },
-        toolResult: null,
-        _key: `tool-${ev.toolId}-${idx}`,
-      };
-      pendingByToolId.set(ev.toolId, out.length);
-      out.push(merged);
-      return;
-    }
-    if (ev.type === 'tool_result' && ev.toolId && pendingByToolId.has(ev.toolId)) {
-      const i = pendingByToolId.get(ev.toolId);
-      pendingByToolId.delete(ev.toolId);
-      const target = out[i];
-      out[i] = {
-        ...target,
-        toolResult: { ok: ev.ok !== false, content: ev.content },
-      };
-      return;
-    }
-    // Preserve a stable _key set upstream (e.g. the consolidated thinking_tokens
-    // row, #870) so React updates it in place instead of remounting; otherwise
-    // fall back to a positional key.
-    out.push({ ...ev, _key: ev._key ?? `e${idx}` });
-  });
-  return out;
 }
 
 /**

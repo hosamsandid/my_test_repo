@@ -406,6 +406,14 @@ def tool_result(tid, text, err=False):
     out({"type": "user", "message": {"content": [{"type": "tool_result",
          "tool_use_id": tid, "content": text, "is_error": err}]}})
 out({"type": "system", "subtype": "init", "session_id": "sess-ask"})
+if mode == "status":
+    # #2841: aee-wait-ci announcing a real wait, then the wait itself.
+    with open(os.environ["AEE_STATUS_FILE"], "a") as fh:
+        fh.write(json.dumps({"kind": "ci-wait", "repo": "o/n", "host": "github.com",
+                             "pr": 7, "timeoutMinutes": 20}) + "\n")
+    time.sleep(2.5)
+    out({"type": "result", "subtype": "success", "result": "CI passed.", "session_id": "sess-ask"})
+    sys.exit(0)
 args = json.loads(os.environ["FAKE_ASK_ARGS"])
 tool_use("t1", "aee-ask ...")
 p = subprocess.run([sys.executable, os.environ["FAKE_AEE_ASK"], *args],
@@ -663,6 +671,151 @@ class AeeAskEndToEnd(unittest.TestCase):
         self.assertEqual(len(set(seen)), 2)
         for path in seen:
             self.assertTrue(str(path).startswith(str(self.workdir / ".agent-studio" / "ask")))
+
+
+    def test_ci_wait_status_note_is_posted_during_the_turn(self):
+        # #2841: the runner, not the agent, posts the "waiting for CI" note.
+        os.environ["FAKE_ASK_ARGS"] = "[]"
+        os.environ["FAKE_CLAUDE_MODE"] = "status"
+        posted = []
+        ctx = {"_statusPoster": posted.append, "_statusLanguage": "en"}
+        seen = []
+        real = entrypoint._status_file_path
+        with patch.object(entrypoint, "_status_file_path",
+                          side_effect=lambda i: seen.append(real(i)) or seen[-1]):
+            text, _s = entrypoint._call_claude_once(
+                "hi", "!room:local", "corr-9", None, None, 60, run_context=ctx)
+        self.assertEqual(text, "CI passed.")  # the final reply is untouched
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(posted[0]["msgtype"], "m.notice")
+        self.assertEqual(posted[0]["io.aee.status-note"]["correlationId"], "corr-9")
+        self.assertIn("https://github.com/o/n/pull/7", posted[0]["body"])
+        self.assertFalse(seen[0].exists(), "the status file is removed after the turn")
+
+
+class StatusNotes(unittest.TestCase):
+    """Chat status note while aee-wait-ci waits (#2841)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "status.jsonl"
+        self.posted = []
+        self.ctx = {"_statusPoster": self.posted.append}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _append(self, text):
+        with open(self.path, "a", encoding="utf-8") as fh:
+            fh.write(text)
+
+    @staticmethod
+    def _line(pr=2838, repo="o/n", **extra):
+        return json.dumps({"kind": "ci-wait", "repo": repo, "pr": pr,
+                           "timeoutMinutes": 20, **extra}) + "\n"
+
+    def test_language_guess(self):
+        g = entrypoint._guess_language
+        self.assertEqual(g("Kannst du bitte den PR mergen, wenn die CI grün ist?"), "de")
+        self.assertEqual(g("Can you please merge the PR when CI is green?"), "en")
+        for text in (None, "", "   ", "ok", 3):
+            self.assertEqual(g(text), "en")
+
+    def test_note_text_english_and_german(self):
+        en = entrypoint._ci_wait_note(json.loads(self._line()), 1, "en", "c1")
+        self.assertEqual(en["msgtype"], "m.notice")
+        self.assertEqual(en["body"], "Pull request #2838 (https://github.com/o/n/pull/2838) is open "
+                                     "— waiting for CI to finish (up to 20 min).")
+        self.assertIn('<a href="https://github.com/o/n/pull/2838">#2838</a>', en["formatted_body"])
+        self.assertEqual(en["io.aee.status-note"],
+                         {"kind": "ci-wait", "repo": "o/n", "pr": 2838, "attempt": 1,
+                          "timeoutMinutes": 20, "correlationId": "c1"})
+        de = entrypoint._ci_wait_note(json.loads(self._line()), 2, "de")
+        self.assertTrue(de["body"].startswith("Pull Request #2838"))
+        self.assertTrue(de["body"].endswith("(bis zu 20 Min.). (Versuch 2)"))
+
+    def test_note_links_the_announced_repo_and_host(self):
+        note = entrypoint._ci_wait_note(
+            {"kind": "ci-wait", "repo": "acme/other", "host": "ghe.example.com", "pr": 5}, 1)
+        self.assertIn("https://ghe.example.com/acme/other/pull/5", note["body"])
+        self.assertNotIn("up to", note["body"])  # no timeout → no limit clause
+
+    def test_malformed_events_give_no_note(self):
+        for event in (None, "x", {}, {"kind": "other", "repo": "o/n", "pr": 1},
+                      {"kind": "ci-wait", "repo": "bad repo", "pr": 1},
+                      {"kind": "ci-wait", "repo": "o/n", "pr": 0},
+                      {"kind": "ci-wait", "repo": "o/n", "pr": True},
+                      {"kind": "ci-wait", "repo": "o/n", "pr": "7"}):
+            self.assertIsNone(entrypoint._ci_wait_note(event, 1))
+
+    def test_one_note_per_wait_and_reruns_name_the_attempt(self):
+        w = entrypoint._StatusNoteWatcher(self.path, self.ctx, "c1")
+        self.assertEqual(w.drain(), 0)  # no file yet
+        self._append(self._line())
+        self.assertEqual(w.drain(), 1)
+        self.assertEqual(w.drain(), 0)  # nothing new → nothing re-posted
+        self._append(self._line() + self._line(pr=9))
+        self.assertEqual(w.drain(), 2)
+        self.assertEqual([n["io.aee.status-note"]["attempt"] for n in self.posted], [1, 2, 1])
+        self.assertTrue(self.posted[1]["body"].endswith("(attempt 2)"))
+
+    def test_partial_line_waits_for_its_end(self):
+        w = entrypoint._StatusNoteWatcher(self.path, self.ctx, None)
+        line = self._line()
+        self._append(line[:15])
+        self.assertEqual(w.drain(), 0)
+        self._append(line[15:])
+        self.assertEqual(w.drain(), 1)
+
+    def test_garbage_lines_are_skipped(self):
+        w = entrypoint._StatusNoteWatcher(self.path, self.ctx, None)
+        self._append("not json\n[1]\n" + json.dumps({"kind": "other"}) + "\n" + self._line())
+        self.assertEqual(w.drain(), 1)
+
+    def test_no_room_means_no_note(self):
+        w = entrypoint._StatusNoteWatcher(self.path, {}, None)
+        self._append(self._line())
+        self.assertEqual(w.drain(), 0)
+
+    def test_a_failing_post_never_breaks_the_run(self):
+        def boom(_note):
+            raise RuntimeError("matrix down")
+        w = entrypoint._StatusNoteWatcher(self.path, {"_statusPoster": boom}, None)
+        self._append(self._line())
+        self.assertEqual(w.drain(), 0)
+
+    def test_language_comes_from_the_run_context(self):
+        self.ctx["_statusLanguage"] = "de"
+        w = entrypoint._StatusNoteWatcher(self.path, self.ctx, None)
+        self._append(self._line())
+        w.drain()
+        self.assertIn("ich warte", self.posted[0]["body"])
+
+    def test_status_file_lives_under_the_state_dir(self):
+        with patch.object(entrypoint, "_agent_workdir", return_value=Path(self._tmp.name)):
+            p = entrypoint._status_file_path("inv/../1")
+        self.assertEqual(p.parent, Path(self._tmp.name) / entrypoint.STATE_DIR / "status")
+        self.assertNotIn("/", p.name[:-len(".jsonl")])
+
+    def test_poster_sends_on_the_runner_loop(self):
+        client = types.SimpleNamespace(room_send=AsyncMock())
+        loop = asyncio.new_event_loop()
+        t = __import__("threading").Thread(target=loop.run_forever, daemon=True)
+        t.start()
+        try:
+            entrypoint._make_status_poster(client, "!r:local", loop)({"body": "x"})
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            t.join(2)
+            loop.close()
+        client.room_send.assert_awaited_once_with(
+            room_id="!r:local", message_type="m.room.message", content={"body": "x"})
+
+    def test_dm_and_trigger_paths_install_the_poster(self):
+        src = Path(entrypoint.__file__).read_text(encoding="utf-8")
+        self.assertIn('dm_run_context["_statusPoster"] = _make_status_poster(', src)
+        self.assertIn('dm_run_context["_statusLanguage"] = _guess_language(body)', src)
+        self.assertIn('run_context["_statusPoster"] = _make_status_poster(', src)
 
 
 class BuildHarvestHint(unittest.TestCase):

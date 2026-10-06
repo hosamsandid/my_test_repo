@@ -466,6 +466,19 @@ its result are folded into one block, and hovering a row dims everything that
 does not belong to the same turn, so you can follow one exchange through a busy
 log. Long logs are windowed, so a run with thousands of steps stays responsive.
 
+A tool that runs for a long time shows that it is still going: its block reads
+*running · 6m 00s* and the time counts up in place, and once it finishes it
+reads *took 6m 12s* (only for calls long enough to report progress). If the run
+ended first, it reads *stopped after …*. Expand the block for the details —
+the background task id and type, and the latest raw progress report. A wait
+for a pull request's CI (`aee-wait-ci`) shows as a card instead of a command:
+*Waiting for CI · PR #2838 · 6m 00s of max 20m*, then the verdict — **CI
+passed**, **No CI configured**, **CI failed**, **Merge conflict**, **Timed
+out** or **Error** — with the PR linked; the command and raw result stay on
+expand. In the chat itself the agent's room gets one short note when such a
+wait starts (*Pull request #2838 is open — waiting for CI to finish*), so you
+know why the agent is quiet; the agent's answer still follows when it is done.
+
 While the agent is working through a task list, that list is shown live — inline
 in the timeline and in a **TODO panel** docked to the bottom, with a
 *done/total · current step* summary. It is built from the agent's own task

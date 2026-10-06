@@ -78,7 +78,9 @@ result *is* the verdict: `0` passed / no CI · `4` failed · `5` conflict ·
 `6` timeout (`1` = error such as no token or a closed PR, `3` = GitHub
 unreachable, `2` = usage, as above). It always prints its JSON result, `--json`
 or not. Its verdict rules are read from `pr-readiness-rules.json` next to the
-script — shared data, not a dependency.
+script — shared data, not a dependency. When a wait really starts it appends
+one `{"kind":"ci-wait",…}` line to `$AEE_STATUS_FILE` (if set), from which the
+runtime posts a single chat status note (#2841); a write failure is ignored.
 
 When `--json` is set, errors are reported as `{"ok": false, "error": "…"}` on
 stdout with the matching exit code, so a JSON caller never has to scrape

@@ -22,7 +22,8 @@ export const JUMP_HIGHLIGHT_MS = 1700;
  * - `{ correlationId }` when the message names its run itself: a user message
  *   (its own event id is the run's correlationId), a trigger notice that
  *   carries `io.aee.trigger.correlationId`, or a triggered-run failure notice
- *   that carries `io.aee.triggerFailure.correlationId`.
+ *   that carries `io.aee.triggerFailure.correlationId`, or a runner status
+ *   note (#2841) that carries `io.aee.status-note.correlationId`.
  * - `{ eventId }` for an agent `m.text` reply (answer, agent error, abort): the
  *   run is looked up server-side from the runner's `message.posted` row,
  *   because the client can't tell which run a reply belongs to when a user
@@ -40,7 +41,8 @@ export function sessionJumpRef(message, agentUserId) {
   if (!eventId || message.isOptimistic || message.type) return null;
   if (message['io.aee.loop-record']) return null;
   if (message.msgtype === 'm.notice') {
-    const meta = message['io.aee.trigger'] || message['io.aee.triggerFailure'];
+    const meta = message['io.aee.trigger'] || message['io.aee.triggerFailure']
+      || message['io.aee.status-note'];
     const cid = meta && typeof meta.correlationId === 'string' ? meta.correlationId : '';
     return cid ? { correlationId: cid } : null;
   }

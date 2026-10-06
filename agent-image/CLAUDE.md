@@ -206,6 +206,9 @@ that could read stdin), pass `</dev/null` rather than a long timeout.
 Run it right after `gh-as-agent push` from your clone of the PR's branch: it
 waits until GitHub shows your pushed commit as the PR's head and never reports
 the previous head's result (`--head <sha>` names the commit explicitly).
+While it waits, the platform posts one short *waiting for CI* note to the chat
+for you (`AEE_STATUS_FILE`) — do not post your own; your final reply still
+reports the verdict.
 Never wait for CI in a background shell or `Task`, and
 do not hand-roll `gh pr checks` loops. On timeout, end your turn; unattended
 flows continue through the gated PR hand-off or a `pull_request.checks_*`

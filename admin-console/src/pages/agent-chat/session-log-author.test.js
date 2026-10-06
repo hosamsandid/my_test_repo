@@ -87,5 +87,5 @@ test('LogEvent never renders the raw Matrix sender (AC7)', () => {
 
 test('SessionLogPanel hands every row the user directory', () => {
   assert.match(PANEL, /useApi\('\/api\/admin\/users'\)/);
-  assert.match(PANEL, /<LogEvent event=\{ev\} authorDirectory=\{authorDirectory\} \/>/);
+  assert.match(PANEL, /<LogEvent event=\{ev\} authorDirectory=\{authorDirectory\}[^>]*\/>/);
 });

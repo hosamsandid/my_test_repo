@@ -109,7 +109,24 @@ the version counter is the human-readable "v4" of one instance.
 
 **Actions** (closed set): `created`, `edited`, `imported`, `adopted` (global→team copy),
 `promoted` (team→global / KB→skill), `lifted` (agent→team), `shared` (team→team),
-`moved`, `merged`, `extended` (KB entries folded in), `resynced` (pulled source update).
+`moved`, `merged`, `extended` (KB entries folded in), `resynced` (pulled source update),
+`restored` (an older version's content made current again — the entry carries
+`restoredFrom: <version>`; #2839).
+
+**Version snapshots (#2839).** Every stamp that records a version also writes the full
+content of that version to `<skill>/_versions/<contentHash>.json`
+(`{v: 1, hash, files: [{path, b64}]}`), content-addressed so an unchanged re-stamp
+stores nothing new. Snapshots are pruned with the history: only hashes still referenced
+by `history` (or the current `contentHash`) are kept, so at most 20 per copy. `_versions/`
+is excluded like `_archive/` — from the content hash, the editor tree, the ZIP export,
+and every copy between tiers (install/seed, transfer, adopt, move, promote, archive): a
+copy starts its own snapshot set at its first stamp, and the stored versions of the
+source are deliberately **not** carried. Deleting a skill removes its snapshots with the
+directory; the deletion archive does not keep them. A snapshot is integrity-checked
+(hash recomputed) on read. History entries without a snapshot (recorded before #2839)
+are listed as *content not available*. The read side — open a version, compare any two
+(`GET /api/skills/:name/versions/diff`), restore (`POST …/versions/:hash/restore`,
+refused 409 on a stale `baseHash`) — is described in the Skills help topic.
 
 **One pure module, two call sites.** `skill-manifest.js` (hashing, stamping, history
 append, drift classification — pure, unit-tested) lives in the admin-console API (the

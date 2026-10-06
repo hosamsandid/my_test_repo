@@ -700,6 +700,74 @@
           }
         ]
       }
+    },
+    {
+      "name": "restore records a NEW version with restoredFrom (history is never rewritten)",
+      "existing": {
+        "v": 1,
+        "name": "demo",
+        "version": 4,
+        "contentHash": "dddddddddddd",
+        "updatedAt": "2026-07-16T09:00:00Z",
+        "updatedBy": "operator:thorsten",
+        "history": [
+          {
+            "version": 4,
+            "hash": "dddddddddddd",
+            "at": "2026-07-16T09:00:00Z",
+            "by": "operator:thorsten",
+            "action": "edited"
+          },
+          {
+            "version": 3,
+            "hash": "cccccccccccc",
+            "at": "2026-07-15T09:00:00Z",
+            "by": "operator:thorsten",
+            "action": "edited"
+          }
+        ]
+      },
+      "opts": {
+        "contentHash": "cccccccccccc",
+        "now": "2026-07-16T12:00:00Z",
+        "by": "operator:ines",
+        "action": "restored",
+        "note": "restored from v3",
+        "restoredFrom": 3
+      },
+      "expected": {
+        "v": 1,
+        "name": "demo",
+        "version": 5,
+        "contentHash": "cccccccccccc",
+        "updatedAt": "2026-07-16T12:00:00Z",
+        "updatedBy": "operator:ines",
+        "history": [
+          {
+            "version": 5,
+            "hash": "cccccccccccc",
+            "at": "2026-07-16T12:00:00Z",
+            "by": "operator:ines",
+            "action": "restored",
+            "note": "restored from v3",
+            "restoredFrom": 3
+          },
+          {
+            "version": 4,
+            "hash": "dddddddddddd",
+            "at": "2026-07-16T09:00:00Z",
+            "by": "operator:thorsten",
+            "action": "edited"
+          },
+          {
+            "version": 3,
+            "hash": "cccccccccccc",
+            "at": "2026-07-15T09:00:00Z",
+            "by": "operator:thorsten",
+            "action": "edited"
+          }
+        ]
+      }
     }
   ],
   "driftCases": [
@@ -826,5 +894,91 @@
     { "state": "conflict", "expected": false },
     { "state": "orphaned", "expected": false },
     { "state": "unknown", "expected": false }
+  ],
+  "snapshotPruneCases": [
+    {
+      "name": "keeps hashes still referenced by history and the current content",
+      "existing": [
+        "aaaaaaaaaaaa",
+        "bbbbbbbbbbbb",
+        "cccccccccccc",
+        "dddddddddddd"
+      ],
+      "manifest": {
+        "contentHash": "dddddddddddd",
+        "history": [
+          {
+            "version": 4,
+            "hash": "dddddddddddd"
+          },
+          {
+            "version": 2,
+            "hash": "bbbbbbbbbbbb"
+          }
+        ]
+      },
+      "expected": [
+        "aaaaaaaaaaaa",
+        "cccccccccccc"
+      ]
+    },
+    {
+      "name": "deduplicated hashes (forceHistory re-records) keep ONE snapshot",
+      "existing": [
+        "aaaaaaaaaaaa"
+      ],
+      "manifest": {
+        "contentHash": "aaaaaaaaaaaa",
+        "history": [
+          {
+            "version": 3,
+            "hash": "aaaaaaaaaaaa"
+          },
+          {
+            "version": 3,
+            "hash": "aaaaaaaaaaaa"
+          }
+        ]
+      },
+      "expected": []
+    },
+    {
+      "name": "no manifest keeps nothing",
+      "existing": [
+        "aaaaaaaaaaaa"
+      ],
+      "manifest": null,
+      "expected": [
+        "aaaaaaaaaaaa"
+      ]
+    }
+  ],
+  "snapshotCases": [
+    {
+      "name": "snapshot hash equals the content hash and excludes sidecars/_versions",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "text": "body"
+        },
+        {
+          "path": "scripts/run.sh",
+          "text": "echo"
+        },
+        {
+          "path": "skill.json",
+          "text": "{}"
+        },
+        {
+          "path": "_versions/x.json",
+          "text": "{}"
+        }
+      ],
+      "expectedHash": "960bec3751df",
+      "expectedPaths": [
+        "SKILL.md",
+        "scripts/run.sh"
+      ]
+    }
   ]
 }

@@ -22,7 +22,17 @@ const skillDrift = require('./skill-drift');
 // only coerce it to plain, predictable entries and flag the one that is the
 // current version (so the UI can mark "you are here"). A missing/!object
 // manifest yields an empty view rather than throwing.
-function normalizeVersionHistory(manifest) {
+//
+// #2839 — `opts.workingHash` is the copy's actual on-disk content hash and
+// `opts.availableHashes` the hashes a version snapshot exists for:
+//   • exactly ONE entry is `current`: the newest entry whose hash equals the
+//     working content (a forceHistory entry repeats a version number, so a
+//     version match would flag two rows — the old "v4 current" twice bug);
+//   • when the working content matches no recorded state (an agent copy edited
+//     in place), `workingCopy` describes it and no history entry is current;
+//   • every entry carries `available` — whether its content can be opened,
+//     compared or restored (the working content is always available).
+function normalizeVersionHistory(manifest, opts = {}) {
   const man = manifest && typeof manifest === 'object' ? manifest : null;
   const current = man ? {
     version: Number.isInteger(man.version) ? man.version : null,
@@ -30,22 +40,36 @@ function normalizeVersionHistory(manifest) {
     updatedAt: man.updatedAt || null,
     updatedBy: man.updatedBy || null,
   } : { version: null, contentHash: null, updatedAt: null, updatedBy: null };
+  const o = opts && typeof opts === 'object' ? opts : {};
+  const workingHash = typeof o.workingHash === 'string' && o.workingHash ? o.workingHash : current.contentHash;
+  const available = new Set(Array.isArray(o.availableHashes) ? o.availableHashes : []);
+  if (workingHash) available.add(workingHash);
 
   const rawHistory = man && Array.isArray(man.history) ? man.history : [];
+  let currentMarked = false;
   const history = rawHistory
     .filter(h => h && typeof h === 'object')
-    .map(h => ({
-      version: Number.isInteger(h.version) ? h.version : null,
-      hash: typeof h.hash === 'string' ? h.hash : null,
-      at: h.at || null,
-      by: h.by || null,
-      action: h.action || null,
-      note: h.note != null && h.note !== '' ? String(h.note) : undefined,
-      // The current version is the newest history entry whose version matches;
-      // marking it lets the timeline highlight the live revision.
-      current: current.version != null && h.version === current.version,
-    }));
-  return { current, history };
+    .map(h => {
+      const hash = typeof h.hash === 'string' ? h.hash : null;
+      // Newest-first, so the first entry matching the working content wins.
+      const isCurrent = !currentMarked && hash != null && hash === workingHash;
+      if (isCurrent) currentMarked = true;
+      return {
+        version: Number.isInteger(h.version) ? h.version : null,
+        hash,
+        at: h.at || null,
+        by: h.by || null,
+        action: h.action || null,
+        note: h.note != null && h.note !== '' ? String(h.note) : undefined,
+        restoredFrom: Number.isInteger(h.restoredFrom) ? h.restoredFrom : undefined,
+        current: isCurrent,
+        available: hash != null && available.has(hash),
+      };
+    });
+  const workingCopy = workingHash && !currentMarked && workingHash !== current.contentHash
+    ? { hash: workingHash, current: true, available: true }
+    : null;
+  return { current, history, workingCopy };
 }
 
 // A stable identity key for one copy, so a caller can dedup a copy that is
@@ -96,7 +120,7 @@ function summarizeCopies(copies) {
 // gathered copies + provenance are supplied by the (fs-bound) caller. Copies are
 // deduped on their identity key, marked `viewed` where they match, sorted, and
 // summarized.
-function assembleLineage({ name, viewed, manifest, provenance, copies } = {}) {
+function assembleLineage({ name, viewed, manifest, provenance, copies, workingHash, availableHashes } = {}) {
   const viewedKey = copyKey(viewed);
   const seen = new Set();
   const deduped = [];
@@ -111,7 +135,7 @@ function assembleLineage({ name, viewed, manifest, provenance, copies } = {}) {
   return {
     name: name || null,
     viewed: viewed || null,
-    versions: normalizeVersionHistory(manifest),
+    versions: normalizeVersionHistory(manifest, { workingHash, availableHashes }),
     origin: (manifest && typeof manifest === 'object' && manifest.origin) || null,
     provenance: provenance && typeof provenance === 'object' ? provenance : null,
     copies: sorted,

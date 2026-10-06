@@ -11,7 +11,7 @@ import { usePageActions } from '../context/PageActionsContext';
 import {
   boardView, updatedAgo, AUTO_REFRESH_MS, readAutoRefresh, writeAutoRefresh, configFormRows, configFromForm,
   withoutRows, REMOVE_CONFIRM_TEXT, removeDialogTitle, RELEASE_CONFIRM_TEXT, releaseDialogTitle, releaseNotice, CHAT_LINK_CLASS, CHAT_LINK_CSS,
-  WAKE_CONFIRM_TEXT, wakeDialogTitle, wakeNotice,
+  WAKE_CONFIRM_TEXT, wakeDialogTitle, wakeNotice, ADOPT_CONFIRM_TEXT, adoptDialogTitle, adoptNotice,
 } from './process/flow-control-view';
 import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections';
 import { readCurrentTeam, writeCurrentTeam, resolveFlowControlTeam } from './current-team';
@@ -53,6 +53,7 @@ export default function FlowControl() {
   const [removeTarget, setRemoveTarget] = useState(null);
   const [releaseTarget, setReleaseTarget] = useState(null);
   const [wakeTarget, setWakeTarget] = useState(null);
+  const [adoptOpen, setAdoptOpen] = useState(false);
   const [removedOpen, setRemovedOpen] = useState(false);
   const loadSeq = useRef(0);
 
@@ -166,6 +167,18 @@ export default function FlowControl() {
       if (res && Array.isArray(res.warnings) && res.warnings.length) setActionError(res.warnings.join(' · '));
     },
     'Failed to wake the agent again',
+  ), [teamId, mutate]);
+
+  // "Adopt all" (#2877): start every row carried over from another instance or
+  // an earlier flow, through the same server-side checks as Wake again.
+  const adoptAll = useCallback((rowIds) => mutate(
+    async () => {
+      const res = await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/flow-board-adopt`, { rowIds });
+      setAdoptOpen(false);
+      setActionNotice(adoptNotice(res));
+      if (res && Array.isArray(res.warnings) && res.warnings.length) setActionError(res.warnings.join(' · '));
+    },
+    'Failed to adopt the carried-over items',
   ), [teamId, mutate]);
 
   const saveColumns = useCallback((config) => mutate(
@@ -294,7 +307,7 @@ export default function FlowControl() {
             {state.data && !view.maintenance && (
               <>
                 <WorkingNow view={view} busy={busy} onSetState={setRoleState} onForceDispatch={forceDispatch} />
-                {view.needsYou && <NeedsYou items={view.needsYou} canManage={view.canManage} busy={busy} onRelease={setReleaseTarget} onWake={setWakeTarget} />}
+                {view.needsYou && <NeedsYou items={view.needsYou} canManage={view.canManage} busy={busy} onRelease={setReleaseTarget} onWake={setWakeTarget} carriedOver={view.carriedOver} onAdoptAll={() => setAdoptOpen(true)} />}
                 <InProgress view={view} busy={busy} onRemove={setRemoveTarget} />
                 {view.doneRows.length > 0 && (
                   <RecentlyCompleted rows={view.doneRows} hint={view.retentionHint} canManage={view.canManage} busy={busy} onRemove={setRemoveTarget} />
@@ -370,6 +383,28 @@ export default function FlowControl() {
           </ul>
           <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
             {WAKE_CONFIRM_TEXT}
+          </p>
+        </Modal>
+      )}
+      {adoptOpen && (
+        <Modal
+          open
+          onClose={() => setAdoptOpen(false)}
+          title={adoptDialogTitle(view.carriedOver.length)}
+          maxWidth={480}
+          footer={(
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
+              <HeaderButton icon={BellRing} label="Adopt all" title="Deliver each carried-over wake label to its agent once" disabled={busy || view.carriedOver.length === 0} onClick={() => adoptAll(view.carriedOver)} />
+            </div>
+          )}
+        >
+          <ul style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+            {(view.needsYou || []).filter((n) => view.carriedOver.includes(n.id)).flatMap((n) => n.wakes.filter((w) => w.roles.length > 0).map((w) => (
+              <li key={`${n.id}:${w.ref}:${w.label}`}>{w.target}</li>
+            )))}
+          </ul>
+          <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+            {ADOPT_CONFIRM_TEXT}
           </p>
         </Modal>
       )}
@@ -573,12 +608,18 @@ function WorkingNow({ view, busy, onSetState, onForceDispatch }) {
 
 /* ── area ②: needs you ─────────────────────────────────────────────── */
 
-function NeedsYou({ items, canManage, busy, onRelease, onWake }) {
+function NeedsYou({ items, canManage, busy, onRelease, onWake, carriedOver = [], onAdoptAll }) {
   return (
     <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
       <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.needsYou} helpLabel="What to do about each reason">
         Needs you ({items.length})
       </AreaHeading>
+      {canManage && carriedOver.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', ...mutedStyle }}>
+          <span>{carriedOver.length === 1 ? '1 item was' : `${carriedOver.length} items were`} carried over from before this team&rsquo;s triggers started here.</span>
+          <SmallButton icon={BellRing} label={`Adopt all (${carriedOver.length})`} title="Start every carried-over item here" disabled={busy} onClick={onAdoptAll} />
+        </div>
+      )}
       {items.map((n) => (
         <div key={n.id} style={{ ...lineStyle, flexWrap: 'wrap', borderLeft: '3px solid var(--eb-status-warning, #d97706)' }}>
           <UserRound size={13} style={{ flexShrink: 0, color: 'var(--eb-text-secondary)' }} />
@@ -590,7 +631,7 @@ function NeedsYou({ items, canManage, busy, onRelease, onWake }) {
             <SmallButton icon={LockOpen} label="Release claim" title={`Release the stale claim (${n.release.map((c) => c.text).join(', ')})`} disabled={busy} onClick={() => onRelease(n)} />
           )}
           {canManage && n.canWake && (
-            <SmallButton icon={BellRing} label="Wake again" title={n.wakes.filter((w) => w.roles.length > 0).map((w) => w.target).join(', ')} disabled={busy} onClick={() => onWake(n)} />
+            <SmallButton icon={BellRing} label={n.carriedOver ? 'Adopt' : 'Wake again'} title={n.wakes.filter((w) => w.roles.length > 0).map((w) => w.target).join(', ')} disabled={busy} onClick={() => onWake(n)} />
           )}
           {/* #2872: which wake label never reached its agent, and why — the
               cause links to the GitHub Event Log row that recorded it. */}

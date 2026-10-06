@@ -107,22 +107,44 @@ test("_flowTeamMembers carries each member's enabled flag for the board (#2754)"
 test("the flow-board-wake route (#2873) re-checks a fresh board and GitHub, wakes only role templates, never touches labels", () => {
   const i = SRC.indexOf("const flowBoardWakeMatch");
   assert.ok(i > 0);
-  const route = SRC.slice(i, SRC.indexOf("// GET /internal/teams/:teamId/pool-control", i));
+  const route = SRC.slice(i, SRC.indexOf("// POST /internal/teams/:teamId/flow-board-adopt", i));
   // At most once: the in-flight guard before any await, released in finally.
   assert.ok(route.indexOf("flowBoardWakeInFlight.has(key)") < route.indexOf("await getTeamFlowBoard"));
   assert.match(route, /finally \{\s*if \(lockKey\) flowBoardWakeInFlight\.delete\(lockKey\);/);
   assert.match(route, /flowWakeAgain\.planWakeAgain\(await getTeamFlowBoard\(teamId, \{ refresh: true \}\), rowId\)/);
-  assert.match(route, /flowWakeAgain\.checkWakeStillPresent\(await fetchWorkItemRaw\(/);
-  assert.match(route, /githubPollerRef\.disarmWake\(\{ repo: w\.repo, number: w\.number, label: w\.label \}\)/);
-  assert.match(route, /onlyAgentIds: new Set\(w\.roles\.map\(\(role\) => role\.id\)\)/);
-  assert.match(route, /source: flowWakeAgain\.WAKE_AGAIN_SOURCE/);
+  assert.match(route, /await deliverBoardWakes\(plan, actor\)/);
   assert.match(route, /_flowBoardCache\.delete\(teamId\)/);
-  // No label write, no poller-bypassing raw enqueue.
   assert.doesNotMatch(route, /swapClaimLabel|\/labels|enqueuePending\(/);
+  // #2877: the delivery itself is shared with Adopt.
+  const deliver = body("async function deliverBoardWakes(");
+  assert.match(deliver, /flowWakeAgain\.checkWakeStillPresent\(await fetchWorkItemRaw\(/);
+  assert.match(deliver, /githubPollerRef\.disarmWake\(\{ repo: w\.repo, number: w\.number, label: w\.label \}\)/);
+  assert.match(deliver, /onlyAgentIds: new Set\(w\.roles\.map\(\(role\) => role\.id\)\)/);
+  assert.match(deliver, /source: flowWakeAgain\.WAKE_AGAIN_SOURCE/);
+  // No label write, no poller-bypassing raw enqueue.
+  assert.doesNotMatch(deliver, /swapClaimLabel|\/labels|enqueuePending\(/);
   // The shared fast-path narrows its listeners to the templates and keeps the
   // readiness-gate hold for every listener it wakes.
   const fast = body("async function wakeGithubLabelListeners(");
   assert.match(fast, /onlyAgentIds \? flowWakeAgain\.templateListeners\(matched, \[\.\.\.onlyAgentIds\]\) : matched/);
   assert.match(fast, /if \(l\.readinessGate\) \{[\s\S]*githubPollerRef\.holdWake\(/);
   assert.match(fast, /return \{ listeners, delivered: decisions\.size, held: held\.size \};/);
+});
+
+test("the flow-board-adopt route (#2877) adopts only on a click, from a fresh board, through the shared wake delivery", () => {
+  const i = SRC.indexOf("const flowBoardAdoptMatch");
+  assert.ok(i > 0);
+  const route = SRC.slice(i, SRC.indexOf("// GET /internal/teams/:teamId/pool-control", i));
+  assert.match(route, /const board = await getTeamFlowBoard\(teamId, \{ refresh: true \}\);/);
+  assert.match(route, /flowWakeAgain\.planAdopt\(board, parsed\.rowIds\)/);
+  // The same per-row in-flight guard as Wake again, released in finally.
+  assert.match(route, /flowBoardWakeInFlight\.has\(key\)/);
+  assert.match(route, /finally \{\s*for \(const k of locks\) flowBoardWakeInFlight\.delete\(k\);/);
+  assert.match(route, /await deliverBoardWakes\(rowPlan, actor\)/);
+  assert.match(route, /_flowBoardCache\.delete\(teamId\)/);
+  assert.doesNotMatch(route, /swapClaimLabel|\/labels|enqueuePending\(|wakeGithubLabelListeners/);
+  // Nothing wakes in-flight items on its own: no timer, sweep or import path
+  // calls the adoption.
+  const callers = SRC.split("deliverBoardWakes(").length - 1;
+  assert.equal(callers, 3, "the definition, Wake again and Adopt — nothing else");
 });

@@ -2146,6 +2146,40 @@ async function refireGithubEvent({ agentId, eventId, triggerId, actor }) {
   }
 }
 
+// The delivery half of the board's "Wake again" (#2873) and "Adopt" (#2877):
+// for each planned wake, re-check on GitHub that the label is still on the
+// open item, clear the poller's armed key, and deliver through the label
+// fast-path to the consumer role templates only — a gated hand-off opens a
+// readiness hold. No label is changed. Returns `{ results, warnings }`.
+async function deliverBoardWakes(plan, actor) {
+  const results = [];
+  const warnings = [];
+  for (const w of plan.wakes) {
+    const ref = `${w.repo}#${w.number}`;
+    const check = flowWakeAgain.checkWakeStillPresent(await fetchWorkItemRaw(w.repo, w.kind, w.number), { label: w.label });
+    if (!check.ok) {
+      warnings.push(`${ref}: ${check.warning} — not woken`);
+      results.push({ repo: w.repo, number: w.number, label: w.label, ok: false });
+      continue;
+    }
+    // The wake must read as a rising edge to the poller's dedup, so a
+    // later genuine re-add is not dropped as already armed.
+    if (githubPollerRef) githubPollerRef.disarmWake({ repo: w.repo, number: w.number, label: w.label });
+    const r = await wakeGithubLabelListeners({
+      repo: w.repo, number: w.number, kind: w.kind, label: w.label, actor,
+      source: flowWakeAgain.WAKE_AGAIN_SOURCE,
+      onlyAgentIds: new Set(w.roles.map((role) => role.id)),
+    });
+    const ok = r.delivered + r.held > 0;
+    if (!ok) warnings.push(`${ref}: no switched-on trigger of ${w.roles.map((role) => role.label).join(', ')} listens for ${w.label} on this repository — not woken`);
+    console.log(
+      `[Orchestrator] flow-board-wake: ${ref} ${w.label} (was ${w.cause}${w.carriedOver ? ', carried over' : ''}) by ${actor || 'console'} → ` +
+      `${r.delivered} delivered, ${r.held} held`);
+    results.push({ repo: w.repo, number: w.number, label: w.label, ok, delivered: r.delivered, held: r.held });
+  }
+  return { results, warnings };
+}
+
 function _flowLiftEmits(cfgEmits, triggers) {
   const base = Array.isArray(cfgEmits) ? cfgEmits.filter((e) => typeof e === "string" && e) : [];
   const lifted = [];
@@ -20534,31 +20568,7 @@ async function main() {
           lockKey = key;
           const plan = flowWakeAgain.planWakeAgain(await getTeamFlowBoard(teamId, { refresh: true }), rowId);
           if (!plan.ok) return sendJson(res, plan.status, { error: plan.error });
-          const results = [];
-          const warnings = [];
-          for (const w of plan.wakes) {
-            const ref = `${w.repo}#${w.number}`;
-            const check = flowWakeAgain.checkWakeStillPresent(await fetchWorkItemRaw(w.repo, w.kind, w.number), { label: w.label });
-            if (!check.ok) {
-              warnings.push(`${ref}: ${check.warning} — not woken`);
-              results.push({ repo: w.repo, number: w.number, label: w.label, ok: false });
-              continue;
-            }
-            // The wake must read as a rising edge to the poller's dedup, so a
-            // later genuine re-add is not dropped as already armed.
-            if (githubPollerRef) githubPollerRef.disarmWake({ repo: w.repo, number: w.number, label: w.label });
-            const r = await wakeGithubLabelListeners({
-              repo: w.repo, number: w.number, kind: w.kind, label: w.label, actor,
-              source: flowWakeAgain.WAKE_AGAIN_SOURCE,
-              onlyAgentIds: new Set(w.roles.map((role) => role.id)),
-            });
-            const ok = r.delivered + r.held > 0;
-            if (!ok) warnings.push(`${ref}: no switched-on trigger of ${w.roles.map((role) => role.label).join(', ')} listens for ${w.label} on this repository — not woken`);
-            console.log(
-              `[Orchestrator] flow-board-wake: ${ref} ${w.label} (was ${w.cause}) by ${actor || 'console'} → ` +
-              `${r.delivered} delivered, ${r.held} held`);
-            results.push({ repo: w.repo, number: w.number, label: w.label, ok, delivered: r.delivered, held: r.held });
-          }
+          const { results, warnings } = await deliverBoardWakes(plan, actor);
           _flowBoardCache.delete(teamId);
           const woken = results.filter((r) => r.ok).length;
           return sendJson(res, woken ? 200 : 409, {
@@ -20569,6 +20579,59 @@ async function main() {
           return sendJson(res, 400, { error: err.message });
         } finally {
           if (lockKey) flowBoardWakeInFlight.delete(lockKey);
+        }
+      });
+      return;
+    }
+
+    // POST /internal/teams/:teamId/flow-board-adopt — "Adopt" (#2877): start
+    // in-flight items carried over from another instance or an earlier flow.
+    // Body `{ rowIds?, actor }`; no `rowIds` = every row the FRESH board
+    // reads as carried over. Each row goes through the same checks and
+    // delivery as "Wake again" (planWakeAgain + deliverBoardWakes), under the
+    // same per-row in-flight guard. Never runs on its own — only on a click.
+    const flowBoardAdoptMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/?]+)\/flow-board-adopt(?:\?.*)?$/);
+    if (flowBoardAdoptMatch) {
+      const teamId = decodeURIComponent(flowBoardAdoptMatch[1]);
+      const cfg = loadAgentConfig(teamId);
+      if (!cfg || cfg.role !== 'team') {
+        return sendJson(res, 404, { error: 'agent team not found' });
+      }
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 100_000) req.destroy(); });
+      req.on('end', async () => {
+        const locks = [];
+        try {
+          const parsed = JSON.parse(body || '{}');
+          const actor = typeof parsed.actor === 'string' && parsed.actor.trim() ? parsed.actor.trim().slice(0, 200) : null;
+          const board = await getTeamFlowBoard(teamId, { refresh: true });
+          const plan = flowWakeAgain.planAdopt(board, parsed.rowIds);
+          if (!plan.ok) return sendJson(res, plan.status, { error: plan.error });
+          const rows = [];
+          const warnings = [...plan.skipped.map((s) => `${s.rowId}: ${s.error}`)];
+          for (const { rowId, plan: rowPlan } of plan.rows) {
+            const key = flowWakeAgain.wakeAgainKey(teamId, rowId);
+            if (flowBoardWakeInFlight.has(key)) {
+              warnings.push(`${rowId}: already being woken`);
+              continue;
+            }
+            flowBoardWakeInFlight.add(key);
+            locks.push(key);
+            const r = await deliverBoardWakes(rowPlan, actor);
+            warnings.push(...r.warnings);
+            rows.push({ rowId, woken: r.results.filter((x) => x.ok).length, results: r.results });
+          }
+          _flowBoardCache.delete(teamId);
+          const adopted = rows.filter((r) => r.woken > 0).length;
+          return sendJson(res, adopted ? 200 : 409, {
+            teamId, adopted, rows, warnings,
+            ...(adopted ? {} : { error: warnings[0] || 'Nothing could be adopted' }),
+          });
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        } finally {
+          for (const k of locks) flowBoardWakeInFlight.delete(k);
         }
       });
       return;

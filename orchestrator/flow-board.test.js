@@ -690,7 +690,9 @@ test('buildFlowBoard: every constellation of the 2026-10-06 incident is flagged 
   const flag = (issueN) => b.rows.find((r) => r.id === `o/r#${issueN}`).needsHuman;
   for (const n of [2859, 2819, 2813, 2858]) {
     assert.equal(b.rows.find((r) => r.id === `o/r#${n}`).status, 'queued', `#${n} reads up next`);
-    assert.equal(flag(n).reason, 'wake never delivered', `#${n}`);
+    // #2877: the history-horizon rows predate their trigger — carried over.
+    const expected = n === 2819 || n === 2813 ? 'carried over — not started here' : 'wake never delivered';
+    assert.equal(flag(n).reason, expected, `#${n}`);
   }
   assert.deepEqual(flag(2859).wakes, [{
     repo: 'o/r', number: 2863, kind: 'pr', label: 'ready-for-review', roles: [{ id: 't-reviewer', label: 'Code Reviewer' }],
@@ -707,7 +709,7 @@ test('buildFlowBoard: every constellation of the 2026-10-06 incident is flagged 
   }]);
   // The rows also land in "Needs you", with the per-label causes.
   const n = b.needsHuman.find((x) => x.id === 'o/r#2819');
-  assert.equal(n.reason, 'wake never delivered');
+  assert.equal(n.reason, 'carried over — not started here');
   assert.equal(n.wakes[0].cause, 'history-horizon');
 });
 
@@ -776,11 +778,11 @@ test('buildFlowBoard: a running, queued, gate-held or pooled consumer keeps the 
   const ev = [logged(2820, { label: 'ready-for-review', created: 1094, logged: 784, outcomes: [dropped('t-reviewer', 'history-horizon')] })];
   const github = { issues: [issue(2819)], prs: [pr(2820, { labels: ['ready-for-review'], closes: [2819], updatedAt: iso(900) })] };
   const flagOf = (extra) => board({ github, events: ev, ...extra }).rows.find((r) => r.id === 'o/r#2819').needsHuman;
-  assert.equal(flagOf({}).reason, 'wake never delivered');
+  assert.equal(flagOf({}).reason, 'carried over — not started here');
   // A dispatch waiting in a queue (or held in the lane) for the issue or the PR.
   assert.equal(flagOf({ queued: [{ repo: 'o/r', numbers: [2819, 2820] }] }), null);
   assert.equal(flagOf({ queued: [{ repo: 'o/r', numbers: [2820] }] }), null);
-  assert.equal(flagOf({ queued: [{ repo: 'o/other', numbers: [2820] }] }).reason, 'wake never delivered');
+  assert.equal(flagOf({ queued: [{ repo: 'o/other', numbers: [2820] }] }).reason, 'carried over — not started here');
   // A hand-off held by its readiness gate.
   assert.equal(flagOf({ gateHolds: [{ repo: 'o/r', number: 2820, agentId: 't-reviewer', waitingFor: ['ci'], heldAt: iso(5) }] }), null);
   // A live pool instance for the item.
@@ -806,7 +808,7 @@ test('buildFlowBoard: a wake within the threshold, or carrying its claim, is not
     github: { prs: [pr(97, { labels: ['ready-for-review', 'ready-for-review:wip'], body: '<!-- agent: t-developer -->', updatedAt: iso(300) })] },
     events: [logged(97, { label: 'ready-for-review', created: 300, outcomes: [dropped('t-reviewer', 'history-horizon')] })],
   });
-  assert.notEqual(claimed.rows[0].needsHuman && claimed.rows[0].needsHuman.reason, 'wake never delivered');
+  assert.ok(!['wake never delivered', 'carried over — not started here'].includes(claimed.rows[0].needsHuman && claimed.rows[0].needsHuman.reason));
 });
 
 test('buildFlowBoard: a wake whose consumer is off stays "nobody picks it up", not parked (#2872)', () => {
@@ -828,4 +830,79 @@ test('buildFlowBoard: a removed-then-re-added wake whose re-add was never seen i
     ],
   });
   assert.deepEqual([b.rows[0].needsHuman.wakes[0].cause, b.rows[0].needsHuman.since], ['not-seen', iso(200)]);
+});
+
+// ---------------------------------------------------------------------------
+// Carried over from another instance or an earlier flow (#2877)
+// ---------------------------------------------------------------------------
+
+// The 2026-10-05 move: labels set 09:40–09:53 on the old instance, the new
+// instance's triggers activated at 10:24–10:27. The new instance's log holds
+// nothing about those labels yet (the late Events API copy may never come).
+const ACTIVATED = iso(90); // 10:24 on the new instance
+const movedTeam = (activatedAt = ACTIVATED) => SDLC.map((m) => ({
+  ...m, triggers: (m.triggers || []).map((t) => ({ ...t, activatedAt })),
+}));
+const carried = (n, issueN, label, mins) => pr(n, { labels: [label], closes: [issueN], body: '<!-- agent: t-developer -->', updatedAt: iso(mins) });
+
+test('carriedOver: a wake label older than every consumer\'s trigger is carried over at once — no waiting window (#2877)', () => {
+  assert.equal(fb.REASONS.carriedOver, 'carried over — not started here');
+  const b = board({
+    members: movedTeam(),
+    github: {
+      issues: [issue(2819, { updatedAt: iso(140) }), issue(2813, { updatedAt: iso(140) }), issue(2858, { updatedAt: iso(140) })],
+      prs: [carried(2820, 2819, 'ready-for-review', 134), carried(2844, 2813, 'ready-for-review', 127), carried(2862, 2858, 'changes-requested', 120)],
+    },
+    now: NOW,
+  });
+  // Exactly the three labelled in-flight items, each at its own stage.
+  assert.deepEqual(b.carriedOver.sort(), ['o/r#2813', 'o/r#2819', 'o/r#2858']);
+  const flag = (id) => b.rows.find((r) => r.id === id).needsHuman;
+  assert.equal(flag('o/r#2819').reason, 'carried over — not started here');
+  assert.deepEqual(flag('o/r#2819').wakes.map((w) => [w.number, w.label, w.cause, w.carriedOver, w.roles.map((r) => r.id)]), [
+    [2820, 'ready-for-review', 'not-seen', true, ['t-reviewer']],
+  ]);
+  assert.deepEqual(flag('o/r#2858').wakes.map((w) => [w.label, w.roles.map((r) => r.id)]), [['changes-requested', ['t-reworker']]]);
+});
+
+test('carriedOver: a late history-horizon copy keeps the row carried over; a label added after activation is not (#2877)', () => {
+  const horizonCopy = logged(2820, { label: 'ready-for-review', created: 134, logged: 5, outcomes: [dropped('t-reviewer', 'history-horizon')] });
+  const b = board({
+    members: movedTeam(),
+    github: { issues: [issue(2819, { updatedAt: iso(140) })], prs: [carried(2820, 2819, 'ready-for-review', 134)] },
+    events: [horizonCopy],
+  });
+  assert.equal(b.rows[0].needsHuman.reason, 'carried over — not started here');
+  assert.equal(b.rows[0].needsHuman.wakes[0].eventId, horizonCopy.eventId);
+  // Labelled 10 min ago, after the triggers went live: an ordinary in-flight
+  // wake inside the window — not carried over, not flagged yet.
+  const fresh = board({ members: movedTeam(), github: { prs: [carried(2900, 2899, 'ready-for-review', 10)] } });
+  assert.equal(fresh.rows[0].needsHuman, null);
+  assert.deepEqual(fresh.carriedOver, []);
+});
+
+test('carriedOver: without a known activation time the board falls back to the ordinary wake-never-delivered window (#2877)', () => {
+  const unstamped = board({ github: { prs: [carried(2820, 2819, 'ready-for-review', 134)] } });
+  assert.equal(unstamped.rows[0].needsHuman.reason, 'wake never delivered');
+  assert.deepEqual(unstamped.carriedOver, []);
+  // A consumer whose trigger has no stamp may have listened all along.
+  const mixed = movedTeam().map((m) => (m.id === 't-reviewer'
+    ? { ...m, triggers: [...m.triggers, { id: 't-old', type: 'github-event', labelFilter: 'ready-for-review' }] }
+    : m));
+  assert.equal(board({ members: mixed, github: { prs: [carried(2820, 2819, 'ready-for-review', 134)] } }).rows[0].needsHuman.reason, 'wake never delivered');
+});
+
+test('carriedOver: running, queued or gate-held work is never carried over; a claim is Release-claim business (#2877)', () => {
+  const github = { issues: [issue(2819, { updatedAt: iso(140) })], prs: [carried(2820, 2819, 'ready-for-review', 134)] };
+  const flagOf = (extra) => board({ members: movedTeam(), github, ...extra }).rows.find((r) => r.id === 'o/r#2819').needsHuman;
+  assert.equal(flagOf({ queued: [{ repo: 'o/r', numbers: [2820] }] }), null);
+  assert.equal(flagOf({ gateHolds: [{ repo: 'o/r', number: 2820, agentId: 't-reviewer', waitingFor: ['ci'], heldAt: iso(5) }] }), null);
+  assert.equal(flagOf({ sessions: [{ agentId: 't-reviewer', session: { id: 's', startedAt: iso(2), workItem: { repo: 'o/r', number: 2820 } } }] }), null);
+  // An orphaned claim from the old instance: needs help + Release claim.
+  const claim = board({
+    members: movedTeam(),
+    github: { issues: [issue(2819, { updatedAt: iso(140) })], prs: [carried(2820, 2819, 'ready-for-review:wip', 134)] },
+  });
+  assert.equal(claim.rows[0].needsHuman.reason, fb.REASONS.needsHelp);
+  assert.deepEqual(claim.carriedOver, []);
 });

@@ -18,6 +18,7 @@ askPrompts:
   - "Why is a pool instance still running after it opened its pull request?"
   - "Why does a row say wake never delivered?"
   - "What does Wake again do?"
+  - "How do I move a team to another instance without losing tickets?"
 ---
 
 ## What the Flow Control board shows
@@ -158,6 +159,29 @@ spelled out, together with how long it has been waiting:
 | **stuck — no progress, needs help** | The row has read *working* for more than an hour, but only because of a claim label (e.g. `ready:wip`) — no agent run or pool instance is alive for it, so the run that claimed it died or was stopped. Team Admins see a **Release claim** button: after you confirm, it swaps the stale `…:wip` label back to the wake label (e.g. `ready`) on GitHub — if the wake label is still there too, it is removed and added again so the step is noticed — the step runs again on the next poll, and the release is recorded in the GitHub Event Log. The board never does this on its own. You can also swap the label by hand. |
 | **nobody picks it up — its agent is switched off** | The item carries a wake label (or its claim), but every agent listening for it is switched off — the agent, or its trigger on that label. Releasing would wake nobody. Switch the agent back on, or route the label elsewhere; the Flows page shows the same as a lint. |
 | **wake never delivered** | The item carries a wake label (e.g. `ready-for-review`) and reads *up next*, but for more than 30 minutes no agent has been running, queued or held for it — the wake never reached its agent. The line names each label and why, from the GitHub Event Log: **older than its agent's trigger** (`history-horizon` — the label was added before the agent's trigger existed, typically after the flow was re-applied or the team moved to another instance), **re-add dropped as already armed** (`wake-already-armed`), **never reported by the GitHub Events API** (no event for it reached the log), or **dropped (…)** with the poller's reason. Click the reason to open that event in the GitHub Event Log. Team Admins see a **Wake again** button: the dialog names the agent role, the item and the label it wakes for — for example *Wake Code Reviewer for PR #2844 (ready-for-review)* — and says: The wake label already on the GitHub item is delivered to its agent again, directly — no label is changed. A pooled role starts on the item’s own instance; a hand-off with a readiness gate still waits for CI. Only do this when nobody is already working on it. Before it wakes anyone, the board checks again that the item is still parked and that the label is still on the open item on GitHub. Each wake is recorded in the GitHub Event Log with your name as the actor. The board never does this on its own. |
+| **carried over — not started here** | The item carries a wake label that is older than its agent’s trigger here — it was applied before the team moved to this instance or before its flow was re-applied, so it will never wake anyone on its own. Team Admins see **Adopt** on the row and **Adopt all (n)** above the list: the dialog lists each item, role and label and says: These items already carry a wake label from before this team’s triggers were activated here — after a move to this instance or a flow re-apply. Adopting delivers each label to its agent once, directly — no label is changed. Items an agent is already working on, or that wait in a queue, are skipped. Nothing is adopted without your click. |
+
+### Moving a team to another instance
+
+Moving an Agent Team to another Agent Studio instance — or re-applying or
+re-materialising its flow — starts every trigger fresh. Work items that
+already carry a wake label are **not** picked up on their own: the new
+triggers ignore everything that happened before they were switched on, so a
+backlog is never replayed by accident.
+
+1. **Move or re-apply the team.** Labels on GitHub stay as they are.
+2. **Open Flow Control.** Items whose wake label is older than the new
+   triggers show **carried over — not started here** right away. Items an
+   agent had claimed on the old instance (`…:wip`) show **stuck — no
+   progress, needs help** after an hour; use **Release claim** for those.
+3. **Adopt.** Use **Adopt all (n)**, or **Adopt** on single rows. Each item is
+   woken once, at the stage its label names.
+
+What carries over: the GitHub items, their labels, branches and pull requests,
+and the team's knowledge base (it lives in git). What does not: running
+sessions, queued wakes, pool instances and their chat sessions on the old
+instance. An adopted item starts a fresh session (on a new pool instance for a
+pooled role) and picks up from what is on GitHub.
 
 ## The stages
 
@@ -237,3 +261,4 @@ do not bring it back.
 **Removed (n)** next to **Columns** lists the removed items; **Restore** puts
 one back at its current stage. Entries for items that are closed, deleted or no
 longer part of the board's GitHub snapshot are cleaned up automatically.
+

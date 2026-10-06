@@ -25,6 +25,10 @@ import {
   wakeDialogTitle,
   wakeTargetText,
   wakeNotice,
+  ADOPT_CONFIRM_TEXT,
+  CARRIED_OVER_REASON,
+  adoptDialogTitle,
+  adoptNotice,
   WAKE_CAUSE_TEXT,
   boardView,
   EMPTY_TEXT,
@@ -762,4 +766,34 @@ test('Wake again copy: dialog title, target line and the notice after a click (#
 test('help topic quotes the Wake again confirmation (#2873)', () => {
   const topic = fs.readFileSync(HELP_TOPIC, 'utf8').replace(/\s+/g, ' ');
   assert.ok(topic.includes(WAKE_CONFIRM_TEXT), 'flow-control.md must quote WAKE_CONFIRM_TEXT');
+});
+
+test('Adopt (#2877): a carried-over row reads Adopt; boardView lists the rows Adopt all would start', () => {
+  assert.equal(CARRIED_OVER_REASON, 'carried over — not started here');
+  const carried = {
+    id: 'o/r#2819', title: 'Release', issue: { repo: 'o/r', number: 2819 }, prs: [],
+    reason: CARRIED_OVER_REASON, since: ago(140),
+    wakes: [{ repo: 'o/r', number: 2820, kind: 'pr', label: 'ready-for-review', roles: [{ id: 't-rev', label: 'Code Reviewer' }], cause: 'not-seen', carriedOver: true }],
+  };
+  const parked = { ...carried, id: 'o/r#2859', reason: 'wake never delivered' };
+  const noConsumer = { ...carried, id: 'o/r#2900', wakes: [{ ...carried.wakes[0], roles: [] }] };
+  assert.equal(needsYouView(carried, { now: NOW }).carriedOver, true);
+  assert.equal(needsYouView(parked, { now: NOW }).carriedOver, false);
+  const v = boardView({
+    stages: STAGES, rows: [], sessions: [], pools: [], repos: ['o/r'], generatedAt: ago(0),
+    needsHuman: [carried, parked, noConsumer], carriedOver: ['o/r#2819', 'o/r#2900'],
+  }, NOW);
+  assert.deepEqual(v.carriedOver, ['o/r#2819']); // nobody to wake for #2900
+  assert.deepEqual(boardView({ stages: STAGES, rows: [], needsHuman: [], sessions: [], pools: [], repos: ['o/r'], generatedAt: ago(0) }, NOW).carriedOver, []);
+});
+
+test('Adopt copy: title, confirmation and notice (#2877)', () => {
+  assert.equal(adoptDialogTitle(1), 'Adopt 1 carried-over item?');
+  assert.equal(adoptDialogTitle(3), 'Adopt 3 carried-over items?');
+  assert.match(ADOPT_CONFIRM_TEXT, /no label is changed/);
+  assert.equal(adoptNotice({ adopted: 3 }), '3 items adopted — each agent starts on its next check.');
+  assert.equal(adoptNotice({ adopted: 1 }), '1 item adopted — each agent starts on its next check.');
+  assert.equal(adoptNotice({ adopted: 0 }), null);
+  const topic = fs.readFileSync(HELP_TOPIC, 'utf8').replace(/\s+/g, ' ');
+  assert.ok(topic.includes(ADOPT_CONFIRM_TEXT), 'flow-control.md must quote ADOPT_CONFIRM_TEXT');
 });

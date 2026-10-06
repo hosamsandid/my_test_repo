@@ -68,6 +68,7 @@ const REASONS = Object.freeze({
   needsHelp: 'stuck — no progress, needs help',
   noConsumer: 'nobody picks it up — its agent is switched off',
   wakeLost: 'wake never delivered',
+  carriedOver: 'carried over — not started here',
 });
 
 function str(v) {
@@ -154,6 +155,10 @@ function buildRoleGraph(members, { labels = [], teamId = null } = {}) {
     const r = {
       id: m.id, displayName: str(m.displayName) || m.id, enabled: m.enabled !== false,
       consumes: new Set(), emits: new Set(), from: new Set(),
+      // Wake label -> when this role's trigger on it started listening
+      // (`activatedAt`, else `createdAt`; the poller's history horizon, #320),
+      // earliest of several. A label older than it was never this role's (#2877).
+      horizons: new Map(),
     };
     for (const e of Array.isArray(m.emits) ? m.emits : []) if (str(e)) r.emits.add(str(e));
     const opts = m.outcomes && Array.isArray(m.outcomes.options) ? m.outcomes.options : [];
@@ -173,7 +178,13 @@ function buildRoleGraph(members, { labels = [], teamId = null } = {}) {
       if (!t || t.type !== 'github-event' || t.enabled === false) continue;
       for (const e of Array.isArray(t.emits) ? t.emits : []) if (str(e)) r.emits.add(str(e));
       const l = str(t.labelFilter);
-      if (l && !isStateSuffix(l)) r.consumes.add(l);
+      if (l && !isStateSuffix(l)) {
+        r.consumes.add(l);
+        const h = toMs(t.activatedAt) ?? toMs(t.createdAt);
+        // Unknown for any trigger = unknown for the label: it may have listened all along.
+        if (h == null || r.horizons.get(l) === null) r.horizons.set(l, null);
+        else if (!r.horizons.has(l) || h < r.horizons.get(l)) r.horizons.set(l, h);
+      }
     }
     for (const c of Array.isArray(m.channels) ? m.channels : []) {
       const from = c && str(c.from);
@@ -713,6 +724,9 @@ function buildFlowBoard(args = {}) {
     sessions,
     pools,
     doneRetentionHours: config.doneRetentionHours,
+    // #2877: rows carried over from another instance or an earlier flow, for
+    // the board's bulk "Adopt all".
+    carriedOver: out.filter((r) => r.needsHuman && r.needsHuman.reason === REASONS.carriedOver).map((r) => r.id),
     removed: removedRows.sort((a, b) => (toMs(b.removedAt) || 0) - (toMs(a.removedAt) || 0) || a.id.localeCompare(b.id)),
     // Stored removals that no longer hide anything: revived by flow activity,
     // or their row is gone from the snapshot (closed and aged out, deleted,
@@ -919,7 +933,10 @@ function humanBlock({
     const wakes = parkedWakes({ open, graph, itemEvents, roleOf, now });
     if (wakes.length) {
       const at = Math.min(...wakes.map((w) => toMs(w.since)));
-      return { reason: REASONS.wakeLost, since: new Date(at).toISOString(), wakes };
+      // #2877: a row whose every parked wake predates its trigger was carried
+      // over from another instance or an earlier flow — "Adopt" starts it here.
+      const reason = wakes.every((w) => w.carriedOver) ? REASONS.carriedOver : REASONS.wakeLost;
+      return { reason, since: new Date(at).toISOString(), wakes };
     }
   }
   if (position.status === 'working' || position.status === 'queued') return null;
@@ -1021,13 +1038,21 @@ function parkedWakes({ open, graph, itemEvents, roleOf, now }) {
         const since = Math.max(toMs(it.updatedAt) || 0, last ? eventAt(last) || 0 : 0) || null;
         wake = { cause: WAKE_CAUSES.notSeen, eventId: null, since };
       }
-      if (wake.since == null || now - wake.since <= PARKED_WAKE_MS) continue;
-      const roles = [...consumers]
-        .filter((id) => graph.roles.get(id) && graph.roles.get(id).enabled !== false)
-        .map((id) => ({ id, label: graph.roles.get(id).displayName }));
+      if (wake.since == null) continue;
+      const live = [...consumers].filter((id) => graph.roles.get(id) && graph.roles.get(id).enabled !== false);
+      // #2877: the label is older than every live consumer's trigger — it was
+      // applied before this instance or flow existed (a team move, a flow
+      // re-apply). No delivery will ever come, so no waiting window either.
+      const carriedOver = wake.cause === WAKE_CAUSES.horizon || (wake.cause === WAKE_CAUSES.notSeen && (() => {
+        const hs = live.map((id) => graph.roles.get(id).horizons.get(l));
+        return hs.length > 0 && hs.every((h) => h != null) && wake.since < Math.min(...hs);
+      })());
+      if (!carriedOver && now - wake.since <= PARKED_WAKE_MS) continue;
+      const roles = live.map((id) => ({ id, label: graph.roles.get(id).displayName }));
       out.push({
         repo: it.repo, number: it.number, kind: it.kind, label: l, roles,
         ...wake, since: new Date(wake.since).toISOString(),
+        ...(carriedOver ? { carriedOver: true } : {}),
       });
     }
   }

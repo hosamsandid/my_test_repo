@@ -9421,6 +9421,33 @@ app.post('/api/teams/:teamId/flow-board-wake', apiLimiter, async (req, res) => {
   }
 });
 
+// POST /api/teams/:teamId/flow-board-adopt — "Adopt" (#2877): start the rows
+// the board reads as carried over from another instance or an earlier flow.
+// Body `{ rowIds? }` (none = every carried-over row). Gated like every board
+// write; the actor is always the session user.
+app.post('/api/teams/:teamId/flow-board-adopt', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!canManageTeam(scope, teamId)) return denyAdmin(res, 'You may not manage this team');
+  const raw = req.body && req.body.rowIds;
+  if (raw != null && (!Array.isArray(raw) || raw.length > 200 || raw.some((id) => typeof id !== 'string' || id.length > 300))) {
+    return res.status(400).json({ error: 'rowIds must be a list of at most 200 row ids' });
+  }
+  const actor = (req.user && (req.user.username || req.user.email || req.user.sub)) || null;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/flow-board-adopt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rowIds: raw || null, actor }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // GET /api/teams/:teamId/pool-control — board data for the Flow Control
 // board's pause/drain/force-dispatch controls (#2250 Phase 5, epic #2251).
 // Visibility-only like `tickets`/`flow-anomalies`: no `canManageTeam` gate on

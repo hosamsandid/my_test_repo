@@ -5237,7 +5237,10 @@ function seedAgentWorkspace(id, env, opts = {}) {
       // throws. Skip the self-copy (but still record it in the manifest).
       if (path.resolve(src) !== path.resolve(dst)) {
         try {
-          fs.cpSync(src, dst, { recursive: true });
+          // #2839: version snapshots belong to ONE copy — never seed them along;
+          // the agent copy keeps its own snapshot of what it received.
+          fs.cpSync(src, dst, { recursive: true, filter: skillManifest.snapshotCopyFilter });
+          skillManifest.snapshotSkillDir(dst);
         } catch (err) {
           warnings.push(`skill ${skillName}: ${err.message}`);
           continue;
@@ -5984,7 +5987,10 @@ function seedAgentWorkspaceForInstance(id, env, blueprintId, skills = []) {
       const skillSrc = path.join(skillsSrc, skillName);
       const skillDst = path.join(skillsDst, skillName);
       if (!fs.existsSync(skillSrc)) { warnings.push(`skill not found: ${skillName}`); continue; }
-      try { fs.cpSync(skillSrc, skillDst, { recursive: true }); }
+      try {
+        fs.cpSync(skillSrc, skillDst, { recursive: true, filter: skillManifest.snapshotCopyFilter });
+        skillManifest.snapshotSkillDir(skillDst);
+      }
       catch (err) { warnings.push(`skill ${skillName}: ${err.message}`); continue; }
       seededManifest[skillName] = { tier: "global", seededAt, ...skillSourceIdentity(skillSrc) };
       try { projectSkillCommands(id, skillName, skillSrc, commandManifest, { seededAt }); }
@@ -12676,7 +12682,10 @@ class Orchestrator {
       if (!src) return { agentId: id, status: "error", error: `skill not found in pool: ${skillName}`, reason: "source-missing" };
       commandSrc = src;
       if (path.resolve(src) !== path.resolve(dst)) {
-        try { fs.cpSync(src, dst, { recursive: true, force: true }); }
+        try {
+          fs.cpSync(src, dst, { recursive: true, force: true, filter: skillManifest.snapshotCopyFilter });
+          skillManifest.snapshotSkillDir(dst);
+        }
         catch (err) { return { agentId: id, status: "error", error: err.message, reason: "copy-failed" }; }
       }
       manifest[skillName] = { tier: skillTierForSource(src), seededAt: new Date().toISOString(), ...skillSourceIdentity(src) };

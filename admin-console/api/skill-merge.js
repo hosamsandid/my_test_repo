@@ -35,9 +35,9 @@ const POOL_TEAM_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 // Sidecars/dirs that are never carried over as "extra files": SKILL.md is the
 // merged draft, skill.json/provenance.json are regenerated for the target, and
-// _archive holds deletion snapshots.
+// _archive holds deletion snapshots, _versions the copy's own version snapshots (#2839).
 const CARRY_EXCLUDED_BASENAMES = new Set(['SKILL.md', 'skill.json', 'provenance.json']);
-const CARRY_EXCLUDED_DIRS = new Set(['_archive']);
+const CARRY_EXCLUDED_DIRS = new Set(['_archive', '_versions']);
 
 // Validate one source ref. Returns { ok, ref } or { ok:false, error }.
 function validateSourceRef(raw, i, res) {

@@ -6,12 +6,14 @@ import {
 import ConfirmDialog from '../components/ConfirmDialog';
 import RowContextMenu from '../components/RowContextMenu';
 import SkillMarkdown from '../components/SkillMarkdown';
+import SkillVersionDiffModal from './SkillVersionDiffModal.jsx';
 import {
   SKILL_MD, MAX_UPLOAD_BYTES, MAX_SAVE_BYTES, READ_CAP_BYTES,
   createModel, buildFileTree, visibleRows, isDir, isMarkdownPath, baseName, parentDir, isUnder,
   validateName, editFile, createFile, createFolder, renamePath, deletePath, uploadFile, uploadConflicts,
   compileChanges, listChanges, changeMarks, saveBytes, targetFolder, splitFrontmatter, looksBinary,
 } from './skill-editor-model.js';
+import { versionLabel, planEditFromVersion, decodeVersionFile, applyVersionPlan } from './skill-version-view.js';
 
 /*
  * SkillEditorModal — the full-screen skill editor (#2837).
@@ -22,6 +24,12 @@ import {
  * sends them to POST /api/skills/:name/files/batch, which applies them
  * atomically as ONE new version. `readOnly` renders the same editor without
  * any edit control (agent-tier copies, missing write permission).
+ *
+ * `version` ({hash, entry}) opens an OLD version read-only (#2839): the tree and
+ * files come from the version snapshot, a banner says so, and the header offers
+ * Compare with current, Restore this version (confirmed; the server records a new
+ * `restored` version) and Edit from this version (loads the old content into the
+ * normal editor as pending changes — one Save records one version).
  *
  * Visual pattern follows Agent Chat's FileViewerModal (portaled, 90vw × 90vh).
  */
@@ -249,7 +257,15 @@ function TreeRow({ row, selected, focused, expanded, mark, readOnly, onSelect, o
 
 /* ─── modal ──────────────────────────────────────────────────────────── */
 
-export default function SkillEditorModal({ skill, tierLabel, readOnly = false, readOnlyReason, onClose, onSaved }) {
+export default function SkillEditorModal({
+  skill, tierLabel, readOnly: readOnlyProp = false, readOnlyReason: readOnlyReasonProp, version = null, versionPermission = null, onClose, onSaved,
+}) {
+  const [versionView, setVersionView] = useState(version && version.hash ? version : null);
+  const [currentHash, setCurrentHash] = useState(null);  // live content hash while viewing an old version
+  const [versionBusy, setVersionBusy] = useState(false);
+  const pendingPlanRef = useRef(null);                   // edit-from-version plan applied on the next load
+  const readOnly = readOnlyProp || !!versionView;
+  const readOnlyReason = versionView ? 'old version' : readOnlyReasonProp;
   const [listing, setListing] = useState(null);         // last server listing {files, dirs}
   const [model, setModel] = useState(null);
   const [baseHash, setBaseHash] = useState(null);
@@ -307,14 +323,49 @@ export default function SkillEditorModal({ skill, tierLabel, readOnly = false, r
     setFocusPath(sel);
   }, []);
 
+  const getJson = useCallback(async (url, init) => {
+    const r = await fetch(url, init);
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw Object.assign(new Error(d.error || `HTTP ${r.status}`), { status: r.status, body: d });
+    return d;
+  }, []);
+
+  const versionHash = versionView ? versionView.hash : null;
   const load = useCallback(() => {
     setListError(null);
     setSaveError(null);
-    return fetch(`${skillUrl}/files?${scopeParams()}`)
-      .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d; })
-      .then(d => applyListing(d, null))
+    if (versionHash) {
+      return Promise.all([
+        getJson(`${skillUrl}/versions/${encodeURIComponent(versionHash)}/files?${scopeParams()}`),
+        getJson(`${skillUrl}/files?${scopeParams()}`),
+      ])
+        .then(([v, cur]) => {
+          applyListing(v, null);
+          setCurrentHash(cur.hash || null);
+          if (v.entry) setVersionView(prev => (prev && prev.hash === versionHash ? { ...prev, entry: v.entry } : prev));
+        })
+        .catch(e => setListError(e.body && e.body.unavailable ? 'The content of this version is not available.' : e.message));
+    }
+    return getJson(`${skillUrl}/files?${scopeParams()}`)
+      .then(d => {
+        applyListing(d, null);
+        setCurrentHash(null);
+        const planned = pendingPlanRef.current;
+        pendingPlanRef.current = null;
+        if (!planned) return;
+        if (d.hash !== planned.expectHash) {
+          setNotice({ ok: false, text: 'The skill changed while the old version was being loaded — open the version again to retry.' });
+          return;
+        }
+        const listingNow = { files: Array.isArray(d.files) ? d.files : [], dirs: Array.isArray(d.dirs) ? d.dirs : [] };
+        const r = applyVersionPlan(createModel(listingNow), planned.plan, planned.contents);
+        setModel(r.state);
+        setNotice(r.errors.length
+          ? { ok: false, text: `Loaded ${planned.label} with problems: ${r.errors.join('; ')}` }
+          : { ok: true, text: `Loaded ${planned.label} as pending changes — review them and Save to record a new version.` });
+      })
       .catch(e => setListError(e.message));
-  }, [skillUrl, scopeParams, applyListing]);
+  }, [skillUrl, scopeParams, applyListing, getJson, versionHash]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -325,13 +376,16 @@ export default function SkillEditorModal({ skill, tierLabel, readOnly = false, r
     if (!needOrigin || cache[needOrigin]) return;
     let cancelled = false;
     setCache(c => ({ ...c, [needOrigin]: { loading: true } }));
-    fetch(`${skillUrl}/file?${scopeParams({ file: needOrigin })}`)
+    const fileUrl = versionHash
+      ? `${skillUrl}/versions/${encodeURIComponent(versionHash)}/file?${scopeParams({ file: needOrigin })}`
+      : `${skillUrl}/file?${scopeParams({ file: needOrigin })}`;
+    fetch(fileUrl)
       .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d; })
       .then(d => { if (!cancelled) setCache(c => ({ ...c, [needOrigin]: d })); })
       .catch(e => { if (!cancelled) setCache(c => ({ ...c, [needOrigin]: { error: e.message } })); });
     return () => { cancelled = true; };
     // `cache` is read only as a guard; listing it would refetch on every update.
-  }, [needOrigin, skillUrl, scopeParams]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [needOrigin, skillUrl, scopeParams, versionHash]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // What the right pane shows for the selected file.
   const view = useMemo(() => {
@@ -433,6 +487,64 @@ export default function SkillEditorModal({ skill, tierLabel, readOnly = false, r
       setSaving(false);
     }
   }, [readOnly, saving, model, skillUrl, scopeParams, baseHash, applyListing, selected, onSaved]);
+
+  /* old version (#2839) ----------------------------------------------------- */
+
+  const versionIsCurrent = !!versionView && !!currentHash && versionView.hash === currentHash;
+  const restorePerm = versionPermission ? versionPermission.restore : { ok: false, reason: 'Not permitted' };
+  const editFromPerm = versionPermission ? versionPermission.editFrom : { ok: false, reason: 'Not permitted' };
+  const versionName = versionView ? (versionView.entry && versionView.entry.version != null ? `version ${versionView.entry.version}` : 'this version') : '';
+
+  const restoreVersion = useCallback(async () => {
+    if (!versionView || versionBusy) return;
+    setDialog(null);
+    setVersionBusy(true);
+    setSaveError(null);
+    setNotice(null);
+    try {
+      const d = await getJson(`${skillUrl}/versions/${encodeURIComponent(versionView.hash)}/restore?${scopeParams()}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseHash: currentHash }),
+      });
+      if (!d.restored) {
+        setNotice({ ok: true, text: 'This version already is the current content — nothing to restore.' });
+        return;
+      }
+      onSaved?.();
+      setVersionView(null);
+      setNotice({ ok: true, text: `Restored ${versionName} as version ${d.version}.` });
+    } catch (e) {
+      const conflict = e.status === 409;
+      setSaveError({ text: conflict ? 'The skill changed since this version was opened. Reload and try again.' : e.message, conflict });
+    } finally {
+      setVersionBusy(false);
+    }
+  }, [versionView, versionBusy, getJson, skillUrl, scopeParams, currentHash, onSaved, versionName]);
+
+  const editFromVersion = useCallback(async () => {
+    if (!versionView || versionBusy) return;
+    setVersionBusy(true);
+    setSaveError(null);
+    setNotice(null);
+    try {
+      const hash = encodeURIComponent(versionView.hash);
+      const diff = await getJson(`${skillUrl}/versions/diff?${scopeParams({ from: versionView.hash, to: 'working' })}`);
+      const plan = planEditFromVersion(diff);
+      const contents = new Map();
+      for (const p of plan.fetch) {
+        const f = await getJson(`${skillUrl}/versions/${hash}/file?${scopeParams({ file: p, encoding: 'base64' })}`);
+        contents.set(p, decodeVersionFile(f));
+      }
+      pendingPlanRef.current = { plan, contents, expectHash: diff.to && diff.to.hash, label: versionName };
+      setMode('preview');
+      setVersionView(null);                              // the load effect applies the plan to the live skill
+    } catch (e) {
+      setSaveError({ text: `Could not load ${versionName}: ${e.message}` });
+    } finally {
+      setVersionBusy(false);
+    }
+  }, [versionView, versionBusy, getJson, skillUrl, scopeParams, versionName]);
 
   const overlayOpen = !!dialog || !!menu;
 
@@ -749,6 +861,40 @@ export default function SkillEditorModal({ skill, tierLabel, readOnly = false, r
           </button>
         </div>
 
+        {versionView && (
+          <div role="note" aria-label="Old version" style={{
+            display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: '6px var(--eb-space-3)', flexShrink: 0, flexWrap: 'wrap',
+            fontSize: 'var(--eb-text-xs)', borderBottom: '1px solid var(--eb-border-default)',
+            background: 'var(--eb-status-warning-bg)', color: 'var(--eb-status-warning-text)',
+          }}>
+            <strong>You are viewing an old version</strong>
+            <span style={{ fontFamily: 'var(--eb-font-mono)' }}>{versionLabel({ ...(versionView.entry || {}), hash: versionView.hash })}</span>
+            {versionIsCurrent && <span>— this is the current content</span>}
+            <span style={{ flex: 1 }} />
+            <button type="button" style={btn(versionBusy)} disabled={versionBusy} onClick={() => setDialog({ kind: 'compare', from: versionView.hash })}>
+              Compare with current
+            </button>
+            <button
+              type="button"
+              style={btn(versionBusy || !editFromPerm.ok || versionIsCurrent)}
+              disabled={versionBusy || !editFromPerm.ok || versionIsCurrent}
+              title={!editFromPerm.ok ? editFromPerm.reason : versionIsCurrent ? 'This version already is the current content' : 'Load this version into the editor as pending changes'}
+              onClick={editFromVersion}
+            >
+              Edit from this version
+            </button>
+            <button
+              type="button"
+              style={btn(versionBusy || !restorePerm.ok || versionIsCurrent, true)}
+              disabled={versionBusy || !restorePerm.ok || versionIsCurrent}
+              title={!restorePerm.ok ? restorePerm.reason : versionIsCurrent ? 'This version already is the current content' : 'Make this version the current content again'}
+              onClick={() => setDialog({ kind: 'confirm-restore' })}
+            >
+              {versionBusy ? 'Working…' : 'Restore this version'}
+            </button>
+          </div>
+        )}
+
         {(saveError || notice) && (
           <div role={saveError || (notice && !notice.ok) ? 'alert' : 'status'} style={{
             display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: '6px var(--eb-space-3)', flexShrink: 0,
@@ -1024,6 +1170,18 @@ export default function SkillEditorModal({ skill, tierLabel, readOnly = false, r
         cancelLabel="Keep editing"
         message={`You have ${pending} unsaved change${pending === 1 ? '' : 's'}. Closing discards them.`}
         onConfirm={() => { setDialog(null); finishClose(); }}
+        onCancel={() => setDialog(null)}
+      />
+      {dialog?.kind === 'compare' && (
+        <SkillVersionDiffModal skill={skill} from={dialog.from} to="working" onClose={() => setDialog(null)} />
+      )}
+      <ConfirmDialog
+        open={dialog?.kind === 'confirm-restore'}
+        variant="warning"
+        title={`Restore ${versionName}?`}
+        confirmLabel="Restore"
+        message={`The skill's current content is replaced by ${versionName}. This is recorded as a new "restored" version, so the current content stays in the history and can be restored again.`}
+        onConfirm={restoreVersion}
         onCancel={() => setDialog(null)}
       />
       <ConfirmDialog

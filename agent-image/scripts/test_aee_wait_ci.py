@@ -248,6 +248,54 @@ class WaitLoop(unittest.TestCase):
         self.assertEqual(res["status"], "timeout")
 
 
+class WaitAnnouncement(unittest.TestCase):
+    """#2841: the runtime's chat status note fires once per wait, and only when
+    there is really something to wait for."""
+
+    def test_announced_once_before_the_first_pause(self):
+        calls = []
+        res, _gh, clock = wait([(pr_(), [run_("build", "IN_PROGRESS", None)])] * 3 + [(pr_(), [run_("build")])],
+                               on_waiting=lambda: calls.append(1))
+        self.assertEqual(res["status"], "passed")
+        self.assertEqual(len(calls), 1)
+
+    def test_not_announced_when_settled_on_the_first_look(self):
+        for steps in ([(pr_(), [run_("build")])],
+                      [(pr_(mergeable="CONFLICTING"), [])],
+                      [(pr_(state="CLOSED"), [])],
+                      [(pr_(), [run_("lint", conclusion="FAILURE")])]):
+            calls = []
+            wait(steps, on_waiting=lambda: calls.append(1))
+            self.assertEqual(calls, [], steps)
+
+    def test_not_announced_while_github_is_unreachable(self):
+        calls = []
+        wait([W.GhError("transient", "EOF")], timeout=3600, on_waiting=lambda: calls.append(1))
+        self.assertEqual(calls, [])
+
+    def test_a_failing_callback_never_breaks_the_wait(self):
+        def boom():
+            raise RuntimeError("room gone")
+        res, _gh, _c = wait([(pr_(), [run_("build", "IN_PROGRESS", None)]), (pr_(), [run_("build")])],
+                            on_waiting=boom)
+        self.assertEqual(res["status"], "passed")
+
+    def test_announce_wait_appends_one_json_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "status.jsonl")
+            self.assertTrue(W.announce_wait(("acme", "widgets", "github.com"), 7, 1200, env={"AEE_STATUS_FILE": path}))
+            self.assertTrue(W.announce_wait(("acme", "widgets", "github.com"), 7, 25, env={"AEE_STATUS_FILE": path}))
+            lines = [json.loads(l) for l in Path(path).read_text().splitlines()]
+        self.assertEqual(lines[0], {"kind": "ci-wait", "repo": "acme/widgets", "host": "github.com", "pr": 7,
+                                    "timeoutMinutes": 20})
+        self.assertEqual(lines[1]["timeoutMinutes"], 1)
+
+    def test_announce_wait_without_a_runtime_does_nothing(self):
+        self.assertFalse(W.announce_wait(("a", "b", "github.com"), 1, 60, env={}))
+        self.assertFalse(W.announce_wait(("a", "b", "github.com"), 1, 60,
+                                         env={"AEE_STATUS_FILE": "/nonexistent-dir/x/status"}))
+
+
 class ExpectedHead(unittest.TestCase):
     """#2818: right after a push GitHub may still show the old head; its verdict
     must not be reported as the pushed commit's."""
@@ -444,11 +492,16 @@ class ExitCodes(unittest.TestCase):
         env = {**os.environ, "AEE_WAIT_CI_GH": str(self.fake), "FAKE_GH_SCENARIO": str(sc),
                "AEE_WAIT_CI_INTERVAL_SEC": "0.05", "AEE_PR_READINESS_CI_GRACE_MS": "0"}
         env.pop("AEE_RUN_DEADLINE", None)
+        env["AEE_STATUS_FILE"] = str(self.tmp / "status.jsonl")
         p = subprocess.run([sys.executable, str(SCRIPT), "7", "--repo", "acme/widgets", *extra],
                            capture_output=True, text=True, env=env, timeout=60)
         out = json.loads(p.stdout)
         self.assertEqual(out["exitCode"], p.returncode)
         return p.returncode, out
+
+    def status_notes(self):
+        f = self.tmp / "status.jsonl"
+        return [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
 
     def test_codes(self):
         cases = [
@@ -469,6 +522,19 @@ class ExitCodes(unittest.TestCase):
         code, out = self.run_cli({"pr": pr_(), "checks": [run_("build", "IN_PROGRESS", None)]},
                                  "--timeout", "0.003")
         self.assertEqual((code, out["status"]), (6, "timeout"))
+        # A real wait announced itself exactly once (#2841).
+        notes = self.status_notes()
+        self.assertEqual(len(notes), 1)
+        self.assertEqual((notes[0]["kind"], notes[0]["repo"], notes[0]["pr"]), ("ci-wait", "acme/widgets", 7))
+
+    def test_settled_or_usage_error_posts_no_note(self):
+        self.run_cli({"pr": pr_(), "checks": [run_("build")]})
+        self.assertEqual(self.status_notes(), [])
+        env = {**os.environ, "AEE_STATUS_FILE": str(self.tmp / "status.jsonl")}
+        p = subprocess.run([sys.executable, str(SCRIPT), "7", "8", "--repo", "acme/widgets"],
+                           capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(p.returncode, 2)
+        self.assertEqual(self.status_notes(), [])
 
     def test_explicit_head_is_never_answered_with_another_heads_verdict(self):
         code, out = self.run_cli({"pr": pr_(SHA_A), "checks": [run_("pytest", conclusion="FAILURE")]},

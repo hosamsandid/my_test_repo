@@ -42,7 +42,7 @@ Clicking a row opens the skill in a side panel with three tabs:
 | Tab | What it shows |
 |---|---|
 | **Content** | A read-only preview of the skill's files. Markdown is rendered (a `SKILL.md` header is shown as a separate metadata block), other text files are shown as code, binaries are named but not displayed, and anything over 512 KB is truncated. **Edit skill** (or **Open**, when you may not edit it) opens the full-screen skill editor described below. |
-| **Versions** | The revision history: a content version and hash prefix (`v4 · a1b2c3`), what produced the revision, who did it and when. The live revision on disk is marked **current**. |
+| **Versions** | The revision history: a content version and hash prefix (`v4 · a1b2c3`), what produced the revision, who did it and when. Exactly one entry — the one whose content is on disk right now — is marked **current**. Each version can be opened, compared and restored — see *Versions: open, compare and restore* below. |
 | **Copies & origin** | Where this copy came from, followed by every place the skill lives today, grouped by team — each copy with its version, a **drift** badge and the update actions. Described in detail below. |
 
 Create a skill with **+ New Skill** (you pick the target pool), or bring one in
@@ -63,7 +63,8 @@ file or a whole folder), **Delete** and **Upload** — uploads also work by
 dropping files onto the tree, are limited to 2 MB per file, and ask before
 replacing a file of the same name. `SKILL.md` at the skill root is the skill
 itself and cannot be renamed, moved or deleted; the platform's own bookkeeping
-(`skill.json`, `provenance.json`, the `_archive` of older versions) is not shown.
+(`skill.json`, `provenance.json`, the `_archive` of deleted skills, the
+`_versions` snapshots) is not shown.
 
 Nothing is written until you press **Save** (or Ctrl/⌘+S). Until then every
 change is pending: changed files and folders carry a dot in the tree and the
@@ -83,6 +84,63 @@ skills you have no write permission for, open in the same editor **read-only**:
 you can browse and preview, but every editing control is gone and the header
 says why. Editing needs the same rights as before — System Admin or a Team Admin
 for global skills, a Team Admin of the team for team skills.
+
+### Versions: open, compare and restore
+
+Every action that records a version — create, save in the editor, import,
+promote, adopt, resync, restore and the rest — also keeps a full copy of the
+skill's content for that version, for every tier including agent copies. Up to
+the last 20 versions are kept, the same as the history itself; a version whose
+content is identical to one already stored costs nothing extra. Versions recorded
+before this feature existed show **Content not available** — their history entry
+stays, but there is nothing to open or compare. The stored copies never travel:
+they are not part of the content hash, not in a ZIP export, and not carried when
+a skill is promoted, adopted, moved, installed or otherwise copied to another
+tier — the copy starts its own version history.
+
+On the **Versions** tab:
+
+- **Open** shows that version in the full-screen editor, read-only, under the
+  banner *You are viewing an old version* with its version, hash, action, author
+  and date.
+- **Compare with current** shows what changed between that version and the
+  current content.
+- Tick any **two** versions and press **Compare** to compare them; the older one
+  is always shown on the left, whichever you ticked first.
+- When an agent's copy was changed by hand after its last recorded version, a
+  **Working copy (unversioned changes)** row at the top stands for the content on
+  disk, and you can compare it like any version.
+
+The comparison opens full-screen. It lists added, removed, modified and renamed
+files with their `+added −removed` line counts; unchanged files are hidden until
+you tick **Show unchanged files**. Switch between **Side-by-side** and
+**Inline** — your choice is remembered for the rest of the browser session.
+Every changed line carries a `+` or `−` marker, so the diff reads without
+colour. Binary files and files over 512 KB are not diffed line by line; they just
+say *binary — changed* or *too large — unchanged*. Comparing a version with
+itself says **No differences**. A renamed file that was also heavily edited may
+show up as one file removed and another added.
+
+From an opened old version you can:
+
+- **Compare with current** — the same comparison, on top of the editor.
+- **Restore this version** — after a confirmation, the version's content
+  replaces the current content and is recorded as a **new** version with the
+  action *restored* (so the content you replaced stays in the history). Agent
+  copies of a global or team skill are resynced once, as after any edit.
+  Restoring an agent's own copy writes into that agent's skill folder and, as
+  with an install, the agent uses the restored content from its next message.
+- **Edit from this version** — loads the old content into the normal editor as
+  pending changes on top of the current skill, so you can adjust it before
+  **Save** records it as one new version.
+
+Both are disabled on the version that already is the current content. Restoring
+needs the same right as editing that copy — a Team Admin of the team for team
+skills, System Admin or a Team Admin for global skills, and for an agent's copy
+the right to install skills on that agent (System Admin or a Team Admin of the
+agent's team). Agent copies cannot be edited here, so they offer **Restore** but
+not **Edit from this version**. If someone changed the skill after you opened the
+old version, the restore is refused and asks you to reload.
 
 ### Copies & origin
 

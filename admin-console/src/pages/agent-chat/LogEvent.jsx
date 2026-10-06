@@ -12,6 +12,7 @@ import {
 import { rateLimitEventSummary, rateLimitEventDetailRows } from './rate-limit-event.js';
 import { buildSystemInitView } from './system-init.js';
 import { isLoopFired, loopFiredLabel } from './loop-run-view.js';
+import { orphanHeartbeatSummary } from './tool-progress.js';
 import { SafeMarkdown } from './Message';
 import { receivedMessageAuthorName, EMPTY_AUTHOR_DIRECTORY } from './message-author.js';
 
@@ -31,6 +32,8 @@ import { receivedMessageAuthorName, EMPTY_AUTHOR_DIRECTORY } from './message-aut
  *   event:           the (possibly pre-merged) event object
  *   authorDirectory: user directory (`buildAuthorDirectory`) that names the
  *                    author of a `message.received` row (#2715); stable value
+ *   repoDirectory:   the agent's repositories (`buildRepoDirectory`) — links a
+ *                    CI-wait card's PR (#2841); stable value
  *
  * Cross-panel hover dim (#1676) is driven by CSS off the `data-cid` set on the
  * wrapper in SessionLogPanel, so this component no longer takes a `dimmed`
@@ -59,7 +62,8 @@ function iconForType(type) {
     case 'assistant_text':   return Sparkles;
     case 'tool_use':
     case 'tool_result':
-    case 'tool':             return Wrench;
+    case 'tool':
+    case 'tool_progress_orphan': return Wrench;
     case 'thinking':         return Brain;
     case 'result':           return CheckCircle2;
     case 'error':
@@ -87,7 +91,9 @@ function colorForType(type) {
   }
 }
 
-function LogEvent({ event, authorDirectory = EMPTY_AUTHOR_DIRECTORY }) {
+const EMPTY_REPO_DIRECTORY = [];
+
+function LogEvent({ event, authorDirectory = EMPTY_AUTHOR_DIRECTORY, repoDirectory = EMPTY_REPO_DIRECTORY }) {
   const [expanded, setExpanded] = useState(false);
   const type = event?.type || 'unknown';
   // A loop iteration reads as a loop, not a generic trigger (#1155 AC7).
@@ -102,7 +108,13 @@ function LogEvent({ event, authorDirectory = EMPTY_AUTHOR_DIRECTORY }) {
     return (
       <div style={{ padding: '2px var(--eb-space-3)' }}>
         <RowMeta ts={event.ts} type="tool_use" />
-        <ToolBlock toolUse={event.toolUse} toolResult={event.toolResult} taskSnapshot={event.taskSnapshot} />
+        <ToolBlock
+          toolUse={event.toolUse}
+          toolResult={event.toolResult}
+          taskSnapshot={event.taskSnapshot}
+          run={event.run}
+          repoDirectory={repoDirectory}
+        />
       </div>
     );
   }
@@ -145,7 +157,7 @@ function LogEvent({ event, authorDirectory = EMPTY_AUTHOR_DIRECTORY }) {
             fontSize: 10,
             textTransform: 'lowercase',
           }}>
-            {type}
+            {type === 'tool_progress_orphan' ? 'tool_progress' : type}
           </span>
         </div>
         <Body event={event} expanded={expanded} authorDirectory={authorDirectory} />
@@ -186,6 +198,7 @@ function hasExpansion(ev) {
     case 'unknown':
     case 'parse_error':
     case 'rate_limit_event':
+    case 'tool_progress_orphan':
       return true;
     case 'system_event':
       // Expandable only when `raw` carries content beyond the subtype label.
@@ -513,6 +526,21 @@ function Body({ event, expanded, authorDirectory }) {
         <div style={{ ...baseStyle, color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
           system / <span style={{ color: 'var(--eb-text-secondary)' }}>{event.subtype || 'unknown'}</span>
           {summary && <span style={{ color: 'var(--eb-text-secondary)' }}> — {summary}</span>}
+          {detail && (
+            <pre style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', fontSize: 'inherit', color: 'var(--eb-text-muted)' }}>
+              {detail}
+            </pre>
+          )}
+        </div>
+      );
+    }
+    case 'tool_progress_orphan': {
+      // Heartbeats of a tool call that is not in the log (#2841 AC6): one row
+      // per call, updated in place; the latest raw heartbeat on expand.
+      const detail = expanded ? JSON.stringify(event.raw, null, 2) : null;
+      return (
+        <div style={{ ...baseStyle, color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
+          {orphanHeartbeatSummary(event)}
           {detail && (
             <pre style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', fontSize: 'inherit', color: 'var(--eb-text-muted)' }}>
               {detail}

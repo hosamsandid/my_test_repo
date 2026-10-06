@@ -1253,6 +1253,166 @@ test('createEpicWithStories: a create is NOT retried on a transport failure (F6 
   });
 });
 
+// ── add new Stories to an EXISTING Epic (#2890) ──────────────────────────────
+
+// GET /rest/api/3/issue/<KEY>?fields=… — the parent lookup that runs before any create.
+const isIssueGet = (url, opts) => (!opts || !opts.method || opts.method === 'GET') && /\/rest\/api\/3\/issue\/[^/?]+\?fields=/.test(url);
+const issueResponse = (key, typeName, { project = 'KAN', hierarchyLevel } = {}) => ({
+  ok: true,
+  status: 200,
+  text: async () => JSON.stringify({ key, fields: { summary: 'Existing epic', project: { key: project }, issuetype: { name: typeName, hierarchyLevel } } }),
+});
+
+test('addStoriesToEpic: creates every story under the existing Epic in ITS project — never an Epic (#2890 AC1/AC2/AC6)', async () => {
+  let n = 0;
+  await withFetch((url, opts) => {
+    if (isIssueGet(url, opts)) {
+      assert.match(url, /\/issue\/OPS-12\?/); // a lowercase key is normalised
+      return issueResponse('OPS-12', 'Epic', { project: 'OPS', hierarchyLevel: 1 });
+    }
+    if (isFieldList(url)) return createFieldList(); // team-managed: native parent
+    if (isCreate(url, opts)) {
+      const body = JSON.parse(opts.body);
+      assert.equal(body.fields.issuetype.name, 'Story'); // AC2 — no Epic is ever created
+      assert.deepEqual(body.fields.project, { key: 'OPS' }); // the Epic's project
+      assert.deepEqual(body.fields.parent, { key: 'OPS-12' });
+      n += 1;
+      return { ok: true, status: 201, text: async () => JSON.stringify({ key: `OPS-${100 + n}` }) };
+    }
+    if (isTransitionList(url) && (!opts || opts.method !== 'POST')) return transitionsResponse();
+    if (isTransitionList(url) && opts.method === 'POST') return { ok: true, status: 204, text: async () => '' };
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  }, async (calls) => {
+    const seen = [];
+    const r = await jc.addStoriesToEpic(CRED, {
+      epicKey: ' ops-12 ',
+      stories: [
+        { summary: 'Design', description: 'the why', assignee: 'acc-1', status: 'In Progress', fields: { Team: '42', 'Story point estimate': 5 } },
+        { summary: 'Build' },
+        { summary: 'Ship' },
+      ],
+      allowList: ['Team', 'Story point estimate'],
+      attribution: 'by an agent',
+      onCreated: (key) => seen.push(key),
+      env: CRED.env,
+    });
+    assert.equal(r.project, 'OPS');
+    assert.equal(r.epic.key, 'OPS-12');
+    assert.match(r.epic.url, /\/browse\/OPS-12$/);
+    assert.equal(r.created, 3);
+    assert.equal(r.failed, 0);
+    assert.deepEqual(r.stories.map((s) => s.key), ['OPS-101', 'OPS-102', 'OPS-103']);
+    assert.equal(r.stories[0].status, 'In Progress'); // follow-up transition, as in create-epic
+    assert.deepEqual(seen, ['OPS-101', 'OPS-102', 'OPS-103']); // each registered as it is created
+    const first = JSON.parse(calls.find((c) => isCreate(c.url, c.opts)).opts.body).fields;
+    assert.deepEqual(first.customfield_20001, { id: '42' });
+    assert.equal(first.customfield_10016, 5);
+    assert.deepEqual(first.assignee, { accountId: 'acc-1' });
+    assert.ok(first.description, 'description sent as ADF');
+  });
+});
+
+test('addStoriesToEpic: a company-managed site links via the Epic Link field, not parent', async () => {
+  await withFetch((url, opts) => {
+    if (isIssueGet(url, opts)) return issueResponse('KAN-1', 'Epic');
+    if (isFieldList(url)) return createFieldList('customfield_10014');
+    if (isCreate(url, opts)) {
+      const body = JSON.parse(opts.body);
+      assert.equal(body.fields.customfield_10014, 'KAN-1');
+      assert.equal('parent' in body.fields, false);
+      return { ok: true, status: 201, text: async () => JSON.stringify({ key: 'KAN-2' }) };
+    }
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    const r = await jc.addStoriesToEpic(CRED, { epicKey: 'KAN-1', stories: [{ summary: 'S' }], allowList: [], env: CRED.env });
+    assert.equal(r.stories[0].key, 'KAN-2');
+  });
+});
+
+test('addStoriesToEpic: one failing story does not block the others (#2890 AC3)', async () => {
+  let n = 0;
+  await withFetch((url, opts) => {
+    if (isIssueGet(url, opts)) return issueResponse('KAN-1', 'Epic');
+    if (isFieldList(url)) return createFieldList();
+    if (isCreate(url, opts)) {
+      n += 1;
+      if (n === 1) return { ok: false, status: 400, text: async () => 'bad assignee' };
+      return { ok: true, status: 201, text: async () => JSON.stringify({ key: `KAN-${n + 1}` }) };
+    }
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    const r = await jc.addStoriesToEpic(CRED, {
+      epicKey: 'KAN-1', stories: [{ summary: 'bad' }, { summary: 'good' }], allowList: [], env: CRED.env,
+    });
+    assert.equal(r.created, 1);
+    assert.equal(r.failed, 1);
+    assert.equal(r.stories[0].ok, false);
+    assert.match(r.stories[0].error, /400/);
+    assert.equal(r.stories[1].key, 'KAN-3');
+  });
+});
+
+test('addStoriesToEpic: a missing or invisible Epic is a 404 and nothing is created (#2890 AC4)', async () => {
+  await withFetch((url, opts) => {
+    if (isIssueGet(url, opts)) return { ok: false, status: 404, text: async () => '{"errorMessages":["Issue does not exist or you do not have permission to see it."]}' };
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  }, async (calls) => {
+    await assert.rejects(
+      () => jc.addStoriesToEpic(CRED, { epicKey: 'NOPE-9', stories: [{ summary: 'S' }], allowList: [], env: CRED.env }),
+      (e) => e.status === 404 && /NOPE-9/.test(e.message) && /scope/.test(e.message) && /Nothing was created/.test(e.message),
+    );
+    assert.equal(calls.filter((c) => isCreate(c.url, c.opts)).length, 0);
+  });
+});
+
+test('addStoriesToEpic: a parent that is not an Epic is refused, naming its type (#2890 AC5)', async () => {
+  await withFetch((url, opts) => {
+    if (isIssueGet(url, opts)) return issueResponse('KAN-7', 'Bug', { hierarchyLevel: 0 });
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  }, async (calls) => {
+    await assert.rejects(
+      () => jc.addStoriesToEpic(CRED, { epicKey: 'KAN-7', stories: [{ summary: 'S' }], allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /KAN-7 is a Bug, not an Epic/.test(e.message),
+    );
+    assert.equal(calls.filter((c) => isCreate(c.url, c.opts)).length, 0);
+  });
+});
+
+test('isEpicIssueType: by name (case-insensitive, overridable) or by Epic hierarchy level', () => {
+  assert.equal(jc.isEpicIssueType({ name: 'epic' }, 'Epic'), true);
+  assert.equal(jc.isEpicIssueType({ name: 'Initiative' }, 'Initiative'), true);
+  assert.equal(jc.isEpicIssueType({ name: 'Épique', hierarchyLevel: 1 }, 'Epic'), true); // localised name
+  assert.equal(jc.isEpicIssueType({ name: 'Story', hierarchyLevel: 0 }, 'Epic'), false);
+  assert.equal(jc.isEpicIssueType(undefined, 'Epic'), false);
+});
+
+test('addStoriesToEpic: a custom field off a non-empty allow-list is a 403 before any Jira call (#2890 AC7)', async () => {
+  await withFetch(() => { throw new Error('no HTTP expected'); }, async (calls) => {
+    await assert.rejects(
+      () => jc.addStoriesToEpic(CRED, {
+        epicKey: 'KAN-1', stories: [{ summary: 'ok' }, { summary: 'S', fields: { Team: '42' } }], allowList: ['Sprint'], env: CRED.env,
+      }),
+      (e) => e.status === 403 && /Team/.test(e.message),
+    );
+    assert.equal(calls.length, 0);
+  });
+});
+
+test('addStoriesToEpic: no key / a malformed key / no stories / a story without a summary is a 400 up front (#2890 AC8)', async () => {
+  await withFetch(() => { throw new Error('no HTTP expected'); }, async (calls) => {
+    const bad = (args) => assert.rejects(() => jc.addStoriesToEpic(CRED, { allowList: [], env: CRED.env, ...args }), (e) => e.status === 400);
+    await bad({ epicKey: '', stories: [{ summary: 'S' }] });
+    await bad({ epicKey: 'not a key', stories: [{ summary: 'S' }] });
+    await bad({ epicKey: 'KAN-1', stories: [] });
+    await bad({ epicKey: 'KAN-1' });
+    await assert.rejects(
+      () => jc.addStoriesToEpic(CRED, { epicKey: 'KAN-1', stories: [{ summary: 'S' }, { summary: '  ' }], allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /story #2/.test(e.message),
+    );
+    assert.equal(calls.length, 0);
+  });
+});
+
 // ── board & sprint management (#2450) ───────────────────────────────────────
 
 const AGILE = 'http://fake-jira:8080/rest/agile/1.0';

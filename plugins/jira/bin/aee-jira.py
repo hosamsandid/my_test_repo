@@ -39,6 +39,7 @@ ticket is routine and reversible):
     aee-jira set-field KAN-6 --field "Team" --value "42"   # set an allow-listed custom field by its Jira name
     aee-jira attachment add KAN-6 report.pdf part-1.pdf   # upload one or more local files as new attachments
     aee-jira create-epic --project KAN --file plan.json   # create one Epic and its child Stories in one operation
+    aee-jira add-stories --epic KAN-12 --file stories.json   # add new Stories to an EXISTING Epic (no new Epic)
     aee-jira sprint create --board "Team Scrum Board" --name "Sprint 12" --start 2026-10-26 --end 2026-11-01
     aee-jira sprint bulk-create --board "Team Scrum Board" --name-template "Acc2.0 {MMM}_{weekOfMonth}" --until 2026-12-31
     aee-jira sprint close --board "Team Scrum Board"     # complete the board's active sprint
@@ -77,6 +78,27 @@ The result reports the Epic key + URL and, per Story, its key/URL on success or
 an error on failure (the Epic and the other Stories still go through — Jira has
 no create-transaction). Non-default issue-type names can be overridden with a
 top-level "issueTypes": {"epic": "...", "story": "..."} in the payload.
+
+`add-stories` fills an Epic that already exists: it creates N new Stories under
+the Epic named by --epic (its key, e.g. KAN-12), in the Epic's own project, and
+never creates an Epic. The payload (from --file, or stdin) is a "stories" array
+with the same per-story fields as create-epic:
+
+    {
+      "stories": [
+        { "summary": "Design checkout", "assignee": "<accountId>",
+          "status": "In Progress", "fields": { "Team": "42" } },
+        { "summary": "Wire the API" }
+      ]
+    }
+
+The call is refused before anything is created when the key does not exist or
+is outside the team's Jira scope, when the issue is not an Epic (the error names
+its actual type), when "stories" is empty or a story has no summary, or when a
+named custom field is not on a non-empty writable-custom-fields allow-list. The
+result reports the Epic and, per Story, its key/URL or an error; one failing
+Story does not stop the others, and the CLI exits 1 if any Story failed. Fill
+several Epics with one call each.
 
 `sprint` manages a Scrum board's sprints, the board resolved by its
 human-readable name (e.g. "Accessio 2.0 Scrum Board"). `sprint list` reads the
@@ -540,6 +562,17 @@ def build_parser():
         help='JSON payload describing {"epic": {...}, "stories": [...]}; omit or use "-" to read stdin',
     )
 
+    p_add_stories = sub.add_parser(
+        "add-stories", parents=[common],
+        help="add new Stories to an EXISTING Epic (payload from --file or stdin), e.g. "
+             "aee-jira add-stories --epic KAN-12 --file stories.json",
+    )
+    p_add_stories.add_argument("--epic", required=True, help="key of the existing Epic the Stories go under, e.g. KAN-12")
+    p_add_stories.add_argument(
+        "--file", metavar="PATH",
+        help='JSON payload describing {"stories": [...]}; omit or use "-" to read stdin',
+    )
+
     p_sprint = sub.add_parser("sprint", parents=[common], help="manage a Scrum board's sprints (list / create / bulk-create / close / start / advance)")
     sprint_sub = p_sprint.add_subparsers(dest="sprint_cmd")
 
@@ -599,7 +632,7 @@ def build_parser():
 
 
 def _read_payload_text(file_path):
-    """The create-epic payload text: from --file, or stdin when omitted / "-"."""
+    """The create-epic / add-stories payload text: from --file, or stdin when omitted / "-"."""
     if not file_path or file_path == "-":
         return sys.stdin.read()
     with open(file_path, "r", encoding="utf-8") as fh:
@@ -718,6 +751,25 @@ def main(argv=None):
         if isinstance(doc.get("issueTypes"), dict):
             body["issueTypes"] = doc["issueTypes"]
         path, method = "/create-epic", "POST"
+    elif args.cmd == "add-stories":
+        try:
+            raw = _read_payload_text(args.file)
+        except OSError as e:
+            emit({"ok": False, "error": "usage", "message": "cannot read payload file: %s" % e}, as_json)
+            return EXIT_USAGE
+        try:
+            doc = json.loads(raw)
+        except ValueError as e:
+            emit({"ok": False, "error": "usage", "message": "payload is not valid JSON: %s" % e}, as_json)
+            return EXIT_USAGE
+        if not isinstance(doc, dict) or not isinstance(doc.get("stories"), list) or not doc["stories"]:
+            emit({"ok": False, "error": "usage",
+                  "message": 'payload must be a JSON object with a non-empty "stories" array'}, as_json)
+            return EXIT_USAGE
+        body = {"epic": args.epic, "stories": doc["stories"]}
+        if isinstance(doc.get("issueTypes"), dict):
+            body["issueTypes"] = doc["issueTypes"]
+        path, method = "/add-stories", "POST"
     elif args.cmd == "sprint":
         sprint_cmd = getattr(args, "sprint_cmd", None)
         if sprint_cmd == "list":
@@ -798,7 +850,8 @@ def main(argv=None):
     # but a story may fail (Jira has no create-transaction). Surface exit 1 so an
     # automated caller notices a partial result, while still printing the Epic
     # key + the per-story map above.
-    if args.cmd == "create-epic" and isinstance(result, dict) and result.get("failed"):
+    # add-stories follows the same convention (#2890).
+    if args.cmd in ("create-epic", "add-stories") and isinstance(result, dict) and result.get("failed"):
         return EXIT_DOMAIN_ERROR
     # sprint bulk-create is likewise one operation with per-sprint outcomes: a
     # per-sprint failure surfaces exit 1 while still printing the per-sprint map.

@@ -662,6 +662,44 @@ async function handleCli(req, res, cliPath) {
     }
   }
 
+  // ── new Stories under an EXISTING Epic (#2890) ───────────────────────────
+  // The CLI sends `{ epic: "<KEY>", stories[], issueTypes? }`; the broker checks
+  // the key is a visible Epic, then creates each story under it in the Epic's
+  // project (jira.addStoriesToEpic) — never a new Epic. Gated exactly like
+  // create-epic: the same `create` write policy, the same allow-list, the same
+  // own-writes registration per created key; audited as `add-stories`.
+  if (cliPath === '/add-stories' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('create');
+    if (!authz.allow) {
+      auditCall('add-stories', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = credFor();
+    if (!cred) return noCredential('add-stories');
+    const body = parseJson(await readBody(req));
+    const epicKey = String(body.epic || '').trim().toUpperCase();
+    if (!epicKey) return sendJson(res, 400, { error: 'an --epic key is required' });
+    if (!Array.isArray(body.stories) || !body.stories.length) return sendJson(res, 400, { error: 'at least one story is required' });
+    try {
+      const result = await jira.addStoriesToEpic(cred, {
+        epicKey,
+        stories: body.stories,
+        allowList: cred.writableCustomFields || [],
+        attribution: `Created by an agent on team "${scopeId}" via Agent Studio.`,
+        issueTypes: body.issueTypes && typeof body.issueTypes === 'object' ? body.issueTypes : undefined,
+        onCreated: (key) => recordOwnWrite(() => {
+          ownWritesStore.recordIssue(scopeId, key);
+          ownWritesStore.recordField(scopeId, key, '*');
+        }),
+      });
+      auditCall('add-stories', 'ok', `${result.epic.key} +${result.created}/${result.stories.length} stories`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      auditCall('add-stories', failureOutcome(err), `${epicKey}: ${err.message}`);
+      return sendJiraError(err);
+    }
+  }
+
   // ── sprint creation on a board (Agile write, #2450) ──────────────────────
   // Two board-scoped writes: create ONE future sprint, or BULK-generate a run of
   // them up to a target date. Role-gated like every other write (D3); the Jira

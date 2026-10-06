@@ -752,3 +752,48 @@ test('aee-jira: link / unlink read as a sentence — first key, type words, last
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('aee-jira add-stories: listed in --help; bad payloads are usage errors; wired to /add-stories; exit 1 on a failed story (#2890)', async () => {
+  const ws = grantedJiraWorkspace();
+  const help = runJira(['--help'], ws);
+  const flat = help.stdout.replace(/\s+/g, ' '); // argparse wraps the help column
+  assert.match(flat, /add-stories add new Stories to an EXISTING Epic/);
+  assert.match(flat, /aee-jira add-stories --epic KAN-12 --file stories.json/);
+  // --epic is required; an empty / malformed / storyless payload never reaches the broker
+  const file = (doc) => { const p = path.join(ws, `p-${Math.random()}.json`); fs.writeFileSync(p, doc); return p; };
+  assert.equal(runJira(['add-stories', '--file', file('{"stories":[{"summary":"S"}]}')], ws).status, 2);
+  assert.equal(runJira(['add-stories', '--epic', 'KAN-1', '--file', file('not json'), '--json'], ws).status, 2);
+  assert.equal(runJira(['add-stories', '--epic', 'KAN-1', '--file', file('{"stories":[]}'), '--json'], ws).status, 2);
+  assert.equal(runJira(['add-stories', '--epic', 'KAN-1', '--file', file('{"epic":{"summary":"E"}}'), '--json'], ws).status, 2);
+
+  const http = require('node:http');
+  const seen = [];
+  let failed = 0;
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, body: JSON.parse(raw) });
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ epic: { key: 'KAN-1' }, stories: [], created: 1, failed }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const live = grantedJiraWorkspace(`http://127.0.0.1:${port}/`);
+    const payload = file('{"stories":[{"summary":"S","status":"In Progress"}],"issueTypes":{"story":"Story"}}');
+    let r = await runJiraAsync(['add-stories', '--epic', 'KAN-1', '--file', payload, '--json'], live);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(seen[0], {
+      method: 'POST', url: '/cli/add-stories',
+      body: { epic: 'KAN-1', stories: [{ summary: 'S', status: 'In Progress' }], issueTypes: { story: 'Story' } },
+    });
+    failed = 1;
+    r = await runJiraAsync(['add-stories', '--epic', 'KAN-1', '--file', payload, '--json'], live);
+    assert.equal(r.status, 1, 'a partial result exits non-zero, like create-epic');
+    assert.equal(JSON.parse(r.stdout.trim()).result.failed, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

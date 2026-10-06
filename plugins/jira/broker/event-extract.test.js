@@ -305,6 +305,26 @@ test('resolveFieldOrigin: agent only for a recorded write to the same issue+fiel
   assert.equal(origin(null), 'human');
 });
 
+test('field_changed for an issue link (#2884): a link the broker created/removed is origin agent; one a human adds is human', () => {
+  const { extractFieldChangeEvents } = require('./event-extract');
+  const { OwnWritesStore } = require('./own-writes-store');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const at = Date.parse('2026-01-01T11:58:00.000Z');
+  const store = new OwnWritesStore({ stateDir: fs.mkdtempSync(path.join(os.tmpdir(), 'jira-own-link-')), now: () => at - 2000 });
+  // what the broker's /link route records for each end of the link
+  store.recordField('team-1', 'KAN-6', 'Link');
+  // Jira's changelog item for a link change: field "Link", no fieldId
+  const item = { field: 'Link', fieldtype: 'jira', from: null, fromString: null, to: 'KAN-7', toString: 'This issue blocks KAN-7' };
+  const [own] = extractFieldChangeEvents(fieldIssue([item]), { ownWrites: store.snapshot('team-1') });
+  assert.equal(own.event, 'field_changed');
+  assert.equal(own.field, 'Link');
+  assert.equal(own.origin, 'agent');
+  const [human] = extractFieldChangeEvents(fieldIssue([item]), { ownWrites: store.snapshot('team-2') });
+  assert.equal(human.origin, 'human');
+});
+
 test('describeEvent: field_changed reads "<key>: <field> <from> → <to>" with ∅ for a missing side', () => {
   const { describeEvent } = require('./event-extract');
   assert.equal(describeEvent({ event: 'field_changed', issueKey: 'KAN-6', field: 'assignee', from: null, to: 'Bob' }), 'KAN-6: assignee ∅ → Bob');

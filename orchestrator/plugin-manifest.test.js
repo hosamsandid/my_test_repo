@@ -598,13 +598,13 @@ test('the shipped jira manifest (plugins/jira) is valid', () => {
   // Phase 3 read UI (`/` @ team-member) + Phase 4 write config (`/admin` @
   // team-admin); `policy` declares the writes as governed subcommands (D3 —
   // role-gated, no confirmation pen, so `requiresApproval` stays empty). `attach`
-  // (#2408) is the attachment upload, gated like the other writes.
+  // (#2408) is the attachment upload, gated like the other writes; `link` / `unlink` (#2884) likewise.
   assert.deepEqual(manifest.ui.routes, [
     { path: '/', minRole: 'team-member' },
     { path: '/admin', minRole: 'team-admin' },
   ]);
   assert.notEqual(manifest.ui.global, true);
-  assert.deepEqual(Object.keys(manifest.policy).sort(), ['attach', 'comment', 'create', 'set-field', 'sprint-advance', 'sprint-bulk-create', 'sprint-close', 'sprint-create', 'sprint-start', 'transition', 'update']);
+  assert.deepEqual(Object.keys(manifest.policy).sort(), ['attach', 'comment', 'create', 'link', 'set-field', 'sprint-advance', 'sprint-bulk-create', 'sprint-close', 'sprint-create', 'sprint-start', 'transition', 'unlink', 'update']);
   assert.deepEqual(manifest.requiresApproval, []);
 });
 

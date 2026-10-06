@@ -808,6 +808,57 @@ async function handleCli(req, res, cliPath) {
     }
   }
 
+  // ── issue links (#2884) ──────────────────────────────────────────────────
+  // `link-types` is a read (the site's types with both phrases). `link` /
+  // `unlink` are writes, role-gated like the others (D3) with their own policy
+  // entries. Jira logs a link change as a `Link` changelog item on BOTH issues,
+  // so each end is recorded as an own write (→ `field_changed` origin: agent).
+  if (cliPath === '/link-types' && req.method === 'GET') {
+    const cred = credFor();
+    if (!cred) return noCredential('link-types');
+    try {
+      const types = await jira.listLinkTypes(cred);
+      auditCall('link-types', 'ok', `${types.length}`);
+      return sendJson(res, 200, { linkTypes: types });
+    } catch (err) {
+      auditCall('link-types', failureOutcome(err), err.message);
+      return sendJiraError(err);
+    }
+  }
+
+  if ((cliPath === '/link' || cliPath === '/unlink') && req.method === 'POST') {
+    const op = cliPath.slice(1);
+    const authz = brokerPolicy.authorizeWrite(op);
+    if (!authz.allow) {
+      auditCall(op, 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = credFor();
+    if (!cred) return noCredential(op);
+    const body = parseJson(await readBody(req));
+    const byId = op === 'unlink' && body.id != null && String(body.id).trim() !== '';
+    const detail = byId ? `link ${String(body.id).trim()}` : `${body.from || ''} ${body.type || ''} ${body.to || ''}`.trim();
+    if (!byId && (!String(body.from || '').trim() || !String(body.to || '').trim() || !String(body.type || '').trim())) {
+      return sendJson(res, 400, { error: op === 'link'
+        ? 'a link needs two issue keys and a link type, e.g. KAN-1 blocks KAN-2'
+        : 'name the link by its id, or by two issue keys and a link type, e.g. KAN-1 blocks KAN-2' });
+    }
+    try {
+      const result = op === 'link'
+        ? await jira.createIssueLink(cred, { from: body.from, type: body.type, to: body.to })
+        : await jira.removeIssueLink(cred, byId ? { id: body.id } : { from: body.from, type: body.type, to: body.to });
+      // An idempotent re-link wrote nothing, so there is no echo to mark.
+      if (result.created !== false) {
+        for (const key of result.issues || []) recordOwnWrite(() => ownWritesStore.recordField(scopeId, key, 'Link'));
+      }
+      auditCall(op, 'ok', `${result.statement || detail} (${result.id || '?'})${result.created === false ? ' existing' : ''}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      auditCall(op, failureOutcome(err), `${detail}: ${err.message}`);
+      return sendJiraError(err);
+    }
+  }
+
   // ── attributed writes (Phase 4, D3 — role-gated server-side, no confirm) ──
   const writeOps = { '/comment': 'comment', '/transition': 'transition', '/update': 'update', '/set-field': 'set-field' };
   if (writeOps[cliPath] && req.method === 'POST') {

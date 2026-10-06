@@ -42,6 +42,7 @@ const IMPORT = () => route("app.post('/api/process/drafts/import-briefings',");
 const ACCESS_READ = () => route("app.get('/api/process/drafts/:id/access',");
 const ACCESS_ADD = () => route("app.post('/api/process/drafts/:id/access',");
 const ACCESS_DEL = () => route("app.delete('/api/process/drafts/:id/access/:userId',");
+const VISIBILITY = () => route("app.put('/api/process/drafts/:id/visibility',");
 
 test('the module is wired in at all', () => {
   assert.match(API_SRC, /require\('\.\/draft-access'\)/);
@@ -50,8 +51,11 @@ test('the module is wired in at all', () => {
 test('AC6 — the list route filters on the shared predicate', () => {
   const src = LIST();
   assert.match(src, /getScope\(req\)/, 'the list must resolve the caller');
-  assert.match(src, /draftAccess\.canAccessDraft\(scope, d\)/);
-  assert.doesNotMatch(src, /res\.json\(drafts\)[\s\S]*canAccessDraft/, 'the filter must precede the response');
+  // #2870 — the list filters on the READ predicate (holders + "Visible to
+  // everyone"), and tells the row whether the viewer may edit.
+  assert.match(src, /if \(!draftAccess\.canViewDraft\(scope, d\)\) return null;/);
+  assert.match(src, /canEdit: draftAccess\.canAccessDraft\(scope, d\)/);
+  assert.doesNotMatch(src, /res\.json\(drafts\)[\s\S]*canViewDraft/, 'the filter must precede the response');
 });
 
 test('AC16 — the list carries the access view, and never a raw user id', () => {
@@ -62,14 +66,31 @@ test('AC16 — the list carries the access view, and never a raw user id', () =>
   assert.doesNotMatch(src, /createdBy:/, 'the view helper owns the projection');
 });
 
-test('AC3/AC7 — every by-id route goes through the one gate', () => {
-  // Including the two access routes: sharing is itself gated on having access.
+test('AC3/AC7 — every write by-id route goes through the one holder gate', () => {
+  // Including the access and visibility routes: sharing is itself gated on
+  // having access, and #2870 AC11 — a "Visible to everyone" reader is refused
+  // here by the server, not only by a hidden button.
   for (const [name, src] of [
-    ['GET', READ()], ['PUT', UPDATE()], ['DELETE', REMOVE()],
+    ['PUT', UPDATE()], ['DELETE', REMOVE()],
     ['GET access', ACCESS_READ()], ['POST access', ACCESS_ADD()], ['DELETE access', ACCESS_DEL()],
+    ['PUT visibility', VISIBILITY()],
   ]) {
-    assert.match(src, /requireDraftAccess\(req, res,/, `${name} must call the shared gate`);
+    assert.match(src, /requireDraftAccess\(req, res,/, `${name} must call the holder gate`);
+    assert.doesNotMatch(src, /requireDraftRead/, `${name} must not use the read gate`);
   }
+});
+
+test('#2870 AC9/AC10 — only the plain GET uses the read gate, and flags read-only', () => {
+  const src = READ();
+  assert.match(src, /requireDraftRead\(req, res, req\.params\.id\)/);
+  assert.doesNotMatch(src, /requireDraftAccess/);
+  assert.match(src, /viewerCanEdit: verdict\.canEdit/);
+  const gate = stripComments(API_SRC.slice(
+    API_SRC.indexOf('function requireDraftRead'),
+    API_SRC.indexOf('function requireDraftRead') + 600,
+  ));
+  assert.match(gate, /draftAccess\.authorizeDraftRead\(getScope\(req\), readDraft\(id\)\)/);
+  assert.doesNotMatch(gate, /status\(40[13]\)/);
 });
 
 test('AC7 — the gate answers with the module\'s indistinguishable 404', () => {
@@ -78,7 +99,7 @@ test('AC7 — the gate answers with the module\'s indistinguishable 404', () => 
     API_SRC.indexOf('function requireDraftAccess') + 900,
   ));
   assert.match(gate, /draftAccess\.authorizeDraft\(getScope\(req\), readDraft\(id\)\)/);
-  assert.match(gate, /res\.status\(verdict\.status\)\.json\(\{ error: verdict\.error \}\)/);
+  assert.match(gate, /res\.status\(verdict\.status\)\.json\(\{ error: verdict\.error, code: verdict\.code \}\)/);
   // A hand-written 403/404 here would re-introduce the existence oracle.
   assert.doesNotMatch(gate, /status\(40[13]\)/);
 });
@@ -117,8 +138,23 @@ test('AC4/AC5 — the save route strips the incoming pair and carries the stored
   );
 });
 
-test('AC12/D3 — the share route only accepts an existing account', () => {
-  assert.match(ACCESS_ADD(), /usersById\(\)\.has\(userId\)/);
+test('AC12/D3 — the share route only accepts existing accounts, all-or-nothing (#2870)', () => {
+  const src = ACCESS_ADD();
+  assert.match(src, /Array\.isArray\(req\.body\?\.userIds\) \? req\.body\.userIds : \[req\.body\?\.userId\]/);
+  assert.match(src, /draftAccess\.addAccessMany\(d, userIds, \{ knownUserIds: new Set\(users\.keys\(\)\) \}\)/);
+  // The refusal must return BEFORE the one write, or a partial set could land.
+  assert.ok(
+    src.indexOf('if (!result.ok) return') < src.indexOf('writeJsonAtomic'),
+    'validation must precede the write',
+  );
+  assert.equal((src.match(/writeJsonAtomic\(/g) || []).length, 1, 'a bulk share is ONE write');
+});
+
+test('#2870 AC8/AC13 — the visibility route writes only the flag', () => {
+  const src = VISIBILITY();
+  assert.match(src, /draftAccess\.setVisibility\(d, req\.body\?\.visibleToEveryone\)/);
+  assert.match(src, /writeJsonAtomic\(draftPath\(id\), result\.draft\)/);
+  assert.doesNotMatch(src, /accessUserIds|validateProcessTemplate/);
 });
 
 test('AC9 — the unshare route relays the module\'s refusal rather than its own', () => {
@@ -136,7 +172,7 @@ test('sharing writes ONLY the access set, never the bundle', () => {
 });
 
 test('AC2 — no draft route branches on createdBy', () => {
-  const routes = [LIST(), CREATE(), READ(), UPDATE(), REMOVE(), IMPORT(), ACCESS_READ(), ACCESS_ADD(), ACCESS_DEL()];
+  const routes = [LIST(), CREATE(), READ(), UPDATE(), REMOVE(), IMPORT(), ACCESS_READ(), ACCESS_ADD(), ACCESS_DEL(), VISIBILITY()];
   for (const src of routes) {
     assert.doesNotMatch(
       src, /if\s*\([^)]*createdBy/,

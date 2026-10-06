@@ -10942,11 +10942,25 @@ function backfillDraftAccess() {
 // AC3 — the by-id gate, applied identically by every route below. Answers with
 // the AC7 indistinguishable-404 so the endpoint never confirms that a draft the
 // caller may not see exists.
+//
+// This is the HOLDER gate (#2870): a caller who reaches the draft only through
+// "Visible to everyone" gets the module's READ_ONLY 403 here, so every write
+// and share route refuses them server-side (AC11), not just the hidden button.
 function requireDraftAccess(req, res, id) {
   if (!DRAFT_ID_RE.test(id)) { res.status(400).json({ error: 'Invalid draft id' }); return null; }
   const verdict = draftAccess.authorizeDraft(getScope(req), readDraft(id));
-  if (!verdict.ok) { res.status(verdict.status).json({ error: verdict.error }); return null; }
+  if (!verdict.ok) { res.status(verdict.status).json({ error: verdict.error, code: verdict.code }); return null; }
   return verdict.draft;
+}
+
+// #2870 AC9 — the READ gate: holders, plus every authenticated user while the
+// draft is visible to everyone. Used by the plain GET only; same AC7 404 for
+// "absent" and "not visible to you".
+function requireDraftRead(req, res, id) {
+  if (!DRAFT_ID_RE.test(id)) { res.status(400).json({ error: 'Invalid draft id' }); return null; }
+  const verdict = draftAccess.authorizeDraftRead(getScope(req), readDraft(id));
+  if (!verdict.ok) { res.status(verdict.status).json({ error: verdict.error }); return null; }
+  return verdict;
 }
 
 app.get('/api/process/drafts', (req, res) => {
@@ -10955,9 +10969,10 @@ app.get('/api/process/drafts', (req, res) => {
   const drafts = listDraftIds().map(id => {
     const d = readDraft(id);
     if (!d) return null;
-    // AC6 — the list filter is the same predicate as the by-id gate; a System
-    // Admin (scope.all) sees every draft (DD7).
-    if (!draftAccess.canAccessDraft(scope, d)) return null;
+    // AC6 — the list filter is the same read predicate as the by-id read gate
+    // (holders, plus everyone while "Visible to everyone" is on — #2870); a
+    // System Admin (scope.all) sees every draft (DD7).
+    if (!draftAccess.canViewDraft(scope, d)) return null;
     return {
       id,
       name: d.name || id,
@@ -10965,7 +10980,9 @@ app.get('/api/process/drafts', (req, res) => {
       updatedAt: d.updatedAt || null,
       // AC16 — private vs shared, and who created one the viewer did not. Never
       // a raw user id: the list has no way to render one.
-      ...draftAccess.draftAccessView(d, { viewerId: scope.userId, usersById: users }),
+      ...draftAccess.draftAccessView(d, {
+        viewerId: scope.userId, usersById: users, canEdit: draftAccess.canAccessDraft(scope, d),
+      }),
     };
   }).filter(Boolean).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   res.json(drafts);
@@ -11000,9 +11017,12 @@ app.post('/api/process/drafts', apiLimiter, (req, res) => {
 });
 
 app.get('/api/process/drafts/:id', (req, res) => {
-  const d = requireDraftAccess(req, res, req.params.id);
-  if (!d) return undefined;
-  return res.json(d);
+  const verdict = requireDraftRead(req, res, req.params.id);
+  if (!verdict) return undefined;
+  // #2870 AC10 — `viewerCanEdit` tells the editor to open read-only for a
+  // global-only reader. Response-only: stripAccessFields drops it on the way
+  // back in, and the write routes enforce the same rule on their own.
+  return res.json({ ...verdict.draft, viewerCanEdit: verdict.canEdit });
 });
 
 // The resolved access set behind the Share dialog. Same projection as the
@@ -11011,23 +11031,48 @@ app.get('/api/process/drafts/:id', (req, res) => {
 app.get('/api/process/drafts/:id/access', (req, res) => {
   const d = requireDraftAccess(req, res, req.params.id);
   if (!d) return undefined;
-  return res.json({ users: draftAccess.resolveAccessList(d, usersById()) });
+  return res.json({
+    users: draftAccess.resolveAccessList(d, usersById()),
+    visibleToEveryone: draftAccess.isVisibleToEveryone(d),
+  });
 });
 
 // Share (DD2 — available to everyone already in the access set, with no action
 // reserved to the creator). Writes ONLY the access set: the bundle is untouched,
 // so a share can never be a way to smuggle a template edit past validation.
+//
+// #2870 AC5/AC6 — takes `userIds: [...]` (bulk) or the original single
+// `userId`. Every id is validated before anything is written, and the set is
+// written in ONE atomic write, so a bulk share is all-or-nothing: an unknown id
+// refuses the whole request with the set unchanged.
 app.post('/api/process/drafts/:id/access', apiLimiter, (req, res) => {
   const { id } = req.params;
   const d = requireDraftAccess(req, res, id);
   if (!d) return undefined;
-  const userId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : '';
+  const userIds = Array.isArray(req.body?.userIds) ? req.body.userIds : [req.body?.userId];
   // D3 — existing accounts only; there are no invitations of people without one.
-  if (!usersById().has(userId)) return res.status(400).json({ error: 'Unknown user' });
-  const result = draftAccess.addAccess(d, userId);
-  if (!result.ok) return res.status(result.status).json({ error: result.error });
+  const users = usersById();
+  const result = draftAccess.addAccessMany(d, userIds, { knownUserIds: new Set(users.keys()) });
+  if (!result.ok) return res.status(result.status).json({ error: result.error, code: result.code });
   if (result.changed) writeJsonAtomic(draftPath(id), { ...d, accessUserIds: result.accessUserIds });
-  return res.json({ users: draftAccess.resolveAccessList({ accessUserIds: result.accessUserIds }, usersById()) });
+  return res.json({
+    users: draftAccess.resolveAccessList({ accessUserIds: result.accessUserIds }, users),
+    added: result.added,
+    skipped: result.skipped,
+  });
+});
+
+// #2870 AC8/AC13 — the "Visible to everyone" switch. Holders only (the same
+// gate as sharing — a global-only reader gets READ_ONLY). Writes ONLY the flag:
+// the bundle and the explicit access set are untouched in both directions.
+app.put('/api/process/drafts/:id/visibility', apiLimiter, (req, res) => {
+  const { id } = req.params;
+  const d = requireDraftAccess(req, res, id);
+  if (!d) return undefined;
+  const result = draftAccess.setVisibility(d, req.body?.visibleToEveryone);
+  if (!result.ok) return res.status(result.status).json({ error: result.error });
+  if (result.changed) writeJsonAtomic(draftPath(id), result.draft);
+  return res.json({ visibleToEveryone: draftAccess.isVisibleToEveryone(result.draft) });
 });
 
 // Unshare. Anyone in the set may remove anyone (DD2), including themselves —

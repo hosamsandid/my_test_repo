@@ -15,7 +15,7 @@ import { useFlowCopilot } from '../context/FlowCopilotContext.jsx';
 import { proposalNodeDiff } from './process/flow-copilot-view';
 import { anomalyCountByNode } from './process/flow-anomalies-view';
 import { poolInstanceHintsByNode, poolInstanceRoleMap, isPoolInstanceRow } from './process/pool-instance-hint.js';
-import { lintView } from './process/lint-view';
+import { lintView, lintAction } from './process/lint-view';
 import HumanNodeInspector from './process/HumanNodeInspector';
 import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog, CreateChannelDialog, AgentToPersonDialog } from './process/EdgeDialogs';
 import { outcomeDropDialog, edgeOpensProducerOutcome, nodeLabelTarget, labelTargetKind } from './process/outcome-routing';
@@ -1199,6 +1199,11 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           <LintsPanel
             lints={displayGraph?.lints || []}
             onFocus={(nodeId) => { if (nodeId) { setSelectedId(nodeId); graphRef.current?.setSelected(nodeId); } }}
+            // #2878: "Create label" for a wake label missing on GitHub — live team only.
+            onAction={isTeamScope && !isDraft ? async (a) => {
+              await apiCall('POST', `/api/teams/${encodeURIComponent(scope)}/repo-labels`, { repo: a.repo, label: a.label });
+              refetch();
+            } : null}
           />
           <HumanTouchpointsPanel
             touchpoints={displayGraph?.humanTouchpoints || []}
@@ -1855,8 +1860,16 @@ function ToolbarButton({ onClick, icon: Icon, disabled, children, badge, title, 
   );
 }
 
-function LintsPanel({ lints, onFocus }) {
+function LintsPanel({ lints, onFocus, onAction = null }) {
   const [open, setOpen] = useState(false);
+  const [actionBusy, setActionBusy] = useState(null);
+  const [actionError, setActionError] = useState('');
+  const runAction = async (a, key) => {
+    setActionBusy(key);
+    setActionError('');
+    try { await onAction(a); } catch (err) { setActionError(err.message || 'The action failed'); }
+    setActionBusy(null);
+  };
   if (!lints || lints.length === 0) return null;
   const errors = lints.filter(l => l.severity === 'error').length;
   const accent = errors > 0 ? 'var(--eb-status-error)' : 'var(--eb-status-warning)';
@@ -1881,14 +1894,19 @@ function LintsPanel({ lints, onFocus }) {
           marginTop: 6, background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
           borderRadius: 'var(--eb-radius-md)', boxShadow: 'var(--eb-shadow-lg)', maxHeight: '50vh', overflowY: 'auto',
         }}>
-          {lints.map((l, i) => (
+          {actionError && (
+            <div style={{ padding: 'var(--eb-space-2) var(--eb-space-3)', color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-xs)' }}>{actionError}</div>
+          )}
+          {lints.map((l, i) => {
+            const action = onAction ? lintAction(l) : null;
+            return (
+            <div key={i} style={{ borderTop: i ? '1px solid var(--eb-border-default)' : 'none' }}>
             <button
-              key={i}
               onClick={() => onFocus(l.nodeId)}
               title={l.nodeId ? 'Focus node' : undefined}
               style={{
                 display: 'block', width: '100%', textAlign: 'left',
-                background: 'none', border: 'none', borderTop: i ? '1px solid var(--eb-border-default)' : 'none',
+                background: 'none', border: 'none',
                 padding: 'var(--eb-space-2) var(--eb-space-3)', cursor: l.nodeId ? 'pointer' : 'default',
                 fontFamily: 'inherit', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)',
               }}
@@ -1920,7 +1938,23 @@ function LintsPanel({ lints, onFocus }) {
                 );
               })()}
             </button>
-          ))}
+            {action && (
+              <div style={{ padding: '0 var(--eb-space-3) var(--eb-space-2)' }}>
+                <button
+                  onClick={() => runAction(action, i)}
+                  disabled={actionBusy != null}
+                  title={action.title}
+                  style={{
+                    background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
+                    padding: '2px 8px', fontFamily: 'inherit', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)',
+                    cursor: actionBusy != null ? 'wait' : 'pointer',
+                  }}
+                >{actionBusy === i ? 'Creating…' : action.text}</button>
+              </div>
+            )}
+            </div>
+            );
+          })}
         </div>
       )}
     </div>

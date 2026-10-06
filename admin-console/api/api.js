@@ -128,6 +128,7 @@ const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { applyPushedBy } = require('./push-producer-filter');
 const { isLiveGraphMember } = require('./live-graph-members');
+const { missingWakeLabels, wakeLabelRepos, missingWakeLabelLints, missingWakeLabelWarnings } = require('./missing-wake-labels');
 const { normalizeBranchFilter } = require('./branch-filter');
 const { normalizeCommentFilter } = require('./comment-filter');
 const { newTriggerIdError, annotateTriggerList, stripTriggerAnnotations, resolveTriggerIndex } = require('./trigger-validate');
@@ -7073,7 +7074,7 @@ function teamHumansRegistry(teamId) {
   return Array.isArray(cfg.humans) ? cfg.humans : [];
 }
 
-app.get('/api/process/graph', (req, res) => {
+app.get('/api/process/graph', async (req, res) => {
   const templatesParam = req.query.templates;
 
   // Template-level blueprint graph. Label hand-off edges come from each
@@ -7130,7 +7131,15 @@ app.get('/api/process/graph', (req, res) => {
     });
   }
   const teamHumans = teamHumansRegistry(team);
-  res.json({ level: 'live', team, humans: teamHumans, ...buildProcessGraph(agents, { labels: teamLabelRegistry(team), humans: teamHumans }) });
+  const graph = buildProcessGraph(agents, { labels: teamLabelRegistry(team), humans: teamHumans });
+  // #2878: a wake label missing on its repository — only for one team's
+  // graph (one bounded GitHub read, cached by the orchestrator). Unreadable
+  // repos are simply not linted.
+  if (team) {
+    const labels = await fetchRepoLabels(wakeLabelRepos(agents));
+    if (labels) graph.lints = [...(graph.lints || []), ...missingWakeLabelLints(missingWakeLabels(agents, labels.labels))];
+  }
+  res.json({ level: 'live', team, humans: teamHumans, ...graph });
 });
 
 // Build a graph from an imported bundle (no persistence) so the canvas can
@@ -9453,9 +9462,15 @@ app.get('/api/flows/graph', async (req, res) => {
     if (Array.isArray(teamCfg.stages)) stages = teamCfg.stages.filter(s => typeof s === 'string');
   }
   const teamHumans = teamHumansRegistry(team);
+  const graph = buildUnifiedGraph(nodes, undefined, { labels: teamLabelRegistry(team), humans: teamHumans });
+  // #2878: a wake label missing on its repository (one team's graph only).
+  if (team) {
+    const labels = await fetchRepoLabels(wakeLabelRepos(nodes));
+    if (labels) graph.lints = [...(graph.lints || []), ...missingWakeLabelLints(missingWakeLabels(nodes, labels.labels))];
+  }
   res.json({
     unifiedFlowVersion: 1, source: 'live', team, stages, humans: teamHumans,
-    ...buildUnifiedGraph(nodes, undefined, { labels: teamLabelRegistry(team), humans: teamHumans }),
+    ...graph,
   });
 });
 
@@ -9556,6 +9571,49 @@ app.post('/api/teams/:teamId/flow-board-removed', apiLimiter, async (req, res) =
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, rowId }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// GET /api/teams/:teamId/missing-labels — the team's wake labels that do not
+// exist on their repository (#2878), for Team Settings. Visibility-gated like
+// the board; `unreadable` lists repos whose labels could not be read.
+app.get('/api/teams/:teamId/missing-labels', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  const members = teamWakeMembers(teamId);
+  const labels = await fetchRepoLabels(wakeLabelRepos(members));
+  if (!labels) return res.status(502).json({ error: 'Could not read the repository labels just now' });
+  return res.json({ teamId, missing: missingWakeLabels(members, labels.labels), unreadable: labels.unreadable });
+});
+
+// POST /api/teams/:teamId/repo-labels — "Create label" (#2878). Body
+// `{ repo, label }`; only a wake label one of the team's triggers listens on,
+// on that trigger's repository. Gated like every other team write; the actor is
+// the session user.
+app.post('/api/teams/:teamId/repo-labels', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!canManageTeam(scope, teamId)) return denyAdmin(res, 'You may not manage this team');
+  const repo = req.body && typeof req.body.repo === 'string' ? req.body.repo.trim() : '';
+  const label = req.body && typeof req.body.label === 'string' ? req.body.label.trim() : '';
+  const listened = teamWakeMembers(teamId).some((m) => m.triggers.some((t) =>
+    t && t.type === 'github-event' && typeof t.repo === 'string' && t.repo.trim() === repo
+    && typeof t.labelFilter === 'string' && t.labelFilter.trim() === label));
+  if (!listened) return res.status(400).json({ error: 'Only a wake label one of this team\u2019s triggers listens on can be created here' });
+  const actor = (req.user && (req.user.username || req.user.email || req.user.sub)) || null;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/repo-labels`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo, label, actor }),
     });
     const data = await resp.json().catch(() => ({}));
     return res.status(resp.status).json(data);
@@ -17621,6 +17679,41 @@ function suffixLabelColor(suffix) {
   return `${f(0)}${f(8)}${f(4)}`;
 }
 
+// #2878: the label names of `repos` from the orchestrator — `{ labels, unreadable }`,
+// or null when it cannot be asked (never throws, bounded to a few seconds).
+async function fetchRepoLabels(repos) {
+  if (!Array.isArray(repos) || !repos.length) return { labels: {}, unreadable: [] };
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/repo-labels?repos=${encodeURIComponent(repos.join(','))}`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return { labels: data.labels || {}, unreadable: Array.isArray(data.unreadable) ? data.unreadable : [] };
+  } catch {
+    return null;
+  }
+}
+
+// #2878: a team's members with their triggers — the label listeners.
+function teamWakeMembers(teamId) {
+  const out = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    if (!isLiveGraphMember(cfg, teamId)) continue;
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    out.push({ id, triggers: Array.isArray(triggers) ? triggers : [] });
+  }
+  return out;
+}
+
+// #2878: after materialisation — one line per wake label that is still missing.
+async function missingLabelWarningsFor(teamId) {
+  const members = teamWakeMembers(teamId);
+  const labels = await fetchRepoLabels(wakeLabelRepos(members));
+  return labels ? missingWakeLabelWarnings(missingWakeLabels(members, labels.labels)) : [];
+}
+
 // Best-effort label provisioning call to the orchestrator after materialisation.
 // Creates missing GitHub labels for the stamped token set. Failures are warnings.
 async function provisionGithubLabels(orchestratorUrl, envId, tokenSet, suffix) {
@@ -18380,6 +18473,8 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     // Create the stamped labels in the target repo so `gh issue edit --add-label`
     // doesn't fail on a label that doesn't exist yet. Failures are logged only.
     provisionGithubLabels(orchestratorUrl, envId, suffixTokenSet, labelSuffix)
+      // #2878: then check that every wake label exists on its repository.
+      .then(async provWarn => [...provWarn, ...await missingLabelWarningsFor(teamId)])
       .then(provWarn => {
         if (provWarn.length) console.warn(`[Team] Label provisioning warnings for ${teamId}:`, provWarn);
       })
@@ -19138,6 +19233,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
     // Emit provisioning warnings as individual warning events so the wizard
     // result step can surface them inline.
     const provWarn = await provisionGithubLabels(orchestratorUrl, envId, suffixTokenSet, labelSuffix);
+    // #2878: then check that every wake label now exists on its repository.
+    provWarn.push(...await missingLabelWarningsFor(teamId));
     for (const w of provWarn) {
       emit({ type: 'warning', message: w });
     }

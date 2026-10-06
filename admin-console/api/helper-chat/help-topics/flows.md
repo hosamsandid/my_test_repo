@@ -375,6 +375,14 @@ source of truth: a person re-applying the same label wakes the consumer exactly
 like an agent does, and every wake shows up in the **GitHub Event Log**. (The
 former *Direct (internal)* delivery option was removed in #2578.)
 
+The label must **exist on the repository**. GitHub refuses to add a label that
+does not exist, so such a hand-off can never fire. For a live team the issues
+panel then shows **Wake label does not exist on GitHub**, naming the label, the
+repository and the listening agent. Team Admins can fix it there with **Create
+label** — the same warning, with the same button, appears in Agent Chat →
+**Settings** under **Wake labels on GitHub**. Team creation checks this too and
+lists a missing label among its warnings.
+
 ### Team labels: the base and the suffix chip
 
 On a live team created with a **label suffix**, every label field — the

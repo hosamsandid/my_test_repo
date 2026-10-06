@@ -810,3 +810,48 @@ and its dedup marker, so the Events API's late copy of the same label is
 dropped as `internal-dedup`. Afterwards the board shows the dispatch as queued,
 held or delivered, so a second click is refused as no longer parked — the
 persisted half of "at most once".
+
+## Amendment 8 — Adopting in-flight items after a move or flow re-apply (#2877, epic #2880)
+
+**A8.1 — the problem.** Moving a team to another instance, or re-applying /
+re-materialising its flow, stamps every trigger with a fresh `activatedAt`.
+Wake labels already on open items predate that stamp, so the history horizon
+(#320/#525) drops their events by design — and on a new instance the Event Log
+may hold nothing about them at all. The items sit at *up next* forever
+(`agent-studio-3-0`, 2026-10-05: #2820/#2842/#2844, ~18 h).
+
+**A8.2 — no implicit replay.** #320 stays the default: nothing is woken on
+import, materialise or re-apply. Adoption is an explicit click.
+
+**A8.3 — detection.** The scan is the board itself: every board computation
+looks at the team's open items (A6). `buildRoleGraph` records, per role and
+wake label, the earliest `activatedAt` (else `createdAt`) of its triggers on
+that label (`horizons`; unknown for any trigger = unknown). A parked wake
+(A6.2) is **carried over** (`carriedOver: true`) when its cause is
+`history-horizon`, or `not-seen` with the label's latest possible add time
+(`since`) before every live consumer's horizon. A carried-over wake needs no
+`PARKED_WAKE_MS` window — no delivery will ever come. A row whose every parked
+wake is carried over reads *carried over — not started here*
+(`REASONS.carriedOver`); the board lists those rows in `carriedOver`. Without a
+known horizon the row falls back to A6's *wake never delivered*. Orphaned
+`:wip` claims from the old instance are A5's *stuck — needs help* + Release
+claim; they are not adopted.
+
+**A8.4 — the action.** **Adopt** (row) is the A7 delivery under another label.
+**Adopt all (n)** posts `POST /api/teams/:teamId/flow-board-adopt` (`{ rowIds? }`,
+session actor) → `POST /internal/teams/:teamId/flow-board-adopt`: one fresh
+board, `planAdopt` (named rows, or every `carriedOver` row; a row no longer
+adoptable is skipped with its reason), then per row the same in-flight guard
+and `deliverBoardWakes` as Wake again — GitHub re-check, `disarmWake`,
+template-only fast-path delivery, readiness holds kept, one Event Log line per
+wake.
+
+**A8.5 — pools, sessions, knowledge (the open question).** Adoption does not
+re-key pool instances. It wakes the role template, and `planPoolDispatch`
+spawns a fresh item-keyed instance on the new instance. Old instances, their
+session pointers and chat history stay on the old instance; nothing migrates
+them. The adopted run starts a fresh session and resumes from what GitHub
+holds (labels, branch, PR, review comments). The team's knowledge base lives
+in git and carries over unchanged. Migrating instance sessions is out of
+scope. A session pointer is bound to the old instance's `claude-home`, and
+replaying it on another instance is not safe.

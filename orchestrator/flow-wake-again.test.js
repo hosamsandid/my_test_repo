@@ -54,3 +54,24 @@ test('wakeAgainKey / source: one in-flight key per row, logged as flow-control (
   assert.equal(wa.wakeAgainKey('t', 'o/r#1'), 't::o/r#1');
   assert.equal(wa.WAKE_AGAIN_SOURCE, 'flow-control');
 });
+
+test('planWakeAgain: a carried-over row is planned like a parked one (#2877)', () => {
+  const plan = wa.planWakeAgain(boardWith({ reason: fb.REASONS.carriedOver, wakes: [wake({ carriedOver: true })] }), 'o/r#2813');
+  assert.equal(plan.ok, true);
+});
+
+test('planAdopt: every carried-over row by default, named rows on request; non-adoptable ones are skipped with their reason (#2877)', () => {
+  const carriedRow = (id, extra = {}) => ({ id, needsHuman: { reason: fb.REASONS.carriedOver, wakes: [wake(extra)] } });
+  const board = {
+    rows: [carriedRow('o/r#1'), carriedRow('o/r#2', { number: 2 }), { id: 'o/r#3', needsHuman: { reason: fb.REASONS.conflict } }],
+    carriedOver: ['o/r#1', 'o/r#2'],
+  };
+  const all = wa.planAdopt(board);
+  assert.deepEqual([all.ok, all.rows.map((r) => r.rowId), all.skipped], [true, ['o/r#1', 'o/r#2'], []]);
+  const named = wa.planAdopt(board, ['o/r#2', 'o/r#3', 'o/r#2', 'o/r#9', 5]);
+  assert.deepEqual(named.rows.map((r) => r.rowId), ['o/r#2']);
+  assert.deepEqual(named.skipped.map((s) => [s.rowId, s.status]), [['o/r#3', 409], ['o/r#9', 404]]);
+  assert.equal(wa.planAdopt({ ...board, stale: true }).status, 503);
+  assert.deepEqual([wa.planAdopt({ rows: [], carriedOver: [] }).ok, wa.planAdopt({ rows: [], carriedOver: [] }).status], [false, 409]);
+  assert.equal(wa.planAdopt(board, ['o/r#3']).status, 409);
+});

@@ -41,13 +41,38 @@ function planWakeAgain(board, rowId) {
   const row = (Array.isArray(board.rows) ? board.rows : []).find((r) => r && r.id === rowId);
   if (!row) return { ok: false, status: 404, error: 'That item is not on the board' };
   const block = row.needsHuman;
-  if (!block || block.reason !== flowBoard.REASONS.wakeLost) {
+  // #2877: a carried-over row is adopted through the same delivery.
+  if (!block || (block.reason !== flowBoard.REASONS.wakeLost && block.reason !== flowBoard.REASONS.carriedOver)) {
     return { ok: false, status: 409, error: 'This item is no longer parked on an undelivered wake' };
   }
   const wakes = (Array.isArray(block.wakes) ? block.wakes : [])
     .filter((w) => w && typeof w.label === 'string' && w.label && Array.isArray(w.roles) && w.roles.length);
   if (!wakes.length) return { ok: false, status: 409, error: 'No agent is switched on to pick this wake up' };
   return { ok: true, row, wakes };
+}
+
+// "Adopt" (#2877): the rows to adopt from a fresh board — the named `rowIds`,
+// or every carried-over row when none are named. A named row that is not
+// (or no longer) adoptable is skipped with its reason rather than failing the
+// batch; only a stale board or an empty selection refuses the whole call.
+function planAdopt(board, rowIds) {
+  if (!board || board.stale) {
+    return { ok: false, status: 503, error: 'GitHub could not be read just now — try again in a moment' };
+  }
+  const named = Array.isArray(rowIds)
+    ? [...new Set(rowIds.filter((id) => typeof id === 'string' && id.trim()).map((id) => id.trim()))].slice(0, 200)
+    : null;
+  const ids = named || (Array.isArray(board.carriedOver) ? board.carriedOver : []);
+  if (!ids.length) return { ok: false, status: 409, error: 'Nothing on the board is carried over' };
+  const rows = [];
+  const skipped = [];
+  for (const rowId of ids) {
+    const plan = planWakeAgain(board, rowId);
+    if (plan.ok) rows.push({ rowId, plan });
+    else skipped.push({ rowId, status: plan.status, error: plan.error });
+  }
+  if (!rows.length) return { ok: false, status: 409, error: skipped[0].error };
+  return { ok: true, rows, skipped };
 }
 
 // The GitHub re-check for one wake, from the raw issue/PR object: the item is
@@ -78,6 +103,7 @@ module.exports = {
   WAKE_AGAIN_SOURCE,
   wakeAgainKey,
   planWakeAgain,
+  planAdopt,
   checkWakeStillPresent,
   templateListeners,
 };

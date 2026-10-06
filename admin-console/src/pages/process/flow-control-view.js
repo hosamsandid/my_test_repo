@@ -387,6 +387,22 @@ export function wakeCauseText(w) {
 // delivered to its agent again. `help-topics/flow-control.md` quotes it.
 export const WAKE_CONFIRM_TEXT = 'The wake label already on the GitHub item is delivered to its agent again, directly — no label is changed. A pooled role starts on the item\u2019s own instance; a hand-off with a readiness gate still waits for CI. Only do this when nobody is already working on it.';
 
+// "Adopt" (#2877): the same delivery for a row carried over from another
+// instance or an earlier flow. `help-topics/flow-control.md` quotes it.
+export const CARRIED_OVER_REASON = 'carried over — not started here';
+export const ADOPT_CONFIRM_TEXT = 'These items already carry a wake label from before this team\u2019s triggers were activated here — after a move to this instance or a flow re-apply. Adopting delivers each label to its agent once, directly — no label is changed. Items an agent is already working on, or that wait in a queue, are skipped.';
+
+export function adoptDialogTitle(n) {
+  return n === 1 ? 'Adopt 1 carried-over item?' : `Adopt ${n} carried-over items?`;
+}
+
+// The notice after "Adopt all"; null when nothing was adopted.
+export function adoptNotice(res) {
+  const n = res && Number.isFinite(res.adopted) ? res.adopted : 0;
+  if (n < 1) return null;
+  return `${n === 1 ? '1 item' : `${n} items`} adopted — each agent starts on its next check.`;
+}
+
 export function wakeDialogTitle(ref) {
   return ref ? `Wake the agent for ${ref} again?` : 'Wake the agent again?';
 }
@@ -441,6 +457,8 @@ export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}
     release,
     wakes,
     canWake: wakes.some((w) => w.roles.length > 0),
+    // #2877: a carried-over row's wake button reads "Adopt".
+    carriedOver: (entry.reason || (entry.needsHuman && entry.needsHuman.reason)) === CARRIED_OVER_REASON,
   };
 }
 
@@ -484,6 +502,8 @@ export function boardView(data, now = Date.now()) {
     pools: working.pools,
     held: Array.isArray(d.held) ? d.held : [],
     needsYou: needs.length ? needs : null,
+    // #2877: rows the board's "Adopt all" would start.
+    carriedOver: Array.isArray(d.carriedOver) ? d.carriedOver.filter((id) => needs.some((n) => n.id === id && n.canWake)) : [],
     activeRows,
     doneRows,
     removed,

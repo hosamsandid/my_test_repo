@@ -187,7 +187,7 @@ const REQUEST_TIMEOUT_MS = 20_000;
 // `TypeError: fetch failed` — DNS, TLS, a stale pooled socket in a long-running
 // process) is rethrown with its `cause` folded into the message so the poller
 // log is actionable.
-async function attempt({ base, path: reqPath, method, headers, payload }) {
+async function attempt({ base, path: reqPath, method, headers, payload, withLocation }) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
   let res;
@@ -205,9 +205,19 @@ async function attempt({ base, path: reqPath, method, headers, payload }) {
   if (!res.ok) {
     const e = new Error(mapJiraError(res.status, text));
     e.status = res.status;
+    // Jira's own answer, for a caller that maps a status more precisely than
+    // mapJiraError can (an issue-link 404 can mean "no Link Issues permission").
+    e.body = typeof text === 'string' ? text.slice(0, 1000) : '';
     throw e;
   }
-  return text ? safeJson(text) : {};
+  const data = text ? safeJson(text) : {};
+  // A create that answers 201 with an empty body (POST /issueLink) carries the
+  // new resource's URL only in `Location`.
+  if (withLocation) {
+    const location = res.headers && typeof res.headers.get === 'function' ? res.headers.get('location') : null;
+    return { data, location: location || null };
+  }
+  return data;
 }
 
 // `idempotent` decides whether a transport failure is retried. Default: GET
@@ -215,12 +225,12 @@ async function attempt({ base, path: reqPath, method, headers, payload }) {
 // (comment, description, transition) must NOT — a transport error, including
 // the 20 s abort, can arrive AFTER Jira accepted the request, and a retry then
 // posts the attribution comment twice or re-runs the transition (F6).
-async function requestJson({ base, path: reqPath, method = 'GET', authHeader, body, idempotent }) {
+async function requestJson({ base, path: reqPath, method = 'GET', authHeader, body, idempotent, withLocation }) {
   const headers = { Accept: 'application/json', 'User-Agent': 'agent-studio-jira-plugin' };
   if (authHeader) headers.Authorization = authHeader;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   const payload = body !== undefined ? JSON.stringify(body) : undefined;
-  const args = { base, path: reqPath, method, headers, payload };
+  const args = { base, path: reqPath, method, headers, payload, withLocation };
   const retryable = idempotent !== undefined ? !!idempotent : method === 'GET';
   try {
     return await attempt(args);
@@ -465,7 +475,7 @@ async function getIssue(cred, issueKey, { env, customFields } = {}) {
   // agent-requested custom fields (#2416). Both read one cached field catalog.
   const epicLinkFieldId = await resolveEpicLinkFieldId(base, auth);
   const custom = await resolveCustomFieldSelection(base, auth, customFields);
-  const fieldList = ['summary', 'status', 'description', 'assignee', 'issuetype', 'attachment', 'created', 'updated', 'parent'];
+  const fieldList = ['summary', 'status', 'description', 'assignee', 'issuetype', 'attachment', 'created', 'updated', 'parent', 'issuelinks'];
   if (epicLinkFieldId) fieldList.push(epicLinkFieldId);
   for (const id of custom.ids) if (!fieldList.includes(id)) fieldList.push(id);
   const raw = await requestJson({
@@ -487,6 +497,9 @@ async function getIssue(cred, issueKey, { env, customFields } = {}) {
     // Parent/epic key (#2415) so an agent can traverse Story→Epic: `show` the
     // key this returns. `null` when the issue has no parent (e.g. an epic).
     parent: parentKeyOf(fields, epicLinkFieldId),
+    // Issue links (#2884), as seen from THIS issue ("blocks" / "is blocked by").
+    // Always present — `[]` when the issue has none.
+    links: shapeIssueLinks(fields.issuelinks, String(raw.key || issueKey)),
     url: `${resolveJiraApiBase(cred.siteUrl)}/browse/${encodeURIComponent(raw.key || issueKey)}`,
   };
   // Requested custom fields (#2416). Only surfaced when some were requested, so
@@ -1258,6 +1271,230 @@ async function setCustomField(cred, issueKey, { fieldName, value, jsonValue, all
     body: { fields: { [id]: shaped } },
   });
   return { issueKey: key, field: name, fieldId: id, changed: true, value: hasJson ? jsonValue : value };
+}
+
+// ── issue links (#2884) ──────────────────────────────────────────────────────
+//
+// Read, create and remove links between two existing issues ("KAN-1 blocks
+// KAN-2"). Jira names the two ends `inwardIssue` / `outwardIssue`, and the
+// names mislead: on `POST /issueLink` the issue sent as `inwardIssue` is the one
+// that takes the type's OUTWARD phrase ("A blocks B" = inwardIssue A,
+// outwardIssue B), while on a read an issue lists the OTHER end under
+// `outwardIssue` when it takes the outward phrase itself. So nothing
+// agent-facing speaks of inward/outward: a read gives the relationship as seen
+// from the issue, and a write takes "<A> <type name or phrase> <B>" and
+// resolves the direction here. Link types vary per site (admin-configurable),
+// so they are always read from `/issueLinkType`, never hard-coded.
+
+const linkErr = (status, message) => { const e = new Error(message); e.status = status; return e; };
+
+// One `issuelinks` entry as seen from `thisKey`. `null` for an entry whose
+// other end is missing — Jira omits an issue the credential cannot see, and a
+// deleted issue's links can linger — so `show` keeps the rest instead of failing.
+function shapeIssueLink(raw, thisKey) {
+  if (!raw || raw.id == null || !raw.type) return null;
+  const other = raw.outwardIssue || raw.inwardIssue;
+  if (!other || !other.key) return null;
+  const phrase = (raw.outwardIssue ? raw.type.outward : raw.type.inward) || raw.type.name || '';
+  const f = other.fields || {};
+  return {
+    id: String(raw.id),
+    type: String(raw.type.name || ''),
+    relationship: String(phrase),
+    otherIssue: {
+      key: String(other.key),
+      summary: f.summary == null ? null : String(f.summary),
+      status: f.status && f.status.name ? String(f.status.name) : null,
+    },
+    statement: `${thisKey} ${phrase} ${other.key}`,
+  };
+}
+
+function shapeIssueLinks(rawLinks, thisKey) {
+  return (Array.isArray(rawLinks) ? rawLinks : []).map((l) => shapeIssueLink(l, thisKey)).filter(Boolean);
+}
+
+function linkTypeLabel(t) {
+  return `${t.name} (${t.outward} / ${t.inward})`;
+}
+
+// Resolve what the caller typed to a link type and a direction. Pure.
+// Case-insensitive; the type NAME wins ("Blocks" → its outward phrase), else
+// either phrase ("is blocked by" → `reversed`: the SECOND key takes the outward
+// phrase). A phrase two types share is ambiguous, and an unknown one is refused
+// listing every type — both before any Jira write.
+function resolveLinkType(types, input) {
+  const list = Array.isArray(types) ? types : [];
+  const want = String(input || '').trim().toLowerCase();
+  const available = list.map(linkTypeLabel).join(', ') || '(none)';
+  if (!want) throw linkErr(400, `a link type is required. Available: ${available}`);
+  const byName = list.find((t) => t.name.toLowerCase() === want);
+  if (byName) return { type: byName, phrase: byName.outward || byName.name, reversed: false };
+  const hits = [];
+  for (const t of list) {
+    if (t.outward.toLowerCase() === want) hits.push({ type: t, phrase: t.outward, reversed: false });
+    else if (t.inward.toLowerCase() === want) hits.push({ type: t, phrase: t.inward, reversed: true });
+  }
+  if (hits.length === 1) return hits[0];
+  if (hits.length > 1) {
+    throw linkErr(400, `"${input}" is a phrase of several link types (${hits.map((h) => h.type.name).join(', ')}) — name the link type instead.`);
+  }
+  throw linkErr(400, `unknown link type "${input}". Available: ${available}`);
+}
+
+// Inward and outward read the same ("relates to"): direction carries no
+// meaning, so A→B and B→A are the same link.
+function isSymmetric(t) {
+  return t.inward.toLowerCase() === t.outward.toLowerCase();
+}
+
+// In `subject`'s raw `issuelinks`, the link of `type` where the subject takes
+// the outward phrase towards `objectKey` (either direction for a symmetric type).
+function findLink(rawLinks, type, objectKey) {
+  const want = objectKey.toUpperCase();
+  const sameType = (l) => l && l.type && (type.id && l.type.id != null ? String(l.type.id) === type.id : l.type.name === type.name);
+  const keyOf = (i) => (i && i.key ? String(i.key).toUpperCase() : null);
+  return (Array.isArray(rawLinks) ? rawLinks : []).find((l) => sameType(l)
+    && (keyOf(l.outwardIssue) === want || (isSymmetric(type) && keyOf(l.inwardIssue) === want))) || null;
+}
+
+async function readIssueLinks(base, auth, issueKey) {
+  try {
+    const raw = await requestJson({ base, path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=issuelinks`, authHeader: auth });
+    return (raw.fields && raw.fields.issuelinks) || [];
+  } catch (e) {
+    if (e.status === 404) throw linkErr(404, `issue ${issueKey} was not found, or the Jira account cannot see it (404). Nothing was changed.`);
+    throw e;
+  }
+}
+
+// A site admin can switch linking off globally. Checked before a link write so
+// the refusal names the cause; an unreadable configuration is not a refusal —
+// the write itself then decides.
+async function assertLinkingEnabled(base, auth) {
+  let conf;
+  try {
+    conf = await requestJson({ base, path: '/rest/api/3/configuration', authHeader: auth });
+  } catch {
+    return;
+  }
+  if (conf && conf.issueLinkingEnabled === false) {
+    throw linkErr(409, 'issue linking is disabled on this Jira site — a Jira site admin turns it on (Jira settings → Issues → Issue linking). Nothing was changed.');
+  }
+}
+
+// A refused link write, named by its cause. Jira answers a missing "Link
+// Issues" permission with a 403 or a 404 whose body says so; any other 404 is
+// an issue (or link) the account cannot see.
+function linkWriteError(e, what) {
+  if (!e || !e.status) return e;
+  if (e.status === 403 || ((e.status === 404 || e.status === 400) && /permission/i.test(e.body || ''))) {
+    return linkErr(403, `the Jira account lacks the "Link Issues" permission for ${what} (${e.status}). Nothing was changed.`);
+  }
+  if (e.status === 404) return linkErr(404, `${what} was not found, or the Jira account cannot see it (404). Nothing was changed.`);
+  return e;
+}
+
+function linkIdFromLocation(location) {
+  const m = /\/issueLink\/(\d+)\/?$/.exec(String(location || ''));
+  return m ? m[1] : null;
+}
+
+function linkKeys(from, to) {
+  const a = String(from || '').trim();
+  const b = String(to || '').trim();
+  if (!a || !b) throw linkErr(400, 'two issue keys are required, e.g. KAN-1 blocks KAN-2');
+  if (a.toUpperCase() === b.toUpperCase()) throw linkErr(400, `an issue cannot be linked to itself (${a}).`);
+  return [a, b];
+}
+
+// The site's link types (CLI `link-types`): `[{ id, name, inward, outward }]`.
+async function listLinkTypes(cred, { env } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const res = await requestJson({ base, path: '/rest/api/3/issueLinkType', authHeader: auth });
+  return (Array.isArray(res.issueLinkTypes) ? res.issueLinkTypes : [])
+    .map((t) => ({ id: String(t.id), name: String(t.name || ''), inward: String(t.inward || ''), outward: String(t.outward || '') }))
+    .filter((t) => t.name);
+}
+
+// Link two existing issues: "<from> <type> <to>". Every refusal (self-link,
+// unknown/ambiguous type, linking disabled, an invisible first issue) comes
+// before the write. Idempotent: an existing link of the same type and direction
+// is reported (`created: false`) instead of duplicated. Never retried on a
+// transport failure (a retry after Jira accepted the first would duplicate).
+async function createIssueLink(cred, { from, type, to, env } = {}) {
+  const [a, b] = linkKeys(from, to);
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const resolved = resolveLinkType(await listLinkTypes(cred, { env }), type);
+  await assertLinkingEnabled(base, auth);
+  const [subject, object] = resolved.reversed ? [b, a] : [a, b];
+  const statement = `${a} ${resolved.phrase} ${b}`;
+  const result = (created, id) => ({ created, id, type: resolved.type.name, statement, issues: [a, b] });
+  const existing = findLink(await readIssueLinks(base, auth, subject), resolved.type, object);
+  if (existing) return result(false, String(existing.id));
+  let location = null;
+  try {
+    const res = await requestJson({
+      base,
+      path: '/rest/api/3/issueLink',
+      method: 'POST',
+      authHeader: auth,
+      body: { type: { name: resolved.type.name }, inwardIssue: { key: subject }, outwardIssue: { key: object } },
+      withLocation: true,
+    });
+    location = res.location;
+  } catch (e) {
+    throw linkWriteError(e, `issue ${subject} or ${object}`);
+  }
+  let id = linkIdFromLocation(location);
+  if (!id) {
+    // No `Location` header: the new link is the one the subject now carries.
+    try {
+      const found = findLink(await readIssueLinks(base, auth, subject), resolved.type, object);
+      id = found ? String(found.id) : null;
+    } catch { /* the link exists; only its id is unknown */ }
+  }
+  return result(true, id);
+}
+
+// Remove a link by its id (from `show`), or by "<from> <type> <to>". A link that
+// does not exist is a 404 and nothing changes. `issues` names both ends so the
+// broker can mark the `Link` changelog echo on each as its own write.
+async function removeIssueLink(cred, { id, from, type, to, env } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  let out;
+  if (id != null && String(id).trim()) {
+    const linkId = String(id).trim();
+    if (!/^\d+$/.test(linkId)) throw linkErr(400, `a link id is numeric (the "id" of an entry in \`aee-jira show\`'s links), got "${linkId}".`);
+    await assertLinkingEnabled(base, auth);
+    let link;
+    try {
+      link = await requestJson({ base, path: `/rest/api/3/issueLink/${linkId}`, authHeader: auth });
+    } catch (e) {
+      if (e.status === 404) throw linkErr(404, `link ${linkId} was not found (404) — it may already be removed, or the Jira account cannot see both issues. Nothing was changed.`);
+      throw e;
+    }
+    const keys = [link.inwardIssue, link.outwardIssue].map((i) => (i && i.key ? String(i.key) : null)).filter(Boolean);
+    out = { removed: true, id: linkId, type: link.type && link.type.name ? String(link.type.name) : null, issues: keys };
+  } else {
+    const [a, b] = linkKeys(from, to);
+    const resolved = resolveLinkType(await listLinkTypes(cred, { env }), type);
+    await assertLinkingEnabled(base, auth);
+    const [subject, object] = resolved.reversed ? [b, a] : [a, b];
+    const statement = `${a} ${resolved.phrase} ${b}`;
+    const existing = findLink(await readIssueLinks(base, auth, subject), resolved.type, object);
+    if (!existing) throw linkErr(404, `no link "${statement}" exists (404). Nothing was changed.`);
+    out = { removed: true, id: String(existing.id), type: resolved.type.name, statement, issues: [a, b] };
+  }
+  try {
+    await requestJson({ base, path: `/rest/api/3/issueLink/${out.id}`, method: 'DELETE', authHeader: auth });
+  } catch (e) {
+    throw linkWriteError(e, `link ${out.id}`);
+  }
+  return out;
 }
 
 // ── issue creation: one Epic + its child Stories (#2424) ─────────────────────
@@ -2052,6 +2289,13 @@ module.exports = {
   shapeFieldWriteValue,
   fieldValueMatches,
   setCustomField,
+  // issue links (#2884)
+  shapeIssueLink,
+  shapeIssueLinks,
+  resolveLinkType,
+  listLinkTypes,
+  createIssueLink,
+  removeIssueLink,
   buildCreateFields,
   collectCustomFieldNames,
   createEpicWithStories,

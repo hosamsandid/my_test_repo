@@ -708,3 +708,47 @@ test('aee-jira forwards the agent caller token (#2562) and surfaces a refusal me
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('aee-jira: link / unlink read as a sentence — first key, type words, last key (#2884)', async () => {
+  const ws = grantedJiraWorkspace();
+  // fewer than three words (or an unlink of two) is a usage error, never a broker call
+  assert.equal(runJira(['link', 'KAN-1', 'KAN-2', '--json'], ws).status, 2);
+  assert.equal(runJira(['unlink', 'KAN-1', 'KAN-2', '--json'], ws).status, 2);
+  assert.equal(runJira(['link', '--json'], ws).status, 2);
+
+  const http = require('node:http');
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, body: raw ? JSON.parse(raw) : null });
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ ok: true }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const live = grantedJiraWorkspace(`http://127.0.0.1:${port}/`);
+    for (const args of [
+      ['link', 'KAN-1', 'is', 'blocked', 'by', 'KAN-2'],
+      ['link', 'KAN-1', 'Blocks', 'KAN-2'],
+      ['unlink', '10001'],
+      ['unlink', 'KAN-1', 'relates to', 'KAN-3'],
+      ['link-types'],
+    ]) {
+      const r = await runJiraAsync([...args, '--json'], live);
+      assert.equal(r.status, 0, args.join(' ') + r.stdout + r.stderr);
+    }
+    assert.deepEqual(seen, [
+      { method: 'POST', url: '/cli/link', body: { from: 'KAN-1', type: 'is blocked by', to: 'KAN-2' } },
+      { method: 'POST', url: '/cli/link', body: { from: 'KAN-1', type: 'Blocks', to: 'KAN-2' } },
+      { method: 'POST', url: '/cli/unlink', body: { id: '10001' } },
+      { method: 'POST', url: '/cli/unlink', body: { from: 'KAN-1', type: 'relates to', to: 'KAN-3' } },
+      { method: 'GET', url: '/cli/link-types', body: null },
+    ]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

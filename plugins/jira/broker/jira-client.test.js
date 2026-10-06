@@ -1665,3 +1665,234 @@ test('advanceSprint: closed but no future sprint to start is a reported partial 
     assert.equal(r.failed, true);
   });
 });
+
+// ── issue links (#2884) ─────────────────────────────────────────────────────
+
+const LINK_TYPES = [
+  { id: '10000', name: 'Blocks', inward: 'is blocked by', outward: 'blocks' },
+  { id: '10001', name: 'Duplicate', inward: 'is duplicated by', outward: 'duplicates' },
+  { id: '10003', name: 'Relates', inward: 'relates to', outward: 'relates to' },
+];
+const json = (status, body, headers) => ({
+  ok: status < 400, status, text: async () => (body === undefined ? '' : JSON.stringify(body)),
+  headers: { get: (h) => (headers || {})[h.toLowerCase()] || null },
+});
+const isLinkTypes = (url) => /\/issueLinkType$/.test(url);
+const isConfiguration = (url) => /\/rest\/api\/3\/configuration$/.test(url);
+const issueLinksOf = (url) => (/\/issue\/([^/?]+)\?fields=issuelinks$/.exec(url) || [])[1];
+const BLOCKS = LINK_TYPES[0];
+const RELATES = LINK_TYPES[2];
+
+test('shapeIssueLink: the relationship is phrased from THIS issue — outwardIssue → outward phrase, inwardIssue → inward', () => {
+  const out = jc.shapeIssueLink({ id: 7, type: BLOCKS, outwardIssue: { key: 'KAN-2', fields: { summary: 'Two', status: { name: 'To Do' } } } }, 'KAN-1');
+  assert.deepEqual(out, {
+    id: '7', type: 'Blocks', relationship: 'blocks',
+    otherIssue: { key: 'KAN-2', summary: 'Two', status: 'To Do' }, statement: 'KAN-1 blocks KAN-2',
+  });
+  const inn = jc.shapeIssueLink({ id: '8', type: BLOCKS, inwardIssue: { key: 'KAN-3', fields: { summary: 'Three' } } }, 'KAN-1');
+  assert.equal(inn.relationship, 'is blocked by');
+  assert.equal(inn.statement, 'KAN-1 is blocked by KAN-3');
+  assert.equal(inn.otherIssue.status, null);
+});
+
+test('shapeIssueLinks: a link whose other end is missing (deleted / not visible) is skipped, the rest kept; none → []', () => {
+  const links = jc.shapeIssueLinks([
+    { id: '1', type: BLOCKS }, // other end not returned
+    { id: '2', type: RELATES, outwardIssue: { key: 'KAN-9', fields: {} } },
+    null,
+  ], 'KAN-1');
+  assert.deepEqual(links.map((l) => l.id), ['2']);
+  assert.deepEqual(jc.shapeIssueLinks(undefined, 'KAN-1'), []);
+});
+
+test('getIssue: `links` lists the issue links (both directions) and is [] when there are none (#2884 AC1)', async () => {
+  const body = (issuelinks) => ({ key: 'KAN-1', fields: { summary: 'S', status: { name: 'To Do' }, issuelinks } });
+  let links = [
+    { id: '100', type: BLOCKS, outwardIssue: { key: 'KAN-2', fields: { summary: 'Two', status: { name: 'Done' } } } },
+    { id: '101', type: BLOCKS, inwardIssue: { key: 'OPS-4', fields: { summary: 'Four', status: { name: 'To Do' } } } },
+  ];
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    if (isTransitionList(url)) return transitionsResponse();
+    assert.match(url, /fields=[^&]*issuelinks/);
+    return json(200, body(links));
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'KAN-1', { env: CRED.env });
+    assert.deepEqual(issue.links.map((l) => [l.id, l.statement, l.otherIssue.status]), [
+      ['100', 'KAN-1 blocks KAN-2', 'Done'],
+      ['101', 'KAN-1 is blocked by OPS-4', 'To Do'],
+    ]);
+    links = undefined;
+    assert.deepEqual((await jc.getIssue(CRED, 'KAN-1', { env: CRED.env })).links, []);
+  });
+});
+
+test('resolveLinkType: name or either phrase, case-insensitive; a phrase sets the direction (#2884 AC4)', () => {
+  assert.deepEqual(jc.resolveLinkType(LINK_TYPES, 'Blocks'), { type: BLOCKS, phrase: 'blocks', reversed: false });
+  assert.deepEqual(jc.resolveLinkType(LINK_TYPES, 'blocks'), { type: BLOCKS, phrase: 'blocks', reversed: false });
+  assert.deepEqual(jc.resolveLinkType(LINK_TYPES, '  IS BLOCKED BY '), { type: BLOCKS, phrase: 'is blocked by', reversed: true });
+  assert.deepEqual(jc.resolveLinkType(LINK_TYPES, 'duplicates'), { type: LINK_TYPES[1], phrase: 'duplicates', reversed: false });
+  assert.deepEqual(jc.resolveLinkType(LINK_TYPES, 'relates to'), { type: RELATES, phrase: 'relates to', reversed: false });
+});
+
+test('resolveLinkType: an unknown type lists the available ones; a phrase two types share is ambiguous', () => {
+  assert.throws(() => jc.resolveLinkType(LINK_TYPES, 'causes'),
+    (e) => e.status === 400 && /unknown link type "causes"/.test(e.message) && /Blocks \(blocks \/ is blocked by\)/.test(e.message) && /Relates/.test(e.message));
+  const shared = [...LINK_TYPES, { id: '20000', name: 'Hard block', inward: 'is blocked by', outward: 'hard-blocks' }];
+  assert.throws(() => jc.resolveLinkType(shared, 'is blocked by'),
+    (e) => e.status === 400 && /several link types \(Blocks, Hard block\)/.test(e.message) && /name the link type/.test(e.message));
+  assert.throws(() => jc.resolveLinkType(LINK_TYPES, ''), (e) => e.status === 400);
+});
+
+test('listLinkTypes: reads /issueLinkType as { id, name, inward, outward } (#2884 AC2)', async () => {
+  await withFetch((url) => {
+    assert.ok(isLinkTypes(url));
+    return json(200, { issueLinkTypes: [{ id: 10000, name: 'Blocks', inward: 'is blocked by', outward: 'blocks', self: 'x' }] });
+  }, async () => {
+    assert.deepEqual(await jc.listLinkTypes(CRED, { env: CRED.env }), [BLOCKS]);
+  });
+});
+
+// A stub Jira for the link writes. `links` maps an issue key to its raw
+// `issuelinks`; every call is recorded.
+function linkJira({ links = {}, config = { issueLinkingEnabled: true }, post, del, getLink } = {}) {
+  return (url, opts) => {
+    const method = (opts && opts.method) || 'GET';
+    if (isLinkTypes(url)) return json(200, { issueLinkTypes: LINK_TYPES });
+    if (isConfiguration(url)) return json(200, config);
+    const key = issueLinksOf(url);
+    if (key) return key in links ? json(200, { key, fields: { issuelinks: links[key] } }) : json(404, { errorMessages: ['Issue does not exist'] });
+    if (/\/issueLink$/.test(url) && method === 'POST') return post ? post(JSON.parse(opts.body)) : json(201, undefined, { location: 'http://fake-jira:8080/rest/api/3/issueLink/555' });
+    if (/\/issueLink\/\d+$/.test(url) && method === 'DELETE') return del ? del(url) : json(204);
+    if (/\/issueLink\/\d+$/.test(url)) return getLink ? getLink(url) : json(404, {});
+    throw new Error(`unexpected ${method} ${url}`);
+  };
+}
+const writesOf = (calls) => calls.filter((c) => c.opts && c.opts.method && c.opts.method !== 'GET');
+
+test('createIssueLink: "A blocks B" posts A as inwardIssue (Jira gives the inward end the outward phrase) and returns the Location id (#2884 AC3)', async () => {
+  await withFetch(linkJira({ links: { 'KAN-1': [] } }), async (calls) => {
+    const r = await jc.createIssueLink(CRED, { from: 'KAN-1', type: 'blocks', to: 'KAN-2', env: CRED.env });
+    assert.deepEqual(r, { created: true, id: '555', type: 'Blocks', statement: 'KAN-1 blocks KAN-2', issues: ['KAN-1', 'KAN-2'] });
+    const [post] = writesOf(calls);
+    assert.deepEqual(JSON.parse(post.opts.body), { type: { name: 'Blocks' }, inwardIssue: { key: 'KAN-1' }, outwardIssue: { key: 'KAN-2' } });
+  });
+});
+
+test('createIssueLink: an inward phrase flips the direction — "A is blocked by B" is the link "B blocks A"', async () => {
+  await withFetch(linkJira({ links: { 'KAN-2': [] } }), async (calls) => {
+    const r = await jc.createIssueLink(CRED, { from: 'KAN-1', type: 'Is Blocked By', to: 'KAN-2', env: CRED.env });
+    assert.equal(r.statement, 'KAN-1 is blocked by KAN-2');
+    const [post] = writesOf(calls);
+    assert.deepEqual(JSON.parse(post.opts.body), { type: { name: 'Blocks' }, inwardIssue: { key: 'KAN-2' }, outwardIssue: { key: 'KAN-1' } });
+  });
+});
+
+test('createIssueLink: an existing link of the same type + direction is reported, not duplicated (#2884 AC5)', async () => {
+  const links = { 'KAN-1': [{ id: '42', type: BLOCKS, outwardIssue: { key: 'KAN-2' } }] };
+  await withFetch(linkJira({ links }), async (calls) => {
+    const r = await jc.createIssueLink(CRED, { from: 'KAN-1', type: 'Blocks', to: 'kan-2', env: CRED.env });
+    assert.equal(r.created, false);
+    assert.equal(r.id, '42');
+    assert.equal(writesOf(calls).length, 0);
+  });
+  // the OPPOSITE direction is a different link → created
+  const reverse = { 'KAN-1': [{ id: '42', type: BLOCKS, inwardIssue: { key: 'KAN-2' } }] };
+  await withFetch(linkJira({ links: reverse }), async (calls) => {
+    assert.equal((await jc.createIssueLink(CRED, { from: 'KAN-1', type: 'Blocks', to: 'KAN-2', env: CRED.env })).created, true);
+    assert.equal(writesOf(calls).length, 1);
+  });
+});
+
+test('createIssueLink: a symmetric type ("relates to") treats B→A as the same link as A→B', async () => {
+  const links = { 'KAN-1': [{ id: '77', type: RELATES, inwardIssue: { key: 'KAN-2' } }] };
+  await withFetch(linkJira({ links }), async (calls) => {
+    const r = await jc.createIssueLink(CRED, { from: 'KAN-1', type: 'relates to', to: 'KAN-2', env: CRED.env });
+    assert.deepEqual([r.created, r.id], [false, '77']);
+    assert.equal(writesOf(calls).length, 0);
+  });
+});
+
+test('createIssueLink: self-link refused before ANY Jira call; unknown type refused before any write (#2884 AC4/AC7)', async () => {
+  await withFetch(linkJira(), async (calls) => {
+    await assert.rejects(() => jc.createIssueLink(CRED, { from: 'KAN-1', type: 'blocks', to: 'kan-1', env: CRED.env }),
+      (e) => e.status === 400 && /itself/.test(e.message));
+    assert.equal(calls.length, 0);
+    await assert.rejects(() => jc.createIssueLink(CRED, { from: 'KAN-1', type: 'causes', to: 'KAN-2', env: CRED.env }),
+      (e) => e.status === 400 && /Available: Blocks/.test(e.message));
+    assert.equal(writesOf(calls).length, 0);
+  });
+});
+
+test('createIssueLink: no Location header → the id is read back from the subject\'s links', async () => {
+  let posted = false;
+  const links = { 'KAN-1': [] };
+  await withFetch(linkJira({ links, post: () => { posted = true; links['KAN-1'] = [{ id: '901', type: BLOCKS, outwardIssue: { key: 'KAN-2' } }]; return json(201); } }), async () => {
+    const r = await jc.createIssueLink(CRED, { from: 'KAN-1', type: 'blocks', to: 'KAN-2', env: CRED.env });
+    assert.ok(posted);
+    assert.equal(r.id, '901');
+  });
+});
+
+test('createIssueLink: Jira refusals name their cause — disabled linking, no Link Issues permission, invisible issue (#2884 AC8)', async () => {
+  await withFetch(linkJira({ links: { 'KAN-1': [] }, config: { issueLinkingEnabled: false } }), async (calls) => {
+    await assert.rejects(() => jc.createIssueLink(CRED, { from: 'KAN-1', type: 'blocks', to: 'KAN-2', env: CRED.env }),
+      (e) => e.status === 409 && /linking is disabled/.test(e.message));
+    assert.equal(writesOf(calls).length, 0);
+  });
+  await withFetch(linkJira({ links: { 'KAN-1': [] }, post: () => json(404, { errorMessages: ["No Link Issue Permission for issue 'KAN-1'."] }) }), async () => {
+    await assert.rejects(() => jc.createIssueLink(CRED, { from: 'KAN-1', type: 'blocks', to: 'KAN-2', env: CRED.env }),
+      (e) => e.status === 403 && /"Link Issues" permission/.test(e.message));
+  });
+  await withFetch(linkJira({ links: { 'KAN-1': [] }, post: () => json(403, {}) }), async () => {
+    await assert.rejects(() => jc.createIssueLink(CRED, { from: 'KAN-1', type: 'blocks', to: 'KAN-2', env: CRED.env }),
+      (e) => e.status === 403 && /"Link Issues" permission/.test(e.message));
+  });
+  await withFetch(linkJira({ links: { 'KAN-1': [] }, post: () => json(404, { errorMessages: ['Issue does not exist'] }) }), async () => {
+    await assert.rejects(() => jc.createIssueLink(CRED, { from: 'KAN-1', type: 'blocks', to: 'KAN-404', env: CRED.env }),
+      (e) => e.status === 404 && /KAN-404 was not found/.test(e.message));
+  });
+  // the first issue itself not visible → a 404 naming it, before the write
+  await withFetch(linkJira({ links: {} }), async (calls) => {
+    await assert.rejects(() => jc.createIssueLink(CRED, { from: 'GONE-1', type: 'blocks', to: 'KAN-2', env: CRED.env }),
+      (e) => e.status === 404 && /issue GONE-1 was not found/.test(e.message));
+    assert.equal(writesOf(calls).length, 0);
+  });
+});
+
+test('removeIssueLink: by id — reads the link (for both keys) then DELETEs it (#2884 AC6)', async () => {
+  const getLink = () => json(200, { id: '42', type: BLOCKS, inwardIssue: { key: 'KAN-1' }, outwardIssue: { key: 'KAN-2' } });
+  await withFetch(linkJira({ getLink }), async (calls) => {
+    const r = await jc.removeIssueLink(CRED, { id: '42', env: CRED.env });
+    assert.deepEqual(r, { removed: true, id: '42', type: 'Blocks', issues: ['KAN-1', 'KAN-2'] });
+    const [del] = writesOf(calls);
+    assert.equal(del.opts.method, 'DELETE');
+    assert.match(del.url, /\/issueLink\/42$/);
+  });
+});
+
+test('removeIssueLink: by type + keys — finds the link in the given direction and DELETEs it', async () => {
+  const links = { 'KAN-2': [{ id: '43', type: BLOCKS, outwardIssue: { key: 'KAN-1' } }] };
+  await withFetch(linkJira({ links }), async (calls) => {
+    const r = await jc.removeIssueLink(CRED, { from: 'KAN-1', type: 'is blocked by', to: 'KAN-2', env: CRED.env });
+    assert.deepEqual(r, { removed: true, id: '43', type: 'Blocks', statement: 'KAN-1 is blocked by KAN-2', issues: ['KAN-1', 'KAN-2'] });
+    assert.match(writesOf(calls)[0].url, /\/issueLink\/43$/);
+  });
+});
+
+test('removeIssueLink: a link that does not exist is a clear 404 and nothing is deleted', async () => {
+  await withFetch(linkJira(), async (calls) => {
+    await assert.rejects(() => jc.removeIssueLink(CRED, { id: '999', env: CRED.env }),
+      (e) => e.status === 404 && /link 999 was not found/.test(e.message));
+    assert.equal(writesOf(calls).length, 0);
+  });
+  await withFetch(linkJira({ links: { 'KAN-1': [] } }), async (calls) => {
+    await assert.rejects(() => jc.removeIssueLink(CRED, { from: 'KAN-1', type: 'blocks', to: 'KAN-2', env: CRED.env }),
+      (e) => e.status === 404 && /no link "KAN-1 blocks KAN-2" exists/.test(e.message));
+    assert.equal(writesOf(calls).length, 0);
+  });
+  await withFetch(linkJira(), async (calls) => {
+    await assert.rejects(() => jc.removeIssueLink(CRED, { id: 'abc', env: CRED.env }), (e) => e.status === 400);
+    assert.equal(calls.length, 0);
+  });
+});

@@ -28,6 +28,7 @@ Reads:
     aee-jira show KAN-6 [--fields "Team,Sprint"] [--comment <id>]   # one issue (summary, status, type, assignee, created/updated, parent/epic key, URL, attachments, availableTransitions; --fields adds custom fields; --comment adds one comment in full)
     aee-jira attachment get KAN-6 10312 [--out path]   # fetch one attachment's content by id
     aee-jira sprint list --board "Team Scrum Board"     # a Scrum board's sprints (resolved by board name)
+    aee-jira link-types                           # the site's issue link types: name, outward + inward phrase
 
 Writes (attributed, role-gated server-side, no human confirmation — moving a
 ticket is routine and reversible):
@@ -43,6 +44,9 @@ ticket is routine and reversible):
     aee-jira sprint close --board "Team Scrum Board"     # complete the board's active sprint
     aee-jira sprint start --board "Team Scrum Board"     # activate the board's next future sprint
     aee-jira sprint advance --board "Team Scrum Board"   # close the active sprint, then start the next future one
+    aee-jira link KAN-1 blocks KAN-2              # link two issues: "KAN-1 blocks KAN-2"
+    aee-jira unlink 10001                         # remove a link by its id (from `show`'s links)
+    aee-jira unlink KAN-1 blocks KAN-2            # …or by the same words that created it
 
 `create-epic` turns one ask into its breakdown: it creates a single Epic and N
 Stories underneath it (each linked to the Epic) in the named project, in one
@@ -102,6 +106,26 @@ dateless sprint (Jira rejects that). `sprint advance` is the roll-over in one
 call: it closes the active sprint, then starts the next future one, reporting each
 half separately so a partial result (e.g. closed but no future sprint to start) is
 visible — the CLI exits 1 on such a partial, while still printing both outcomes.
+
+`link` links two existing issues and reads like the sentence it records:
+`aee-jira link KAN-1 blocks KAN-2` makes KAN-1 block KAN-2. The words between
+the two keys are a link type NAME ("Blocks", "Relates") or one of its phrases
+("blocks", "is blocked by", "relates to"), case-insensitive — quoting is
+optional. The FIRST key is the subject of the phrase: `aee-jira link KAN-2 is
+blocked by KAN-1` records the very same link. A type name means its outward
+phrase ("Blocks" = "blocks"). `aee-jira link-types` lists the types this site
+offers (they are admin-configurable); an unknown type, a phrase two types share,
+or linking an issue to itself is refused before anything is written. Linking two
+issues that are already linked the same way creates no duplicate — the result
+says `created: false` and gives the existing link id. On success the result
+states the relationship in plain words (`statement`) and returns the link `id`.
+`show` lists an issue's links as seen from that issue
+(`links: [{id, type, relationship, otherIssue: {key, summary, status}, statement}]`).
+`unlink` removes a link by that `id`, or by the same words that created it; a
+link that does not exist is a "not found" error and nothing changes. When Jira
+refuses, the error names the cause: the account lacks the "Link Issues"
+permission, an issue is not found or not visible, or linking is disabled on the
+site.
 
 `set-field` sets ONE custom field. Any custom field is writable by default; if an
 admin set a non-empty `writable-custom-fields` allow-list, a field not on that
@@ -489,6 +513,23 @@ def build_parser():
         help="raw JSON value sent to Jira verbatim (escape hatch for an exotic field shape)",
     )
 
+    sub.add_parser("link-types", parents=[common], help="list the site's issue link types (name, outward + inward phrase)")
+
+    p_link = sub.add_parser(
+        "link", parents=[common],
+        help='link two issues, read as a sentence: `link KAN-1 blocks KAN-2` (KAN-1 blocks KAN-2)',
+    )
+    p_link.add_argument(
+        "words", nargs="+", metavar="WORD",
+        help='first issue key, a link type name or phrase ("blocks", "is blocked by", "Relates"), second issue key',
+    )
+
+    p_unlink = sub.add_parser(
+        "unlink", parents=[common],
+        help="remove a link by its id (from `show`), or by the words that created it: `unlink KAN-1 blocks KAN-2`",
+    )
+    p_unlink.add_argument("words", nargs="+", metavar="WORD", help="a link id, or first key, link type, second key")
+
     p_create = sub.add_parser(
         "create-epic", parents=[common],
         help="create one Epic and its child Stories in one operation (payload from --file or stdin)",
@@ -644,6 +685,20 @@ def main(argv=None):
         else:
             payload["value"] = args.value
         path, method, body = "/set-field", "POST", payload
+    elif args.cmd == "link-types":
+        path = "/link-types"
+    elif args.cmd in ("link", "unlink"):
+        words = args.words
+        if args.cmd == "unlink" and len(words) == 1:
+            body = {"id": words[0]}
+        elif len(words) >= 3:
+            body = {"from": words[0], "type": " ".join(words[1:-1]), "to": words[-1]}
+        else:
+            emit({"ok": False, "error": "usage",
+                  "message": "usage: aee-jira link <KEY> <link type or phrase> <KEY>   e.g. aee-jira link KAN-1 blocks KAN-2\n"
+                             "       aee-jira unlink <linkId>  |  aee-jira unlink <KEY> <link type or phrase> <KEY>"}, as_json)
+            return EXIT_USAGE
+        path, method = "/" + args.cmd, "POST"
     elif args.cmd == "create-epic":
         try:
             raw = _read_payload_text(args.file)

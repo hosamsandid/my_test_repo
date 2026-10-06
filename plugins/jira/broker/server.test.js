@@ -1414,3 +1414,153 @@ test('audit: a wake the orchestrator answers with 500 is domain-error with the s
     orch.close();
   }
 });
+
+// ── issue links (#2884) ─────────────────────────────────────────────────────
+
+const LINK_TYPES_FIXTURE = [
+  { id: '10000', name: 'Blocks', inward: 'is blocked by', outward: 'blocks' },
+  { id: '10003', name: 'Relates', inward: 'relates to', outward: 'relates to' },
+];
+
+// A stub Jira for the link routes. `links` is each issue's raw `issuelinks`.
+function stubLinkJira(seen, links) {
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    const u = String(url);
+    const method = (opts && opts.method) || 'GET';
+    seen.push({ url: u, method, auth: opts && opts.headers && opts.headers.Authorization, body: opts && opts.body });
+    const res = (status, body, headers = {}) => ({
+      ok: status < 400, status, text: async () => (body === undefined ? '' : JSON.stringify(body)),
+      headers: { get: (h) => headers[h.toLowerCase()] || null },
+    });
+    if (/\/issueLinkType$/.test(u)) return res(200, { issueLinkTypes: LINK_TYPES_FIXTURE });
+    if (/\/configuration$/.test(u)) return res(200, { issueLinkingEnabled: true });
+    const m = /\/issue\/([^/?]+)\?fields=issuelinks$/.exec(u);
+    if (m) return res(200, { key: m[1], fields: { issuelinks: links[m[1]] || [] } });
+    if (/\/issueLink$/.test(u) && method === 'POST') return res(201, undefined, { location: 'https://acme.atlassian.net/rest/api/3/issueLink/555' });
+    if (/\/issueLink\/\d+$/.test(u) && method === 'DELETE') return res(204);
+    if (/\/issueLink\/42$/.test(u)) return res(200, { id: '42', type: LINK_TYPES_FIXTURE[0], inwardIssue: { key: 'KAN-3' }, outwardIssue: { key: 'KAN-4' } });
+    return res(404, {});
+  };
+  return () => { global.fetch = origFetch; };
+}
+
+test('cli link / unlink / link-types: authorised write, audited, both ends stamped as own writes (#2884 AC2/AC3/AC6/AC9/AC11)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
+  broker._setGrantResolver(SERVICE_GRANT);
+  broker.ownWritesStore.teardown('team-1');
+  const seen = [];
+  const restore = stubLinkJira(seen, { 'KAN-6': [{ id: '77', type: LINK_TYPES_FIXTURE[0], outwardIssue: { key: 'KAN-8' } }] });
+  const srv = await listen();
+  try {
+    const types = await call(srv, 'GET', '/cli/link-types', { token: TOKEN });
+    assert.equal(types.status, 200);
+    assert.deepEqual(types.body.linkTypes, LINK_TYPES_FIXTURE);
+
+    const linked = await call(srv, 'POST', '/cli/link', { token: TOKEN, body: { from: 'KAN-1', type: 'blocks', to: 'KAN-2' } });
+    assert.equal(linked.status, 200);
+    assert.deepEqual(linked.body, { created: true, id: '555', type: 'Blocks', statement: 'KAN-1 blocks KAN-2', issues: ['KAN-1', 'KAN-2'] });
+    const fields = () => broker.ownWritesStore.snapshot('team-1').fields;
+    assert.equal(fields()['KAN-1|link'].length, 1);
+    assert.equal(fields()['KAN-2|link'].length, 1);
+
+    // an idempotent re-link writes nothing to Jira and stamps nothing
+    const again = await call(srv, 'POST', '/cli/link', { token: TOKEN, body: { from: 'KAN-6', type: 'Blocks', to: 'KAN-8' } });
+    assert.deepEqual([again.status, again.body.created, again.body.id], [200, false, '77']);
+    assert.equal(fields()['KAN-6|link'], undefined);
+
+    const unlinked = await call(srv, 'POST', '/cli/unlink', { token: TOKEN, body: { id: '42' } });
+    assert.equal(unlinked.status, 200);
+    assert.deepEqual(unlinked.body, { removed: true, id: '42', type: 'Blocks', issues: ['KAN-3', 'KAN-4'] });
+    assert.equal(fields()['KAN-3|link'].length, 1);
+    assert.equal(fields()['KAN-4|link'].length, 1);
+
+    // refusals before any Jira write: missing words, self-link, unknown type
+    const writesBefore = seen.filter((s) => s.method !== 'GET').length;
+    assert.equal((await call(srv, 'POST', '/cli/link', { token: TOKEN, body: { from: 'KAN-1', to: 'KAN-2' } })).status, 400);
+    assert.equal((await call(srv, 'POST', '/cli/unlink', { token: TOKEN, body: {} })).status, 400);
+    const self = await call(srv, 'POST', '/cli/link', { token: TOKEN, body: { from: 'KAN-1', type: 'blocks', to: 'KAN-1' } });
+    assert.equal(self.status, 400);
+    assert.match(self.body.error, /itself/);
+    const unknown = await call(srv, 'POST', '/cli/link', { token: TOKEN, body: { from: 'KAN-1', type: 'causes', to: 'KAN-2' } });
+    assert.equal(unknown.status, 400);
+    assert.match(unknown.body.error, /Available: Blocks \(blocks \/ is blocked by\), Relates/);
+    assert.equal(seen.filter((s) => s.method !== 'GET').length, writesBefore);
+
+    // every call is audited with the calling scope; link/unlink go through their own policy entries
+    const lines = auditLines().filter((l) => l.scopeId === 'team-1' && ['link', 'unlink', 'link-types'].includes(l.subcommand));
+    assert.ok(lines.some((l) => l.subcommand === 'link' && l.outcome === 'ok' && /KAN-1 blocks KAN-2 \(555\)/.test(l.detail) && l.identity === 'service-account'));
+    assert.ok(lines.some((l) => l.subcommand === 'link' && l.outcome === 'ok' && /existing/.test(l.detail)));
+    assert.ok(lines.some((l) => l.subcommand === 'unlink' && l.outcome === 'ok' && /\(42\)/.test(l.detail)));
+    assert.ok(lines.some((l) => l.subcommand === 'link' && l.outcome === 'domain-error' && /itself/.test(l.detail)));
+    assert.ok(lines.some((l) => l.subcommand === 'link-types' && l.outcome === 'ok'));
+    assert.deepEqual(brokerPolicyOf('link'), { allow: true });
+    assert.deepEqual(brokerPolicyOf('unlink'), { allow: true });
+
+    // GET on a write path → 404
+    assert.equal((await call(srv, 'GET', '/cli/link', { token: TOKEN })).status, 404);
+    // no service account → refused before Jira
+    const nocred = await call(srv, 'POST', '/cli/link', { token: OTHER, body: { from: 'X-1', type: 'blocks', to: 'X-2' } });
+    assert.equal(nocred.body.code, 'no-service-account');
+  } finally {
+    restore();
+    broker.ownWritesStore.teardown('team-1');
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+function brokerPolicyOf(op) {
+  return require('./broker-policy').authorizeWrite(op);
+}
+
+test('cli link: a policy denial refuses the write before Jira is touched (#2884 AC9)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
+  const policy = require('./broker-policy');
+  const orig = policy.authorizeWrite;
+  policy.authorizeWrite = (op) => (op === 'link' || op === 'unlink' ? { allow: false, code: 'scope-not-allowed', reason: 'not for you' } : orig(op));
+  const seen = [];
+  const restore = stubLinkJira(seen, {});
+  const srv = await listen();
+  try {
+    for (const route of ['/cli/link', '/cli/unlink']) {
+      const r = await call(srv, 'POST', route, { token: TOKEN, body: { from: 'KAN-1', type: 'blocks', to: 'KAN-2' } });
+      assert.equal(r.status, 403, route);
+      assert.equal(r.body.code, 'scope-not-allowed');
+    }
+    assert.equal(seen.length, 0);
+    assert.ok(auditLines().some((l) => l.subcommand === 'unlink' && l.outcome === 'denied' && l.detail === 'scope-not-allowed'));
+  } finally {
+    policy.authorizeWrite = orig;
+    restore();
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli link in a chat turn uses the sender\'s own Jira token; an automated run the service account (#2884 AC10)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
+  const seen = [];
+  const restore = stubLinkJira(seen, {});
+  const srv = await listen();
+  try {
+    broker._setGrantResolver(async () => ({ ok: true, mode: 'personal', interactive: true, agentId: 'team-1-dev', userId: 'alice', values: { email: 'alice@b.c', 'api-token': 'alice-tok' } }));
+    const chat = await callAs(srv, 'POST', '/cli/link', { token: TOKEN, caller: 'aeecall1.x.y', body: { from: 'KAN-1', type: 'blocks', to: 'KAN-2' } });
+    assert.equal(chat.status, 200);
+    assert.ok(seen.length > 0 && seen.every((c) => c.auth === basic('alice@b.c', 'alice-tok')), 'every Jira call as alice');
+    assert.ok(auditLines().some((l) => l.subcommand === 'link' && l.identity === 'alice' && l.interactive === true));
+
+    seen.length = 0;
+    broker._setGrantResolver(SERVICE_GRANT);
+    const auto = await call(srv, 'POST', '/cli/link', { token: TOKEN, body: { from: 'KAN-1', type: 'blocks', to: 'KAN-2' } });
+    assert.equal(auto.status, 200);
+    assert.ok(seen.length > 0 && seen.every((c) => c.auth === basic('svc@b.c', 'svc-tok')), 'every Jira call as the service account');
+  } finally {
+    restore();
+    broker._setGrantResolver(SERVICE_GRANT);
+    broker.ownWritesStore.teardown('team-1');
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});

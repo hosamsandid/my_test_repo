@@ -106,6 +106,8 @@ watching and automated runs use the team's service account.
 | `aee-jira comment KAN-6 --body "…"` | add a comment |
 | `aee-jira update KAN-6 --description "…"` | replace the description (keep what the human wrote and add a section — the old text stays in Jira's history) |
 | `aee-jira set-field KAN-6 --field "Team" --value "<v>"` | set a custom field by its Jira name (any, unless a Team Admin set a `writable-custom-fields` list); for Team pass the id from `show --fields "Team"` |
+| `aee-jira link KAN-1 blocks KAN-2` / `aee-jira link-types` | link two existing issues — read it as a sentence: the first key is the subject of the phrase ("is blocked by" flips it); a type name such as `Blocks` means its outward phrase. `link-types` lists the site's types (name, outward / inward phrase). An existing identical link is reported, not duplicated. `show` lists an issue's `links` (`id`, `type`, `relationship`, `otherIssue`, `statement`) |
+| `aee-jira unlink 10001` / `aee-jira unlink KAN-1 blocks KAN-2` | remove a link by its id (from `show`) or by the same sentence; a link that does not exist is refused and nothing changes |
 | `aee-jira transition KAN-6 --to "In Progress"` | move the issue on — this is itself a status change and wakes whichever teammate's trigger names that target status |
 | `aee-jira create-epic --project KAN --file plan.json` | create one Epic and its child Stories in one call (summary, assignee, status, custom fields per Story); reports each key or a per-Story error |
 | `aee-jira sprint list --board "<board name>"` | list a Scrum board's sprints (id, name, state, start/end), the board resolved by its human-readable name. Read-only |

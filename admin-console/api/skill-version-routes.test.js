@@ -117,7 +117,14 @@ test('restore: staging swap, path containment, one `restored` stamp, one auto-re
   assert.equal((src.match(/stampSkill\(/g) || []).length, 1);
   assert.match(src, /action: 'restored', restoredFrom/);
   assert.equal((src.match(/autoResyncOnEdit\(/g) || []).length, 1);
-  assert.match(src, /if \(viewed\.tier !== 'agent'\) \{\s*autoResyncOnEdit/);
+  assert.match(src, /\} else \{\s*autoResyncOnEdit/);
+});
+
+test('restore: an agent copy is mirrored into an isolated agent volume right away (same as install)', () => {
+  const src = route(RESTORE);
+  assert.equal((src.match(/notifyAgentReseed\(/g) || []).length, 1);
+  assert.match(src, /if \(viewed\.tier === 'agent'\) \{\s*notifyAgentReseed\(viewed\.agentId, \[`skills\/\$\{name\}`\]\);\s*\} else \{\s*autoResyncOnEdit/);
+  assert.ok(src.indexOf('notifyAgentReseed(') > src.indexOf('stampSkill('), 'reseed only after the swap and stamp');
 });
 
 test('snapshots never travel: every skill copy/archive cpSync filters _versions; the batch staging copy keeps them', () => {

@@ -12005,7 +12005,11 @@ app.post('/api/skills/:name/versions/:hash/restore', (req, res) => {
     name, by: skillActor(req), action: 'restored', restoredFrom,
     note: restoredFrom != null ? `restored from v${restoredFrom}` : `restored from ${hash}`,
   });
-  if (viewed.tier !== 'agent') {
+  if (viewed.tier === 'agent') {
+    // Same as install: mirror the restored copy into a running isolated
+    // agent's own volume right away (no-op on the shared volume).
+    notifyAgentReseed(viewed.agentId, [`skills/${name}`]);
+  } else {
     autoResyncOnEdit(name, viewed.tier === 'team' ? { tier: 'team', teamId: viewed.teamId } : { tier: 'global' });
   }
   let newHash = null;

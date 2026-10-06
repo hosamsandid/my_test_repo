@@ -128,8 +128,8 @@ From an opened old version you can:
   replaces the current content and is recorded as a **new** version with the
   action *restored* (so the content you replaced stays in the history). Agent
   copies of a global or team skill are resynced once, as after any edit.
-  Restoring an agent's own copy writes into that agent's skill folder; an agent
-  with its own isolated volume picks the change up at its next restart or sync.
+  Restoring an agent's own copy writes into that agent's skill folder and, as
+  with an install, the agent uses the restored content from its next message.
 - **Edit from this version** — loads the old content into the normal editor as
   pending changes on top of the current skill, so you can adjust it before
   **Save** records it as one new version.

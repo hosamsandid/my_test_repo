@@ -68,9 +68,11 @@ test('a successful mutation clears the cache, mounted behind the auth gate and s
   assert.match(mw, /res\.end = function endAndInvalidateRoster\(\.\.\.args\) \{\n    res\.end = end;/, 'one decision per request');
   assert.match(mw, /return end\.apply\(this, args\);/);
   assert.doesNotMatch(mw, /res\.(once|on)\('(close|finish)'/);
-  assert.match(API_SRC, /function invalidateRosterCache\(\) \{\n  rosterCache\.clear\(\);\n\}/);
+  assert.match(API_SRC, /function invalidateRosterCache\(\) \{\n  rosterCache\.clear\(\);\n  agentStatusCache\.invalidate\(\);[^\n]*\n\}/);
 });
 
 test('the statuses cache TTL honours an explicit 0 like the roster one', () => {
-  assert.match(API_SRC, /const STATUS_CACHE_TTL_MS = ttlMsFromEnv\(process\.env\.AGENT_STATUSES_TTL_MS, 2000\);/);
+  // #570: 2 s TTL → 5 s fresh + stale-while-revalidate (swr-cache.js).
+  assert.match(API_SRC, /const STATUS_CACHE_TTL_MS = ttlMsFromEnv\(process\.env\.AGENT_STATUSES_TTL_MS, 5000\);/);
+  assert.match(API_SRC, /const STATUS_CACHE_MAX_STALE_MS = ttlMsFromEnv\(process\.env\.AGENT_STATUSES_MAX_STALE_MS, 30_000\);/);
 });

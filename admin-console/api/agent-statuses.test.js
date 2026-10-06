@@ -3,7 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
+const { buildAgentStatus } = require('./agent-statuses');
 
 describe('buildAgentStatus', () => {
   it('reports a disabled agent regardless of running/status inputs', () => {
@@ -47,27 +47,5 @@ describe('buildAgentStatus', () => {
     assert.equal(buildAgentStatus({ ...base, dmRoom: { roomId: 'r' }, sessionFileExists: false }).hasSession, false);
     assert.equal(buildAgentStatus({ ...base, dmRoom: null, sessionFileExists: true }).hasSession, false);
     assert.equal(buildAgentStatus({ ...base, dmRoom: {}, sessionFileExists: true }).hasSession, false);
-  });
-});
-
-describe('statusCacheFresh', () => {
-  it('is fresh within the TTL', () => {
-    assert.equal(statusCacheFresh(1000, 1001, 2000), true);
-    assert.equal(statusCacheFresh(1000, 1000, 2000), true); // same instant
-  });
-
-  it('is stale at or past the TTL', () => {
-    assert.equal(statusCacheFresh(1000, 3000, 2000), false);
-    assert.equal(statusCacheFresh(1000, 5000, 2000), false);
-  });
-
-  it('is never fresh for a non-positive TTL or a backwards clock', () => {
-    assert.equal(statusCacheFresh(1000, 1500, 0), false);
-    assert.equal(statusCacheFresh(1000, 900, 2000), false);
-  });
-
-  it('is never fresh for a missing build timestamp', () => {
-    assert.equal(statusCacheFresh(null, 1000, 2000), false);
-    assert.equal(statusCacheFresh(undefined, 1000, 2000), false);
   });
 });

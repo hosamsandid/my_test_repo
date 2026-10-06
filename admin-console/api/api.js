@@ -39,6 +39,9 @@ const {
 const { discoverBoundAgents, hiddenBlastRadius, projectRespawnOutcome, respawnWithConcurrency } = require('./respawn-agents');
 const { githubApiBase } = require('./github-api-base');
 const { createTtlCache, ttlMsFromEnv } = require('./ttl-cache');
+const { createSwrCache } = require('./swr-cache');
+const { createProcessesSource } = require('./agent-processes-view');
+const { indexAgentsByEnvironment, environmentAgentRows, firstAgentIdUsingEnvironment } = require('./environment-agents');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, isTeamAdminOfAny, canManageAgent,
         visibleEnvironment, canManageEnvironment, canCreateEnvironment, canRetierEnvironment,
         visibleUser, describeAuthz,
@@ -187,7 +190,7 @@ const { reposFromEnv, repoVars } = require('./team-repo-resolve');
 const { planCreatorMembership, creatorEnvironmentOwnership } = require('./creator-membership');
 const { validateTeamProviderAvailability } = require('./team-provider-check');
 const { pruneTeamFromProviders } = require('./provider-team-prune');
-const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
+const { buildAgentStatus } = require('./agent-statuses');
 const {
   buildRosterEntries, projectRoster, mutationInvalidatesRoster, rosterTtlMsFromEnv,
 } = require('./matrix-agent-roster');
@@ -1618,25 +1621,25 @@ function generateOpensshEd25519Keypair(comment) {
   return { privateKey: privatePem, publicKey: publicSsh, pubBlob };
 }
 
+// Every agent config, read once and indexed by environmentId (#570). A caller
+// answering several environments builds this once and passes it to
+// `agentsUsingEnvironment` instead of letting each call re-read the fleet.
+function agentsByEnvironment() {
+  return indexAgentsByEnvironment(listAgentDirs().map(id => ({
+    id, cfg: readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {}),
+  })));
+}
+
+// The first agent (disk order) bound to this environment, regardless of the
+// caller's scope — the delete guard must see every binding — or null.
 function environmentInUse(envId) {
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (cfg.environmentId === envId) return id;
-  }
-  return null;
+  return firstAgentIdUsingEnvironment(agentsByEnvironment(), envId);
 }
 
 // All agents referencing this environment, scoped to what the caller may see
 // (same team/visibility rules as GET /api/agents — #302, #439).
-function agentsUsingEnvironment(envId, scope) {
-  const agents = [];
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (cfg.environmentId === envId && visibleAgent(scope, agentMetaForScope(cfg))) {
-      agents.push({ id, displayName: cfg.displayName || id });
-    }
-  }
-  return agents;
+function agentsUsingEnvironment(envId, scope, byEnv = agentsByEnvironment()) {
+  return environmentAgentRows(byEnv, envId, cfg => visibleAgent(scope, agentMetaForScope(cfg)));
 }
 
 function sshKeyInUse(keyId) {
@@ -2361,16 +2364,16 @@ app.get('/api/agents', (req, res) => {
 // buildAgentStatus (agent-statuses.js, #1677).
 async function buildAllAgentStatuses() {
   let runningIds = new Set();
-  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
-  try {
-    const resp = await fetch(`${orchestratorUrl}/internal/agents/processes`);
-    if (resp.ok) {
-      const processes = await resp.json();
-      for (const p of processes) {
-        if (p.running) runningIds.add(p.id);
-      }
-    }
-  } catch { /* orchestrator unreachable — all agents appear offline */ }
+  // Bounded (#570, agent-processes-view.js): the build waits at most
+  // AGENT_PROCESSES_WAIT_MS on the one outstanding orchestrator request, then
+  // uses the last good runtime view while that request is still running (slow,
+  // not down) or for AGENT_PROCESSES_LAST_VIEW_MAX_MS after a failed one. With
+  // no view, all agents read offline and the build rejects with that set as
+  // `err.entries` (see agentStatusEntries).
+  const view = await agentProcesses.read();
+  for (const p of view.processes || []) {
+    if (p && p.id && p.running) runningIds.add(p.id);
+  }
 
   const entries = [];
   for (const id of listAgentDirs()) {
@@ -2386,31 +2389,77 @@ async function buildAllAgentStatuses() {
     }
     entries.push({ cfg, status: buildAgentStatus({ id, cfg, running, status, dmRoom, sessionFileExists }) });
   }
+  if (view.source === 'none') {
+    const err = new Error('orchestrator processes unavailable — no runtime view');
+    err.entries = entries;
+    throw err;
+  }
   return entries;
 }
 
-// Short-TTL single-flight cache over the full status set. Several console
-// surfaces poll this endpoint on a 5s beat (Shell nav badge, Agent-Chat list,
-// Maintenance Mode); the front end now shares one poll (#1677), but multiple
-// tabs/users and scope-varying callers can still land close together — a ~2s
-// TTL collapses those onto one filesystem + orchestrator sweep. Caching the
-// in-flight promise also dedups concurrent rebuilds.
-let _statusCache = null; // { builtAt, promise }
+// Stale-while-revalidate, single-flight cache over the full status set (#570).
+// Several console surfaces poll this endpoint on a 5s beat (Shell nav badge,
+// Agent-Chat list, Maintenance Mode); the front end shares one poll (#1677),
+// but every tab and user still lands here. Within AGENT_STATUSES_TTL_MS a poll
+// gets the cached set; after that, up to AGENT_STATUSES_MAX_STALE_MS, it gets
+// the cached set at once while one rebuild runs in the background — so a poll
+// no longer waits on the orchestrator hop (observed p90 5–15 s under load). A
+// roster-affecting console mutation invalidates it (`invalidateRosterCache`):
+// the next poll still gets the cached set and starts the rebuild, so a
+// create/enable/disable shows one rebuild later instead of costing a cold wait.
 // `0` turns the cache off, like AGENT_ROSTER_TTL_MS (#566).
-const STATUS_CACHE_TTL_MS = ttlMsFromEnv(process.env.AGENT_STATUSES_TTL_MS, 2000);
+const STATUS_CACHE_TTL_MS = ttlMsFromEnv(process.env.AGENT_STATUSES_TTL_MS, 5000);
+const STATUS_CACHE_MAX_STALE_MS = ttlMsFromEnv(process.env.AGENT_STATUSES_MAX_STALE_MS, 30_000);
+// The orchestrator processes hop (#570, agent-processes-view.js). Observed under
+// load: p90 5–15 s, and up to ~60 s while the orchestrator's event loop stalls.
+//   WAIT 3 s   — how long one build waits on the request before the last view
+//                stands in; short, because a cold poll waits on it.
+//   TIMEOUT 60 s — the request's hard deadline, at or above the observed stall,
+//                so a stall that clears is answered, not abandoned; only one
+//                request is ever outstanding, so nothing piles up behind it.
+//   LAST_VIEW 15 s — how long the last view outlives a FAILED answer. While a
+//                request is still outstanding it vouches for the view up to its
+//                deadline instead. Worst cases: down (fast failures) 15 s +
+//                max-stale 30 s; hung (no answer at all) 15 + 60 + 30 s.
+const AGENT_PROCESSES_WAIT_MS = ttlMsFromEnv(process.env.AGENT_PROCESSES_WAIT_MS, 3000) || 3000;
+const AGENT_PROCESSES_TIMEOUT_MS = ttlMsFromEnv(process.env.AGENT_PROCESSES_TIMEOUT_MS, 60_000) || 60_000;
+const AGENT_PROCESSES_LAST_VIEW_MAX_MS = ttlMsFromEnv(process.env.AGENT_PROCESSES_LAST_VIEW_MAX_MS, 15_000);
+const agentProcesses = createProcessesSource({
+  fetchProcesses: async () => {
+    const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+    const resp = await fetch(`${orchestratorUrl}/internal/agents/processes`, {
+      signal: AbortSignal.timeout(AGENT_PROCESSES_TIMEOUT_MS),
+    });
+    return resp.ok ? resp.json() : null;
+  },
+  waitMs: AGENT_PROCESSES_WAIT_MS,
+  timeoutMs: AGENT_PROCESSES_TIMEOUT_MS,
+  viewMaxMs: AGENT_PROCESSES_LAST_VIEW_MAX_MS,
+});
+// A failed build is held for one fresh window (`failureBackoffMs`): during an
+// outage every poll would otherwise run its own config sweep + orchestrator
+// wait. A failure streak logs once when it starts and once when it ends.
+const agentStatusCache = createSwrCache({
+  freshMs: STATUS_CACHE_TTL_MS,
+  maxStaleMs: STATUS_CACHE_MAX_STALE_MS,
+  failureBackoffMs: STATUS_CACHE_TTL_MS,
+  onError: (err) => console.warn(`[statuses] rebuild failing: ${err.message} — serving the last good set while it lasts`),
+  onRecover: ({ failures }) => console.warn(`[statuses] rebuild recovered after ${failures} failed attempt(s)`),
+});
 
-function agentStatusEntries() {
-  const now = Date.now();
-  if (_statusCache && statusCacheFresh(_statusCache.builtAt, now, STATUS_CACHE_TTL_MS)) {
-    return _statusCache.promise;
-  }
-  const promise = buildAllAgentStatuses().catch(err => {
-    // Don't cache a failed build — let the next request retry.
-    if (_statusCache && _statusCache.promise === promise) _statusCache = null;
+// A build with no runtime view (orchestrator down past the last-view window)
+// rejects instead of resolving, so the cache never stores an all-offline set
+// and keeps serving the previous good one up to its max-stale (review on PR
+// #573). A caller that has to wait — cold cache, or past max-stale — still gets
+// the all-offline set; it is held only as the failure backoff, never as the
+// cached value, so the poll after the backoff retries the orchestrator.
+async function agentStatusEntries() {
+  try {
+    return await agentStatusCache.get(buildAllAgentStatuses);
+  } catch (err) {
+    if (Array.isArray(err.entries)) return err.entries;
     throw err;
-  });
-  _statusCache = { builtAt: now, promise };
-  return promise;
+  }
 }
 
 app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
@@ -16195,12 +16244,13 @@ app.get('/api/environments', (req, res) => {
       // of team assignment — `isGlobalEnvironment` re-reads its own
       // preconditions, so this can never widen past what the record currently
       // qualifies for.
-      : !isTemplateEnvironment(e) && (visibleEnvironment(scope, e) || isGlobalEnvironment(e)))
+      : !isTemplateEnvironment(e) && (visibleEnvironment(scope, e) || isGlobalEnvironment(e)));
+  const byEnv = envs.length ? agentsByEnvironment() : new Map(); // one fleet read for the whole list (#570)
+  res.json(envs
     .map(e => {
-      const agents = agentsUsingEnvironment(e.id, scope); // (#439)
+      const agents = agentsUsingEnvironment(e.id, scope, byEnv); // (#439)
       return { ...e, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, e) };
-    });
-  res.json(envs);
+    }));
 });
 
 app.get('/api/environments/:id', (req, res) => {
@@ -20224,6 +20274,7 @@ const rosterCache = createTtlCache({ ttlMs: ROSTER_CACHE_TTL_MS, maxEntries: 1 }
 
 function invalidateRosterCache() {
   rosterCache.clear();
+  agentStatusCache.invalidate(); // #570: same configs; revalidate, keep serving the old set meanwhile
 }
 
 // An agent skipped from the build is logged once per (agent, error), not on

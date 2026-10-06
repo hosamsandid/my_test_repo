@@ -187,7 +187,7 @@ export default function ToolBlock({ toolUse, toolResult, taskSnapshot, run = nul
             {summary}
           </span>
         )}
-        {ci && (
+        {ci && ci.pr != null && (
           <span style={{ fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-secondary)', flexShrink: 0 }}>
             {ci.url ? '·' : `· PR #${ci.pr}`}
           </span>

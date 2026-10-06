@@ -4,8 +4,8 @@
 // command and the raw JSON stay available on expand (ToolBlock).
 //
 // Option parsing mirrors agent-image/scripts/aee-wait-ci parse_args /
-// parse_pr_arg; a command that does not parse cleanly is simply not a CI-wait
-// card (the normal Bash rendering stays).
+// parse_pr_arg. A call whose arguments do not parse (a usage error, exit 2)
+// still renders as a card with its verdict (`Error`), just without a PR.
 
 import { formatElapsed } from './tool-progress.js';
 
@@ -59,6 +59,11 @@ export function shellTokens(command) {
 
 function isWaitCiToken(tok) {
   return tok === 'aee-wait-ci' || tok.endsWith('/aee-wait-ci');
+}
+
+// True when the Bash command runs aee-wait-ci at all, parseable or not.
+export function invokesWaitCi(command) {
+  return shellTokens(command).some(isWaitCiToken);
 }
 
 /**
@@ -234,26 +239,30 @@ function formatMinutes(min) {
 }
 
 /**
- * Everything the CI-wait card shows, or null when the tool call is not an
- * aee-wait-ci wait (the normal ToolBlock rendering stays).
+ * Everything the CI-wait card shows, or null when the tool call does not run
+ * aee-wait-ci (the normal ToolBlock rendering stays).
  *   { pr, repo, url, timeoutText, verdict, waitedSeconds, json }
+ * A call whose arguments do not parse (usage error, exit 2) still gets a card:
+ * `pr` / `url` are null unless the result names them, the verdict reads from
+ * the result (`Error`).
  * `verdict` is null while pending — or when the result could not be read, in
  * which case `unreadable` is true and the normal result view is kept.
  */
 export function ciWaitCard(toolUse, toolResult, repoDirectory) {
   if (!toolUse || toolUse.tool !== 'Bash') return null;
-  const parsed = parseCiWaitCommand(toolUse.input?.command);
-  if (!parsed) return null;
+  const command = toolUse.input?.command;
+  const parsed = parseCiWaitCommand(command);
+  if (!parsed && !invokesWaitCi(command)) return null;
   const result = toolResult ? parseCiWaitResult(toolResult.content) : null;
   const json = result?.json || null;
   const repo = resolveCiWaitRepo(parsed, json, repoDirectory);
-  const pr = json && Number.isInteger(json.pr) && json.pr > 0 ? json.pr : parsed.pr;
+  const pr = json && Number.isInteger(json.pr) && json.pr > 0 ? json.pr : (parsed?.pr ?? null);
   const verdict = ciVerdict(result);
   return {
     pr,
     repo,
-    url: prUrl(repo, pr, parsed.urlRepo?.host),
-    timeoutText: `max ${formatMinutes(parsed.timeoutMinutes)}`,
+    url: prUrl(repo, pr, parsed?.urlRepo?.host),
+    timeoutText: `max ${formatMinutes(parsed ? parsed.timeoutMinutes : DEFAULT_TIMEOUT_MIN)}`,
     verdict,
     unreadable: !!toolResult && !verdict,
     waitedSeconds: json && Number.isFinite(json.waitedSeconds) ? json.waitedSeconds : null,

@@ -10,6 +10,7 @@ import {
   parseCiWaitResult,
   ciVerdict,
   ciWaitCard,
+  invokesWaitCi,
   toolHeaderText,
 } from './ci-wait-view.js';
 
@@ -46,7 +47,7 @@ test('caps --timeout at the CLI ceiling', () => {
   assert.equal(parseCiWaitCommand('aee-wait-ci 1 --timeout 90').timeoutMinutes, 50);
 });
 
-test('not a CI wait: other commands, usage errors', () => {
+test('parseCiWaitCommand: null for other commands and usage errors (the card still renders via invokesWaitCi)', () => {
   assert.equal(parseCiWaitCommand('ls -la'), null);
   assert.equal(parseCiWaitCommand('grep aee-wait-ci-foo file'), null);
   assert.equal(parseCiWaitCommand('aee-wait-ci'), null);
@@ -139,7 +140,34 @@ test('ciWaitCard: pending, settled, unreadable, not a wait', () => {
   assert.equal(unreadable.unreadable, true);
 
   assert.equal(ciWaitCard({ tool: 'Bash', input: { command: 'npm test' } }, null, DIR), null);
+  assert.equal(ciWaitCard({ tool: 'Bash', input: { command: 'grep aee-wait-ci-foo file' } }, null, DIR), null);
   assert.equal(ciWaitCard({ tool: 'Read', input: { file_path: 'aee-wait-ci' } }, null, DIR), null);
+});
+
+test('ciWaitCard: a usage error (exit 2) still renders the card with an Error verdict, no PR', () => {
+  const usageJson = 'Exit code 2\nusage: aee-wait-ci <pr> …\n{"ok":false,"status":"error","error":"exactly one pull request, please"}';
+  for (const command of ['aee-wait-ci', 'aee-wait-ci --bogus 12', 'aee-wait-ci 1 2', 'aee-wait-ci 1 --timeout abc']) {
+    const card = ciWaitCard({ tool: 'Bash', input: { command } }, { ok: false, content: usageJson }, DIR);
+    assert.ok(card, command);
+    assert.equal(card.verdict.key, 'error', command);
+    assert.equal(card.verdict.label, 'Error', command);
+    assert.equal(card.unreadable, false, command);
+    assert.equal(card.pr, null, command);
+    assert.equal(card.url, null, command);
+    assert.equal(card.json.error, 'exactly one pull request, please', command);
+  }
+  // Exit code only (no JSON line) → Error too.
+  const exitOnly = ciWaitCard({ tool: 'Bash', input: { command: 'aee-wait-ci --bogus' } }, { ok: false, content: 'Exit code 2' }, DIR);
+  assert.equal(exitOnly.verdict.label, 'Error');
+  assert.equal(exitOnly.timeoutText, 'max 20m');
+  assert.equal(toolHeaderText({ tool: 'Bash', ci: exitOnly, runView: null, pending: false, stopped: false }).label, 'Error');
+});
+
+test('invokesWaitCi: any aee-wait-ci call, parseable or not', () => {
+  assert.equal(invokesWaitCi('aee-wait-ci'), true);
+  assert.equal(invokesWaitCi('cd x && /usr/local/bin/aee-wait-ci --bogus'), true);
+  assert.equal(invokesWaitCi('grep aee-wait-ci-foo file'), false);
+  assert.equal(invokesWaitCi(undefined), false);
 });
 
 test('toolHeaderText: CI card while waiting, settled, stopped; plain tools', () => {

@@ -693,7 +693,7 @@ test('buildFlowBoard: every constellation of the 2026-10-06 incident is flagged 
     assert.equal(flag(n).reason, 'wake never delivered', `#${n}`);
   }
   assert.deepEqual(flag(2859).wakes, [{
-    repo: 'o/r', number: 2863, kind: 'pr', label: 'ready-for-review',
+    repo: 'o/r', number: 2863, kind: 'pr', label: 'ready-for-review', roles: [{ id: 't-reviewer', label: 'Code Reviewer' }],
     cause: 'wake-already-armed', eventId: 'ev-2863-ready-for-review-1100', since: iso(1100),
   }]);
   assert.deepEqual(flag(2819).wakes.map((w) => [w.number, w.cause, w.eventId, w.since]), [
@@ -702,7 +702,7 @@ test('buildFlowBoard: every constellation of the 2026-10-06 incident is flagged 
   assert.equal(flag(2813).wakes[0].cause, 'history-horizon');
   // Never seen: no event to link, and the clock starts at the item's last update.
   assert.deepEqual(flag(2858).wakes, [{
-    repo: 'o/r', number: 2862, kind: 'pr', label: 'changes-requested',
+    repo: 'o/r', number: 2862, kind: 'pr', label: 'changes-requested', roles: [{ id: 't-reworker', label: 'Reworker' }],
     cause: 'not-seen', eventId: null, since: iso(1000),
   }]);
   // The rows also land in "Needs you", with the per-label causes.

@@ -9395,6 +9395,32 @@ app.post('/api/teams/:teamId/flow-board-release', apiLimiter, async (req, res) =
   }
 });
 
+// POST /api/teams/:teamId/flow-board-wake — "Wake again" on a row the board
+// flags as "wake never delivered" (#2873). Body `{ rowId }`. Delivers the wake
+// label already on the GitHub item to its agent again, without touching any
+// label; gated like every other board write, and the actor — always the
+// session user, never the body — is stamped onto the Event Log line.
+app.post('/api/teams/:teamId/flow-board-wake', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!canManageTeam(scope, teamId)) return denyAdmin(res, 'You may not manage this team');
+  const rowId = req.body && typeof req.body.rowId === 'string' ? req.body.rowId.trim() : '';
+  if (!rowId || rowId.length > 300) return res.status(400).json({ error: 'rowId is required' });
+  const actor = (req.user && (req.user.username || req.user.email || req.user.sub)) || null;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/flow-board-wake`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rowId, actor }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // GET /api/teams/:teamId/pool-control — board data for the Flow Control
 // board's pause/drain/force-dispatch controls (#2250 Phase 5, epic #2251).
 // Visibility-only like `tickets`/`flow-anomalies`: no `canManageTeam` gate on

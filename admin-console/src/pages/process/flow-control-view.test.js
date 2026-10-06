@@ -21,6 +21,10 @@ import {
   groupWorkingNow,
   needsYouView,
   wakeCauseText,
+  WAKE_CONFIRM_TEXT,
+  wakeDialogTitle,
+  wakeTargetText,
+  wakeNotice,
   WAKE_CAUSE_TEXT,
   boardView,
   EMPTY_TEXT,
@@ -454,16 +458,24 @@ test('needsYouView: a wake never delivered names each label, its cause and the E
     id: 'o/r#2819', title: 'Release button', issue: { repo: 'o/r', number: 2819 }, prs: [],
     reason: 'wake never delivered', since: ago(1094),
     wakes: [
-      { repo: 'o/r', number: 2820, kind: 'pr', label: 'ready-for-review', cause: 'history-horizon', eventId: '123', since: ago(1094) },
+      { repo: 'o/r', number: 2820, kind: 'pr', label: 'ready-for-review', roles: [{ id: 't-rev', label: 'Code Reviewer' }], cause: 'history-horizon', eventId: '123', since: ago(1094) },
       { repo: 'o/r', number: 2862, kind: 'pr', label: 'changes-requested', cause: 'not-seen', eventId: null, since: ago(1000) },
     ],
   }, { now: NOW });
   assert.equal(v.reason, 'wake never delivered');
   assert.deepEqual(v.wakes, [
-    { ref: 'PR #2820', label: 'ready-for-review', cause: 'history-horizon', text: WAKE_CAUSE_TEXT['history-horizon'], href: '/github-events?event=123' },
-    { ref: 'PR #2862', label: 'changes-requested', cause: 'not-seen', text: 'never reported by the GitHub Events API', href: null },
+    {
+      ref: 'PR #2820', label: 'ready-for-review', cause: 'history-horizon', text: WAKE_CAUSE_TEXT['history-horizon'], href: '/github-events?event=123',
+      roles: [{ id: 't-rev', label: 'Code Reviewer' }], target: 'Wake Code Reviewer for PR #2820 (ready-for-review)',
+    },
+    {
+      ref: 'PR #2862', label: 'changes-requested', cause: 'not-seen', text: 'never reported by the GitHub Events API', href: null,
+      roles: [], target: 'Wake its agent for PR #2862 (changes-requested)',
+    },
   ]);
-  assert.deepEqual(needsYouView({ id: 'x', reason: 'conflict with base' }, { now: NOW }).wakes, []);
+  assert.equal(v.canWake, true);
+  const other = needsYouView({ id: 'x', reason: 'conflict with base' }, { now: NOW });
+  assert.deepEqual([other.wakes, other.canWake], [[], false]);
 });
 
 test('wakeCauseText: the four causes the board reports (#2872)', () => {
@@ -723,4 +735,31 @@ test('help topic says pooled instances are listed beneath their role (AC8)', () 
   const md = fs.readFileSync(HELP_TOPIC, 'utf8');
   const section = md.split('## Who is working right now')[1].split('\n## ')[0];
   assert.match(section, /indented directly beneath/);
+});
+
+test('Wake again copy: dialog title, target line and the notice after a click (#2873)', () => {
+  assert.equal(wakeDialogTitle('#2813'), 'Wake the agent for #2813 again?');
+  assert.equal(wakeDialogTitle(''), 'Wake the agent again?');
+  assert.match(WAKE_CONFIRM_TEXT, /no label is changed/);
+  assert.match(WAKE_CONFIRM_TEXT, /own instance/);
+  assert.match(WAKE_CONFIRM_TEXT, /readiness gate/);
+  assert.equal(
+    wakeTargetText({ ref: 'PR #2844', label: 'ready-for-review-prod', roles: [{ id: 'a', label: 'Code Reviewer' }, { id: 'b' }] }),
+    'Wake Code Reviewer and b for PR #2844 (ready-for-review-prod)',
+  );
+  assert.equal(
+    wakeNotice({ woken: 1, results: [{ ok: true, delivered: 1, held: 0 }] }, '#2813'),
+    'Wake delivered again for #2813 — its agent starts on its next check (within a few seconds).',
+  );
+  assert.equal(
+    wakeNotice({ woken: 2, results: [{ ok: true, delivered: 0, held: 1 }] }, null),
+    '2 wakes delivered again — its hand-off waits for CI first.',
+  );
+  assert.equal(wakeNotice({ woken: 0 }, '#1'), null);
+  assert.equal(wakeNotice(null, '#1'), null);
+});
+
+test('help topic quotes the Wake again confirmation (#2873)', () => {
+  const topic = fs.readFileSync(HELP_TOPIC, 'utf8').replace(/\s+/g, ' ');
+  assert.ok(topic.includes(WAKE_CONFIRM_TEXT), 'flow-control.md must quote WAKE_CONFIRM_TEXT');
 });

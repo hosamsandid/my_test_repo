@@ -218,6 +218,7 @@ const poolSpawns = poolSpawnSlots.createSpawnSlots();
 const flowSupervisor = require("./flow-supervisor");
 const flowBoard = require("./flow-board");
 const flowClaimRelease = require("./flow-claim-release");
+const flowWakeAgain = require("./flow-wake-again");
 const recurringPoolSource = require("./recurring-pool-source");
 const predictedPaths = require("./predicted-paths");
 const poolInstanceLanes = require("./pool-instance-lanes");
@@ -1915,14 +1916,19 @@ async function fetchWorkItemTitle(repoFullName, kind, number) {
 // needs to run again). Does NOT write the label to GitHub — same discipline
 // as the endpoint it was extracted from, "the label itself is unchanged; this
 // path does not stamp any label".
-async function wakeGithubLabelListeners({ repo, number, kind, label, actor, source = 'internal-plugin' }) {
+//
+// A third caller, the board's "Wake again" (#2873), passes `onlyAgentIds`:
+// the wake then goes to those agents' listeners only — the consumer role
+// templates, so a pooled role is routed onto the item's own instance.
+async function wakeGithubLabelListeners({ repo, number, kind, label, actor, source = 'internal-plugin', onlyAgentIds = null }) {
   const key = labelFastPath.eventKeyForKind(kind);
   const agents = listAgentIds().map((aid) => ({
     agentId: aid,
     enabled: loadAgentConfig(aid)?.enabled !== false,
     triggers: loadTriggers(aid),
   }));
-  const listeners = labelFastPath.matchPollerListeners({ repo, label, kind }, agents);
+  const matched = labelFastPath.matchPollerListeners({ repo, label, kind }, agents);
+  const listeners = onlyAgentIds ? flowWakeAgain.templateListeners(matched, [...onlyAgentIds]) : matched;
   const now = new Date().toISOString();
   // #1897 AC8: resolve the title best-effort so the notice isn't blank.
   // #2114: also carry the PR's closesIssues (from the same fetch) so the
@@ -1995,7 +2001,7 @@ async function wakeGithubLabelListeners({ repo, number, kind, label, actor, sour
     console.log(
       `[Orchestrator] label-fastpath: ${repo}#${number} +${label} matched no poller listener`);
   }
-  return { listeners };
+  return { listeners, delivered: decisions.size, held: held.size };
 }
 
 // ── Manual "Fire again" for a dropped GitHub wake (#2525) ─────────────────
@@ -2006,6 +2012,9 @@ let githubPollerRef = null;
 // at-most-once guarantee (AC9): a double-click or two users clicking at once
 // hit this before any await. The persisted half is the logged re-fire row.
 const githubRefireInFlight = new Set();
+// In-flight "Wake again" clicks (#2873), keyed `<team>::<row>` — the same
+// concurrent at-most-once guard as the re-fire above.
+const flowBoardWakeInFlight = new Set();
 
 // The raw issue/PR object (state, merged, labels, title, body) for the re-fire's
 // state check (AC8). Null on any failure — the caller refuses rather than
@@ -20488,6 +20497,78 @@ async function main() {
           });
         } catch (err) {
           return sendJson(res, 400, { error: err.message });
+        }
+      });
+      return;
+    }
+
+    // POST /internal/teams/:teamId/flow-board-wake — "Wake again" on a row
+    // flagged "wake never delivered" (#2873). Body `{ rowId, actor }`. Re-reads
+    // a FRESH board and refuses unless the row is still parked; re-checks on
+    // GitHub that each wake label is still on an open item; then delivers the
+    // wake in-process to the consumer role templates only (no label change, no
+    // Events API), opening a readiness hold for a gated hand-off. One Event Log
+    // line per wake (`source: 'flow-control'`, the actor as the event's actor).
+    const flowBoardWakeMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/?]+)\/flow-board-wake(?:\?.*)?$/);
+    if (flowBoardWakeMatch) {
+      const teamId = decodeURIComponent(flowBoardWakeMatch[1]);
+      const cfg = loadAgentConfig(teamId);
+      if (!cfg || cfg.role !== 'team') {
+        return sendJson(res, 404, { error: 'agent team not found' });
+      }
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 10_000) req.destroy(); });
+      req.on('end', async () => {
+        let lockKey = null;
+        try {
+          const parsed = JSON.parse(body || '{}');
+          const rowId = typeof parsed.rowId === 'string' ? parsed.rowId.trim() : '';
+          if (!rowId) return sendJson(res, 400, { error: 'rowId is required' });
+          const actor = typeof parsed.actor === 'string' && parsed.actor.trim() ? parsed.actor.trim().slice(0, 200) : null;
+          const key = flowWakeAgain.wakeAgainKey(teamId, rowId);
+          if (flowBoardWakeInFlight.has(key)) {
+            return sendJson(res, 409, { code: 'in-progress', error: 'This item is already being woken again.' });
+          }
+          flowBoardWakeInFlight.add(key);
+          lockKey = key;
+          const plan = flowWakeAgain.planWakeAgain(await getTeamFlowBoard(teamId, { refresh: true }), rowId);
+          if (!plan.ok) return sendJson(res, plan.status, { error: plan.error });
+          const results = [];
+          const warnings = [];
+          for (const w of plan.wakes) {
+            const ref = `${w.repo}#${w.number}`;
+            const check = flowWakeAgain.checkWakeStillPresent(await fetchWorkItemRaw(w.repo, w.kind, w.number), { label: w.label });
+            if (!check.ok) {
+              warnings.push(`${ref}: ${check.warning} — not woken`);
+              results.push({ repo: w.repo, number: w.number, label: w.label, ok: false });
+              continue;
+            }
+            // The wake must read as a rising edge to the poller's dedup, so a
+            // later genuine re-add is not dropped as already armed.
+            if (githubPollerRef) githubPollerRef.disarmWake({ repo: w.repo, number: w.number, label: w.label });
+            const r = await wakeGithubLabelListeners({
+              repo: w.repo, number: w.number, kind: w.kind, label: w.label, actor,
+              source: flowWakeAgain.WAKE_AGAIN_SOURCE,
+              onlyAgentIds: new Set(w.roles.map((role) => role.id)),
+            });
+            const ok = r.delivered + r.held > 0;
+            if (!ok) warnings.push(`${ref}: no switched-on trigger of ${w.roles.map((role) => role.label).join(', ')} listens for ${w.label} on this repository — not woken`);
+            console.log(
+              `[Orchestrator] flow-board-wake: ${ref} ${w.label} (was ${w.cause}) by ${actor || 'console'} → ` +
+              `${r.delivered} delivered, ${r.held} held`);
+            results.push({ repo: w.repo, number: w.number, label: w.label, ok, delivered: r.delivered, held: r.held });
+          }
+          _flowBoardCache.delete(teamId);
+          const woken = results.filter((r) => r.ok).length;
+          return sendJson(res, woken ? 200 : 409, {
+            teamId, rowId, woken, results, warnings,
+            ...(woken ? {} : { error: warnings[0] || 'Nothing could be woken' }),
+          });
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        } finally {
+          if (lockKey) flowBoardWakeInFlight.delete(lockKey);
         }
       });
       return;

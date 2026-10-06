@@ -968,7 +968,8 @@ function eventAt(e) {
 
 /**
  * Every wake label on the row's open items that never reached a consumer:
- * `[{ repo, number, kind, label, cause, dropReason?, eventId?, since }]`.
+ * `[{ repo, number, kind, label, roles, cause, dropReason?, eventId?, since }]`,
+ * `roles` being the switched-on consumer roles a "Wake again" would wake (#2873).
  * The caller has already ruled out live, queued and gate-held work.
  *
  * A wake label's Event Log trail is every entry on the item about that label
@@ -1021,8 +1022,11 @@ function parkedWakes({ open, graph, itemEvents, roleOf, now }) {
         wake = { cause: WAKE_CAUSES.notSeen, eventId: null, since };
       }
       if (wake.since == null || now - wake.since <= PARKED_WAKE_MS) continue;
+      const roles = [...consumers]
+        .filter((id) => graph.roles.get(id) && graph.roles.get(id).enabled !== false)
+        .map((id) => ({ id, label: graph.roles.get(id).displayName }));
       out.push({
-        repo: it.repo, number: it.number, kind: it.kind, label: l,
+        repo: it.repo, number: it.number, kind: it.kind, label: l, roles,
         ...wake, since: new Date(wake.since).toISOString(),
       });
     }

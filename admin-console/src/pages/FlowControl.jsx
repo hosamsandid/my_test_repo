@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
-  AlertTriangle, RefreshCw, ExternalLink, Info, Pause, Play, Waves, Zap, Power, Columns, UserRound, EyeOff, RotateCcw, LockOpen, CheckCircle2,
+  AlertTriangle, RefreshCw, ExternalLink, Info, Pause, Play, Waves, Zap, Power, Columns, UserRound, EyeOff, RotateCcw, LockOpen, CheckCircle2, BellRing,
 } from 'lucide-react';
 import { Link as RouterLink, useSearchParams } from 'react-router';
 import { useApi, apiCall } from '../hooks/useApi';
@@ -11,6 +11,7 @@ import { usePageActions } from '../context/PageActionsContext';
 import {
   boardView, updatedAgo, AUTO_REFRESH_MS, readAutoRefresh, writeAutoRefresh, configFormRows, configFromForm,
   withoutRows, REMOVE_CONFIRM_TEXT, removeDialogTitle, RELEASE_CONFIRM_TEXT, releaseDialogTitle, releaseNotice, CHAT_LINK_CLASS, CHAT_LINK_CSS,
+  WAKE_CONFIRM_TEXT, wakeDialogTitle, wakeNotice,
 } from './process/flow-control-view';
 import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections';
 import { readCurrentTeam, writeCurrentTeam, resolveFlowControlTeam } from './current-team';
@@ -51,6 +52,7 @@ export default function FlowControl() {
   const [columnsOpen, setColumnsOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState(null);
   const [releaseTarget, setReleaseTarget] = useState(null);
+  const [wakeTarget, setWakeTarget] = useState(null);
   const [removedOpen, setRemovedOpen] = useState(false);
   const loadSeq = useRef(0);
 
@@ -151,6 +153,19 @@ export default function FlowControl() {
       if (res && Array.isArray(res.warnings) && res.warnings.length) setActionError(res.warnings.join(' · '));
     },
     'Failed to release the claim',
+  ), [teamId, mutate]);
+
+  // "Wake again" (#2873): the server re-checks the row on a fresh board and the
+  // label on GitHub, then delivers the parked wake to its role again — no label
+  // change. A wake that could not be delivered comes back as a warning.
+  const wakeAgain = useCallback((target) => mutate(
+    async () => {
+      const res = await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/flow-board-wake`, { rowId: target.id });
+      setWakeTarget(null);
+      setActionNotice(wakeNotice(res, target.ref));
+      if (res && Array.isArray(res.warnings) && res.warnings.length) setActionError(res.warnings.join(' · '));
+    },
+    'Failed to wake the agent again',
   ), [teamId, mutate]);
 
   const saveColumns = useCallback((config) => mutate(
@@ -279,7 +294,7 @@ export default function FlowControl() {
             {state.data && !view.maintenance && (
               <>
                 <WorkingNow view={view} busy={busy} onSetState={setRoleState} onForceDispatch={forceDispatch} />
-                {view.needsYou && <NeedsYou items={view.needsYou} canManage={view.canManage} busy={busy} onRelease={setReleaseTarget} />}
+                {view.needsYou && <NeedsYou items={view.needsYou} canManage={view.canManage} busy={busy} onRelease={setReleaseTarget} onWake={setWakeTarget} />}
                 <InProgress view={view} busy={busy} onRemove={setRemoveTarget} />
                 {view.doneRows.length > 0 && (
                   <RecentlyCompleted rows={view.doneRows} hint={view.retentionHint} canManage={view.canManage} busy={busy} onRemove={setRemoveTarget} />
@@ -334,6 +349,27 @@ export default function FlowControl() {
           </ul>
           <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
             {RELEASE_CONFIRM_TEXT}
+          </p>
+        </Modal>
+      )}
+      {wakeTarget && (
+        <Modal
+          open
+          onClose={() => setWakeTarget(null)}
+          title={wakeDialogTitle(wakeTarget.ref)}
+          maxWidth={480}
+          footer={(
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
+              <HeaderButton icon={BellRing} label="Wake again" title="Deliver the wake label to its agent again" disabled={busy} onClick={() => wakeAgain(wakeTarget)} />
+            </div>
+          )}
+        >
+          <p style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>{wakeTarget.title}</p>
+          <ul style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+            {wakeTarget.wakes.filter((w) => w.roles.length > 0).map((w) => <li key={`${w.ref}:${w.label}`}>{w.target}</li>)}
+          </ul>
+          <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+            {WAKE_CONFIRM_TEXT}
           </p>
         </Modal>
       )}
@@ -537,7 +573,7 @@ function WorkingNow({ view, busy, onSetState, onForceDispatch }) {
 
 /* ── area ②: needs you ─────────────────────────────────────────────── */
 
-function NeedsYou({ items, canManage, busy, onRelease }) {
+function NeedsYou({ items, canManage, busy, onRelease, onWake }) {
   return (
     <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
       <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.needsYou} helpLabel="What to do about each reason">
@@ -552,6 +588,9 @@ function NeedsYou({ items, canManage, busy, onRelease }) {
           <span style={{ marginLeft: 'auto', ...mutedStyle }} title="Waiting for">{n.waiting}</span>
           {canManage && n.release.length > 0 && (
             <SmallButton icon={LockOpen} label="Release claim" title={`Release the stale claim (${n.release.map((c) => c.text).join(', ')})`} disabled={busy} onClick={() => onRelease(n)} />
+          )}
+          {canManage && n.canWake && (
+            <SmallButton icon={BellRing} label="Wake again" title={n.wakes.filter((w) => w.roles.length > 0).map((w) => w.target).join(', ')} disabled={busy} onClick={() => onWake(n)} />
           )}
           {/* #2872: which wake label never reached its agent, and why — the
               cause links to the GitHub Event Log row that recorded it. */}

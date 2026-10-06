@@ -672,6 +672,116 @@ test('cli writes: /create-epic creates an epic + child stories, allow-list-gatin
   }
 });
 
+test('cli writes: /add-stories creates stories under an existing Epic, registers own writes, audits (#2890)', async () => {
+  // A distinct site keeps the process-lifetime field catalog off other fixtures.
+  broker.scopeCredentials.set('team-1', { 'site-url': 'addstoriesco', email: 'a@b.c', 'api-token': 'tok', 'writable-custom-fields': 'Team' });
+  const origFetch = global.fetch;
+  const created = [];
+  const ISSUES = {
+    'KAN-12': { key: 'KAN-12', fields: { summary: 'Payments', project: { key: 'KAN' }, issuetype: { name: 'Epic', hierarchyLevel: 1 } } },
+    'KAN-7': { key: 'KAN-7', fields: { summary: 'A story', project: { key: 'KAN' }, issuetype: { name: 'Story', hierarchyLevel: 0 } } },
+  };
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    if (String(url).match(/\/rest\/api\/3\/field$/)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify([
+        { id: 'customfield_20001', name: 'Team', schema: { type: 'team' } },
+      ]) };
+    }
+    const get = String(url).match(/\/rest\/api\/3\/issue\/([^/?]+)\?fields=/);
+    if (get && (!opts || !opts.method || opts.method === 'GET')) {
+      const issue = ISSUES[decodeURIComponent(get[1])];
+      return issue
+        ? { ok: true, status: 200, text: async () => JSON.stringify(issue) }
+        : { ok: false, status: 404, text: async () => '{"errorMessages":["Issue does not exist or you do not have permission to see it."]}' };
+    }
+    if (opts && opts.method === 'POST' && String(url).match(/\/rest\/api\/3\/issue$/)) {
+      const body = JSON.parse(opts.body);
+      created.push(body.fields);
+      return { ok: true, status: 201, text: async () => JSON.stringify({ key: `KAN-${100 + created.length}` }) };
+    }
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  };
+  const srv = await listen();
+  try {
+    const ok = await call(srv, 'POST', '/cli/add-stories', {
+      token: TOKEN,
+      body: { epic: 'kan-12', stories: [{ summary: 'One', fields: { Team: '42' } }, { summary: 'Two' }] },
+    });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.epic.key, 'KAN-12');
+    assert.equal(ok.body.created, 2);
+    assert.equal(ok.body.failed, 0);
+    assert.deepEqual(ok.body.stories.map((s) => s.key), ['KAN-101', 'KAN-102']);
+    assert.ok(created.every((f) => f.issuetype.name === 'Story' && f.parent.key === 'KAN-12'), 'only Stories, each under the Epic');
+    assert.deepEqual(created[0].customfield_20001, { id: '42' });
+    const own = broker.ownWritesStore.snapshot('team-1');
+    assert.ok(own.issues['KAN-101'] && own.issues['KAN-102'], 'created stories are own writes');
+    assert.ok(own.fields['KAN-101|*']);
+    assert.ok(auditLines().some((l) => l.subcommand === 'add-stories' && l.outcome === 'ok' && l.detail === 'KAN-12 +2/2 stories'));
+
+    const before = created.length;
+    // a key Jira does not return (absent / outside the team's scope) → 404, nothing created
+    const missing = await call(srv, 'POST', '/cli/add-stories', { token: TOKEN, body: { epic: 'OTHER-1', stories: [{ summary: 'S' }] } });
+    assert.equal(missing.status, 404);
+    assert.match(missing.body.error, /OTHER-1 was not found, or it is outside this team's Jira scope/);
+    // not an Epic → 400 naming the type
+    const notEpic = await call(srv, 'POST', '/cli/add-stories', { token: TOKEN, body: { epic: 'KAN-7', stories: [{ summary: 'S' }] } });
+    assert.equal(notEpic.status, 400);
+    assert.match(notEpic.body.error, /KAN-7 is a Story, not an Epic/);
+    // a custom field off the non-empty allow-list → 403
+    const refused = await call(srv, 'POST', '/cli/add-stories', {
+      token: TOKEN, body: { epic: 'KAN-12', stories: [{ summary: 'S', fields: { Priority: 'High' } }] },
+    });
+    assert.equal(refused.status, 403);
+    // no epic / no stories / a story without a summary → 400
+    assert.equal((await call(srv, 'POST', '/cli/add-stories', { token: TOKEN, body: { stories: [{ summary: 'S' }] } })).status, 400);
+    assert.equal((await call(srv, 'POST', '/cli/add-stories', { token: TOKEN, body: { epic: 'KAN-12', stories: [] } })).status, 400);
+    assert.equal((await call(srv, 'POST', '/cli/add-stories', { token: TOKEN, body: { epic: 'KAN-12', stories: [{}] } })).status, 400);
+    assert.equal(created.length, before, 'no refused call created anything');
+
+    // no service account → 400 no-service-account
+    const nocred = await call(srv, 'POST', '/cli/add-stories', { token: OTHER, body: { epic: 'X-1', stories: [{ summary: 'S' }] } });
+    assert.equal(nocred.status, 400);
+    assert.equal(nocred.body.code, 'no-service-account');
+    // POST only
+    assert.equal((await call(srv, 'GET', '/cli/add-stories', { token: TOKEN })).status, 404);
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli writes: /add-stories is denied by the same `create` policy as /create-epic, same error shape (#2890 AC10)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
+  const policy = require('./broker-policy');
+  const orig = policy.authorizeWrite;
+  policy.authorizeWrite = (op) => (op === 'create' ? { allow: false, code: 'scope-not-allowed', reason: 'not for you' } : orig(op));
+  const origFetch = global.fetch;
+  const jiraCalls = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    jiraCalls.push(url);
+    throw new Error('Jira must not be called');
+  };
+  const srv = await listen();
+  try {
+    const epic = await call(srv, 'POST', '/cli/create-epic', { token: TOKEN, body: { project: 'KAN', epic: { summary: 'E' } } });
+    const add = await call(srv, 'POST', '/cli/add-stories', { token: TOKEN, body: { epic: 'KAN-1', stories: [{ summary: 'S' }] } });
+    assert.equal(add.status, 403);
+    assert.deepEqual(add.body, epic.body);
+    assert.deepEqual(add.body, { error: 'not for you', code: 'scope-not-allowed' });
+    assert.equal(jiraCalls.length, 0);
+    assert.ok(auditLines().some((l) => l.subcommand === 'add-stories' && l.outcome === 'denied' && l.detail === 'scope-not-allowed'));
+  } finally {
+    policy.authorizeWrite = orig;
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
 test('ui /admin: team-admin only; PUT replaces the watch config', async () => {
   const srv = await listen();
   const { port } = srv.address();
@@ -1246,7 +1356,7 @@ test('a refused grant blocks EVERY subcommand before Jira is touched (AC4/AC5)',
     const routes = [
       ['GET', '/cli/whoami'], ['GET', '/cli/inbox'], ['GET', '/cli/inbox?consume=KAN-1:1'], ['GET', '/cli/projects'],
       ['GET', '/cli/show?issue=KAN-1'], ['GET', '/cli/sprint/list?board=B'], ['GET', '/cli/attachment?issue=KAN-1&id=1'],
-      ['POST', '/cli/comment'], ['POST', '/cli/transition'], ['POST', '/cli/create-epic'], ['POST', '/cli/sprint/create'],
+      ['POST', '/cli/comment'], ['POST', '/cli/transition'], ['POST', '/cli/create-epic'], ['POST', '/cli/add-stories'], ['POST', '/cli/sprint/create'],
       ['POST', '/cli/attachment/add'],
     ];
     for (const [method, url] of routes) {

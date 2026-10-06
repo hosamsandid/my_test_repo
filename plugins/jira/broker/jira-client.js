@@ -1590,24 +1590,22 @@ function collectCustomFieldNames(epic, stories) {
   return out;
 }
 
-// `onCreated(key)` fires the moment each issue exists — before the next create
-// — so the broker's own-writes registry knows the key before any poll can see
-// it (a large epic spans several poll ticks).
-async function createEpicWithStories(cred, { projectKey, epic, stories, allowList, attribution, issueTypes, env, onCreated } = {}) {
-  const project = String(projectKey || '').trim();
-  if (!project) { const e = new Error('a project key is required'); e.status = 400; throw e; }
-  if (!epic || typeof epic !== 'object') { const e = new Error('an epic is required'); e.status = 400; throw e; }
-  if (!String(epic.summary || '').trim()) { const e = new Error('the epic requires a summary'); e.status = 400; throw e; }
+// Validate every story up front (a story without a summary is a 400 before any
+// create). Pure — throws, returns the list.
+function validateStoryList(stories) {
   const storyList = Array.isArray(stories) ? stories : [];
   storyList.forEach((s, i) => {
     if (!s || typeof s !== 'object' || !String(s.summary || '').trim()) {
       const e = new Error(`story #${i + 1} requires a summary`); e.status = 400; throw e;
     }
   });
+  return storyList;
+}
 
-  // (2) allow-list gate — an empty list means unrestricted; a non-empty list
-  // restricts writes to only the named fields (#2449 flips the old deny-by-default).
-  const usedNames = collectCustomFieldNames(epic, storyList);
+// (2) allow-list gate — an empty list means unrestricted; a non-empty list
+// restricts writes to only the named fields (#2449 flips the old deny-by-default).
+// Throws a 403 naming every refused field. Pure — runs before any HTTP call.
+function assertCreateFieldsAllowed(usedNames, allowList) {
   const allow = (Array.isArray(allowList) ? allowList : [])
     .map((s) => String(s || '').trim().toLowerCase()).filter(Boolean);
   const notAllowed = allow.length
@@ -1621,12 +1619,11 @@ async function createEpicWithStories(cred, { projectKey, epic, stories, allowLis
     e.status = 403;
     throw e;
   }
+}
 
-  const base = apiBaseFor(cred.siteUrl, env);
-  const auth = basicAuthHeader(cred.email, cred.apiToken);
-
-  // (3) name → id + schema, up front (one cached catalog fetch feeds every field
-  // AND the Epic-link id used to wire Story→Epic).
+// (3) name → id + schema, up front (one cached catalog fetch feeds every field
+// AND the Epic-link id used to wire Story→Epic). An unknown name is a 400.
+async function resolveCreateFieldMeta(base, auth, usedNames) {
   const catalog = await resolveFieldCatalog(base, auth);
   const fieldMeta = new Map();
   const unknown = [];
@@ -1642,17 +1639,15 @@ async function createEpicWithStories(cred, { projectKey, epic, stories, allowLis
     e.status = 400;
     throw e;
   }
+  return { catalog, fieldMeta };
+}
 
-  const epicTypeName = String((issueTypes && issueTypes.epic) || EPIC_ISSUE_TYPE).trim() || EPIC_ISSUE_TYPE;
-  const storyTypeName = String((issueTypes && issueTypes.story) || STORY_ISSUE_TYPE).trim() || STORY_ISSUE_TYPE;
-  const siteBase = resolveJiraApiBase(cred.siteUrl);
-  const browseUrl = (key) => `${siteBase}/browse/${encodeURIComponent(key)}`;
-
-  // Apply an optional follow-up status transition to a just-created issue. Jira
-  // creates in the workflow's initial status, so a requested non-default start is
-  // a transition (the ticket's implementer note). A transition failure is
-  // reported alongside the created key, never a hard failure — the issue exists.
-  const applyStatus = async (key, status, out) => {
+// Apply an optional follow-up status transition to a just-created issue. Jira
+// creates in the workflow's initial status, so a requested non-default start is
+// a transition (the ticket's implementer note). A transition failure is
+// reported alongside the created key, never a hard failure — the issue exists.
+function statusApplier(cred, env) {
+  return async (key, status, out) => {
     const want = String(status || '').trim();
     if (!want) return;
     try {
@@ -1662,22 +1657,18 @@ async function createEpicWithStories(cred, { projectKey, epic, stories, allowLis
       out.statusError = err.message;
     }
   };
+}
 
-  // (1→create) the epic first — its key links every story.
-  const epicFields = buildCreateFields({ projectKey: project, issueTypeName: epicTypeName, spec: epic, fieldMeta, attribution });
-  const epicCreated = await createIssue(base, auth, epicFields);
-  const epicKey = epicCreated.key;
-  if (typeof onCreated === 'function') onCreated(epicKey);
-  const epicOut = { key: epicKey, url: browseUrl(epicKey), summary: String(epic.summary).trim() };
-  await applyStatus(epicKey, epic.status, epicOut);
-
-  // Each story, linked to the epic. Team-managed projects use the native
-  // `parent`; company-managed (classic) uses the Epic Link custom field — mirror
-  // the #2415 read side: a site with an Epic Link field id uses it, else `parent`.
+// Create each story under `epicKey`, one at a time. Team-managed projects use
+// the native `parent`; company-managed (classic) uses the Epic Link custom field
+// — mirror the #2415 read side: a site with an Epic Link field id uses it, else
+// `parent`. A per-story failure is recorded and the loop continues (no
+// create-transaction); returns the per-story outcome list.
+async function createStoriesUnderEpic({ base, auth, projectKey, epicKey, storyList, storyTypeName, catalog, fieldMeta, attribution, applyStatus, browseUrl, onCreated }) {
   const storyResults = [];
-  for (const [i, s] of storyList.entries()) {
+  for (const s of storyList) {
     try {
-      const storyFields = buildCreateFields({ projectKey: project, issueTypeName: storyTypeName, spec: s, fieldMeta, attribution });
+      const storyFields = buildCreateFields({ projectKey, issueTypeName: storyTypeName, spec: s, fieldMeta, attribution });
       if (catalog.epicLinkId) storyFields[catalog.epicLinkId] = epicKey;
       else storyFields.parent = { key: epicKey };
       const created = await createIssue(base, auth, storyFields);
@@ -1689,12 +1680,129 @@ async function createEpicWithStories(cred, { projectKey, epic, stories, allowLis
       storyResults.push({ summary: String(s.summary).trim(), ok: false, error: err.message });
     }
   }
+  return storyResults;
+}
+
+// `onCreated(key)` fires the moment each issue exists — before the next create
+// — so the broker's own-writes registry knows the key before any poll can see
+// it (a large epic spans several poll ticks).
+async function createEpicWithStories(cred, { projectKey, epic, stories, allowList, attribution, issueTypes, env, onCreated } = {}) {
+  const project = String(projectKey || '').trim();
+  if (!project) { const e = new Error('a project key is required'); e.status = 400; throw e; }
+  if (!epic || typeof epic !== 'object') { const e = new Error('an epic is required'); e.status = 400; throw e; }
+  if (!String(epic.summary || '').trim()) { const e = new Error('the epic requires a summary'); e.status = 400; throw e; }
+  const storyList = validateStoryList(stories);
+
+  const usedNames = collectCustomFieldNames(epic, storyList);
+  assertCreateFieldsAllowed(usedNames, allowList);
+
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const { catalog, fieldMeta } = await resolveCreateFieldMeta(base, auth, usedNames);
+
+  const epicTypeName = String((issueTypes && issueTypes.epic) || EPIC_ISSUE_TYPE).trim() || EPIC_ISSUE_TYPE;
+  const storyTypeName = String((issueTypes && issueTypes.story) || STORY_ISSUE_TYPE).trim() || STORY_ISSUE_TYPE;
+  const siteBase = resolveJiraApiBase(cred.siteUrl);
+  const browseUrl = (key) => `${siteBase}/browse/${encodeURIComponent(key)}`;
+  const applyStatus = statusApplier(cred, env);
+
+  // (1→create) the epic first — its key links every story.
+  const epicFields = buildCreateFields({ projectKey: project, issueTypeName: epicTypeName, spec: epic, fieldMeta, attribution });
+  const epicCreated = await createIssue(base, auth, epicFields);
+  const epicKey = epicCreated.key;
+  if (typeof onCreated === 'function') onCreated(epicKey);
+  const epicOut = { key: epicKey, url: browseUrl(epicKey), summary: String(epic.summary).trim() };
+  await applyStatus(epicKey, epic.status, epicOut);
+
+  const storyResults = await createStoriesUnderEpic({
+    base, auth, projectKey: project, epicKey, storyList, storyTypeName, catalog, fieldMeta, attribution, applyStatus, browseUrl, onCreated,
+  });
 
   return {
     project,
     epic: epicOut,
     stories: storyResults,
     created: 1 + storyResults.filter((r) => r.ok).length,
+    failed: storyResults.filter((r) => !r.ok).length,
+  };
+}
+
+// ── add new Stories to an EXISTING Epic (#2890) ──────────────────────────────
+//
+// The counterpart of `createEpicWithStories` for a team that already has its
+// Epics: N new Stories are created under the Epic named by its key, in the
+// Epic's own project. NO Epic is ever created. Same per-story contract
+// (summary / description / assignee / status / fields), same allow-list gate,
+// same per-story outcome map. The guards run before any create, in order:
+//   1. shape validation — a malformed epic key, no stories, or a story without
+//      a summary is a 400.
+//   2. the custom-field allow-list (403), as in create-epic.
+//   3. the Epic lookup — a key Jira does not return (absent, or not visible to
+//      the team's credential, which is the team's project scope) is a 404; an
+//      issue that is not an Epic is a 400 naming its actual type.
+//   4. name → id resolution of the custom fields (400 on an unknown name).
+const ISSUE_KEY_RE = /^[A-Z][A-Z0-9_]*-\d+$/;
+
+// An issue counts as an Epic when its type carries the Epic name (or the
+// payload's `issueTypes.epic` override, for a renamed type) or sits on Jira's
+// Epic hierarchy level (1) — the latter covers a localised type name.
+function isEpicIssueType(issuetype, epicTypeName) {
+  if (!issuetype || typeof issuetype !== 'object') return false;
+  if (String(issuetype.name || '').trim().toLowerCase() === epicTypeName.toLowerCase()) return true;
+  return Number(issuetype.hierarchyLevel) === 1;
+}
+
+async function addStoriesToEpic(cred, { epicKey, stories, allowList, attribution, issueTypes, env, onCreated } = {}) {
+  const key = String(epicKey || '').trim().toUpperCase();
+  if (!key) { const e = new Error('an --epic key is required'); e.status = 400; throw e; }
+  if (!ISSUE_KEY_RE.test(key)) { const e = new Error(`"${String(epicKey).trim()}" is not a Jira issue key (expected e.g. KAN-12)`); e.status = 400; throw e; }
+  const storyList = validateStoryList(stories);
+  if (!storyList.length) { const e = new Error('at least one story is required'); e.status = 400; throw e; }
+
+  const usedNames = collectCustomFieldNames(null, storyList);
+  assertCreateFieldsAllowed(usedNames, allowList);
+
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const epicTypeName = String((issueTypes && issueTypes.epic) || EPIC_ISSUE_TYPE).trim() || EPIC_ISSUE_TYPE;
+  const storyTypeName = String((issueTypes && issueTypes.story) || STORY_ISSUE_TYPE).trim() || STORY_ISSUE_TYPE;
+
+  // (3) the parent must exist, be visible, and be an Epic — before any create.
+  let raw;
+  try {
+    raw = await requestJson({ base, path: `/rest/api/3/issue/${encodeURIComponent(key)}?fields=issuetype,project,summary`, authHeader: auth });
+  } catch (e) {
+    if (e.status === 404) {
+      const err = new Error(`Epic ${key} was not found, or it is outside this team's Jira scope (the account cannot see it). Nothing was created.`);
+      err.status = 404;
+      throw err;
+    }
+    throw e;
+  }
+  const fields = (raw && raw.fields) || {};
+  const actualKey = String(raw.key || key);
+  if (!isEpicIssueType(fields.issuetype, epicTypeName)) {
+    const typeName = (fields.issuetype && fields.issuetype.name) || 'unknown type';
+    const e = new Error(`${actualKey} is a ${typeName}, not an Epic — add-stories only adds Stories under an existing Epic. Nothing was created.`);
+    e.status = 400;
+    throw e;
+  }
+  const project = String((fields.project && fields.project.key) || actualKey.replace(/-\d+$/, ''));
+
+  const { catalog, fieldMeta } = await resolveCreateFieldMeta(base, auth, usedNames);
+  const siteBase = resolveJiraApiBase(cred.siteUrl);
+  const browseUrl = (k) => `${siteBase}/browse/${encodeURIComponent(k)}`;
+
+  const storyResults = await createStoriesUnderEpic({
+    base, auth, projectKey: project, epicKey: actualKey, storyList, storyTypeName, catalog, fieldMeta, attribution,
+    applyStatus: statusApplier(cred, env), browseUrl, onCreated,
+  });
+
+  return {
+    project,
+    epic: { key: actualKey, url: browseUrl(actualKey), summary: String(fields.summary || '') },
+    stories: storyResults,
+    created: storyResults.filter((r) => r.ok).length,
     failed: storyResults.filter((r) => !r.ok).length,
   };
 }
@@ -2299,6 +2407,8 @@ module.exports = {
   buildCreateFields,
   collectCustomFieldNames,
   createEpicWithStories,
+  addStoriesToEpic,
+  isEpicIssueType,
   EPIC_ISSUE_TYPE,
   STORY_ISSUE_TYPE,
   // board & sprint management (#2450)

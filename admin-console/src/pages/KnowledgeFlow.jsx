@@ -36,6 +36,7 @@ import {
 } from './consolidation-view';
 import { hasFrontmatterMeta, syncFrontmatterName, suggestFreeName } from './promotion-frontmatter';
 import { lastUsedLabel, compareLastUsed } from './knowledge-retrieval-view';
+import { createFeedReloadThrottle } from './knowledge-reload-throttle.js';
 
 /*
  * Knowledge Flow — team-scoped (#560).
@@ -303,15 +304,39 @@ export default function KnowledgeFlow() {
   }, [selectedTeam, loadSelectedTeam]);
 
   // Live feed → pulse the matching card + refresh the selected team's slice.
-  const reloadTimers = useRef({});
+  // #571: throttled to one graph reload per team per ~8 s while events stream
+  // (always with a trailing reload), none while the tab is hidden and one
+  // catch-up when it is visible again (knowledge-reload-throttle.js). Reloads
+  // after the user's own mutations call loadTeamData directly and stay immediate.
+  const feedReloadRef = useRef(null);
+  feedReloadRef.current = (teamId) => {
+    const t = (teams || []).find(x => x.id === teamId);
+    loadTeamData(teamId, t ? t.members : [], { withPrivate: false });
+  };
+  const feedThrottleRef = useRef(null);
+  useEffect(() => {
+    const throttle = createFeedReloadThrottle({
+      reload: (teamId) => feedReloadRef.current(teamId),
+      isHidden: () => document.hidden === true,
+    });
+    feedThrottleRef.current = throttle;
+    let prevHidden = document.hidden === true;
+    const onVisibility = () => {
+      const nextHidden = document.hidden === true;
+      throttle.visibilityChanged(prevHidden, nextHidden);
+      prevHidden = nextHidden;
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      throttle.dispose();
+      feedThrottleRef.current = null;
+    };
+  }, []);
   const scheduleTeamReload = useCallback((teamId) => {
-    if (!teamId) return;
-    clearTimeout(reloadTimers.current[teamId]);
-    reloadTimers.current[teamId] = setTimeout(() => {
-      const t = (teams || []).find(x => x.id === teamId);
-      loadTeamData(teamId, t ? t.members : [], { withPrivate: false });
-    }, 400);
-  }, [teams, loadTeamData]);
+    if (!teamId || !feedThrottleRef.current) return;
+    feedThrottleRef.current.request(teamId);
+  }, []);
 
   const onFeedEvent = useCallback((ev) => {
     if (!ev || !ev.teamId) return;

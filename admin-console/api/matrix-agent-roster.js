@@ -260,4 +260,5 @@ module.exports = {
   poolWaitingFields,
   mutationInvalidatesRoster,
   rosterTtlMsFromEnv,
+  trimTrailingSlashes,
 };

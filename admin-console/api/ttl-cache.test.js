@@ -149,6 +149,31 @@ test('clear: a rejection from a superseded compute does not evict the newer one'
   await p2;
 });
 
+// #571 — deleteWhere is clear() narrowed to some keys: the matching values go
+// and their in-flight computes are detached; the rest keep serving.
+test('deleteWhere: drops and detaches only the matching keys', async () => {
+  const cache = createTtlCache({ ttlMs: 1000, now: fakeClock().now });
+  cache.set('team:a|0', 1);
+  cache.set('team:b|0', 2);
+  let resolveA; let resolveB;
+  const pa = cache.getOrCompute('team:a|1', () => new Promise((r) => { resolveA = r; }));
+  const pb = cache.getOrCompute('team:b|1', () => new Promise((r) => { resolveB = r; }));
+  await Promise.resolve();
+  cache.deleteWhere((k) => k.startsWith('team:a|'));
+  assert.equal(cache.get('team:a|0'), undefined);
+  assert.equal(cache.get('team:b|0'), 2, 'a non-matching value survives');
+  let recomputed = false;
+  const pa2 = cache.getOrCompute('team:a|1', () => { recomputed = true; return 'fresh'; });
+  resolveA('stale');
+  resolveB('kept');
+  assert.equal(await pa, 'stale', 'a caller already waiting still gets its result');
+  assert.equal(await pa2, 'fresh');
+  assert.equal(recomputed, true, 'the detached compute is not joined');
+  assert.equal(cache.get('team:a|1'), 'fresh', 'the superseded value never overwrites the newer one');
+  assert.equal(await pb, 'kept');
+  assert.equal(cache.get('team:b|1'), 'kept', 'a non-matching in-flight compute still caches');
+});
+
 test('ttlMsFromEnv honours an explicit 0 and falls back on unset or junk', () => {
   assert.equal(ttlMsFromEnv(undefined, 2000), 2000);
   assert.equal(ttlMsFromEnv('', 2000), 2000);

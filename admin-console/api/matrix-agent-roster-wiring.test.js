@@ -56,18 +56,13 @@ test('the console\'s own DM-room write clears the cache at the write site', () =
 });
 
 test('a successful mutation clears the cache, mounted behind the auth gate and status-checked', () => {
-  const at = API_SRC.indexOf("if (!mutationInvalidatesRoster(req.method, req.originalUrl)) return next();");
+  // The res.end / final-status behaviour itself is unit-tested in
+  // invalidate-on-write.test.js; this guards that the roster uses it.
+  const at = API_SRC.indexOf("app.use('/api', invalidateOnSuccessfulWrite(mutationInvalidatesRoster, invalidateRosterCache));");
   assert.ok(at > 0, 'invalidation middleware missing');
   assert.ok(at > API_SRC.indexOf("app.use('/api', auth.gate);"), 'an unauthenticated request must not reach it');
   assert.ok(at < API_SRC.indexOf("app.get('/api/matrix/agents',"));
-  const mw = API_SRC.slice(at, API_SRC.indexOf('\n});', at));
-  assert.match(mw, /if \(res\.statusCode < 400\) invalidateRosterCache\(\);/,
-    'decided on the final status, so a 4xx/5xx leaves the cache alone');
-  // Hooked on the handler's own response, not on socket events: `close` on a
-  // client abort fires before the write lands, and `finish` never fires after.
-  assert.match(mw, /res\.end = function endAndInvalidateRoster\(\.\.\.args\) \{\n    res\.end = end;/, 'one decision per request');
-  assert.match(mw, /return end\.apply\(this, args\);/);
-  assert.doesNotMatch(mw, /res\.(once|on)\('(close|finish)'/);
+  assert.match(API_SRC, /const \{ invalidateOnSuccessfulWrite \} = require\('\.\/invalidate-on-write'\);/);
   assert.match(API_SRC, /function invalidateRosterCache\(\) \{\n  rosterCache\.clear\(\);\n  agentStatusCache\.invalidate\(\);[^\n]*\n\}/);
 });
 

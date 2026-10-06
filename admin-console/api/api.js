@@ -42,6 +42,12 @@ const { createTtlCache, ttlMsFromEnv } = require('./ttl-cache');
 const { createSwrCache } = require('./swr-cache');
 const { createProcessesSource } = require('./agent-processes-view');
 const { indexAgentsByEnvironment, environmentAgentRows, firstAgentIdUsingEnvironment } = require('./environment-agents');
+const { invalidateOnSuccessfulWrite } = require('./invalidate-on-write');
+const knowledgeFleetLib = require('./knowledge-fleet');
+const {
+  knowledgeGraphCacheKey, mutationInvalidatesKnowledgeGraph, knowledgeGraphTtlMsFromEnv, knowledgeAugmentTimeoutMsFromEnv,
+  knowledgeGraphKeyStaleForEvent, claimKnowledgeEventOffset, knowledgeEventMarkForFileSize,
+} = require('./knowledge-graph-cache');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, isTeamAdminOfAny, canManageAgent,
         visibleEnvironment, canManageEnvironment, canCreateEnvironment, canRetierEnvironment,
         visibleUser, describeAuthz,
@@ -477,25 +483,14 @@ app.use('/api', auth.gate);
 
 // The chat roster's shared cache (#566) is cleared when a roster-affecting
 // console mutation succeeds, so a create/rename/enable done here shows on the
-// next roster fetch instead of one TTL later. Behind the auth gate (an
-// unauthenticated request never reaches it) and decided on the real final
-// status: a refused or failed write (`>= 400`) leaves the cache alone.
-//
-// Decided when the HANDLER responds (`res.end`), not on a socket event: a
-// client that disconnects mid-request emits `close` before the handler's write
-// has landed (clearing then lets a concurrent poll re-cache the old state), and
-// the destroyed socket never emits `finish` once it does. `res.end` runs after
-// the write either way. The allowlist is `mutationInvalidatesRoster`.
-app.use('/api', (req, res, next) => {
-  if (!mutationInvalidatesRoster(req.method, req.originalUrl)) return next();
-  const end = res.end;
-  res.end = function endAndInvalidateRoster(...args) {
-    res.end = end;
-    if (res.statusCode < 400) invalidateRosterCache();
-    return end.apply(this, args);
-  };
-  next();
-});
+// next roster fetch instead of one TTL later; the knowledge-graph cache (#571)
+// likewise, so the page's post-mutation reload never reads the pre-mutation
+// graph. Behind the auth gate (an unauthenticated request never reaches them),
+// decided on the handler's own `res.end` and its real final status
+// (invalidate-on-write.js). The allowlists are `mutationInvalidatesRoster` and
+// `mutationInvalidatesKnowledgeGraph`.
+app.use('/api', invalidateOnSuccessfulWrite(mutationInvalidatesRoster, invalidateRosterCache));
+app.use('/api', invalidateOnSuccessfulWrite(mutationInvalidatesKnowledgeGraph, invalidateKnowledgeGraphCache));
 
 // Team-share room sync (#2174, epic #2166 B2). Mirrors the `auditMutations`
 // pattern above: mounted before the two routes it watches and listening for
@@ -1097,7 +1092,9 @@ function podmanRequest(method, urlPath) {
   });
 }
 
-function readJsonFile(filePath, fallback = null) {
+// `onError(err)`, when given, hears the real cause of a failed read/parse
+// (the return value is still `fallback`).
+function readJsonFile(filePath, fallback = null, onError = null) {
   if (typeof filePath !== 'string') return fallback;
   // Confine reads under an allowed root before the value reaches readFileSync.
   // Same containPathUnderRoot() return-value barrier as writeJsonAtomic; reads
@@ -1110,7 +1107,8 @@ function readJsonFile(filePath, fallback = null) {
   if (safe === null) return fallback;
   try {
     return JSON.parse(fs.readFileSync(safe, 'utf8'));
-  } catch {
+  } catch (err) {
+    if (onError) onError(err);
     return fallback;
   }
 }
@@ -7290,53 +7288,62 @@ function agentKnowledgeTeam(cfg) {
 // caller can see the HUMAN team any of its agents belongs to. Admin scopes
 // (all:true) short-circuit. Falls back to a direct id match so a membership that
 // (unusually) names the squad id keeps working.
-function knowledgeTeamVisible(scope, knowledgeTeamId) {
-  if (!scope) return false;
-  if (scope.all) return true;
-  if (visibleTeam(scope, knowledgeTeamId)) return true;
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (agentKnowledgeTeam(cfg) !== knowledgeTeamId) continue;
-    if (visibleTeam(scope, cfg.teamId)) return true;
-  }
-  return false;
+//
+// #571: every helper below takes an optional `fleet` (knowledge-fleet.js) — one
+// read of every agent config, built once per request by the knowledge routes
+// that call several helpers and threaded through. Without one a helper builds
+// its own. The cheap checks run before any fleet is built.
+// An unreadable config is warned about with its real cause, once per broken
+// streak (knowledge-fleet.js `createEntryWarnings`).
+const _knowledgeFleetWarnings = knowledgeFleetLib.createEntryWarnings();
+
+function buildKnowledgeFleetNow() {
+  return knowledgeFleetLib.buildKnowledgeFleet(listAgentDirs(), {
+    readConfig: (id) => {
+      let cause = null;
+      const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null, (err) => { cause = err; });
+      if (cause) throw cause;
+      return cfg;
+    },
+    onEntryError: (id, err) => {
+      if (_knowledgeFleetWarnings.shouldWarn(id, err)) console.warn(`[knowledge] config of ${id} unreadable, read as empty: ${err.message}`);
+    },
+    onEntryOk: (id) => _knowledgeFleetWarnings.ok(id),
+    agentKnowledgeTeam,
+    agentMetaForScope,
+  });
+}
+
+// `fleet` may be a fleet or a thunk returning one; without either the lib
+// builds one lazily, only past its cheap checks.
+function knowledgeTeamVisible(scope, knowledgeTeamId, fleet = null) {
+  return knowledgeFleetLib.knowledgeTeamVisible(fleet || buildKnowledgeFleetNow, scope, knowledgeTeamId, { visibleTeam });
 }
 
 // Resolve a team's KB store-relative path (e.g. docs/agent-knowledge/) from any
 // of its agents' environments — a team shares one env → one KB config.
-function resolveTeamStorePath(teamId) {
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (agentKnowledgeTeam(cfg) !== teamId || !cfg.environmentId) continue;
-    // #570: the KB store path is keyed per team — overlay the team's overrides.
-    const env = knowledgeSuggestions.mergeTeamKnowledgeConfig(loadEnvironment(cfg.environmentId), loadTeamKnowledgeOverrides(teamId));
-    const p = env && env.knowledgeStore && typeof env.knowledgeStore.path === 'string'
-      ? env.knowledgeStore.path : null;
-    if (p) return p.replace(/^\/+|\/+$/g, '') + '/';
-  }
-  return KB_DEFAULT_STORE_PATH;
+// #570: the KB store path is keyed per team — the team's overrides are overlaid.
+function resolveTeamStorePath(teamId, fleet = null) {
+  return knowledgeFleetLib.resolveTeamStorePath(fleet || buildKnowledgeFleetNow(), teamId, {
+    loadEnvironment,
+    loadTeamKnowledgeOverrides,
+    mergeTeamKnowledgeConfig: knowledgeSuggestions.mergeTeamKnowledgeConfig,
+    defaultStorePath: KB_DEFAULT_STORE_PATH,
+  });
 }
 
 // Resolve a team's KB repo web URL for provenance links (sourceRefs → PR/issue).
-function resolveTeamRepoUrl(teamId) {
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (agentKnowledgeTeam(cfg) !== teamId || !cfg.environmentId) continue;
-    // #570: the KB repoRef is keyed per team — overlay the team's overrides.
-    const env = knowledgeSuggestions.mergeTeamKnowledgeConfig(loadEnvironment(cfg.environmentId), loadTeamKnowledgeOverrides(teamId));
-    const ref = env && env.knowledgeStore && env.knowledgeStore.repoRef;
-    if (ref && ref.url) return ref.url;
-    const repos = (env && env.repositories) || [];
-    if (repos[0] && repos[0].url) return repos[0].url;
-  }
-  return null;
+// #570: the KB repoRef is keyed per team — the team's overrides are overlaid.
+function resolveTeamRepoUrl(teamId, fleet = null) {
+  return knowledgeFleetLib.resolveTeamRepoUrl(fleet || buildKnowledgeFleetNow(), teamId, {
+    loadEnvironment,
+    loadTeamKnowledgeOverrides,
+    mergeTeamKnowledgeConfig: knowledgeSuggestions.mergeTeamKnowledgeConfig,
+  });
 }
 
-function teamAgentIds(teamId) {
-  return listAgentDirs().filter(id => {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    return agentKnowledgeTeam(cfg) === teamId;
-  });
+function teamAgentIds(teamId, fleet = null) {
+  return knowledgeFleetLib.teamAgentIds(fleet || buildKnowledgeFleetNow(), teamId);
 }
 
 // Kind → { dir, file }, honouring a store's manifest if present, else defaults.
@@ -7381,13 +7388,8 @@ function kbReadStore(entries, storeRoot) {
 // the human tenant team ('default' for everyone) — and two squads can share one
 // env, i.e. one KB store, so the store location alone can't separate them
 // either. The recording agent's squad is authoritative.
-function knowledgeTeamByAgent() {
-  const map = new Map();
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    map.set(id, agentKnowledgeTeam({ ...cfg, id: cfg.id || id }));
-  }
-  return map;
+function knowledgeTeamByAgent(fleet = null) {
+  return knowledgeFleetLib.knowledgeTeamByAgent(fleet || buildKnowledgeFleetNow());
 }
 
 const KNOWLEDGE_ARCHIVED_DIR = path.join(WORKSPACE, 'knowledge-archived');
@@ -7426,17 +7428,18 @@ function readTriggersFor(teamId) {
 // Entries are re-homed to their origin agent's squad, and the operator-decision
 // overlays (archive, supervised review) are re-applied at read time so they hold
 // even when the git-sync side lags (see overlayStatuses).
-function gatherTeamEntries(teamId) {
+function gatherTeamEntries(teamId, { fleet = null } = {}) {
   let entries = [];
   const warnings = [];
   if (!AGENT_ID_RE.test(teamId)) return { entries, warnings };
-  const storeRel = resolveTeamStorePath(teamId);
+  const kfleet = fleet || buildKnowledgeFleetNow();
+  const storeRel = resolveTeamStorePath(teamId, kfleet);
   const cloneRoot = path.join(KNOWLEDGE_CLONE_ROOT, path.basename(teamId));
   const cloneStore = path.join(cloneRoot, storeRel);
   if (fs.existsSync(path.join(cloneRoot, '.git')) && fs.existsSync(cloneStore)) {
     kbReadStore(entries, cloneStore);
   } else {
-    for (const agentId of teamAgentIds(teamId)) {
+    for (const agentId of teamAgentIds(teamId, kfleet)) {
       const store = path.join(AGENTS_DIR, agentId, 'knowledge', storeRel);
       if (fs.existsSync(store)) kbReadStore(entries, store);
     }
@@ -7447,7 +7450,7 @@ function gatherTeamEntries(teamId) {
   // entry in the team whose store we are reading. Then drop sibling squads'
   // entries (a shared env means a shared store — the canonical clone can carry
   // both squads' shards).
-  const originTeams = knowledgeTeamByAgent();
+  const originTeams = knowledgeTeamByAgent(kfleet);
   entries = entries
     .map((e) => {
       if (!e || typeof e !== 'object') return e;
@@ -7466,7 +7469,7 @@ function gatherTeamEntries(teamId) {
       if (!(k in decisions)) decisions[k] = v;
     }
   }
-  const reviewOn = knowledgeReviewOn(teamKnowledgeEnv(teamId)); // #570: per-team config
+  const reviewOn = knowledgeReviewOn(teamKnowledgeEnv(teamId, kfleet)); // #570: per-team config
   entries = overlayStatuses(entries, { archivedIds: archived, decisions, reviewOn });
   // #916: validity is a field overlay (never a status) — same legacy-'default'
   // merge as the archive store so pre-re-homing decisions still hold.
@@ -7489,19 +7492,14 @@ function gatherTeamEntries(teamId) {
 }
 
 // Which teams does this scope + membership resolve to?
-function knowledgeScopeTeams(parsed, scope) {
+// global: every team that has agents, narrowed by membership scope.
+function knowledgeScopeTeams(parsed, scope, fleet = null) {
   if (parsed.kind === 'team') return [parsed.id];
-  if (parsed.kind === 'agent') {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, parsed.id, 'config.json'), {});
-    return [agentKnowledgeTeam({ ...cfg, id: cfg.id || parsed.id })];
-  }
-  // global: every team that has agents, narrowed by membership scope.
-  const teams = new Set();
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    teams.add(agentKnowledgeTeam({ ...cfg, id: cfg.id || id }));
-  }
-  return [...teams].filter(t => knowledgeTeamVisible(scope, t));
+  const kfleet = fleet || buildKnowledgeFleetNow();
+  return knowledgeFleetLib.knowledgeScopeTeams(kfleet, parsed, {
+    agentKnowledgeTeam,
+    isVisible: (t) => knowledgeTeamVisible(scope, t, kfleet),
+  });
 }
 
 // Fire-and-forget refresh of a team's canonical clone before we read it, so the
@@ -7518,18 +7516,9 @@ function refreshTeamCloneBestEffort(teamId) {
   }).catch(() => {}).finally(() => clearTimeout(timer));
 }
 
-function gatherKnowledgeAgents(scope, teamIds) {
-  const set = new Set(teamIds);
-  const agents = [];
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (cfg.role === 'team') continue; // template holder, not a contributor
-    const teamId = agentKnowledgeTeam({ ...cfg, id: cfg.id || id });
-    if (!set.has(teamId)) continue;
-    if (!visibleAgent(scope, agentMetaForScope(cfg))) continue;
-    agents.push({ id, parentTeamId: teamId, environmentId: cfg.environmentId || null, displayName: cfg.displayName || id });
-  }
-  return agents;
+// A team template holder is not a contributor and is left out.
+function gatherKnowledgeAgents(scope, teamIds, fleet = null) {
+  return knowledgeFleetLib.gatherKnowledgeAgents(fleet || buildKnowledgeFleetNow(), scope, teamIds, { visibleAgent });
 }
 
 // The provenance.json a Phase-3 promotion writes beside SKILL.md — carries the
@@ -7540,7 +7529,7 @@ function readSkillProvenance(dir) {
   return p && typeof p === 'object' ? p : null;
 }
 
-function gatherKnowledgeSkills(scope) {
+function gatherKnowledgeSkills(scope, fleet = null) {
   const skills = [];
   const poolSkillsDir = path.join(POOL_DIR, 'skills');
   try {
@@ -7556,8 +7545,11 @@ function gatherKnowledgeSkills(scope) {
       skills.push(s);
     });
   } catch { /* no pool skills */ }
+  // Built at most once, and only if some team's visibility needs it.
+  let kfleet = fleet;
+  const lazyFleet = () => (kfleet = kfleet || buildKnowledgeFleetNow());
   for (const ts of listTeamSkills(null)) {
-    if (!knowledgeTeamVisible(scope, ts.teamId)) continue;
+    if (!knowledgeTeamVisible(scope, ts.teamId, lazyFleet)) continue;
     const s = { name: ts.name, tier: 'team', teamId: ts.teamId };
     const dir = safeTeamSkillDir(ts.teamId, ts.name);
     const prov = dir ? readSkillProvenance(dir) : null;
@@ -7577,31 +7569,80 @@ function knowledgeScopeParam(req) {
   return parsed;
 }
 
-app.get('/api/knowledge/graph', async (req, res) => {
-  const scope = getScope(req);
-  const parsed = knowledgeScopeParam(req);
-  const teamIds = knowledgeScopeTeams(parsed, scope);
+// #571: one graph build per (scope, includeArchived, viewer) per TTL, shared by
+// concurrent callers (single-flight). The cached value is the finished graph —
+// knowledge entries + display data, no configs or tokens — and is never
+// mutated once cached. Cleared by a successful knowledge/skill/agent/team/env/
+// membership mutation (`mutationInvalidatesKnowledgeGraph`, wired behind
+// the auth gate), and by every event the knowledge stream tails (the
+// orchestrator's own writes — harvest, consolidation — before the client's
+// feed-driven reload): only the graphs that event can change, once per event
+// however many streams are open (`invalidateKnowledgeGraphCacheForEvent`).
+// Writes no open stream reports (sidecars, seeded skills) show up within one
+// TTL. `KNOWLEDGE_GRAPH_TTL_MS=0` turns the cache off entirely.
+const KNOWLEDGE_GRAPH_TTL_MS = knowledgeGraphTtlMsFromEnv(process.env);
+const knowledgeGraphCache = createTtlCache({ ttlMs: KNOWLEDGE_GRAPH_TTL_MS, maxEntries: 50 });
+function invalidateKnowledgeGraphCache() { knowledgeGraphCache.clear(); }
+
+// Byte offset in KNOWLEDGE_EVENTS_FILE through which tailed events have already
+// invalidated (shared by every open stream; knowledge-graph-cache.js).
+let knowledgeEventsInvalidatedThrough = 0;
+function noteKnowledgeEventsFileSize(size) {
+  knowledgeEventsInvalidatedThrough = knowledgeEventMarkForFileSize(knowledgeEventsInvalidatedThrough, size);
+}
+function invalidateKnowledgeGraphCacheForEvent(ev, endOffset) {
+  const claim = claimKnowledgeEventOffset(knowledgeEventsInvalidatedThrough, endOffset);
+  knowledgeEventsInvalidatedThrough = claim.mark;
+  if (claim.invalidate) knowledgeGraphCache.deleteWhere((key) => knowledgeGraphKeyStaleForEvent(key, ev));
+}
+
+async function buildKnowledgeGraphResponse(scope, parsed, includeArchived) {
+  // One read of every agent config for the whole build (#571).
+  const fleet = buildKnowledgeFleetNow();
+  const teamIds = knowledgeScopeTeams(parsed, scope, fleet);
 
   await Promise.all(teamIds.map(refreshTeamCloneBestEffort));
 
   const entries = [];
   const warnings = [];
   for (const teamId of teamIds) {
-    const g = gatherTeamEntries(teamId);
+    const g = gatherTeamEntries(teamId, { fleet });
     entries.push(...g.entries);
     warnings.push(...g.warnings);
   }
-  const agents = gatherKnowledgeAgents(scope, teamIds);
-  const skills = gatherKnowledgeSkills(scope);
-  const includeArchived = req.query.includeArchived === '1' || req.query.includeArchived === 'true';
+  const agents = gatherKnowledgeAgents(scope, teamIds, fleet);
+  const skills = gatherKnowledgeSkills(scope, fleet);
   const graph = buildKnowledgeGraph({ scope: parsed.scope, entries, skills, agents, now: Date.now(), warnings, includeArchived });
   augmentPendingPromotions(graph, teamIds);
-  augmentSkillActivation(graph, parsed);
-  await augmentDigestInclusion(graph, teamIds);
-  await augmentSkillRoles(graph, teamIds);
+  augmentSkillActivation(graph, parsed, fleet);
   augmentDisplaySummary(graph, entries);
-  await augmentRetrievalStats(graph, teamIds);
-  res.json(graph);
+  // The three orchestrator overlays write disjoint node fields (inDigest /
+  // roles / lastUsedAt+usage), so they run side by side, each fetch bounded
+  // by KNOWLEDGE_AUGMENT_TIMEOUT_MS: a stalled orchestrator costs one timeout
+  // and degrades to "no badges" instead of three serial hangs.
+  await Promise.all([
+    augmentDigestInclusion(graph, teamIds),
+    augmentSkillRoles(graph, teamIds),
+    augmentRetrievalStats(graph, teamIds),
+  ]);
+  return graph;
+}
+
+app.get('/api/knowledge/graph', async (req, res) => {
+  const scope = getScope(req);
+  const parsed = knowledgeScopeParam(req);
+  const includeArchived = req.query.includeArchived === '1' || req.query.includeArchived === 'true';
+  try {
+    const build = () => buildKnowledgeGraphResponse(scope, parsed, includeArchived);
+    const graph = KNOWLEDGE_GRAPH_TTL_MS > 0
+      ? await knowledgeGraphCache.getOrCompute(
+        knowledgeGraphCacheKey({ scope: parsed.scope, includeArchived, viewerScope: scope }), build)
+      : await build();
+    res.json(graph);
+  } catch (err) {
+    console.error(`[knowledge] graph build failed: ${err.message}`);
+    res.status(500).json({ error: 'knowledge graph build failed' });
+  }
 });
 
 // Overlay the human-readable summary (#635) on every item node: `summary` is the
@@ -7632,12 +7673,17 @@ function augmentDisplaySummary(graph, entries) {
 // with the same pure builder that writes knowledge-digest.md, so the badge can
 // never disagree with the file the agents import. Best-effort: an unreachable
 // orchestrator just means no badges.
+// #571: the per-call bound on the three orchestrator augment fetches below.
+const KNOWLEDGE_AUGMENT_TIMEOUT_MS = knowledgeAugmentTimeoutMsFromEnv(process.env);
+
 async function augmentDigestInclusion(graph, teamIds) {
   if (!graph || !Array.isArray(graph.nodes)) return;
   const included = new Set();
   await Promise.all((teamIds || []).map(async (teamId) => {
     try {
-      const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/digest-status`);
+      const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/digest-status`, {
+        signal: AbortSignal.timeout(KNOWLEDGE_AUGMENT_TIMEOUT_MS),
+      });
       if (!resp.ok) return;
       const data = await resp.json();
       for (const id of (Array.isArray(data.includedIds) ? data.includedIds : [])) included.add(id);
@@ -7661,7 +7707,9 @@ async function augmentRetrievalStats(graph, teamIds) {
   let anyStats = false;
   await Promise.all((teamIds || []).map(async (teamId) => {
     try {
-      const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/retrieval-stats`);
+      const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/retrieval-stats`, {
+        signal: AbortSignal.timeout(KNOWLEDGE_AUGMENT_TIMEOUT_MS),
+      });
       if (!resp.ok) return;
       const data = await resp.json();
       anyStats = true;
@@ -7702,6 +7750,7 @@ async function augmentSkillRoles(graph, teamIds) {
       const resp = await fetch(`${ORCH_URL()}/internal/knowledge/domains`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ teamId, op: 'read' }),
+        signal: AbortSignal.timeout(KNOWLEDGE_AUGMENT_TIMEOUT_MS),
       });
       if (!resp.ok) return;
       const data = await resp.json().catch(() => ({}));
@@ -7727,19 +7776,17 @@ async function augmentSkillRoles(graph, teamIds) {
 // added. Also adds ghost nodes for adopted global skills that the lane filter
 // wouldn't render (active list ∌ origin team). Mutates `graph` in place; no-op
 // outside team scope or when the squad has no team agent.
-function augmentSkillActivation(graph, parsed) {
+function augmentSkillActivation(graph, parsed, fleet = null) {
   if (!graph || !Array.isArray(graph.nodes) || parsed.kind !== 'team') return;
   const teamId = parsed.id;
-  const teamCfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
-  if (!teamCfg || teamCfg.role !== 'team') return;
-  const teamSkills = Array.isArray(teamCfg.skills) ? teamCfg.skills : [];
+  const kfleet = fleet || buildKnowledgeFleetNow();
+  const grant = knowledgeFleetLib.teamSkillGrant(kfleet, teamId);
+  if (!grant) return;
+  const teamSkills = grant.skills;
 
-  let members = [];
-  try {
-    members = fs.readdirSync(AGENTS_DIR)
-      .map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null))
-      .filter(c => c && c.role === 'team-member' && c.parentTeamId === teamId);
-  } catch { /* no agents dir */ }
+  // Slim member rows (knowledge-fleet.js `teamMembers`): `provisioned` stands
+  // in for the Matrix token, which the fleet never carries.
+  const members = knowledgeFleetLib.teamMembers(kfleet, teamId);
   const manifests = new Map(members.map(m => [
     m.id,
     readJsonFile(path.join(resolveAgentStateDir(path.join(AGENTS_DIR, m.id)), 'seeded-skills.json'), {}) || {},
@@ -7787,7 +7834,7 @@ function augmentSkillActivation(graph, parsed) {
         const granted = hasOverride ? m.skillsOverride.includes(name) : inList;
         const seededEntry = (manifests.get(m.id) || {})[name];
         const seeded = !!seededEntry;
-        const state = !m.token ? 'stub'
+        const state = !m.provisioned ? 'stub'
           : (hasOverride && !granted) ? 'excluded-override'
           : seeded ? 'active'
           : granted ? 'pending'
@@ -7874,9 +7921,10 @@ function augmentPendingPromotions(graph, teamIds) {
 app.get('/api/knowledge/summary', async (req, res) => {
   const scope = getScope(req);
   const parsed = knowledgeScopeParam(req);
-  const teamIds = knowledgeScopeTeams(parsed, scope);
+  const fleet = buildKnowledgeFleetNow(); // #571: one config read for every team
+  const teamIds = knowledgeScopeTeams(parsed, scope, fleet);
   const entries = [];
-  for (const teamId of teamIds) entries.push(...gatherTeamEntries(teamId).entries);
+  for (const teamId of teamIds) entries.push(...gatherTeamEntries(teamId, { fleet }).entries);
   res.json(summarizeKnowledge({ scope: parsed.scope, entries, now: Date.now() }));
 });
 
@@ -7903,9 +7951,10 @@ app.get('/api/knowledge/item/:id', (req, res) => {
   const teamId = typeof req.query.teamId === 'string' ? req.query.teamId : '';
   if (!/^[0-9a-f]{12}$/.test(id)) return res.status(400).json({ error: 'invalid id' });
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'invalid teamId' });
-  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const fleet = buildKnowledgeFleetNow(); // #571: one config read for the whole request
+  if (!knowledgeTeamVisible(scope, teamId, fleet)) return res.status(404).json({ error: 'not found' });
 
-  const { entries } = gatherTeamEntries(teamId);
+  const { entries } = gatherTeamEntries(teamId, { fleet });
   // Prefer a live entry over a merge tombstone of the same id (Phase 3).
   const entry = entries.find(e => e && e.id === id && e.status !== 'merged')
     || entries.find(e => e && e.id === id) || null;
@@ -7914,7 +7963,7 @@ app.get('/api/knowledge/item/:id', (req, res) => {
   const originAgent = typeof entry.originAgent === 'string' ? entry.originAgent : null;
   const correlationId = typeof entry.correlationId === 'string' ? entry.correlationId : null;
   const roomId = originAgent && correlationId ? findRoomForCorrelation(originAgent, correlationId) : null;
-  const repoUrl = resolveTeamRepoUrl(teamId);
+  const repoUrl = resolveTeamRepoUrl(teamId, fleet);
   const sourceRefs = Array.isArray(entry.sourceRefs) ? entry.sourceRefs : [];
 
   const links = {
@@ -8073,6 +8122,7 @@ app.get('/api/knowledge/stream', (req, res) => {
   }
 
   let lineBuf = '';
+  let lineStart = cursor; // byte offset of lineBuf's first byte
   let fileWatcher = null;
   let dirWatcher = null;
   let draining = false;
@@ -8086,9 +8136,17 @@ app.get('/api/knowledge/stream', (req, res) => {
   writeCursor();
   const heartbeat = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* noop */ } }, 15000);
 
-  const emitLine = (line) => {
+  const emitLine = (line, endOffset) => {
     const ev = kbParseLine(line);
-    if (ev && knowledgeLinks.matchesScope(ev, scope)) writeEvent(ev);
+    if (!ev) return;
+    // #571: a feed event is a knowledge write (often the orchestrator's own —
+    // harvest, consolidation, promotion — which never passes the console's
+    // mutation middleware). Clear the graphs it touches BEFORE the client
+    // hears of it, so the reload the event triggers rebuilds instead of being
+    // served the pre-event graph — and staying on it if no further event
+    // follows. Keyed by the line's end offset, so N open streams clear once.
+    invalidateKnowledgeGraphCacheForEvent(ev, endOffset);
+    if (knowledgeLinks.matchesScope(ev, scope)) writeEvent(ev);
   };
 
   const drain = () => {
@@ -8100,7 +8158,8 @@ app.get('/api/knowledge/stream', (req, res) => {
       if (!fs.existsSync(filepath)) { draining = false; if (pending) { pending = false; setImmediate(drain); } return; }
       size = fs.statSync(filepath).size;
     } catch { draining = false; return; }
-    if (size < cursor) { cursor = 0; lineBuf = ''; writeEvent({ type: '_truncated' }); }
+    noteKnowledgeEventsFileSize(size);
+    if (size < cursor) { cursor = 0; lineBuf = ''; lineStart = 0; writeEvent({ type: '_truncated' }); }
     if (size === cursor) { draining = false; if (pending) { pending = false; setImmediate(drain); } return; }
     const stream = fs.createReadStream(filepath, { start: cursor, end: size - 1, encoding: 'utf8' });
     stream.on('data', (chunk) => {
@@ -8109,7 +8168,8 @@ app.get('/api/knowledge/stream', (req, res) => {
       while ((idx = lineBuf.indexOf('\n')) >= 0) {
         const line = lineBuf.slice(0, idx);
         lineBuf = lineBuf.slice(idx + 1);
-        if (line.trim()) emitLine(line);
+        lineStart += Buffer.byteLength(line, 'utf8') + 1;
+        if (line.trim()) emitLine(line, lineStart);
       }
     });
     stream.on('error', () => { draining = false; if (pending) { pending = false; setImmediate(drain); } });
@@ -8321,10 +8381,11 @@ app.post('/api/knowledge/summaries/backfill', heavyLimiter, async (req, res) => 
   const teamId = typeof req.body?.team === 'string' ? req.body.team
     : (typeof req.body?.teamId === 'string' ? req.body.teamId : '');
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
-  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const fleet = buildKnowledgeFleetNow(); // #571: one config read for the whole request
+  if (!knowledgeTeamVisible(scope, teamId, fleet)) return res.status(404).json({ error: 'not found' });
 
   const MAX_PER_REQUEST = 40;
-  const { entries } = gatherTeamEntries(teamId);
+  const { entries } = gatherTeamEntries(teamId, { fleet });
   const missing = (Array.isArray(entries) ? entries : []).filter(
     (e) => e && typeof e.id === 'string' && /^[0-9a-f]{12}$/.test(e.id)
       && e.status !== 'merged'
@@ -8904,18 +8965,8 @@ app.post('/api/skills/resync', apiLimiter, async (req, res) => {
 
 // The environment a team shares (from any of its agents' configs). Mirrors the
 // orchestrator's resolveTeamEnvId; used only to read/display config here.
-function teamEnvironment(teamId) {
-  let ids;
-  try { ids = fs.readdirSync(AGENTS_DIR); } catch { return null; }
-  for (const id of ids) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
-    if (!cfg) continue;
-    if (agentKnowledgeTeam({ ...cfg, id: cfg.id || id }) === teamId && cfg.environmentId) {
-      const env = loadEnvironment(cfg.environmentId);
-      if (env) return env;
-    }
-  }
-  return null;
+function teamEnvironment(teamId, fleet = null) {
+  return knowledgeFleetLib.teamEnvironment(fleet || buildKnowledgeFleetNow(), teamId, { loadEnvironment });
 }
 
 // Per-team knowledge-config overrides (#570). The orchestrator persists the four
@@ -8930,8 +8981,8 @@ function loadTeamKnowledgeOverrides(teamId) {
 // The team's effective knowledge env: the shared environment overlaid with the
 // team's per-team overrides (#570). Every knowledge read path resolves config
 // through this so two teams sharing one env report independent settings.
-function teamKnowledgeEnv(teamId) {
-  return knowledgeSuggestions.mergeTeamKnowledgeConfig(teamEnvironment(teamId), loadTeamKnowledgeOverrides(teamId));
+function teamKnowledgeEnv(teamId, fleet = null) {
+  return knowledgeSuggestions.mergeTeamKnowledgeConfig(teamEnvironment(teamId, fleet), loadTeamKnowledgeOverrides(teamId));
 }
 
 // Auto-resync gate (#629 AC5): after a source skill is EDITED, fan the drift-
@@ -8959,9 +9010,10 @@ function autoResyncOnEdit(skillName, { tier, teamId } = {}) {
       }
     }
   }
+  const fleet = targetTeams.length ? buildKnowledgeFleetNow() : null; // #571: one read for every team
   for (const tid of targetTeams) {
     let mode;
-    try { mode = knowledgeSuggestions.resolveSkillResyncMode(teamKnowledgeEnv(tid)); } catch { mode = null; }
+    try { mode = knowledgeSuggestions.resolveSkillResyncMode(teamKnowledgeEnv(tid, fleet)); } catch { mode = null; }
     if (mode !== 'auto') continue; // default `review`: leave copies outdated
     fetch(`${orchestratorUrl}/internal/skills/resync`, {
       method: 'POST',
@@ -9037,12 +9089,13 @@ app.get('/api/knowledge/gates', (req, res) => {
   const scope = getScope(req);
   const teamId = typeof req.query.team === 'string' ? req.query.team : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
-  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const fleet = buildKnowledgeFleetNow(); // #571: one config read for the whole request
+  if (!knowledgeTeamVisible(scope, teamId, fleet)) return res.status(404).json({ error: 'not found' });
   // #570: knowledge config (autonomy / review / gates / storage) is keyed PER
   // TEAM, so overlay the team's own overrides onto its shared environment. Two
   // teams reusing one environment therefore report independent settings, and the
   // config is no longer "shared with" sibling teams (sharedWith is always empty).
-  const env = teamKnowledgeEnv(teamId);
+  const env = teamKnowledgeEnv(teamId, fleet);
   res.json({
     team: teamId,
     autonomy: teamAutonomyLevel(env),
@@ -9392,12 +9445,13 @@ app.get('/api/knowledge/review-queue', async (req, res) => {
   const scope = getScope(req);
   const teamId = typeof req.query.team === 'string' ? req.query.team : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
-  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const fleet = buildKnowledgeFleetNow(); // #571: one config read for the whole request
+  if (!knowledgeTeamVisible(scope, teamId, fleet)) return res.status(404).json({ error: 'not found' });
   await refreshTeamCloneBestEffort(teamId);
-  const { entries, warnings } = gatherTeamEntries(teamId);
+  const { entries, warnings } = gatherTeamEntries(teamId, { fleet });
   const only = req.query.include === 'rejected' ? null : 'pending';
   const items = selectReviewQueue(entries, { only });
-  res.json({ team: teamId, review: knowledgeReviewOn(teamKnowledgeEnv(teamId)), items, warnings }); // #570: per-team config
+  res.json({ team: teamId, review: knowledgeReviewOn(teamKnowledgeEnv(teamId, fleet)), items, warnings }); // #570: per-team config
 });
 
 // ── Approve / reject / reset a held KB entry ────────────────────────────────

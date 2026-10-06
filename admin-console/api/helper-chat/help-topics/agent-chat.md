@@ -845,6 +845,24 @@ sitting at the same level as everything else rather than as separate sections
 below a box; a team with nothing installed or configured still shows all
 eight tabs, each explaining its own empty state rather than disappearing.
 
+**General → Label suffix** is the one place a team's label suffix is changed
+after creation — the suffix that keeps parallel teams on one repository from
+waking each other. It follows the same rule as at creation (up to eight
+lowercase letters, digits and single inner dashes; empty means no suffix), so
+you can also give an unsuffixed team a suffix or remove one. **Change…**
+first shows a confirmation with how many labels and agents the change touches
+and a warning that the labels are renamed in place on GitHub; only then is
+anything written. It rewrites every place the team uses those labels —
+triggers and claims, channels, outcomes' *set label* actions, the label and
+human-role registries and the prompt text (only whole label names; a plain
+word such as *ready* stays as it is) — and renames the GitHub labels, so open
+issues and pull requests keep them. A suffix that would produce a label name
+another team on the same repository already uses is refused. If a GitHub
+rename fails, the team is still updated and the section lists the pending
+renames with a **Retry GitHub rename** button. Running sessions pick up the
+new labels and prompts on their next run. It applies immediately, not through
+Save.
+
 Saving General or Skills uses this form's own Save button; the five
 environment tabs and Plugins keep their own, unrelated save/apply behaviour
 exactly as before — switching tabs never loses an edit in progress, and the

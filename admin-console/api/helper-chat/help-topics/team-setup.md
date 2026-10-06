@@ -95,6 +95,13 @@ auto-generated token has no words to separate.
 
 Leave it blank unless another Agent Team already uses that repository.
 
+After creation you no longer type the suffix: the live team's label fields show
+the editable **base** (`ready-for-review`) next to a muted, read-only
+**`-k3f9` chip**, and save the full name for you. To change, add or remove the
+suffix later, use **Team Settings → General → Label suffix** — it renames every
+team label in one step, including the labels on GitHub (see the Agent Chat
+help, *The team's configuration tabs, in detail*).
+
 ## Collisions, failure and growing later
 
 - **Create team** is disabled, with the reason stated next to the button, on a

@@ -7,6 +7,7 @@ import { useHelpSubject } from '../../context/HelperChatContext';
 import { OVERLAY_FLOW_LABELS } from '../../context/page-help-view.js';
 import { FLOWS_HELP_SECTIONS } from './flows-help-sections';
 import { registryRows } from './label-registry-ops';
+import { SuffixedLabelText } from '../../components/SuffixedLabelInput';
 
 // Label registry editor (#981) — per routing label, WHO sets it and who reacts.
 // Gate/brake-ness is CONFIGURATION, not naming (#928), and the two flags encode
@@ -125,7 +126,7 @@ export default function LabelRegistryPanel({ labels = [], unusedLabels = [], ops
               padding: '8px 4px', borderTop: '1px solid var(--eb-border-default)',
             }}>
               <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
-                <code style={{ fontSize: 'var(--eb-text-xs)', overflowWrap: 'anywhere' }}>{row.name}</code>
+                <SuffixedLabelText label={row.name} codeStyle={{ fontSize: 'var(--eb-text-xs)', overflowWrap: 'anywhere' }} />
                 {row.unused && (
                   <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
                     not used in this flow

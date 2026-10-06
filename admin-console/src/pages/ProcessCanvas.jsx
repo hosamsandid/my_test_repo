@@ -21,6 +21,8 @@ import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog, CreateChannel
 import { outcomeDropDialog, edgeOpensProducerOutcome, nodeLabelTarget, labelTargetKind } from './process/outcome-routing';
 import MaterializeDialog from './process/MaterializeDialog';
 import SidePanel from '../components/SidePanel';
+import { LabelSuffixContext } from '../components/SuffixedLabelInput';
+import { labelSuffixContextFor } from './process/label-suffix-view.js';
 import { roleIcon } from '../components/role-icons';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
 import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './process/connection-capabilities';
@@ -402,6 +404,12 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     removeHumanEmit: (id, label) => liveOps.removeHumanEmit(scope, id, label),
   }), [scope]);
 
+  // #2858: a live team's label editors show the base + the suffix as a chip.
+  // Drafts, imports and Copilot proposals are templates — no suffix there.
+  const labelSuffixCtx = useMemo(
+    () => (parallelismTeamCfg && !imported && !proposal ? labelSuffixContextFor(parallelismTeamCfg) : null),
+    [parallelismTeamCfg, imported, proposal],
+  );
   // A Copilot proposal wins the display like an imported bundle does — the
   // canvas is the read-only preview of what the chat produced (#1069).
   const displayGraph = proposal ? proposal.graph : imported ? imported.graph : isDraft ? draftGraph : graph;
@@ -891,6 +899,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     // Outer row: the canvas column + the docked Copilot rail (#1069). The rail
     // is a flex CHILD, not an overlay — the canvas stays visible and
     // interactive while chatting (it is the live preview of the chat's output).
+    <LabelSuffixContext.Provider value={labelSuffixCtx}>
     <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
     <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {/* Toolbar — the scope picker lives in the Flows left list, not here. */}
@@ -1492,6 +1501,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
       />
     )}
     </div>
+    </LabelSuffixContext.Provider>
   );
 }
 

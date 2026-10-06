@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { User, Trash2, X } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
+import { useLabelSuffix, LabelSuffixChip } from '../../components/SuffixedLabelInput';
+import { labelListToText, labelListFromText } from './label-suffix-view.js';
 import { wireHumanGate } from './wiring-engine';
 
 // Inspector variant for a first-class human role node (#987). A human role is
@@ -61,23 +63,24 @@ function GateWakePicker({ label, human, peers, ops, humanOps, busy, onChanged })
 }
 
 export default function HumanNodeInspector({ human, stages = [], ops, triggerOps, peers = [], onClose, onDeleted, onChanged }) {
+  const suffixCtx = useLabelSuffix();
   const [name, setName] = useState(human.name || human.id);
   const [description, setDescription] = useState(human.description || '');
   const [stage, setStage] = useState(human.stage || '');
-  const [emitsText, setEmitsText] = useState((human.emits || []).join(', '));
+  const [emitsText, setEmitsText] = useState(labelListToText(human.emits, suffixCtx));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
   const dirty = name !== (human.name || human.id)
     || description !== (human.description || '')
     || stage !== (human.stage || '')
-    || emitsText !== (human.emits || []).join(', ');
+    || emitsText !== labelListToText(human.emits, suffixCtx);
 
   const save = async () => {
     if (busy) return;
     setBusy(true); setError(null);
     try {
-      const emits = emitsText.split(',').map(s => s.trim()).filter(Boolean);
+      const emits = labelListFromText(emitsText, suffixCtx, human.emits);
       await ops.upsertHuman({ ...human, id: human.id, name: name.trim() || human.id, description, stage, emits });
       onChanged?.();
     } catch (e) { setError(e.message); }
@@ -136,6 +139,11 @@ export default function HumanNodeInspector({ human, stages = [], ops, triggerOps
           <label style={labelStyle}>Labels this person applies (gates), comma-separated</label>
           <input style={inputStyle} value={emitsText} disabled={busy}
             placeholder="e.g. dispatch, approved" onChange={e => setEmitsText(e.target.value)} />
+          {suffixCtx && (
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 3 }}>
+              Team labels get <LabelSuffixChip suffix={suffixCtx.suffix} /> appended; labels without it are kept as they are.
+            </span>
+          )}
           <p style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 4, lineHeight: 1.5 }}>
             A label a human applies is a gate — an agent emitting it is a hard error.
           </p>

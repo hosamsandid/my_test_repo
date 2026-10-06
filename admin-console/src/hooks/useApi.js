@@ -104,6 +104,8 @@ export async function apiCall(method, url, body) {
     // the mutation DID happen; the caller must not report it as a failure.
     if (err && err.applied === true) e.applied = true;
     if (err && err.rolledBack === true) e.rolledBack = true;
+    // A 409 from the label-suffix change (#2858 AC10) names the colliding labels.
+    if (err && Array.isArray(err.collisions)) e.collisions = err.collisions;
     throw e;
   }
   return res.status === 204 ? null : res.json();

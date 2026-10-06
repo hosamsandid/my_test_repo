@@ -18,6 +18,7 @@ import {
   doneTitle,
   sessionView,
   poolView,
+  groupWorkingNow,
   needsYouView,
   boardView,
   EMPTY_TEXT,
@@ -362,7 +363,7 @@ test('chat link CSS gives hover and keyboard-focus affordances', () => {
 
 test('FlowControl wires the chat links: router Link, stage cell and Working-now line (#651 source guard)', () => {
   const jsx = fs.readFileSync(path.join(here, '..', 'FlowControl.jsx'), 'utf8');
-  assert.match(jsx, /import \{ Link as RouterLink \} from 'react-router';/);
+  assert.match(jsx, /import \{ Link as RouterLink(, [^}]*)? \} from 'react-router';/);
   assert.match(jsx, /<style>\{CHAT_LINK_CSS\}<\/style>/);
   assert.match(jsx, /if \(!chat\) return children;/);
   assert.match(jsx, /<RouterLink to=\{chat\.to\} title=\{chat\.label\} aria-label=\{chat\.label\} className=\{CHAT_LINK_CLASS\}/);
@@ -629,4 +630,69 @@ test('#2795: a PR held by its hand-off gate shows "waiting for CI" on the row', 
   assert.equal(free.gateTitle, '');
   const jsx = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'FlowControl.jsx'), 'utf8');
   assert.match(jsx, /\{row\.gateText && <div style=\{mutedStyle\} title=\{row\.gateTitle\}>⏳ \{row\.gateText\}<\/div>\}/);
+});
+
+// #2848 — running instances nested beneath their pool line.
+test('groupWorkingNow: pooled instances go beneath their own pool, in server order (AC1, AC2, edge: stable order)', () => {
+  const v = boardView({
+    sessions: [
+      { id: 'a', agentId: 't-dev-i8', roleId: 't-dev', roleLabel: 'Developer', instance: 8, startedAt: ago(9) },
+      { id: 'b', agentId: 't-rev-i3', roleId: 't-rev', roleLabel: 'Reviewer', instance: 3, startedAt: ago(5) },
+      { id: 'c', agentId: 't-dev-i7', roleId: 't-dev', roleLabel: 'Developer', instance: 7, startedAt: ago(2) },
+    ],
+    pools: [
+      { agentId: 't-rev', roleId: 'rev', label: 'Reviewer', busy: 1, capacity: 3 },
+      { agentId: 't-dev', roleId: 'dev', label: 'Developer', busy: 2, capacity: 3 },
+    ],
+  }, NOW);
+  assert.deepEqual(v.sessions, []);
+  assert.deepEqual(v.pools.map((p) => [p.label, p.instances.map((s) => s.id)]), [
+    ['Reviewer', ['b']],
+    ['Developer', ['a', 'c']],
+  ]);
+});
+
+test('groupWorkingNow: instance lines keep their content and chat link (AC3)', () => {
+  const v = boardView({
+    repos: ['o/r'],
+    sessions: [{ id: 'a', agentId: 't-dev-i7', roleId: 't-dev', roleLabel: 'Developer', instance: 7, issue: { repo: 'o/r', number: 7 }, title: 'Fix it', startedAt: ago(3) }],
+    pools: [{ agentId: 't-dev', roleId: 'dev', label: 'Developer', busy: 1, capacity: 3 }],
+  }, NOW);
+  const s = v.pools[0].instances[0];
+  assert.deepEqual(s, sessionView({ id: 'a', agentId: 't-dev-i7', roleId: 't-dev', roleLabel: 'Developer', instance: 7, issue: { repo: 'o/r', number: 7 }, title: 'Fix it', startedAt: ago(3) }, { now: NOW }));
+  assert.equal(s.chat.to, '/chats/t-dev-i7');
+  assert.equal(s.instance, '#7');
+});
+
+test('groupWorkingNow: idle pools have no children; non-pooled and unmatched runs stay top level (AC4, AC5, AC6)', () => {
+  const v = boardView({
+    sessions: [
+      { id: 'plain', agentId: 't-po', roleId: 't-po', roleLabel: 'PO' },
+      { id: 'orphan', agentId: 't-qa-i4', roleId: 't-qa', roleLabel: 'QA', instance: 4 },
+      { id: 'noRole', agentId: 't-x', roleLabel: 'X' },
+    ],
+    pools: [{ agentId: 't-dev', roleId: 'dev', label: 'Developer', busy: 0, capacity: 3, state: 'paused' }],
+  }, NOW);
+  assert.deepEqual(v.sessions.map((s) => s.id), ['plain', 'orphan', 'noRole']);
+  assert.deepEqual(v.pools[0].instances, []);
+  assert.equal(v.pools[0].stateText, 'Paused');
+});
+
+test('groupWorkingNow: a draining pool keeps its finishing instances and its badge; no run is lost or doubled', () => {
+  const sessions = [
+    { id: 'a', roleId: 't-dev', role: 'Developer' },
+    { id: 'b', roleId: 't-po', role: 'PO' },
+  ];
+  const pools = [poolView({ agentId: 't-dev', roleId: 'dev', label: 'Developer', busy: 1, state: 'draining' })];
+  const g = groupWorkingNow(sessions, pools);
+  assert.equal(g.pools[0].stateText, 'Draining, 1 still running');
+  const all = [...g.sessions, ...g.pools.flatMap((p) => p.instances)].map((s) => s.id).sort();
+  assert.deepEqual(all, ['a', 'b']);
+  assert.deepEqual(groupWorkingNow(undefined, undefined), { sessions: [], pools: [] });
+});
+
+test('help topic says pooled instances are listed beneath their role (AC8)', () => {
+  const md = fs.readFileSync(HELP_TOPIC, 'utf8');
+  const section = md.split('## Who is working right now')[1].split('\n## ')[0];
+  assert.match(section, /indented directly beneath/);
 });

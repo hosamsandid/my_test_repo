@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   AlertTriangle, RefreshCw, ExternalLink, Info, Pause, Play, Waves, Zap, Power, Columns, UserRound, EyeOff, RotateCcw, LockOpen, CheckCircle2,
 } from 'lucide-react';
-import { Link as RouterLink } from 'react-router';
+import { Link as RouterLink, useSearchParams } from 'react-router';
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import PageHelpButton from '../components/PageHelpButton';
@@ -13,6 +13,7 @@ import {
   withoutRows, REMOVE_CONFIRM_TEXT, removeDialogTitle, RELEASE_CONFIRM_TEXT, releaseDialogTitle, releaseNotice, CHAT_LINK_CLASS, CHAT_LINK_CSS,
 } from './process/flow-control-view';
 import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections';
+import { readCurrentTeam, writeCurrentTeam, resolveFlowControlTeam } from './current-team';
 
 // The Flow Control board (#2573, concept `docs/flow-control-concept.md`
 // Amendment 3): who is working on what, where a person is needed, and how far
@@ -53,10 +54,23 @@ export default function FlowControl() {
   const [removedOpen, setRemovedOpen] = useState(false);
   const loadSeq = useRef(0);
 
-  // Default to the first team once the list arrives; never override a choice.
+  const [searchParams] = useSearchParams();
+  const urlTeam = searchParams.get('team') || '';
+
+  // Open on `?team=`, else the team last worked with in Agent Chat or picked
+  // here (#2850), else the first team — once the list arrives, so no other
+  // team's board is fetched first; never override a choice.
   useEffect(() => {
-    if (!teamId && teams.length > 0) setTeamId(teams[0].id);
-  }, [teams, teamId]);
+    if (teamId) return;
+    const resolved = resolveFlowControlTeam({ urlTeam, rememberedTeam: readCurrentTeam(username), teams });
+    if (resolved) setTeamId(resolved);
+  }, [teams, teamId, urlTeam, username]);
+
+  // A pick in the picker becomes the current team for every page.
+  const pickTeam = useCallback((id) => {
+    setTeamId(id);
+    writeCurrentTeam(username, id);
+  }, [username]);
 
   // The preference is per user, and the user record can arrive after mount.
   useEffect(() => { setAutoRefresh(readAutoRefresh(username)); }, [username]);
@@ -227,7 +241,7 @@ export default function FlowControl() {
         ) : (
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
-              <TeamPicker teams={teams} value={teamId} onChange={setTeamId} />
+              <TeamPicker teams={teams} value={teamId} onChange={pickTeam} />
               {view.canManage && (
                 <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 'var(--eb-space-2)' }}>
                   {view.removed.length > 0 && (
@@ -413,6 +427,12 @@ const lineStyle = {
   fontSize: 'var(--eb-text-sm)',
 };
 
+const nestedLineStyle = {
+  ...lineStyle,
+  marginLeft: 'var(--eb-space-6)',
+  borderLeft: '3px solid var(--eb-border-default)',
+};
+
 const mutedStyle = { color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' };
 
 // In-console link to the chat of the agent working right now (#2723): a real
@@ -443,26 +463,32 @@ function Link({ href, children }) {
 
 /* ── area ①: working now ───────────────────────────────────────────── */
 
+// One running run. `nested` (#2848): an instance listed beneath its pool line.
+function SessionLine({ s, nested = false }) {
+  return (
+    <div style={nested ? nestedLineStyle : lineStyle}>
+      <span style={{ color: 'var(--eb-text-primary)', fontWeight: 500 }}>
+        <ChatLink chat={s.chat}>
+          {s.role}{s.instance && <span style={mutedStyle}> {s.instance}</span>}
+        </ChatLink>
+      </span>
+      <span style={{ fontFamily: 'var(--eb-font-mono)', ...mutedStyle }}>{s.item}</span>
+      {s.title && <span style={{ color: 'var(--eb-text-primary)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.title}</span>}
+      <span style={{ marginLeft: 'auto', ...mutedStyle }} title="Running for">{s.running}</span>
+    </div>
+  );
+}
+
 function WorkingNow({ view, busy, onSetState, onForceDispatch }) {
   const nothing = view.sessions.length === 0 && view.pools.length === 0 && view.held.length === 0;
   return (
     <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
       <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.working} helpLabel="What Working now shows">Working now</AreaHeading>
       {nothing && <p style={{ margin: 0, ...mutedStyle }}>No agent is running.</p>}
-      {view.sessions.map((s) => (
-        <div key={s.id} style={lineStyle}>
-          <span style={{ color: 'var(--eb-text-primary)', fontWeight: 500 }}>
-            <ChatLink chat={s.chat}>
-              {s.role}{s.instance && <span style={mutedStyle}> {s.instance}</span>}
-            </ChatLink>
-          </span>
-          <span style={{ fontFamily: 'var(--eb-font-mono)', ...mutedStyle }}>{s.item}</span>
-          {s.title && <span style={{ color: 'var(--eb-text-primary)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.title}</span>}
-          <span style={{ marginLeft: 'auto', ...mutedStyle }} title="Running for">{s.running}</span>
-        </div>
-      ))}
+      {view.sessions.map((s) => <SessionLine key={s.id} s={s} />)}
       {view.pools.map((p) => (
-        <div key={p.key} style={lineStyle}>
+        <React.Fragment key={p.key}>
+        <div style={lineStyle}>
           <span style={{ color: 'var(--eb-text-primary)', fontWeight: 500 }}>{p.label}</span>
           <span style={mutedStyle}>{p.occupancy}</span>
           {p.stateText && (
@@ -487,6 +513,8 @@ function WorkingNow({ view, busy, onSetState, onForceDispatch }) {
             <PageHelpButton label="Pause, Drain and Switch on" size={12} section={FLOW_CONTROL_HELP_SECTIONS.poolControls} style={{ padding: 0 }} />
           </span>
         </div>
+        {p.instances.map((s) => <SessionLine key={s.id} s={s} nested />)}
+        </React.Fragment>
       ))}
       {view.held.map((h) => (
         <div key={h.id} style={lineStyle}>

@@ -197,7 +197,7 @@ your reply still work too.
 
 ---
 
-## 8. Admin Console UI gotchas
+## 8. Agent Studio UI (admin-console) gotchas
 
 - **Popovers/tooltips inside scrollable or `overflow`-clipped ancestors get
   clipped — and `z-index` cannot rescue them.** Any absolutely/relatively

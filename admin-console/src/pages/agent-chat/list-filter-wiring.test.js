@@ -48,6 +48,15 @@ test('AC3/AC11/AC12 — the list derives its reorder gates and empty hint from t
   assert.doesNotMatch(list, /filter\.kind/);
 });
 
+test('#2846 — every shown team gets the member gate; each keeps its ≥2-members guard', () => {
+  assert.match(list, /const \{ groups: canReorder, members: canReorderMembers \} = useMemo\(/);
+  assert.match(list, /memberReorder=\{canReorderMembers\}/);
+  assert.match(list, /const memberDragEnabled = memberReorder && group\.children\.length > 1;/);
+  assert.match(list, /dragEnabled=\{memberDragEnabled\}/);
+  // Group grips stay on the stricter everything-shown gate.
+  assert.match(list, /dragEnabled=\{canReorder && visibleGroups\.length > 1\}/);
+});
+
 test('AC13 — labelled checkboxes, Escape closes and returns focus', () => {
   assert.match(control, /type="checkbox"[\s\S]*?aria-label=\{entry\.subtitle \? `\$\{entry\.label\} \(\$\{entry\.subtitle\}\)` : entry\.label\}/);
   assert.match(control, /if \(e\.key === 'Escape'\) \{[\s\S]*?close\(\);/);

@@ -176,6 +176,7 @@ const skillMerge = require('./skill-merge');
 const skillImport = require('./skill-import');
 const skillGrantValidate = require('./skill-grant-validate');
 const skillPoolTeam = require('./skill-pool-team');
+const skillFileBatch = require('./skill-file-batch');
 const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archives');
 const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix, stampLiveLabels } = require('./label-suffix');
@@ -11855,7 +11856,11 @@ app.get('/api/skills/:name/files', (req, res) => {
   const root = skillRootDir(source, name, agentId, teamId);
   if (!root) return res.status(400).json({ error: 'Invalid skill name, agent id or team id' });
   if (!fs.existsSync(path.join(root, 'SKILL.md'))) return res.status(404).json({ error: 'Skill not found' });
-  res.json({ files: listSkillFiles(root) });
+  // `dirs` lets the skill editor show persisted empty folders; `hash` is the
+  // content hash the editor sends back as `baseHash` on save (#2837 AC16/AC22).
+  let hash = null;
+  try { hash = skillManifest.hashSkillDir(root); } catch { hash = null; }
+  res.json({ files: listSkillFiles(root), dirs: skillFileBatch.listSkillDirs(root), hash });
 });
 
 // Read a single file from a skill directory. Caps reads and flags binary files
@@ -11936,6 +11941,93 @@ app.put('/api/skills/:name/file', (req, res) => {
   stampSkill(root, { name, by: skillActor(req), action: 'edited' });
   autoResyncOnEdit(name, source === 'team' ? { tier: 'team', teamId } : { tier: 'global' });
   res.json({ path: String(file), source: 'pool' });
+});
+
+// Atomic multi-file save for the full-screen skill editor (#2837). One request
+// carries every pending change (deletes, moves, writes incl. uploads, empty
+// folders); skill-file-batch.js validates it against the current listing. The
+// changes are applied to a STAGING copy of the skill dir which is then swapped
+// in, so a failure anywhere writes nothing (AC11). `baseHash` is the content
+// hash the editor loaded; a mismatch means someone else changed the skill and
+// the save is refused with 409 (AC16). Exactly one version stamp + one
+// auto-resync per save (AC12). Same permission gate as PUT …/file (#2307, AC24).
+app.post('/api/skills/:name/files/batch', (req, res) => {
+  const { name } = req.params;
+  const { source, teamId } = req.query;
+  if (source === 'agent') {
+    return res.status(403).json({ error: 'Agent skills are read-only from the registry. Promote the skill to the pool to edit it.' });
+  }
+  if (!SKILL_NAME_RE.test(name || '') || (source === 'team' && !POOL_TEAM_ID_RE.test(teamId || ''))) {
+    return res.status(400).json({ error: 'Invalid skill name or team id' });
+  }
+  const scope = getScope(req);
+  const permit = skillTransfer.permitTransfer(
+    skillTransfer.requiredPoolWritePermission(source === 'team' ? 'team' : 'global', teamId),
+    { systemAdmin: !!scope.all, isTeamAdmin: (tid) => canManageTeam(scope, tid), isTeamAdminOfAny: () => isTeamAdminOfAny(scope) },
+    'edit',
+  );
+  if (!permit.ok) return res.status(403).json({ error: permit.error });
+  const root = source === 'team' ? safeTeamSkillDir(teamId, name) : safeGlobalSkillDir(name);
+  if (!root) return res.status(400).json({ error: 'Invalid skill name or team id' });
+  if (!fs.existsSync(path.join(root, 'SKILL.md'))) return res.status(404).json({ error: 'Skill not found' });
+
+  const body = req.body || {};
+  const currentHash = skillManifest.hashSkillDir(root);
+  if (typeof body.baseHash !== 'string' || body.baseHash !== currentHash) {
+    return res.status(409).json({ error: 'This skill was changed elsewhere since you opened it. Reload to see the current version — your pending changes are kept until you do.', conflict: true, currentHash });
+  }
+  const listing = { files: listSkillFiles(root).map(f => f.path), dirs: skillFileBatch.listSkillDirs(root) };
+  const planned = skillFileBatch.planBatch(body, listing);
+  if (!planned.ok) return res.status(planned.status).json({ error: planned.error, ...(planned.file ? { file: planned.file } : {}) });
+
+  // SKILL.md must keep a usable frontmatter — but only refuse when the save
+  // would break one that is valid today, so legacy skills stay editable.
+  const mdWrite = planned.plan.writes.find(w => w.path === 'SKILL.md');
+  if (mdWrite) {
+    let before = '';
+    try { before = fs.readFileSync(path.join(root, 'SKILL.md'), 'utf8'); } catch { /* treated as invalid */ }
+    const after = skillImport.validateSkillMd(mdWrite.bytes.toString('utf8'));
+    if (skillImport.validateSkillMd(before).ok && !after.ok) {
+      return res.status(400).json({ error: after.error, file: 'SKILL.md' });
+    }
+  }
+
+  const parent = path.dirname(root);
+  const tag = `${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  const staging = path.join(parent, `.${path.basename(root)}.edit-${tag}`);
+  const backup = path.join(parent, `.${path.basename(root)}.prev-${tag}`);
+  try {
+    fs.cpSync(root, staging, { recursive: true, verbatimSymlinks: true });
+    skillFileBatch.applyBatch(staging, planned.plan);
+  } catch (err) {
+    try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ }
+    return res.status(500).json({ error: `Save failed, nothing was written: ${err.message}` });
+  }
+  try {
+    fs.renameSync(root, backup);
+    try {
+      fs.renameSync(staging, root);
+    } catch (err) {
+      fs.renameSync(backup, root);
+      throw err;
+    }
+  } catch (err) {
+    try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ }
+    return res.status(500).json({ error: `Save failed, nothing was written: ${err.message}` });
+  }
+  try { fs.rmSync(backup, { recursive: true, force: true }); } catch { /* best effort */ }
+
+  const manifest = stampSkill(root, { name, by: skillActor(req), action: 'edited' });
+  autoResyncOnEdit(name, source === 'team' ? { tier: 'team', teamId } : { tier: 'global' });
+  let hash = null;
+  try { hash = skillManifest.hashSkillDir(root); } catch { hash = null; }
+  res.json({
+    saved: true,
+    version: manifest && manifest.version != null ? manifest.version : null,
+    hash,
+    files: listSkillFiles(root),
+    dirs: skillFileBatch.listSkillDirs(root),
+  });
 });
 
 // Stream a ZIP archive of an entire skill directory (pool or agent source).

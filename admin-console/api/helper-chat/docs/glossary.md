@@ -292,7 +292,7 @@ deliberately *not* the configuration audit log.
 
 ## Infrastructure
 
-### Admin Console
+### Agent Studio (web UI)
 The browser UI on port `4000`. Everything is done here: agents, credentials,
 environments, flows, knowledge, chats, logs. Sits behind a login.
 
@@ -328,6 +328,7 @@ and knowing which is which saves confusion:
 | Name | What it names | Where you see it |
 |---|---|---|
 | **Agent Studio** | the **product** | the UI, the browser tab, the login screen, the README |
+| **`admin-console`** | the **internal service name** of the Agent Studio web UI | container, image and directory names, operator docs |
 | **agent-studio** | the **compose project** (default container and volume name prefix) | `podman ps`, volume names, `COMPOSE_PROJECT_NAME` in `.env` |
 | **`.agent-studio/`** | the **per-agent workspace state directory** | every agent's file tree (`bin/`, `plugins/`, `seeded-skills.json`, `prompt-history.json`, `artifacts.jsonl`, …) |
 | **AEE** / `AEE_*` | the **internal runtime/env-var namespace** ("Agent Execution Environment") | environment variables, container labels (`aee.*`), the `io.aee.*` wire protocol, operator docs |

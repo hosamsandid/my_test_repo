@@ -115,7 +115,7 @@ Crucially, the import accepts skills in the **classic skill format** produced by
 
 ## 9. Access Control
 
-**Question:** Admin Console ships with one shared login. Anyone with it can change any config, see all sessions, access all credentials. No role separation out of the box.
+**Question:** Agent Studio ships with one shared login. Anyone with it can change any config, see all sessions, access all credentials. No role separation out of the box.
 
 **Resolution:**
 Access control is no longer a single shared login. Under the Team area we can **create users and give each user an individual password**, and assign users to agent teams. There are **three roles — System Admin, Team Admin, and normal Team Member** — which are allowed to see different things in the Studio (visibility scoping).

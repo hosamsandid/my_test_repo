@@ -8,7 +8,7 @@ Skills exist on two tiers, and an agent resolves a skill name **team-first, then
 
 | Tier | Location | Managed by | Who gets it |
 |---|---|---|---|
-| **Global** | `skills/<name>/SKILL.md` in the skill-pool volume (`/pool/skills` in the admin console, `/template-workspace/skills` in the orchestrator) | Team Admin (any team) or System Admin | every agent |
+| **Global** | `skills/<name>/SKILL.md` in the skill-pool volume (`/pool/skills` in the `admin-console` container, `/template-workspace/skills` in the orchestrator) | Team Admin (any team) or System Admin | every agent |
 | **Team** | `/workspace/teams/<teamId>/skills/<name>/SKILL.md` (on the workspace volume) | Team Admin | only agents owned by that team |
 
 The `<teamId>` of a team pool is the **Agent Team** id: a team's agents and its members all read the pool of that Agent Team (a member uses its parent team), and only a standalone agent falls back to its legacy team id. Creating, importing, adopting and deleting team skills on the Skills page use the same key (#2689).
@@ -42,7 +42,7 @@ The default skill set covers mainframe migration: COBOL analysis, JCL conversion
 
 ## Skills Registry
 
-The Admin Console's **Skills Registry** page (`/skills`) lists all available skills in the pool and lets you click through to read any skill's content without leaving the browser.
+Agent Studio's **Skills Registry** page (`/skills`) lists all available skills in the pool and lets you click through to read any skill's content without leaving the browser.
 
 ## Updating a skill
 

@@ -420,7 +420,7 @@ async function handleCli(req, res, cliPath) {
   const sendJiraError = (err) => {
     if (personal && err && err.status === 401) {
       return sendJson(res, 401, {
-        error: `Jira rejected your personal Jira token (401) — renew it in the Admin Console under ${PERSONAL_TOKEN_PAGE}.`,
+        error: `Jira rejected your personal Jira token (401) — renew it in Agent Studio under ${PERSONAL_TOKEN_PAGE}.`,
         code: 'personal-credential-rejected',
       });
     }

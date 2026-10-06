@@ -32,6 +32,7 @@ import PageHelpButton from '../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat/agent-chat-help-sections.js';
 import { buildSessionJumpRequest } from './agent-chat/session-jump.js';
 import { agentNotFoundState, agentNotFoundFrom, agentNotFoundCopy } from './agent-chat/agent-not-found.js';
+import { teamIdOfAgent, writeCurrentTeam } from './current-team.js';
 
 // Page-action header buttons (#1956). Copied from the convention the other
 // #1847/#1912-migrated pages share (`Briefings.jsx`): accent for the page's
@@ -629,6 +630,14 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   // room at all. Both cases treat the route as no *chat* selection so the panel
   // never attempts `ChatPanel` against a null room.
   const routedAgent = (agents ?? []).find(a => a.id === agentId) || null;
+
+  // #2850: the team of the routed subject (a member, a pool instance or the
+  // team entry itself) becomes the current team Flow Control opens on. An
+  // agent outside any team leaves the current team as it was.
+  const routedTeamId = teamIdOfAgent(routedAgent);
+  useEffect(() => {
+    if (routedTeamId) writeCurrentTeam(user?.username, routedTeamId);
+  }, [routedTeamId, user?.username]);
 
   // #2311 D2: the roster now refreshes in the background, so the currently
   // open chat's agent can vanish (pool reap, deletion elsewhere) while the

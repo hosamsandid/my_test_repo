@@ -11,7 +11,7 @@ every Jira call server-side. This CLI is a privilege-less client that just
 carries the scope token and the agent's caller token.
 
 Whose Jira account a call runs as (#2562): in a CHAT turn, the person who wrote
-the message — their own Jira e-mail + API token, stored in the Admin Console
+the message — their own Jira e-mail + API token, stored in Agent Studio
 under Connections → Plugin Tokens. Without one every subcommand is refused and
 nothing is sent to Jira. In an AUTOMATED run (schedule, event, loop, hand-off)
 the team's service account is used.

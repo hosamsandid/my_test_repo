@@ -1,6 +1,6 @@
 # Autonomous Triggers
 
-Agents are driven by triggers defined in a per-agent `triggers.json` file. The scheduler syncs changes every 60 seconds. All trigger types are created and managed per agent via the Admin Console — inline in the **Agent Chat** right rail, under the **Triggers** tab.
+Agents are driven by triggers defined in a per-agent `triggers.json` file. The scheduler syncs changes every 60 seconds. All trigger types are created and managed per agent in Agent Studio — inline in the **Agent Chat** right rail, under the **Triggers** tab.
 
 ## Trigger Types
 
@@ -45,7 +45,7 @@ The orchestrator exposes a second HTTP server on `HOOK_PORT` (default `4003`). E
 **Endpoint:** `POST http://<host>:4003/hooks/<agentId>/<triggerId>`  
 **Auth:** `X-Hook-Secret: <secret>` header, e.g. `curl -X POST -H "X-Hook-Secret: <secret>" http://<host>:4003/hooks/<agentId>/<triggerId>` — or, for a GitHub webhook (which cannot send custom headers), the secret as the webhook's **Secret**: the `X-Hub-Signature-256` HMAC over the body is verified instead (#2680). A signed GitHub `ping` returns 200 without firing. Bodies over 25 MB → 413.
 
-The webhook secret is generated automatically when the trigger is created. It is visible in the Admin Console trigger editor.
+The webhook secret is generated automatically when the trigger is created. It is visible in the Agent Studio trigger editor.
 
 ## GitHub Poller
 
@@ -205,6 +205,6 @@ The loop posts a summary and stops when it reaches any terminal state:
 | **paused** | Platform runaway safeguard tripped. |
 | **stopped** | User pressed **Stop** mid-loop. |
 
-### Admin Console
+### In Agent Studio
 
 The **Start a loop** dialog opens from the **loop icon** (`<Repeat/>`) in the chat composer (bottom-left of the message input area in Agent Chat). The icon carries a tooltip and screen-reader label — "Run a loop — repeats until the goal is met" — shown on hover **and** keyboard focus, so it is discoverable without prior context. Core settings (number of tries, who checks the work) are always visible; the stop condition, token budget, and gap options live under **Advanced settings**. The loop icon is **launch-only** (#1427): while any chat turn or loop is running for the selected agent, the primary-action button (the **Send** position) switches to a unified **Stop** (⏹) control; pressing it aborts whatever is running via the session-stop path and returns to **Send**. A turn stop also inserts a distinct "Stopped by user" marker in the transcript.

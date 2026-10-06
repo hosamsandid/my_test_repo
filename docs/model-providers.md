@@ -53,7 +53,7 @@ For `oauth-token` providers the orchestrator:
 - Strips `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_API_KEY` (which would otherwise take precedence over the OAuth token in the CLI).
 - The agent CLI therefore talks directly to `api.anthropic.com`, bypassing any configured proxy.
 
-**Compliance note:** Consumer-subscription OAuth tokens are limited to single-user use under [Anthropic's Consumer Terms](https://www.anthropic.com/legal/consumer-terms). The Admin Console requires an explicit single-user confirmation before creating or re-keying an `oauth-token` provider. This acknowledgment is recorded on the provider entry (`complianceAck`). One-shot server-side generation (e.g. for LLM-assisted prompt drafting) deliberately skips `oauth-token` providers to avoid unintended multi-user use.
+**Compliance note:** Consumer-subscription OAuth tokens are limited to single-user use under [Anthropic's Consumer Terms](https://www.anthropic.com/legal/consumer-terms). Agent Studio requires an explicit single-user confirmation before creating or re-keying an `oauth-token` provider. This acknowledgment is recorded on the provider entry (`complianceAck`). One-shot server-side generation (e.g. for LLM-assisted prompt drafting) deliberately skips `oauth-token` providers to avoid unintended multi-user use.
 
 ## Model overrides
 

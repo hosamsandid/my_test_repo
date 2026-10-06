@@ -51,7 +51,8 @@ test('the label fast path and the manual re-fire fold the verdict into their log
   const fast = slice(ORCH, 'async function wakeGithubLabelListeners(', '\n}\n', 6000);
   assert.match(fast, /enqueuePending\(l\.agentId, \{[\s\S]*?\}, \{ decision \}\);/, 'the fast path must pass a decision');
   assert.match(fast, /githubEventLog\.applyPoolDecision\(\{[\s\S]*?\}, decisions\.get\(l\)\)/);
-  const refire = slice(ORCH, 'const ok = enqueuePending(agentId, githubRefire.buildRefirePendingEntry({', 'githubEventLog.record(logEntry);', 3000);
+  // #2875: the re-fire enqueues on the pool instance's template (`target`).
+  const refire = slice(ORCH, 'const ok = enqueuePending(target, githubRefire.buildRefirePendingEntry({', 'githubEventLog.record(logEntry);', 3000);
   assert.match(refire, /\}\), \{ decision \}\);/, 'the re-fire must pass a decision');
   assert.match(refire, /githubEventLog\.applyPoolDecision\(\s*\{[^}]*\}, decision\)/);
 });

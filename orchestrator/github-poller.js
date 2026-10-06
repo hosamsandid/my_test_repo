@@ -39,6 +39,7 @@ const commentFilter = require('./comment-filter');
 const { knowledgeBranchesByRepo, isKnowledgeBranchPush } = require('./knowledge-branch-exclusion');
 const prReadiness = require('./pr-readiness');
 const handoffGate = require('./handoff-gate');
+const { isDirectWakeListener } = require('./pool-wake-target');
 
 // Poll cadence. Fixed 30s in production; overridable via
 // AEE_GITHUB_POLL_INTERVAL_MS (#711) so the E2E stack can tighten it — the
@@ -2445,6 +2446,10 @@ function computePollPlan({ environments = [], agents = [], knowledgeLocations = 
     // process may have been stopped; enqueueing would only accumulate a
     // backlog that fires in a burst on re-enable.
     if (agent?.config?.enabled === false) continue;
+    // #2875: a pool instance inherits its role's triggers but is never woken
+    // directly — its template subscribes, and the dispatch routes the wake
+    // onto the item's own instance.
+    if (!isDirectWakeListener(agent?.config)) continue;
     const triggers = agent?.triggers;
     if (!Array.isArray(triggers)) continue;
 

@@ -137,6 +137,18 @@ test('projectAgentRows (#2525): one row per trigger outcome of this agent only, 
   assert.deepEqual(eventLog.projectAgentRows([armedDrop], 'nobody'), []);
 });
 
+test('projectAgentRows (#2875): a pool instance\'s drop re-fired through its template reads as re-fired on the instance', () => {
+  const inst = 'developer-i7';
+  const drop = { ...armedDrop, outcomes: [{ ...armedDrop.outcomes[0], agentId: inst }] };
+  const viaTemplate = {
+    ...refireRow,
+    refireOf: { ...refireRow.refireOf, agentId: inst },
+    outcomes: [{ ...refireRow.outcomes[0], agentId: DEV, instanceId: inst }],
+  };
+  const row = eventLog.projectAgentRows([drop, viaTemplate], inst).find(r => r.eventId === '100');
+  assert.deepEqual(row.refired, { eventId: 'refire:abc', by: 'ana', at: '2026-09-28T11:00:00.000Z' });
+});
+
 test('projectAgentRows (#2525): a re-fired drop carries who/when; the other trigger does not', () => {
   const rows = eventLog.projectAgentRows([armedDrop, refireRow], DEV);
   const t1 = rows.find(r => r.eventId === '100' && r.triggerId === 't1');

@@ -129,7 +129,18 @@ test('buildRefireEvent + buildRefirePendingEntry produce the poller-shaped deliv
     github: { event: 'pull_request.labeled', eventId: 'refire:ab', repo: 'org/repo', actor: 'ana', createdAt: '2026-09-29T00:00:00Z', payload: ev.payload },
   });
   assert.deepEqual(r.buildRefireLogFields({ entry: DROP, outcome: found.outcome, actor: 'ana' }),
-    { source: 'manual-refire', refiredBy: 'ana', refireOf: { eventId: '555', reason: 'wake-already-armed', ts: DROP.ts } });
+    { source: 'manual-refire', refiredBy: 'ana', refireOf: { eventId: '555', reason: 'wake-already-armed', ts: DROP.ts, agentId: 'rev' } });
+});
+
+test('findPriorRefire: a pool instance\'s drop re-fired through its template still counts as re-fired (#2875)', () => {
+  const refire = {
+    source: 'manual-refire', eventId: 'refire:1', ts: '2026-09-28T11:00:00Z', refiredBy: 'ana',
+    refireOf: { eventId: '555', reason: 'wake-already-armed', ts: DROP.ts, agentId: 'rev-i42' },
+    outcomes: [{ agentId: 'rev', triggerId: 't1', status: 'delivered', instanceId: 'rev-i42' }],
+  };
+  assert.equal(r.findPriorRefire([refire], { eventId: '555', agentId: 'rev-i42', triggerId: 't1' }), refire);
+  assert.equal(r.findPriorRefire([refire], { eventId: '555', agentId: 'rev-i42', triggerId: 't2' }), null);
+  assert.equal(r.findPriorRefire([refire], { eventId: '556', agentId: 'rev-i42', triggerId: 't1' }), null);
 });
 
 test('refireKey distinguishes triggers', () => {

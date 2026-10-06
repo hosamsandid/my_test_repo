@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   REFIRABLE_REASONS,
+  LABEL_PRESENT_REASONS,
   EVENT_RANGES,
   DEFAULT_EVENT_RANGE,
   rangeSince,
@@ -68,7 +69,7 @@ test('AC4: only delivered rows link to their session, by the runner correlationI
 test('AC5/AC7: Fire again is offered only on the three protection drops, to a manager, once', () => {
   assert.deepEqual([...REFIRABLE_REASONS], ['wake-already-armed', 'throttle', 'internal-dedup']);
   for (const r of REFIRABLE_REASONS) assert.equal(canRefire(drop(r), { canManage: true }), true, r);
-  for (const r of ['label-filter', 'self-claim-label', 'history-horizon', 'push-duplicate']) {
+  for (const r of ['label-filter', 'self-claim-label', 'push-duplicate']) {
     assert.equal(canRefire(drop(r), { canManage: true }), false, r);
   }
   assert.equal(canRefire(drop('throttle'), { canManage: false }), false, 'read-only for a member');
@@ -180,4 +181,18 @@ test('#2795: readiness-gate rows read as held / cleared, and gate drops explain 
   assert.match(dropReasonText(drop('gate-timeout', { gates: ['ci'] })), /not CI within the gate timeout.*'needs-human'/);
   assert.match(dropReasonText(drop('gate-cancelled', { cancelReason: 'closed' })), /the PR was closed first/);
   assert.match(dropReasonText(drop('gate-cancelled', { cancelReason: 'label-removed' })), /'ready-for-review' was removed first/);
+});
+
+test('#2874: a history-horizon drop of a label add is offered, with copy that says the event predates the trigger', () => {
+  assert.deepEqual([...LABEL_PRESENT_REASONS], ['history-horizon']);
+  assert.equal(canRefire(drop('history-horizon'), { canManage: true }), true);
+  // Not a label being added → nothing to re-check, never offered.
+  for (const event of ['pull_request.opened', 'pull_request.unlabeled', 'push']) {
+    assert.equal(canRefire(drop('history-horizon', { event }), { canManage: true }), false, event);
+  }
+  assert.equal(canRefire(drop('history-horizon', { label: null }), { canManage: true }), false);
+  assert.equal(canRefire(drop('history-horizon'), { canManage: false }), false);
+  const d = refireDialog(drop('history-horizon'));
+  assert.match(d.why, /predates the trigger: 'ready-for-review' was added to #42 Add thing before the trigger was activated/);
+  assert.match(d.why, /only fired again while 'ready-for-review' is still on the item/);
 });

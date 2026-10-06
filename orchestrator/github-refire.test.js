@@ -145,3 +145,58 @@ test('checkItemState (#2822): a comment listener\'s requireLabel must still be o
   assert.equal(r.checkItemState(issue(['clarifying']), { kind: 'issue', wakeLabel: null, requireLabel: 'clarifying' }).ok, true);
   assert.equal(r.checkItemState(issue([]), { kind: 'issue', wakeLabel: null }).ok, true);
 });
+
+// #2874: a history-horizon drop — the label was applied before the trigger
+// existed (flow re-applied, team moved to another instance).
+const HORIZON = {
+  ...DROP, eventId: '16462270300',
+  outcomes: [{ agentId: 'rev', triggerId: 't1', status: 'dropped', reason: 'history-horizon', digest: false }],
+};
+const horizonFound = r.findDroppedOutcome([HORIZON], { eventId: '16462270300', agentId: 'rev', triggerId: 't1' });
+
+test('history-horizon is refirable only while its label is present, never automatically (#2874)', () => {
+  assert.deepEqual([...r.LABEL_PRESENT_REASONS], ['history-horizon']);
+  assert.equal(r.isRefirableWhileLabelPresent('history-horizon'), true);
+  assert.equal(r.isRefirableReason('history-horizon'), false);
+  assert.equal(r.isRefirableWhileLabelPresent('label-filter'), false);
+});
+
+test('planRefire: a history-horizon drop of the trigger\'s own wake label is planned with that label required (#2874)', () => {
+  const p = r.planRefire({ found: horizonFound, prior: null, trigger: TRIGGER, agentEnabled: true });
+  assert.deepEqual(p, { ok: true, wakeLabel: 'ready-for-review', workItem: HORIZON.workItem, labelRequired: true });
+  // An any-label listener takes the event's own label as the wake label.
+  const any = r.planRefire({ found: horizonFound, trigger: { id: 't1', type: 'github-event', enabled: true } });
+  assert.equal(any.wakeLabel, 'ready-for-review');
+});
+
+test('planRefire: a history-horizon drop with the label still present passes the state check; without it it is refused (#2874)', () => {
+  const p = r.planRefire({ found: horizonFound, trigger: TRIGGER, agentEnabled: true });
+  const open = (labels) => ({ state: 'open', merged: false, labels: labels.map((name) => ({ name })) });
+  assert.deepEqual(r.checkItemState(open(['ready-for-review', 'bug']), { kind: 'pr', wakeLabel: p.wakeLabel }), { ok: true });
+  const gone = r.checkItemState(open(['bug']), { kind: 'pr', wakeLabel: p.wakeLabel });
+  assert.deepEqual([gone.ok, gone.status, gone.code], [false, 409, 'label-gone']);
+  assert.match(gone.error, /'ready-for-review' is no longer on the pull request/);
+  assert.equal(r.checkItemState(open(['ready-for-review:wip']), { kind: 'pr', wakeLabel: p.wakeLabel }).code, 'label-claimed');
+  assert.equal(r.checkItemState({ state: 'closed', labels: [{ name: 'ready-for-review' }] }, { kind: 'pr', wakeLabel: p.wakeLabel }).code, 'item-closed');
+});
+
+test('planRefire: a history-horizon drop that is not this trigger\'s wake is refused with the reason (#2874)', () => {
+  const plan = (entry) => r.planRefire({
+    found: { entry, outcome: entry.outcomes[0] }, trigger: TRIGGER, agentEnabled: true,
+  });
+  // Some other label's add — the horizon gate runs before the label filter.
+  const other = plan({ ...HORIZON, label: 'ux' });
+  assert.deepEqual([other.ok, other.code], [false, 'not-refirable']);
+  assert.match(other.error, /added 'ux', not 'ready-for-review'/);
+  // Not a label add at all (PR opened, label removed, a push).
+  for (const event of ['pull_request.opened', 'pull_request.unlabeled', 'push']) {
+    const p = plan({ ...HORIZON, event });
+    assert.deepEqual([p.ok, p.code], [false, 'not-refirable'], event);
+    assert.match(p.error, /predates the trigger/);
+  }
+  assert.equal(plan({ ...HORIZON, label: null }).code, 'not-refirable');
+  // The other routing drops stay refused.
+  const labelFilter = plan({ ...HORIZON, outcomes: [{ ...HORIZON.outcomes[0], reason: 'label-filter' }] });
+  assert.equal(labelFilter.code, 'not-refirable');
+  assert.match(labelFilter.error, /history-horizon while the wake label is still on the item/);
+});

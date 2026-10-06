@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  READ_ONLY_MENU_HINT,
   buildFlowsRailMenu,
   intentForMenuKey,
   parseFlowIntent,
@@ -90,7 +91,7 @@ test('an unrecognised target degrades to an empty menu instead of guessing', () 
 test('only the two canvas actions carry an intent; the rest the page handles itself', () => {
   assert.equal(intentForMenuKey('create-team'), FLOW_INTENTS.createTeam);
   assert.equal(intentForMenuKey('edit-as-draft'), FLOW_INTENTS.editAsDraft);
-  for (const k of ['rename', 'share', 'export', 'delete', 'open-chat', 'nope', undefined]) {
+  for (const k of ['rename', 'share', 'export', 'delete', 'duplicate', 'open-chat', 'nope', undefined]) {
     assert.equal(intentForMenuKey(k), null, `${String(k)} must not become an intent`);
   }
 });
@@ -123,5 +124,25 @@ test('both export buttons on the page derive the same filename', () => {
   assert.equal(bundleFilename('keep.this-one_ok'), 'keep.this-one_ok.process.json');
   for (const bad of [undefined, null, '', 0]) {
     assert.equal(bundleFilename(bad), 'process.process.json', String(bad));
+  }
+});
+
+// ─── #2870 AC10 — a "Visible to everyone" reader ────────────────────────────
+
+test('#2870 AC10 — a read-only draft row offers create-team, duplicate and export', () => {
+  const { items } = buildFlowsRailMenu({ kind: 'draft', name: 'D', roleCount: 2, canEdit: false });
+  assert.deepEqual(keys(items), ['create-team', 'duplicate', 'export', 'rename', 'share', 'delete']);
+  for (const k of ['create-team', 'duplicate', 'export']) assert.ok(!byKey(items, k).disabled, `${k} enabled`);
+  for (const k of ['rename', 'share', 'delete']) {
+    assert.equal(byKey(items, k).disabled, true, `${k} is inert`);
+    assert.equal(byKey(items, k).title, READ_ONLY_MENU_HINT);
+  }
+  assert.equal(byKey(items, 'duplicate').separated, true);
+});
+
+test('#2870 — a holder\'s menu is unchanged, whether or not canEdit is sent', () => {
+  for (const canEdit of [true, undefined]) {
+    const { items } = buildFlowsRailMenu({ kind: 'draft', name: 'D', roleCount: 1, canEdit });
+    assert.deepEqual(keys(items), ['create-team', 'rename', 'share', 'export', 'delete']);
   }
 });

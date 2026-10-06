@@ -11,6 +11,8 @@ import PageHelpButton from '../components/PageHelpButton';
 import SkillMarkdown from '../components/SkillMarkdown';
 import SkillEditorModal, { MarkdownWithFrontmatter } from './SkillEditorModal.jsx';
 import { skillEditPermission } from './skill-editor-model.js';
+import SkillVersionDiffModal from './SkillVersionDiffModal.jsx';
+import { versionRows, toggleCompareSelection, normalizeComparePair, versionActionPermission } from './skill-version-view.js';
 import PublishSkillAction from '../components/PublishSkillAction';
 import { usePageActions } from '../context/PageActionsContext';
 import { useHelpSubject } from '../context/HelperChatContext';
@@ -404,34 +406,80 @@ function copyToRow(copy, name) {
   return { name, source, teamId: copy.teamId, agentId: copy.agentId };
 }
 
-/* ─── Versions tab — skill.json history timeline (#632, AC2) ───────────── */
-function VersionsTab({ lineage, loading, error }) {
+/* ─── Versions tab — skill.json history timeline (#632, AC2; #2839) ─────── */
+// Every entry with a stored snapshot can be opened (read-only, in the editor) or
+// compared with the current content; ticking two rows compares any pair. A copy
+// whose content drifted from every recorded version gets a "Working copy" row.
+function VersionsTab({ lineage, loading, error, onOpen, onCompare }) {
+  const [picked, setPicked] = useState([]);
   if (loading) return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading version history…</div>;
   if (error) return <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load lineage: {error}</div>;
-  const versions = lineage?.versions;
-  const history = Array.isArray(versions?.history) ? versions.history : [];
-  if (!history.length) {
+  const rows = versionRows(lineage?.versions);
+  if (!rows.length) {
     return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', fontStyle: 'italic' }}>No version history recorded yet.</div>;
   }
+  const pair = picked.length === 2 ? normalizeComparePair(rows, picked[0], picked[1]) : null;
+  const linkBtn = (disabled) => ({
+    background: 'none', border: 'none', padding: 0, fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+    color: disabled ? 'var(--eb-text-muted)' : 'var(--eb-accent-primary)', cursor: disabled ? 'not-allowed' : 'pointer',
+  });
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-      {history.map((h, i) => (
-        <div key={`${h.version}-${h.hash}-${i}`} style={{
-          display: 'flex', flexDirection: 'column', gap: 2,
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+        <span style={{ flex: 1 }}>Tick two versions to compare them.</span>
+        <button
+          type="button"
+          disabled={!pair}
+          onClick={() => pair && onCompare(pair.from, pair.to)}
+          style={{
+            padding: '3px 10px', borderRadius: 'var(--eb-radius-sm)', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+            border: '1px solid var(--eb-border-default)', background: 'var(--eb-bg-surface)',
+            color: pair ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)', cursor: pair ? 'pointer' : 'not-allowed',
+          }}
+        >
+          Compare{picked.length ? ` (${picked.length}/2)` : ''}
+        </button>
+      </div>
+      {rows.map(r => (
+        <div key={r.key} style={{
+          display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
           padding: 'var(--eb-space-2) var(--eb-space-3)',
-          border: `1px solid ${h.current ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
-          background: h.current ? 'var(--eb-accent-muted)' : 'var(--eb-bg-surface)',
+          border: `1px solid ${r.current ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+          background: r.current ? 'var(--eb-accent-muted)' : 'var(--eb-bg-surface)',
           borderRadius: 'var(--eb-radius-sm)',
         }}>
-          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
-            <VersionChip version={h.version} contentHash={h.hash} />
-            {h.action && <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)' }}>{h.action}</span>}
-            {h.current && <Chip label="current" color="var(--eb-accent-primary)" bg="var(--eb-accent-muted)" title="The live revision on disk" />}
+          <input
+            type="checkbox"
+            aria-label={`Select ${r.kind === 'working' ? 'the working copy' : `version ${r.version ?? ''}`} for comparison`}
+            checked={picked.includes(r.key)}
+            disabled={!r.available}
+            onChange={() => setPicked(sel => toggleCompareSelection(sel, r.key))}
+            style={{ marginTop: 3 }}
+          />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+              {r.kind === 'working'
+                ? <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>Working copy (unversioned changes)</span>
+                : <VersionChip version={r.version} contentHash={r.hash} />}
+              {r.action && <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)' }}>{r.action}</span>}
+              {Number.isInteger(r.restoredFrom) && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>from v{r.restoredFrom}</span>}
+              {r.current && <Chip label="current" color="var(--eb-accent-primary)" bg="var(--eb-accent-muted)" title="The content on disk right now" />}
+            </div>
+            {r.kind !== 'working' && (
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                {[r.by, formatTs(r.at)].filter(Boolean).join(' · ')}
+              </div>
+            )}
+            {r.note && <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', fontStyle: 'italic' }}>{r.note}</div>}
+            {r.available ? (
+              <div style={{ display: 'flex', gap: 'var(--eb-space-3)' }}>
+                {r.kind !== 'working' && <button type="button" style={linkBtn(false)} onClick={() => onOpen(r)}>Open</button>}
+                {!r.current && <button type="button" style={linkBtn(false)} onClick={() => onCompare(r.ref, 'working')}>Compare with current</button>}
+              </div>
+            ) : (
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>Content not available</div>
+            )}
           </div>
-          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-            {[h.by, formatTs(h.at)].filter(Boolean).join(' · ')}
-          </div>
-          {h.note && <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', fontStyle: 'italic' }}>{h.note}</div>}
         </div>
       ))}
     </div>
@@ -722,6 +770,12 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
   const [editorOpen, setEditorOpen] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const editPerm = skillEditPermission(skill, caller);
+  // Skill versions (#2839): an old version opened in the editor, and the pair
+  // the full-screen diff compares ({from, to} — hash or 'working').
+  const [openVersion, setOpenVersion] = useState(null);
+  const [comparePair, setComparePair] = useState(null);
+  const agentTeamId = isAgent ? ((installableAgents ?? []).find(a => a.id === skill.agentId)?.parentTeamId || skill.teamId || null) : null;
+  const versionPerm = versionActionPermission(skill, caller, agentTeamId);
 
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -1084,7 +1138,15 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
         })}
       </div>
 
-      {tab === 'versions' && <VersionsTab lineage={lineage} loading={lineageLoading} error={lineageError} />}
+      {tab === 'versions' && (
+        <VersionsTab
+          lineage={lineage}
+          loading={lineageLoading}
+          error={lineageError}
+          onOpen={r => { setOpenVersion({ hash: r.hash, entry: r }); setEditorOpen(true); }}
+          onCompare={(from, to) => setComparePair({ from, to })}
+        />
+      )}
       {tab === COPIES_TAB_ID && (
         <CopiesTab
           lineage={lineage} loading={lineageLoading} error={lineageError}
@@ -1101,7 +1163,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
         {editPerm.editable ? (
           <button
-            onClick={() => setEditorOpen(true)}
+            onClick={() => { setOpenVersion(null); setEditorOpen(true); }}
             style={primaryBtnStyle(false)}
             title="Open the full-screen skill editor: folder tree, preview / edit, file operations, one Save for everything"
           >
@@ -1109,7 +1171,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
           </button>
         ) : (
           <button
-            onClick={() => setEditorOpen(true)}
+            onClick={() => { setOpenVersion(null); setEditorOpen(true); }}
             style={secondaryBtnStyle}
             title={`Open the skill in the full-screen editor, read-only — ${editPerm.reason}`}
           >
@@ -1373,9 +1435,14 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
           tierLabel={TIER_LABEL[isPool ? 'global' : skill.source] || skill.source}
           readOnly={!editPerm.editable}
           readOnlyReason={editPerm.reason}
-          onClose={() => setEditorOpen(false)}
-          onSaved={() => setReloadKey(k => k + 1)}
+          version={openVersion}
+          versionPermission={versionPerm}
+          onClose={() => { setEditorOpen(false); setOpenVersion(null); }}
+          onSaved={() => { setReloadKey(k => k + 1); if (lineage) reloadLineage(); }}
         />
+      )}
+      {comparePair && (
+        <SkillVersionDiffModal skill={skill} from={comparePair.from} to={comparePair.to} onClose={() => setComparePair(null)} />
       )}
 
       {/* Delete confirmation dialog. A guarded delete (409) surfaces the

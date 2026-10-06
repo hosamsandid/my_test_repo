@@ -30,7 +30,7 @@ export const MAX_SAVE_BYTES = 7 * 1024 * 1024;     // mirrors MAX_BATCH_BYTES
 export const READ_CAP_BYTES = 512 * 1024;          // mirrors SKILL_FILE_MAX_BYTES in api.js
 
 const PROTECTED_BASENAMES = new Set(['skill.json', 'provenance.json']);
-const PROTECTED_DIRS = new Set(['_archive', '.aee-batch-hold']);
+const PROTECTED_DIRS = new Set(['_archive', '_versions', '.aee-batch-hold']);
 
 // Platform-managed files (manifest, provenance sidecar, archived snapshots) are
 // neither shown nor editable (AC21) — same rule as skill-manifest.isExcludedPath.

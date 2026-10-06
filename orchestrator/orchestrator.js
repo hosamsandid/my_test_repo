@@ -219,6 +219,7 @@ const flowSupervisor = require("./flow-supervisor");
 const flowBoard = require("./flow-board");
 const flowClaimRelease = require("./flow-claim-release");
 const flowWakeAgain = require("./flow-wake-again");
+const poolWakeTarget = require("./pool-wake-target");
 const recurringPoolSource = require("./recurring-pool-source");
 const predictedPaths = require("./predicted-paths");
 const poolInstanceLanes = require("./pool-instance-lanes");
@@ -1945,11 +1946,11 @@ async function fetchWorkItemTitle(repoFullName, kind, number) {
 // templates, so a pooled role is routed onto the item's own instance.
 async function wakeGithubLabelListeners({ repo, number, kind, label, actor, source = 'internal-plugin', onlyAgentIds = null }) {
   const key = labelFastPath.eventKeyForKind(kind);
-  const agents = listAgentIds().map((aid) => ({
-    agentId: aid,
-    enabled: loadAgentConfig(aid)?.enabled !== false,
-    triggers: loadTriggers(aid),
-  }));
+  const agents = listAgentIds().map((aid) => {
+    const config = loadAgentConfig(aid) || null;
+    // `config` lets the matcher skip pool instances (#2875).
+    return { agentId: aid, enabled: config?.enabled !== false, config, triggers: loadTriggers(aid) };
+  });
   const matched = labelFastPath.matchPollerListeners({ repo, label, kind }, agents);
   const listeners = onlyAgentIds ? flowWakeAgain.templateListeners(matched, [...onlyAgentIds]) : matched;
   const now = new Date().toISOString();
@@ -2132,7 +2133,11 @@ async function refireGithubEvent({ agentId, eventId, triggerId, actor }) {
     });
     const logFields = githubRefire.buildRefireLogFields({ entry, outcome, actor });
     const decision = {};
-    const ok = enqueuePending(agentId, githubRefire.buildRefirePendingEntry({
+    // #2875: a drop logged on a pool instance re-fires through its role
+    // template, so the wake lands on the item's own instance — never on an
+    // instance working another ticket.
+    const target = poolWakeTarget.wakeTargetAgentId(agentId, loadAgentConfig(agentId));
+    const ok = enqueuePending(target, githubRefire.buildRefirePendingEntry({
       triggerId, key, ghEvent, wakeLabel, refireOf: logFields.refireOf,
     }), { decision });
     if (!ok) {
@@ -2148,14 +2153,14 @@ async function refireGithubEvent({ agentId, eventId, triggerId, actor }) {
       ...githubEventLog.buildEventEntry({
         ghEvent, repoFullName: entry.repo, key,
         outcomes: [githubEventLog.applyPoolDecision(
-          { agentId, triggerId, status: "delivered", reason: null, digest: false, wakeLabel }, decision)],
+          { agentId: target, triggerId, status: "delivered", reason: null, digest: false, wakeLabel }, decision)],
       }),
       ...logFields,
     };
     githubEventLog.record(logEntry);
     console.log(
       `[Orchestrator] refire: ${entry.repo}#${workItem.number} ${key} (${eventId}, was ${outcome.reason}) ` +
-      `→ agent=${agentId} trigger=${triggerId} by ${actor || "console"} as ${ghEvent.id}`);
+      `→ agent=${target}${target !== agentId ? ` (for ${agentId})` : ""} trigger=${triggerId} by ${actor || "console"} as ${ghEvent.id}`);
     return {
       status: 200,
       body: {

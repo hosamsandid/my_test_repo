@@ -95,7 +95,10 @@ function findPriorRefire(entries, { eventId, agentId, triggerId }) {
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (!entry || entry.source !== REFIRE_SOURCE || !entry.refireOf) continue;
     if (entry.refireOf.eventId !== eventId) continue;
-    if ((entry.outcomes || []).some((o) => o && o.agentId === agentId && o.triggerId === triggerId)) {
+    // #2875: a pool instance's drop re-fires through its template, so the
+    // outcome names the template; `refireOf.agentId` keeps the drop's agent.
+    const byAgent = (o) => o.agentId === agentId || entry.refireOf.agentId === agentId;
+    if ((entry.outcomes || []).some((o) => o && byAgent(o) && o.triggerId === triggerId)) {
       return entry;
     }
   }
@@ -304,6 +307,9 @@ function buildRefireLogFields({ entry, outcome, actor }) {
       eventId: String(entry.eventId),
       reason: outcome.reason,
       ts: entry.ts || null,
+      // The agent the drop was logged for (#2875) — a pool instance's drop is
+      // delivered to its template, so the outcome alone no longer says it.
+      ...(outcome && typeof outcome.agentId === 'string' ? { agentId: outcome.agentId } : {}),
     },
   };
 }

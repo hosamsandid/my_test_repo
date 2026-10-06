@@ -1183,3 +1183,32 @@ extra role, and the live export carried a phantom role.
   three statuses) and its Node Inspector lists *#item · status* per instance;
   nothing is shown while the role has no live instance. Flow anomalies
   attributed to an instance are counted on its role's node (`poolOf`).
+
+## Amendment 16 — instances are never direct GitHub wake listeners (#2875)
+
+A pool instance inherits its role's `github-event` triggers. Delivery paths
+matched listeners by trigger alone, so a label wake also reached every live
+instance of the role — including instances working on another ticket. On
+2026-10-06 the internal label fast-path woke `code-reviewer-i2859` for PR
+#2820 (ticket #2819); it posted the review there. The same family produced the
+duplicate PRs on #2685, #2698 and #2579.
+
+**Rule.** An agent with `poolInstance: true` is never a direct wake listener on
+any path. The wake goes to the role **template**; `enqueuePending` →
+`planPoolDispatch` routes it onto the item's own instance (reusing it, or
+spawning one), so the instance that already holds the item keeps receiving its
+follow-ups through the item key (#2789). One pure helper decides it,
+`orchestrator/pool-wake-target.js`:
+
+- `isDirectWakeListener(config)` — false for a pool instance. Applied in the
+  poller's plan (`computePollPlan`) and the label fast-path's matcher
+  (`matchPollerListeners`, also used by the Flow Supervisor). A parity test
+  pins that both return the same listener set.
+- `wakeTargetAgentId(agentId, config)` — a pool instance's template. "Fire
+  again" on a drop logged for an instance enqueues on the template; the
+  re-fire row records the drop's agent in `refireOf.agentId`, so the instance's
+  Events tab still shows the drop as re-fired and a second re-fire is refused.
+
+Consequence: instance subscribers no longer appear in the poller's fan-out, so
+the Event Log stops showing their per-event `wake-already-armed` drops. A role
+whose template is switched off now wakes none of its instances either.

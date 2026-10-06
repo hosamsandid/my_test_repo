@@ -207,6 +207,10 @@ function draftAccessView(draft, { viewerId = null, usersById = new Map() } = {})
     accessCount: accessUserIds.length,
     createdByYou: !!(viewerId && createdBy && createdBy === viewerId),
     createdByName: createdBy ? ((known && known.displayName) || 'Deleted user') : null,
+    // Is the viewer in the access set? A System Admin lists every draft (DD7),
+    // so "visible" is not "shared with me" — the Flows rail filter's
+    // membership quick filter needs the difference (#2859).
+    viewerHasAccess: !!(viewerId && accessUserIds.includes(viewerId)),
   };
 }
 

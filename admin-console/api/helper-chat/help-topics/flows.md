@@ -91,6 +91,36 @@ The left list is how you choose what the canvas shows. It has two sections:
 The list can be collapsed to give the canvas the full width, and the divider
 between it and the canvas can be dragged; both are remembered.
 
+The **filter** at the top of the list narrows it to the flows you care about —
+the same control as the agent list filter in Agent Chat. Collapsed, it reads
+**All flows**, the one flow's name, or **N of M flows**; click it to open the
+panel (Escape closes it). The panel lists every team and draft under **Teams**
+and **Drafts**, each with the same second line as its row (environment, or the
+draft's agent count and sharing), so two flows with the same name stay apart.
+Tick or untick flows, search by name (searching never changes what is ticked),
+and use **Select all** / **Deselect all** on the listed flows. The quick filters
+replace the selection with a preset you can then adjust:
+
+- **Only my private flows** — teams where you are the only member, and your own
+  unshared drafts.
+- **Flows I am a member of** — teams you belong to in any role, and every draft
+  you have access to (your own and the ones shared with you).
+- **Flows where I am Team Admin** / **…a regular member** — teams by your role;
+  drafts have no roles, so they never match these.
+
+Membership means exactly what it means in Agent Chat. A System Admin sees flows
+they are not a member of; those match no quick filter. The quick filters are
+greyed out until your memberships have loaded.
+
+The list then shows only the ticked flows. A section whose flows are all hidden
+says so, and with nothing ticked at all the list points you to the filter. The
+choice is saved for your user (separately from the Agent Chat filter), so it
+follows you to other browsers. It remembers what you *hid*: a flow created or
+shared with you later appears automatically, as does a renamed draft. Opening a
+hidden flow — from a link, **New flow**, **Create team…** or when the page
+restores your last flow — ticks it back in, so the open flow is always in the
+list.
+
 There is no third section. Earlier versions listed a read-only **Role
 templates** blueprint and a **BriefingPack flows** source; both are gone, and a
 bookmark pointing at either falls back silently to no selection rather than to

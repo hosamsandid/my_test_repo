@@ -26,8 +26,30 @@ import {
  * @param {{hidden:string[]}} props.selection
  * @param {(action:{type:string, key?:string, keys?:string[], shown?:boolean, filterId?:string})=>void} props.onAction
  * @param {string|null} props.quickFiltersDisabledReason  null = available
+ *
+ * The Flows rail (#2859) reuses the control for its teams + drafts. Its
+ * wording, quick-filter list and summary come in through the optional props
+ * below; the defaults are Agent Chat's own, so that page passes none of them.
+ * Entries carrying a `group` are listed under a heading per group.
+ *
+ * @param {object} [props.copy]                 overrides of `DEFAULT_COPY`
+ * @param {{id:string,label:string}[]} [props.quickFilters]
+ * @param {string} [props.summary]              the button's one-line summary
  */
-export default function ListFilterControl({ entries, selection, onAction, quickFiltersDisabledReason = null }) {
+export const DEFAULT_COPY = Object.freeze({
+  buttonTitle: 'Filter agent list',
+  panelLabel: 'Filter agent list by team',
+  searchLabel: 'Search teams',
+  listLabel: 'Teams',
+  noEntries: 'No teams to filter.',
+  noMatches: 'No teams match your search.',
+});
+
+export default function ListFilterControl({
+  entries, selection, onAction, quickFiltersDisabledReason = null,
+  copy: copyOverrides = null, quickFilters = QUICK_FILTERS, summary: summaryOverride = null,
+}) {
+  const copy = copyOverrides ? { ...DEFAULT_COPY, ...copyOverrides } : DEFAULT_COPY;
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const wrapperRef = useRef(null);
@@ -37,7 +59,7 @@ export default function ListFilterControl({ entries, selection, onAction, quickF
   const panelId = useId();
 
   const listed = searchEntries(entries, query);
-  const summary = selectionSummary(entries, selection);
+  const summary = summaryOverride ?? selectionSummary(entries, selection);
 
   // Close on a click anywhere outside the control.
   useEffect(() => {
@@ -88,8 +110,8 @@ export default function ListFilterControl({ entries, selection, onAction, quickF
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
-        aria-label={`Filter agent list: ${summary}`}
-        title="Filter agent list"
+        aria-label={`${copy.buttonTitle}: ${summary}`}
+        title={copy.buttonTitle}
         style={triggerStyle}
       >
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
@@ -103,7 +125,7 @@ export default function ListFilterControl({ entries, selection, onAction, quickF
           ref={panelRef}
           id={panelId}
           role="dialog"
-          aria-label="Filter agent list by team"
+          aria-label={copy.panelLabel}
           onKeyDown={onPanelKeyDown}
           style={panelStyle}
         >
@@ -114,8 +136,8 @@ export default function ListFilterControl({ entries, selection, onAction, quickF
               type="search"
               value={query}
               onChange={e => setQuery(e.target.value)}
-              placeholder="Search teams"
-              aria-label="Search teams"
+              placeholder={copy.searchLabel}
+              aria-label={copy.searchLabel}
               style={searchStyle}
             />
           </div>
@@ -139,7 +161,7 @@ export default function ListFilterControl({ entries, selection, onAction, quickF
 
           <div role="group" aria-label="Quick filters" style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             <span style={sectionLabelStyle}>Quick filters</span>
-            {QUICK_FILTERS.map(q => (
+            {quickFilters.map(q => (
               <button
                 key={q.id}
                 type="button"
@@ -157,14 +179,18 @@ export default function ListFilterControl({ entries, selection, onAction, quickF
             ))}
           </div>
 
-          <div role="group" aria-label="Teams" style={listStyle}>
+          <div role="group" aria-label={copy.listLabel} style={listStyle}>
             {listed.length === 0 && (
               <div style={{ padding: 'var(--eb-space-2)', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>
-                {entries.length === 0 ? 'No teams to filter.' : 'No teams match your search.'}
+                {entries.length === 0 ? copy.noEntries : copy.noMatches}
               </div>
             )}
-            {listed.map(entry => (
-              <label key={entry.key} style={entryStyle}>
+            {listed.map((entry, i) => (
+              <React.Fragment key={entry.key}>
+              {entry.group && entry.group !== listed[i - 1]?.group && (
+                <span style={{ ...sectionLabelStyle, padding: '4px 2px 2px' }}>{entry.group}</span>
+              )}
+              <label style={entryStyle}>
                 <input
                   type="checkbox"
                   checked={isEntryShown(selection, entry.key)}
@@ -181,6 +207,7 @@ export default function ListFilterControl({ entries, selection, onAction, quickF
                   )}
                 </span>
               </label>
+              </React.Fragment>
             ))}
           </div>
         </div>

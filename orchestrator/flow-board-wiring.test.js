@@ -83,7 +83,7 @@ test("the flow-board-removed route checks removability on the board and never wr
 test("the flow-board-release route (#2754) re-reads a fresh board, swaps via the pure helper and logs every swap", () => {
   const i = SRC.indexOf("const flowBoardReleaseMatch");
   assert.ok(i > 0);
-  const route = SRC.slice(i, SRC.indexOf("// GET /internal/teams/:teamId/pool-control", i));
+  const route = SRC.slice(i, SRC.indexOf("// POST /internal/teams/:teamId/flow-board-wake", i));
   // Only on a FRESH board — never the cached snapshot the page was showing.
   assert.match(route, /flowClaimRelease\.planClaimRelease\(await getTeamFlowBoard\(teamId, \{ refresh: true \}\), rowId\)/);
   assert.match(route, /if \(!plan\.ok\) return sendJson\(res, plan\.status/);
@@ -102,4 +102,27 @@ test("the flow-board-release route (#2754) re-reads a fresh board, swaps via the
 
 test("_flowTeamMembers carries each member's enabled flag for the board (#2754)", () => {
   assert.match(body("function _flowTeamMembers("), /enabled: cfg\.enabled !== false,/);
+});
+
+test("the flow-board-wake route (#2873) re-checks a fresh board and GitHub, wakes only role templates, never touches labels", () => {
+  const i = SRC.indexOf("const flowBoardWakeMatch");
+  assert.ok(i > 0);
+  const route = SRC.slice(i, SRC.indexOf("// GET /internal/teams/:teamId/pool-control", i));
+  // At most once: the in-flight guard before any await, released in finally.
+  assert.ok(route.indexOf("flowBoardWakeInFlight.has(key)") < route.indexOf("await getTeamFlowBoard"));
+  assert.match(route, /finally \{\s*if \(lockKey\) flowBoardWakeInFlight\.delete\(lockKey\);/);
+  assert.match(route, /flowWakeAgain\.planWakeAgain\(await getTeamFlowBoard\(teamId, \{ refresh: true \}\), rowId\)/);
+  assert.match(route, /flowWakeAgain\.checkWakeStillPresent\(await fetchWorkItemRaw\(/);
+  assert.match(route, /githubPollerRef\.disarmWake\(\{ repo: w\.repo, number: w\.number, label: w\.label \}\)/);
+  assert.match(route, /onlyAgentIds: new Set\(w\.roles\.map\(\(role\) => role\.id\)\)/);
+  assert.match(route, /source: flowWakeAgain\.WAKE_AGAIN_SOURCE/);
+  assert.match(route, /_flowBoardCache\.delete\(teamId\)/);
+  // No label write, no poller-bypassing raw enqueue.
+  assert.doesNotMatch(route, /swapClaimLabel|\/labels|enqueuePending\(/);
+  // The shared fast-path narrows its listeners to the templates and keeps the
+  // readiness-gate hold for every listener it wakes.
+  const fast = body("async function wakeGithubLabelListeners(");
+  assert.match(fast, /onlyAgentIds \? flowWakeAgain\.templateListeners\(matched, \[\.\.\.onlyAgentIds\]\) : matched/);
+  assert.match(fast, /if \(l\.readinessGate\) \{[\s\S]*githubPollerRef\.holdWake\(/);
+  assert.match(fast, /return \{ listeners, delivered: decisions\.size, held: held\.size \};/);
 });

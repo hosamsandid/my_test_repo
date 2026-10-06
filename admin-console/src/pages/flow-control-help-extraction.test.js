@@ -127,9 +127,9 @@ test('one read, and the removed surfaces stay removed (AC10, AC11)', () => {
   }
 });
 
-test('every write targets a pool control, the column configuration, a board removal or a claim release', () => {
+test('every write targets a pool control, the column configuration, a board removal, a claim release or a wake again', () => {
   const mutations = page.match(/apiCall\('(POST|PUT|PATCH|DELETE)', `[^`]*`/g) || [];
-  assert.equal(mutations.length, 6, `expected six writes, got ${mutations.join(' | ')}`);
+  assert.equal(mutations.length, 7, `expected seven writes, got ${mutations.join(' | ')}`);
   for (const call of mutations) {
     assert.ok(
       /\/pool-control\/\$\{encodeURIComponent\(roleId\)\}`$/.test(call)
@@ -137,7 +137,9 @@ test('every write targets a pool control, the column configuration, a board remo
         || /\/flow-board-config`$/.test(call)
         || /\/flow-board-removed`$/.test(call)
         // #2754: the explicit "Release claim" on a stuck row.
-        || /\/flow-board-release`$/.test(call),
+        || /\/flow-board-release`$/.test(call)
+        // #2873: the explicit "Wake again" on a row whose wake never arrived.
+        || /\/flow-board-wake`$/.test(call),
       `unexpected mutating call in the Flow Control board: ${call}`,
     );
   }

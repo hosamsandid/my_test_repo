@@ -776,4 +776,37 @@ log never raises the flag. Each flagged wake is listed on the row's
 `needsHuman.wakes` (`{repo, number, kind, label, cause, dropReason?, eventId,
 since}`), and the board's **Needs you** area shows `label — cause`, linked to
 the GitHub Event Log row (`/github-events?event=<id>`, which shows that one
-event over the 7-day retention). The action that restarts such a row is #2873.
+event over the 7-day retention). Each wake also names its switched-on consumer
+`roles` (`{id, label}`) for the action below.
+
+## Amendment 7 — Wake again (#2873, epic #2880)
+
+**A7.1 — the action.** A Team Admin (`canManageTeam`) gets a **Wake again**
+button on a *wake never delivered* row. The confirmation names each wake's
+role, item and label (*Wake Code Reviewer for PR #2844 (ready-for-review)*).
+The console route `POST /api/teams/:teamId/flow-board-wake` (`{ rowId }`; the
+actor is the session user, never the body) proxies to the orchestrator's
+`POST /internal/teams/:teamId/flow-board-wake`.
+
+**A7.2 — the checks.** An in-flight guard per `<team>::<row>`, taken before
+any await, turns concurrent clicks away with 409 `in-progress`. The route then
+re-reads a **fresh** board and refuses a stale board (503), an unknown row
+(404), or a row that is no longer parked or has no switched-on consumer (409)
+— `planWakeAgain` in the pure `orchestrator/flow-wake-again.js`. For each wake
+it re-reads the item on GitHub (`checkWakeStillPresent`): an item that is
+closed, has lost the label or cannot be read is skipped with a warning.
+
+**A7.3 — the delivery.** Labels are left alone and the Events API is not
+involved. The route clears the poller's armed wake-edge key (`disarmWake`),
+then calls the label fast-path (`wakeGithubLabelListeners`) with `onlyAgentIds`
+set to the wake's consumer **role templates** (`templateListeners`). Pool
+instances inherit their role's trigger, so the raw listener list holds every
+live instance, another item's included (#2875); only the template is woken,
+and `enqueuePending` → `planPoolDispatch` routes it onto the item's own
+instance exactly as a poller delivery does. A listener with a readiness gate
+(#2795) gets a poller hold (`holdWake`), never a bypass. The fast-path writes
+the Event Log line (`source: 'flow-control'`, the actor as the event's actor)
+and its dedup marker, so the Events API's late copy of the same label is
+dropped as `internal-dedup`. Afterwards the board shows the dispatch as queued,
+held or delivered, so a second click is refused as no longer parked — the
+persisted half of "at most once".

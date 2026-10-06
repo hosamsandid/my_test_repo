@@ -383,6 +383,29 @@ export function wakeCauseText(w) {
   return `dropped (${w.dropReason || 'unknown'})`;
 }
 
+// "Wake again" (#2873): what the confirm dialog says before a parked wake is
+// delivered to its agent again. `help-topics/flow-control.md` quotes it.
+export const WAKE_CONFIRM_TEXT = 'The wake label already on the GitHub item is delivered to its agent again, directly — no label is changed. A pooled role starts on the item\u2019s own instance; a hand-off with a readiness gate still waits for CI. Only do this when nobody is already working on it.';
+
+export function wakeDialogTitle(ref) {
+  return ref ? `Wake the agent for ${ref} again?` : 'Wake the agent again?';
+}
+
+// "Wake Code Reviewer for PR #2844 (ready-for-review)".
+export function wakeTargetText(w) {
+  const roles = (Array.isArray(w && w.roles) ? w.roles : []).map((r) => r && (r.label || r.id)).filter(Boolean);
+  return `Wake ${roles.join(' and ') || 'its agent'} for ${w.ref} (${w.label})`;
+}
+
+// The notice after a wake that reached at least one agent; null otherwise
+// (the error bar carries that).
+export function wakeNotice(res, ref) {
+  const n = res && Number.isFinite(res.woken) ? res.woken : 0;
+  if (n < 1) return null;
+  const held = (Array.isArray(res.results) ? res.results : []).some((r) => r && r.ok && r.held > 0 && !r.delivered);
+  return `${n === 1 ? 'Wake' : `${n} wakes`} delivered again${ref ? ` for ${ref}` : ''} — ${held ? 'its hand-off waits for CI first' : 'its agent starts on its next check (within a few seconds)'}.`;
+}
+
 export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}) {
   const ref = entry.issue
     ? itemRef(entry.issue.repo, entry.issue.number, singleRepo)
@@ -405,7 +428,9 @@ export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}
       cause: w.cause,
       text: wakeCauseText(w),
       href: eventLogHref(w.eventId),
-    }));
+      roles: (Array.isArray(w.roles) ? w.roles : []).filter((r) => r && r.id),
+    }))
+    .map((w) => ({ ...w, target: wakeTargetText(w) }));
   return {
     id: entry.id,
     ref,
@@ -415,6 +440,7 @@ export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}
     waiting: since(entry.since || (entry.needsHuman && entry.needsHuman.since), now),
     release,
     wakes,
+    canWake: wakes.some((w) => w.roles.length > 0),
   };
 }
 

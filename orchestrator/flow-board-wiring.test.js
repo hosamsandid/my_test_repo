@@ -148,3 +148,17 @@ test("the flow-board-adopt route (#2877) adopts only on a click, from a fresh bo
   const callers = SRC.split("deliverBoardWakes(").length - 1;
   assert.equal(callers, 3, "the definition, Wake again and Adopt — nothing else");
 });
+
+test("the repo-labels routes (#2878) read labels per repo with its env token, cache them, and create with 422 = done", () => {
+  const i = SRC.indexOf("const repoLabelsMatch");
+  assert.ok(i > 0);
+  const route = SRC.slice(i, SRC.indexOf("// ── Create GitHub labels for a team", i));
+  assert.match(route, /resolveRepoGithubTokenId\(repo\)/);
+  assert.match(route, /githubApiBase\(\)/);
+  assert.doesNotMatch(route, /api\.github\.com/);
+  // A repo that cannot be read is unreadable, never "has no labels".
+  assert.match(route, /unreadable\.push\(\{ repo, error: err\.message \}\)/);
+  assert.match(route, /Date\.now\(\) - hit\.at < REPO_LABEL_TTL_MS/);
+  assert.match(route, /if \(r\.status === 201 \|\| r\.status === 422\)/);
+  assert.match(route, /_repoLabelCache\.delete\(repo\)/);
+});

@@ -2038,6 +2038,9 @@ const githubRefireInFlight = new Set();
 // In-flight "Wake again" clicks (#2873), keyed `<team>::<row>` — the same
 // concurrent at-most-once guard as the re-fire above.
 const flowBoardWakeInFlight = new Set();
+// Repository label names for the #2878 lint, per repo, for a minute.
+const REPO_LABEL_TTL_MS = 60_000;
+const _repoLabelCache = new Map(); // repo -> { at, names }
 
 // The raw issue/PR object (state, merged, labels, title, body) for the re-fire's
 // state check (AC8). Null on any failure — the caller refuses rather than
@@ -18811,6 +18814,89 @@ async function main() {
             res.end(JSON.stringify({ error: err.message }));
           }
         })();
+      });
+      return;
+    }
+
+    // GET /internal/repo-labels?repos=<a,b> — the label names of each repo
+    // (#2878: the "wake label does not exist" lint), read with the repo's
+    // environment token and cached for a minute. A repo that cannot be read is
+    // listed under `unreadable`, never reported as having no labels.
+    // POST /internal/repo-labels `{ repo, label, actor }` — create one label
+    // (the lint's "Create label"), the same create-on-demand stampMirrorLabel
+    // uses; 422 (already exists) counts as done.
+    const repoLabelsMatch = req.url.match(/^\/internal\/repo-labels(?:\?.*)?$/);
+    if (repoLabelsMatch && (req.method === 'GET' || req.method === 'POST')) {
+      const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+      const tokenFor = (repo) => {
+        const tokenId = resolveRepoGithubTokenId(repo);
+        if (!tokenId) return null;
+        try { return fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), "utf8").trim(); } catch { return null; }
+      };
+      const { githubApiBase } = require("./github-api-base");
+      const headersFor = (token) => ({
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      });
+      if (req.method === 'GET') {
+        (async () => {
+          const q = new URL(req.url, 'http://x').searchParams.get('repos') || '';
+          const repos = [...new Set(q.split(',').map((r) => r.trim()).filter((r) => REPO_RE.test(r)))].slice(0, 20);
+          const labels = {};
+          const unreadable = [];
+          await Promise.all(repos.map(async (repo) => {
+            const hit = _repoLabelCache.get(repo);
+            if (hit && Date.now() - hit.at < REPO_LABEL_TTL_MS) { labels[repo] = hit.names; return; }
+            const token = tokenFor(repo);
+            if (!token) { unreadable.push({ repo, error: 'no readable GitHub token covers this repository' }); return; }
+            try {
+              const names = [];
+              for (let page = 1; page <= 10; page++) {
+                const r = await fetch(`${githubApiBase()}/repos/${repo}/labels?per_page=100&page=${page}`, { headers: headersFor(token) });
+                if (!r.ok) throw new Error(`GitHub returned ${r.status}`);
+                const batch = await r.json();
+                for (const l of Array.isArray(batch) ? batch : []) if (l && typeof l.name === 'string') names.push(l.name);
+                if (!Array.isArray(batch) || batch.length < 100) break;
+              }
+              _repoLabelCache.set(repo, { at: Date.now(), names });
+              labels[repo] = names;
+            } catch (err) {
+              unreadable.push({ repo, error: err.message });
+            }
+          }));
+          sendJson(res, 200, { labels, unreadable });
+        })().catch((err) => sendJson(res, 500, { error: err.message }));
+        return;
+      }
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 10_000) req.destroy(); });
+      req.on('end', async () => {
+        try {
+          const parsed = JSON.parse(body || '{}');
+          const repo = typeof parsed.repo === 'string' ? parsed.repo.trim() : '';
+          const label = typeof parsed.label === 'string' ? parsed.label.trim() : '';
+          const actor = typeof parsed.actor === 'string' && parsed.actor.trim() ? parsed.actor.trim().slice(0, 200) : null;
+          if (!REPO_RE.test(repo) || !label || label.length > 50) {
+            return sendJson(res, 400, { error: 'repo (owner/name) and label (at most 50 characters) are required' });
+          }
+          const token = tokenFor(repo);
+          if (!token) return sendJson(res, 424, { error: `No readable GitHub token covers ${repo}` });
+          const r = await fetch(`${githubApiBase()}/repos/${repo}/labels`, {
+            method: 'POST', headers: headersFor(token),
+            body: JSON.stringify({ name: label, color: 'ededed', description: 'wake label of an Agent Studio flow' }),
+          });
+          _repoLabelCache.delete(repo);
+          if (r.status === 201 || r.status === 422) {
+            console.log(`[Orchestrator] repo-labels: ${repo} +${label} ${r.status === 201 ? 'created' : 'already existed'} by ${actor || 'console'}`);
+            return sendJson(res, 200, { ok: true, repo, label, created: r.status === 201 });
+          }
+          const text = await r.text().catch(() => '');
+          return sendJson(res, 502, { error: `GitHub returned ${r.status} creating '${label}' on ${repo}: ${text.slice(0, 200)}` });
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
       });
       return;
     }

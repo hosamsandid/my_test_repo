@@ -30,6 +30,9 @@ const {
   emptyDraftBundle,
 } = require('./process-template');
 const { processTemplateToUnified, buildUnifiedGraph } = require('./unified-graph');
+const {
+  describeHandoffGates, readinessRefusal, normalizeHandoffGates, conflictSolverHint,
+} = require('./flow-copilot-readiness');
 
 // ≤ 3 LLM calls per turn: one generation + at most two repairs (#1047 decision 3).
 const MAX_REPAIR_ITERATIONS = 2;
@@ -352,6 +355,7 @@ function readPromptAddendum() {
 // ── prompt composition ───────────────────────────────────────────────────────
 
 function buildCopilotSystem({ formatDoc, addendum, bundle }) {
+  const gates = describeHandoffGates(bundle);
   // Revision turns (the current bundle already has roles) use the patch
   // contract (#1071): a minimal op list instead of whole-bundle regeneration —
   // smaller outputs and structural preservation of untouched parts. The
@@ -373,6 +377,8 @@ function buildCopilotSystem({ formatDoc, addendum, bundle }) {
       '  {"op":"setStages","stages":[…]} · {"op":"setGates","gates":[…]}',
       '  {"op":"upsertLabel","label":{"name":"…", …}} · {"op":"removeLabel","name":"…"}',
       '  {"op":"upsertHuman","human":{"id":"…", …}} · {"op":"removeHuman","id":"…"}',
+      '- A question about the flow, or a request you must refuse, gets {"summary": "<your answer>",',
+      '  "ops": []} — the empty list proposes nothing; `summary` is the whole answer.',
       '- Only when the change cannot be expressed as ops (a full restructure), fall back to',
       '  {"summary": "…", "bundle": { … }} with the COMPLETE bundle — then',
       '  reproduce every part you were not asked to change verbatim.',
@@ -404,6 +410,8 @@ function buildCopilotSystem({ formatDoc, addendum, bundle }) {
     ].join('\n'),
     `## Bundle format reference\n\n${formatDoc || '(format reference unavailable)'}`,
     `## Studio wiring conventions\n\n${addendum || '(conventions addendum unavailable)'}`,
+    // #2915: only present when the bundle has a PR / issue hand-off.
+    ...(gates ? [gates] : []),
     `## Current bundle\n\nThe bundle as it exists right now (the user's instructions apply to it):\n\n\`\`\`json\n${JSON.stringify(bundle, null, 2)}\n\`\`\``,
   ].join('\n\n');
 }
@@ -597,6 +605,23 @@ async function generateBundleInParts({
 
 // ── the generate → validate → repair loop ────────────────────────────────────
 
+// A turn that answers instead of proposing (#2915): a question about the flow,
+// or a refused request. `bundle: null` — the client keeps no proposal, renders
+// the summary as the Copilot's reply and offers nothing to apply.
+function answerResult(summary, { repairIterations = 0, generatedInParts = false, refused = false } = {}) {
+  return {
+    ok: true,
+    answer: true,
+    ...(refused ? { refused: true } : {}),
+    bundle: null,
+    summary,
+    changes: [],
+    lints: [],
+    repairIterations,
+    generatedInParts,
+  };
+}
+
 // A turn the caller stopped (#2087). Distinct from every transport failure so
 // the route can end the stream silently instead of emitting an error event the
 // client would render as a failed generation — the client asked for this.
@@ -638,7 +663,9 @@ function isCopilotAborted(err) {
  * stopped turn must leave no proposal (AC11), so returning the partial result
  * would be exactly wrong. Omitting the signal keeps the loop byte-identical.
  *
- * @returns {{ ok, bundle, summary, changes, lints, repairIterations }}
+ * @returns {{ ok, bundle, summary, changes, lints, repairIterations, answer? }} —
+ *   `answer: true` (with `bundle: null`) when the turn answered instead of
+ *   proposing (#2915): a question, or a refused readiness-gate request.
  */
 async function runCopilot({
   bundle,
@@ -723,6 +750,11 @@ async function runCopilot({
     let findings;
     if (!parsed) {
       findings = [{ code: 'unparseable-output', severity: 'error', message: 'the reply was not a parseable {"summary", "bundle"} or {"summary", "ops"} JSON object' }];
+    } else if (!parsed.bundle && parsed.ops && parsed.ops.length === 0) {
+      // An answer, not a proposal (#2915): a question about the flow, or a
+      // request the model declined. Nothing to validate or apply.
+      if (parsed.summary) return answerResult(parsed.summary, { repairIterations, generatedInParts });
+      findings = [{ code: 'invalid-ops', severity: 'error', message: 'an empty ops list needs a `summary` that answers the user' }];
     } else {
       // Patch contract (#1071): apply the op list to the CURRENT bundle; the
       // result runs through the same gate as a whole-bundle reply. A failed
@@ -734,10 +766,17 @@ async function runCopilot({
         try { candidate = applyCopilotOps(baseBundle, parsed.ops); }
         catch (err) { opsError = err.message; }
       }
+      // A readiness gate the API would refuse, or one on an issue hand-off,
+      // refuses the turn with the API's reason (#2915 AC3/AC4) instead of
+      // entering the repair loop, where the model would quietly "fix" the
+      // request into something the user did not ask for.
+      const refusal = candidate ? readinessRefusal(baseBundle, candidate) : null;
+      if (refusal) return answerResult(refusal, { repairIterations, generatedInParts, refused: true });
       if (!candidate) {
         findings = [{ code: 'invalid-ops', severity: 'error', message: opsError || 'the ops list could not be applied' }];
       } else {
-        const ev = evaluateBundle(candidate);
+        // Canonical gates: the stored value equals what the edge dialog writes.
+        const ev = evaluateBundle(normalizeHandoffGates(candidate));
         best = { bundle: ev.bundle, summary: parsed.summary, lints: ev.lints };
         findings = errorLints(ev.lints);
       }
@@ -758,10 +797,18 @@ async function runCopilot({
   if (!best) {
     throw new Error('LLM returned no parseable bundle');
   }
+  const ok = errorLints(best.lints).length === 0;
+  // #2915 AC5: switching "Block on merge conflict" on in a team with a
+  // conflict solver suggests its wake label as the failure label — unless the
+  // model's own summary already names it.
+  const hint = ok ? conflictSolverHint(baseBundle, best.bundle) : null;
+  const summary = hint && !String(best.summary || '').includes(hint.wakeLabel)
+    ? [best.summary, hint.text].filter(Boolean).join(' ')
+    : best.summary;
   return {
-    ok: errorLints(best.lints).length === 0,
+    ok,
     bundle: best.bundle,
-    summary: best.summary,
+    summary,
     // Diff against the sanitized baseline so the change list reflects real
     // edits, not fields the sanitizer would strip from both sides anyway.
     changes: computeChanges(sanitizeBundle(baseBundle) || baseBundle, best.bundle),

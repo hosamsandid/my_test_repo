@@ -29,6 +29,7 @@ Reads:
     aee-jira comments KAN-6 [--limit N] [--offset N]   # the issue's comments, newest first (20 per page)
     aee-jira attachment get KAN-6 10312 [--out path]   # fetch one attachment's content by id
     aee-jira sprint list --board "Team Scrum Board"     # a Scrum board's sprints (resolved by board name)
+    aee-jira version list --project KAN           # a project's versions (releases), unreleased first
     aee-jira link-types                           # the site's issue link types: name, outward + inward phrase
     aee-jira users "Anna" [--project KAN | --issue KAN-10] [--limit N]   # find people: name / e-mail → accountId
 
@@ -54,6 +55,8 @@ ticket is routine and reversible):
     aee-jira sprint close --board "Team Scrum Board"     # complete the board's active sprint
     aee-jira sprint start --board "Team Scrum Board"     # activate the board's next future sprint
     aee-jira sprint advance --board "Team Scrum Board"   # close the active sprint, then start the next future one
+    aee-jira version create --project KAN --name 1.5 --release-date 2026-11-30   # a new project version
+    aee-jira version release --project KAN --name 1.4 [--date 2026-10-07] [--move-to 1.5]   # mark it released
     aee-jira link KAN-1 blocks KAN-2              # link two issues: "KAN-1 blocks KAN-2"
     aee-jira unlink 10001                         # remove a link by its id (from `show`'s links)
     aee-jira unlink KAN-1 blocks KAN-2            # …or by the same words that created it
@@ -274,6 +277,20 @@ dateless sprint (Jira rejects that). `sprint advance` is the roll-over in one
 call: it closes the active sprint, then starts the next future one, reporting each
 half separately so a partial result (e.g. closed but no future sprint to start) is
 visible — the CLI exits 1 on such a partial, while still printing both outcomes.
+
+`version` manages a project's versions (the releases issues get as fix
+version). `version list` returns each version's name, description, start and
+release date, `released`, `archived` (archived ones are listed, marked) and
+`overdue`, unreleased first. `version create` adds one version (`--name`,
+optional `--description`, `--start`, `--release-date`, dates YYYY-MM-DD); a name
+the project already has is refused, as is a release date before the start date.
+`version release` marks a version released with today's date or `--date`, and
+reports how many of its issues are still unresolved: with `--move-to <version>`
+they are moved there (as in Jira's own release dialog), otherwise they stay and
+the result says so. Releasing an already released version is reported as
+`already-released`, not as an error. Creating and releasing need the Jira
+"Administer Projects" permission on the project (typically a project admin);
+without it the refusal says so.
 
 `link` links two existing issues and reads like the sentence it records:
 `aee-jira link KAN-1 blocks KAN-2` makes KAN-1 block KAN-2. The words between
@@ -884,6 +901,25 @@ def build_parser():
     p_sprint_advance.add_argument("--close-id", dest="close_id", help="close this sprint id instead of the board's active one")
     p_sprint_advance.add_argument("--start-id", dest="start_id", help="start this sprint id instead of the earliest future one")
 
+    p_version = sub.add_parser("version", parents=[common], help="a project's versions (releases): list / create / release")
+    version_sub = p_version.add_subparsers(dest="version_cmd")
+
+    p_version_list = version_sub.add_parser("list", parents=[common], help="list a project's versions, unreleased first")
+    p_version_list.add_argument("--project", required=True, help="the project key, e.g. KAN")
+
+    p_version_create = version_sub.add_parser("create", parents=[common], help="create one version in a project")
+    p_version_create.add_argument("--project", required=True, help="the project key, e.g. KAN")
+    p_version_create.add_argument("--name", required=True, help='the version name, e.g. "1.5"')
+    p_version_create.add_argument("--description", help="optional description")
+    p_version_create.add_argument("--start", help="optional start date (YYYY-MM-DD)")
+    p_version_create.add_argument("--release-date", dest="release_date", help="optional planned release date (YYYY-MM-DD)")
+
+    p_version_release = version_sub.add_parser("release", parents=[common], help="mark a version as released")
+    p_version_release.add_argument("--project", required=True, help="the project key, e.g. KAN")
+    p_version_release.add_argument("--name", required=True, help='the version to release, e.g. "1.4"')
+    p_version_release.add_argument("--date", help="release date (YYYY-MM-DD, default today)")
+    p_version_release.add_argument("--move-to", dest="move_to", help="move the version's unresolved issues to this version")
+
     return parser
 
 
@@ -1202,6 +1238,32 @@ def main(argv=None):
                              "       aee-jira sprint close --board <name> [--sprint-id <id>]\n"
                              "       aee-jira sprint start --board <name> [--sprint-id <id>]\n"
                              "       aee-jira sprint advance --board <name> [--close-id <id>] [--start-id <id>]"}, as_json)
+            return EXIT_USAGE
+    elif args.cmd == "version":
+        version_cmd = getattr(args, "version_cmd", None)
+        if version_cmd == "list":
+            path = "/version/list?" + urllib.parse.urlencode({"project": args.project})
+        elif version_cmd == "create":
+            path, method = "/version/create", "POST"
+            body = {"project": args.project, "name": args.name}
+            if args.description:
+                body["description"] = args.description
+            if args.start:
+                body["startDate"] = args.start
+            if args.release_date:
+                body["releaseDate"] = args.release_date
+        elif version_cmd == "release":
+            path, method = "/version/release", "POST"
+            body = {"project": args.project, "name": args.name}
+            if args.date:
+                body["releaseDate"] = args.date
+            if args.move_to:
+                body["moveTo"] = args.move_to
+        else:
+            emit({"ok": False, "error": "usage",
+                  "message": "usage: aee-jira version list --project <key>\n"
+                             "       aee-jira version create --project <key> --name <name> [--description <text>] [--start <date>] [--release-date <date>]\n"
+                             "       aee-jira version release --project <key> --name <name> [--date <date>] [--move-to <name>]"}, as_json)
             return EXIT_USAGE
     else:
         parser.print_help()

@@ -43,6 +43,8 @@ const POLICY = Object.freeze({
   unlink: { scopes: ['team'] },
   'set-epic': { scopes: ['team'] },
   edit: { scopes: ['team'] },
+  'version-create': { scopes: ['team'] },
+  'version-release': { scopes: ['team'] },
 });
 
 // Wired but empty — see the header.

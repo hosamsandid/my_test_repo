@@ -2821,6 +2821,258 @@ async function editIssueFields(cred, issueKey, { changes, env, onChanged } = {})
   };
 }
 
+// ── project versions: list, create, release (#2902) ──────────────────────────
+//
+// Teams plan releases with project versions ("1.4"): issues carry a fix
+// version, and the version is marked released when it ships. Three calls:
+//   • READ  — a project's versions (GET /project/{key}/versions), unreleased
+//             first, archived ones listed but marked.
+//   • WRITE — create one version (POST /version); a name the project already
+//             has is refused before Jira is asked.
+//   • WRITE — release one version (PUT /version/{id} { released, releaseDate }),
+//             optionally moving its unresolved issues to another version the
+//             way Jira's own release dialog does (`moveUnfixedIssuesTo`).
+// A project the credential cannot see is the standard out-of-scope 404. Jira
+// answers a create / release without the project-admin permission with a 403,
+// mapped to a refusal that names the permission (never the raw body).
+
+const VERSION_PERMISSION_HINT = 'creating and releasing versions needs the Jira "Administer Projects" permission on the project (typically a project admin)';
+// The changelog names a fix-version change by id and display name; both are
+// stamped so the moved issues' `field_changed` echo reads `origin: agent`.
+const FIX_VERSION_CHANGE_FIELDS = Object.freeze(['fixVersions', 'Fix Version']);
+
+const versionErr = (status, message) => { const e = new Error(message); e.status = status; return e; };
+
+// Today's date as `YYYY-MM-DD` (UTC). `now` is a test seam.
+function todayIso(now) {
+  return new Date(typeof now === 'function' ? now() : Date.now()).toISOString().slice(0, 10);
+}
+
+// One version as the agent sees it. Jira reports `overdue` only on unreleased
+// versions with a past release date; when it is absent it is derived. Pure.
+function shapeVersion(raw, today) {
+  const v = raw && typeof raw === 'object' ? raw : {};
+  const released = v.released === true;
+  const releaseDate = v.releaseDate ? String(v.releaseDate) : null;
+  const overdue = released ? false
+    : typeof v.overdue === 'boolean' ? v.overdue
+      : !!(releaseDate && today && releaseDate < today);
+  return {
+    id: v.id != null ? String(v.id) : null,
+    name: v.name != null ? String(v.name) : null,
+    description: v.description ? String(v.description) : null,
+    startDate: v.startDate ? String(v.startDate) : null,
+    releaseDate,
+    released,
+    archived: v.archived === true,
+    overdue,
+  };
+}
+
+// Unreleased first, otherwise Jira's own (sequence) order. Pure.
+function sortVersions(versions) {
+  return [...versions.filter((v) => !v.released), ...versions.filter((v) => v.released)];
+}
+
+function findVersion(versions, name) {
+  const want = String(name == null ? '' : name).trim().toLowerCase();
+  return versions.find((v) => String(v.name || '').trim().toLowerCase() === want) || null;
+}
+
+function availableVersions(versions) {
+  return versions.map((v) => v.name).filter(Boolean).join(', ') || '(none)';
+}
+
+// A `YYYY-MM-DD` date argument, validated. Pure — throws a 400.
+function versionDate(value, label) {
+  if (value == null || String(value).trim() === '') return null;
+  const d = String(value).trim();
+  if (!isIsoDate(d)) throw versionErr(400, `"${d}" is not a valid ${label} — use YYYY-MM-DD, e.g. 2026-10-31`);
+  return d;
+}
+
+// Jira's refusal of a version write, readable. Pure.
+function versionWriteRefusal(err, projectKey, tail) {
+  if (err.status === 403) return `the Jira account may not manage versions in project ${projectKey} (403) — ${VERSION_PERMISSION_HINT}.${tail}`;
+  if (err.status === 404) return `${outOfScope('Project ', projectKey)}.${tail}`;
+  const body = safeJson(err.body || '');
+  const parts = [];
+  for (const [id, msg] of Object.entries(body && body.errors && typeof body.errors === 'object' ? body.errors : {})) parts.push(`${id}: ${msg}`);
+  for (const msg of Array.isArray(body && body.errorMessages) ? body.errorMessages : []) parts.push(String(msg));
+  if (!parts.length) return `${err.message}${tail}`;
+  return `Jira refused the version change in project ${projectKey}: ${parts.map((p) => String(p).replace(/[.\s]+$/, '')).join('; ')}.${tail}`;
+}
+
+// The project (scope check + canonical key + id) and its versions.
+async function readProjectVersions(base, auth, projectKey, tail, today) {
+  const key = String(projectKey == null ? '' : projectKey).trim().toUpperCase();
+  if (!key) throw versionErr(400, 'a --project key is required');
+  let project;
+  let raw;
+  try {
+    project = await requestJson({ base, path: `/rest/api/3/project/${encodeURIComponent(key)}`, authHeader: auth });
+    raw = await requestJson({ base, path: `/rest/api/3/project/${encodeURIComponent(key)}/versions`, authHeader: auth });
+  } catch (e) {
+    if (e.status === 404) throw versionErr(404, `${outOfScope('Project ', key)}.${tail}`);
+    throw e;
+  }
+  return {
+    projectKey: String((project && project.key) || key),
+    projectId: project && project.id != null ? String(project.id) : null,
+    raw: Array.isArray(raw) ? raw : [],
+    versions: (Array.isArray(raw) ? raw : []).map((v) => shapeVersion(v, today)),
+  };
+}
+
+async function listProjectVersions(cred, { projectKey, env, now } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const { projectKey: key, versions } = await readProjectVersions(base, auth, projectKey, '', todayIso(now));
+  return {
+    project: key,
+    count: versions.length,
+    unreleased: versions.filter((v) => !v.released).length,
+    versions: sortVersions(versions),
+  };
+}
+
+async function createProjectVersion(cred, { projectKey, name, description, startDate, releaseDate, env, now } = {}) {
+  const tail = ' Nothing was created.';
+  const versionName = String(name == null ? '' : name).trim();
+  if (!versionName) throw versionErr(400, 'a version --name is required (e.g. "1.5")');
+  if (/[\r\n]/.test(versionName)) throw versionErr(400, 'the version name must be a single line');
+  if (versionName.length > 255) throw versionErr(400, 'the version name is longer than Jira allows (255 characters)');
+  const start = versionDate(startDate, 'start date');
+  const release = versionDate(releaseDate, 'release date');
+  if (start && release && release < start) {
+    throw versionErr(400, `the release date ${release} is before the start date ${start}.${tail}`);
+  }
+
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const today = todayIso(now);
+  const { projectKey: key, projectId, versions } = await readProjectVersions(base, auth, projectKey, tail, today);
+  const dup = findVersion(versions, versionName);
+  const duplicate = () => versionErr(409,
+    `project ${key} already has a version "${dup ? dup.name : versionName}"${dup ? ` (${dup.released ? 'released' : 'unreleased'}${dup.archived ? ', archived' : ''})` : ''}.${tail}`);
+  if (dup) throw duplicate();
+
+  const body = { name: versionName };
+  if (projectId) body.projectId = Number(projectId);
+  else body.project = key;
+  const desc = description == null ? '' : String(description).trim();
+  if (desc) body.description = desc;
+  if (start) body.startDate = start;
+  if (release) body.releaseDate = release;
+  let created;
+  try {
+    // A write — NOT retried on a transport failure (F6).
+    created = await requestJson({ base, path: '/rest/api/3/version', method: 'POST', authHeader: auth, body });
+  } catch (e) {
+    // Another caller created the same name between the list and the create.
+    if (e.status === 400 && /already exists/i.test(String(e.body || ''))) throw duplicate();
+    throw versionErr(e.status, versionWriteRefusal(e, key, tail));
+  }
+  return { project: key, version: shapeVersion({ ...body, ...created }, today) };
+}
+
+// The keys of a version's unresolved issues (for the own-writes stamps when
+// they are moved). Best effort: an unreadable search stamps nothing.
+async function unresolvedVersionIssueKeys(base, auth, versionId) {
+  const keys = [];
+  try {
+    let nextPageToken;
+    for (let page = 0; page < MAX_PAGES; page += 1) {
+      const body = { jql: `fixVersion = ${Number(versionId)} AND resolution = EMPTY`, fields: ['summary'], maxResults: PAGE_SIZE };
+      if (nextPageToken) body.nextPageToken = nextPageToken;
+      const res = await requestJson({ base, path: '/rest/api/3/search/jql', method: 'POST', idempotent: true, authHeader: auth, body });
+      for (const raw of Array.isArray(res.issues) ? res.issues : []) if (raw && raw.key) keys.push(String(raw.key));
+      if (res.isLast !== false || !res.nextPageToken) break;
+      nextPageToken = res.nextPageToken;
+    }
+  } catch {
+    return keys;
+  }
+  return keys;
+}
+
+async function releaseProjectVersion(cred, { projectKey, name, releaseDate, moveTo, env, now, onMoved } = {}) {
+  const tail = ' Nothing was changed.';
+  const versionName = String(name == null ? '' : name).trim();
+  if (!versionName) throw versionErr(400, 'a version --name is required (e.g. "1.4")');
+  const date = versionDate(releaseDate, 'release date');
+  const moveName = moveTo == null ? '' : String(moveTo).trim();
+
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const today = todayIso(now);
+  const { projectKey: key, raw, versions } = await readProjectVersions(base, auth, projectKey, tail, today);
+  const version = findVersion(versions, versionName);
+  if (!version) throw versionErr(404, `project ${key} has no version "${versionName}". Available: ${availableVersions(versions)}.${tail}`);
+
+  if (version.released) {
+    return {
+      project: key,
+      version,
+      outcome: 'already-released',
+      message: `${version.name} was already released${version.releaseDate ? ` on ${version.releaseDate}` : ''} — nothing was changed${moveName ? ' and no issues were moved' : ''}.`,
+      unresolvedIssues: null,
+      movedTo: null,
+      moved: 0,
+    };
+  }
+
+  const effective = date || today;
+  if (version.startDate && effective < version.startDate) {
+    throw versionErr(400, `the release date ${effective} is before ${version.name}'s start date ${version.startDate}.${tail}`);
+  }
+  let target = null;
+  if (moveName) {
+    target = findVersion(versions, moveName);
+    if (!target) throw versionErr(404, `project ${key} has no version "${moveName}" to move the unresolved issues to. Available: ${availableVersions(versions)}.${tail}`);
+    if (target.id === version.id) throw versionErr(400, `cannot move ${version.name}'s unresolved issues to ${version.name} itself.${tail}`);
+    if (target.archived) throw versionErr(400, `version ${target.name} is archived — move the unresolved issues to an active version.${tail}`);
+  }
+
+  let unresolved = 0;
+  try {
+    const counts = await requestJson({ base, path: `/rest/api/3/version/${encodeURIComponent(version.id)}/unresolvedIssueCount`, authHeader: auth });
+    unresolved = Number(counts && counts.issuesUnresolvedCount) || 0;
+  } catch (e) {
+    if (e.status === 404) throw versionErr(404, `${outOfScope('Project ', key)}.${tail}`);
+    throw e;
+  }
+  const movedKeys = target && unresolved ? await unresolvedVersionIssueKeys(base, auth, version.id) : [];
+
+  const body = { released: true, releaseDate: effective };
+  if (target && unresolved) {
+    const targetRaw = raw.find((v) => v && String(v.id) === target.id);
+    body.moveUnfixedIssuesTo = (targetRaw && targetRaw.self) || `${base}/rest/api/3/version/${encodeURIComponent(target.id)}`;
+  }
+  let updated;
+  try {
+    // A write — NOT retried on a transport failure (F6).
+    updated = await requestJson({ base, path: `/rest/api/3/version/${encodeURIComponent(version.id)}`, method: 'PUT', authHeader: auth, body });
+  } catch (e) {
+    throw versionErr(e.status, versionWriteRefusal(e, key, tail));
+  }
+  const moved = target ? unresolved : 0;
+  if (moved && movedKeys.length && typeof onMoved === 'function') onMoved(movedKeys);
+  let message = `${version.name} released on ${effective}`;
+  if (!unresolved) message += '; it had no unresolved issues.';
+  else if (target) message += `; its ${unresolved} unresolved issue${unresolved === 1 ? ' was' : 's were'} moved to ${target.name}.`;
+  else message += `; ${unresolved} unresolved issue${unresolved === 1 ? ' stays' : 's stay'} assigned to ${version.name} (pass --move-to <version> to move them).`;
+  return {
+    project: key,
+    version: shapeVersion({ ...(raw.find((v) => v && String(v.id) === version.id) || {}), ...(updated && typeof updated === 'object' ? updated : {}), released: true, releaseDate: effective }, today),
+    outcome: 'released',
+    message,
+    unresolvedIssues: unresolved,
+    movedTo: target && unresolved ? target.name : null,
+    moved,
+  };
+}
+
 // ── board & sprint management (Jira Agile API, #2450) ────────────────────────
 //
 // The first capability that touches Jira's **Agile** surface (`/rest/agile/1.0`,
@@ -3453,6 +3705,14 @@ module.exports = {
   normalizeIssueEdit,
   editRefusalMessage,
   editIssueFields,
+  // project versions (#2902)
+  FIX_VERSION_CHANGE_FIELDS,
+  shapeVersion,
+  sortVersions,
+  versionWriteRefusal,
+  listProjectVersions,
+  createProjectVersion,
+  releaseProjectVersion,
   // board & sprint management (#2450)
   MAX_BULK_SPRINTS,
   parseUtcDay,

@@ -29,6 +29,7 @@ Reads:
     aee-jira attachment get KAN-6 10312 [--out path]   # fetch one attachment's content by id
     aee-jira sprint list --board "Team Scrum Board"     # a Scrum board's sprints (resolved by board name)
     aee-jira link-types                           # the site's issue link types: name, outward + inward phrase
+    aee-jira users "Anna" [--project KAN | --issue KAN-10] [--limit N]   # find people: name / e-mail → accountId
 
 Writes (attributed, role-gated server-side, no human confirmation — moving a
 ticket is routine and reversible):
@@ -180,6 +181,28 @@ on the issue's edit screen is named). The result lists each requested field
 with its old and new value and "changed" or "unchanged" (already at that value,
 not written). An issue outside the team's Jira scope is refused. Description
 (`update`) and custom fields (`set-field`) have their own commands.
+
+`users` finds people, so you can assign them: Jira identifies a person by an
+opaque accountId, never by name or e-mail, and every `assignee` (`edit
+--assignee`, `create-issue --assignee`, a create-epic / add-stories payload's
+"assignee") takes that accountId. Search by a name or e-mail fragment:
+
+    aee-jira users "Anna Schmidt"                 # every match: accountId, displayName, email, active, accountType
+    aee-jira users "anna.schmidt@acme.com"        # a full e-mail finds that one person (if your account may see them)
+    aee-jira users "Anna" --project KAN           # only people who can be assigned issues in KAN
+    aee-jira users "Anna" --issue KAN-10          # only people who can be assigned KAN-10
+    aee-jira edit KAN-10 --assignee <accountId>   # then assign with the accountId from the result
+
+`email` is only filled when Jira shows it to the calling account (privacy
+settings often hide it — then it is null; it is never guessed). Without
+--project / --issue a deactivated account is listed with `active: false`; with
+them only active, assignable people come back. `accountType` "app" marks a bot
+or integration, not a person. Several people with the same name are all listed
+and the `note` says so — tell them apart by e-mail or ask, never pick one at
+random. No match is an empty `users` list with a "No user found" note (exit 0).
+At most 50 people are returned (`--limit` lowers it); `truncated: true` means
+there were more — narrow the query. A project or issue outside your team's Jira
+scope is refused.
 
 `sprint` manages a Scrum board's sprints, the board resolved by its
 human-readable name (e.g. "Accessio 2.0 Scrum Board"). `sprint list` reads the
@@ -616,6 +639,25 @@ def build_parser():
         help="raw JSON value sent to Jira verbatim (escape hatch for an exotic field shape)",
     )
 
+    p_users = sub.add_parser(
+        "users", parents=[common],
+        help='find Jira users by name or e-mail → their accountId, the value every --assignee / "assignee" '
+             'takes, e.g. aee-jira users "Anna" --project KAN, then aee-jira edit KAN-10 --assignee <accountId>',
+        description="Find people so you can assign them. Jira identifies a person by an opaque accountId, never by "
+                    "name or e-mail; `edit --assignee`, `create-issue --assignee` and a create-epic / add-stories "
+                    "payload's \"assignee\" all take that accountId. Each match carries accountId, displayName, "
+                    "email (only when Jira shows it to your account, else null — never guessed), active and "
+                    "accountType (\"app\" = a bot, not a person). --project / --issue return only active people "
+                    "who can be assigned there. Several people with the same name are all listed and the note says "
+                    "so: tell them apart by e-mail or ask — never pick one. No match is an empty list with a "
+                    "\"No user found\" note. At most 50 come back; truncated: true means there were more.",
+    )
+    p_users.add_argument("query", help='a name or e-mail address, or part of one, e.g. "Anna" or "anna@acme.com"')
+    g_users = p_users.add_mutually_exclusive_group()
+    g_users.add_argument("--project", help="only people who can be assigned issues in this project, e.g. KAN")
+    g_users.add_argument("--issue", help="only people who can be assigned this issue, e.g. KAN-10")
+    p_users.add_argument("--limit", type=int, help="return at most N people (1-50, default 50)")
+
     sub.add_parser("link-types", parents=[common], help="list the site's issue link types (name, outward + inward phrase)")
 
     p_link = sub.add_parser(
@@ -860,6 +902,15 @@ def main(argv=None):
         path, method, body = "/set-field", "POST", payload
     elif args.cmd == "link-types":
         path = "/link-types"
+    elif args.cmd == "users":
+        q = {"query": args.query}
+        if args.project:
+            q["project"] = args.project
+        if args.issue:
+            q["issue"] = args.issue
+        if args.limit is not None:
+            q["limit"] = args.limit
+        path = "/users?" + urllib.parse.urlencode(q)
     elif args.cmd in ("link", "unlink"):
         words = args.words
         if args.cmd == "unlink" and len(words) == 1:

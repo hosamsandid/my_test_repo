@@ -2895,3 +2895,146 @@ test('normalizeIssueEdit: shape refusals before Jira (labels with spaces, set+ad
   assert.deepEqual(jc.normalizeIssueEdit({ assignee: '', dueDate: '' }), { assignee: null, dueDate: null });
   assert.deepEqual(jc.normalizeIssueEdit({ labels: { add: ['a', 'A', 'b'] } }), { labels: { add: ['a', 'b'], remove: [] } });
 });
+
+// ── user lookup (#2898) ─────────────────────────────────────────────────────
+
+const jiraUser = (id, name, extra = {}) => ({ accountId: id, displayName: name, active: true, accountType: 'atlassian', ...extra });
+const usersResponse = (list) => ({ ok: true, status: 200, text: async () => JSON.stringify(list) });
+
+test('searchUsers: name query → accountId, displayName, email only when Jira gives it, active, accountType (#2898 AC1/AC6)', async () => {
+  await withFetch((url) => {
+    const u = new URL(url);
+    assert.equal(u.pathname, '/rest/api/3/user/search');
+    assert.equal(u.searchParams.get('query'), 'Anna');
+    assert.equal(u.searchParams.get('maxResults'), '51'); // one extra row tells "more matches"
+    return usersResponse([
+      jiraUser('acc-1', 'Anna Schmidt', { emailAddress: 'anna@acme.com' }),
+      jiraUser('acc-2', 'Anna Berg', { emailAddress: '' }),
+    ]);
+  }, async () => {
+    const r = await jc.searchUsers(CRED, { query: ' Anna ', env: CRED.env });
+    assert.deepEqual(r, {
+      query: 'Anna', assignableOnly: false, count: 2, truncated: false, note: null,
+      users: [
+        { accountId: 'acc-1', displayName: 'Anna Schmidt', email: 'anna@acme.com', active: true, accountType: 'atlassian' },
+        { accountId: 'acc-2', displayName: 'Anna Berg', email: null, active: true, accountType: 'atlassian' },
+      ],
+    });
+  });
+});
+
+test('searchUsers: a full e-mail address is passed to Jira as the query (#2898 AC2)', async () => {
+  await withFetch((url) => {
+    assert.equal(new URL(url).searchParams.get('query'), 'anna@acme.com');
+    return usersResponse([jiraUser('acc-1', 'Anna Schmidt', { emailAddress: 'anna@acme.com' })]);
+  }, async () => {
+    const r = await jc.searchUsers(CRED, { query: 'anna@acme.com', env: CRED.env });
+    assert.deepEqual(r.users.map((u) => u.accountId), ['acc-1']);
+  });
+});
+
+test('searchUsers: --project checks scope, then searches assignable users and leaves inactive ones out (#2898 AC3/AC5)', async () => {
+  await withFetch((url) => {
+    const u = new URL(url);
+    if (u.pathname === '/rest/api/3/project/KAN') return usersResponse({ key: 'KAN' });
+    assert.equal(u.pathname, '/rest/api/3/user/assignable/search');
+    assert.equal(u.searchParams.get('project'), 'KAN');
+    return usersResponse([jiraUser('acc-1', 'Anna'), jiraUser('acc-9', 'Anna Gone', { active: false })]);
+  }, async (calls) => {
+    const r = await jc.searchUsers(CRED, { query: 'Anna', project: 'KAN', env: CRED.env });
+    assert.equal(r.assignableOnly, true);
+    assert.equal(r.project, 'KAN');
+    assert.deepEqual(r.users.map((u) => u.accountId), ['acc-1']);
+    assert.equal(calls.length, 2);
+  });
+});
+
+test('searchUsers: --issue narrows to people assignable to that issue (#2898 AC3)', async () => {
+  await withFetch((url) => {
+    const u = new URL(url);
+    if (u.pathname === '/rest/api/3/issue/KAN-10') return usersResponse({ key: 'KAN-10' });
+    assert.equal(u.pathname, '/rest/api/3/user/assignable/search');
+    assert.equal(u.searchParams.get('issueKey'), 'KAN-10');
+    assert.equal(u.searchParams.get('project'), null);
+    return usersResponse([jiraUser('acc-1', 'Anna')]);
+  }, async () => {
+    const r = await jc.searchUsers(CRED, { query: 'Anna', issue: 'KAN-10', env: CRED.env });
+    assert.equal(r.issue, 'KAN-10');
+    assert.equal(r.count, 1);
+  });
+});
+
+test('searchUsers: without narrowing, an inactive account is listed and marked; apps are marked (#2898 AC5, edge case)', async () => {
+  await withFetch(() => usersResponse([
+    jiraUser('acc-9', 'Anna Gone', { active: false }),
+    jiraUser('app-1', 'Anna Bot', { accountType: 'app' }),
+  ]), async () => {
+    const r = await jc.searchUsers(CRED, { query: 'Anna', env: CRED.env });
+    assert.deepEqual(r.users.map((u) => [u.accountId, u.active, u.accountType]), [['acc-9', false, 'atlassian'], ['app-1', true, 'app']]);
+    assert.match(r.note, /accountType "app" are apps \/ bots/);
+    assert.match(r.note, /active: false are deactivated accounts/);
+  });
+});
+
+test('searchUsers: no match is an empty result with a "no user found" note, not an error (#2898 AC4)', async () => {
+  await withFetch((url) => (/\/project\//.test(url) ? usersResponse({}) : usersResponse([])), async () => {
+    const r = await jc.searchUsers(CRED, { query: 'Zed', env: CRED.env });
+    assert.deepEqual([r.users, r.count, r.truncated, r.note], [[], 0, false, 'No user found matching "Zed".']);
+    const p = await jc.searchUsers(CRED, { query: 'Zed', project: 'KAN', env: CRED.env });
+    assert.equal(p.note, 'No user found matching "Zed" who can be assigned in project KAN.');
+  });
+});
+
+test('searchUsers: capped at 50 (or --limit) and says when there were more (#2898 AC7)', async () => {
+  const many = Array.from({ length: 51 }, (_, i) => jiraUser(`acc-${i}`, `Person ${i}`));
+  await withFetch((url) => {
+    const max = Number(new URL(url).searchParams.get('maxResults'));
+    return usersResponse(many.slice(0, max));
+  }, async () => {
+    const r = await jc.searchUsers(CRED, { query: 'Person', env: CRED.env });
+    assert.equal(r.count, jc.USER_SEARCH_LIMIT);
+    assert.equal(r.truncated, true);
+    assert.match(r.note, /More than 50 users match — only the first 50 are listed/);
+    const small = await jc.searchUsers(CRED, { query: 'Person', limit: '3', env: CRED.env });
+    assert.deepEqual([small.count, small.truncated], [3, true]);
+    const capped = await jc.searchUsers(CRED, { query: 'Person', limit: 500, env: CRED.env });
+    assert.equal(capped.count, 50);
+  });
+});
+
+test('searchUsers: several people with the same name are all returned and flagged (#2898 edge case)', async () => {
+  await withFetch(() => usersResponse([
+    jiraUser('acc-1', 'Anna Schmidt', { emailAddress: 'a1@acme.com' }),
+    jiraUser('acc-2', 'anna schmidt'),
+    jiraUser('acc-3', 'Anna Berg'),
+  ]), async () => {
+    const r = await jc.searchUsers(CRED, { query: 'Anna', env: CRED.env });
+    assert.equal(r.count, 3);
+    assert.match(r.note, /2 users are named "Anna Schmidt" — tell them apart by e-mail or accountId, do not guess/);
+    assert.doesNotMatch(r.note, /Anna Berg/);
+  });
+});
+
+test('searchUsers: a project or issue outside the team scope is the standard refusal, no user search (#2898 AC8)', async () => {
+  await withFetch(() => ({ ok: false, status: 404, text: async () => '{}' }), async (calls) => {
+    await assert.rejects(
+      jc.searchUsers(CRED, { query: 'Anna', project: 'OTHER', env: CRED.env }),
+      (e) => e.status === 404 && e.message === "Project OTHER was not found, or it is outside this team's Jira scope (the account cannot see it).",
+    );
+    await assert.rejects(
+      jc.searchUsers(CRED, { query: 'Anna', issue: 'OTHER-1', env: CRED.env }),
+      (e) => e.status === 404 && /^Issue OTHER-1 was not found, or it is outside this team's Jira scope/.test(e.message),
+    );
+    assert.ok(calls.every((c) => !/\/user\//.test(c.url)));
+  });
+});
+
+test('searchUsers: usage refusals before any HTTP (empty query, project + issue, bad limit)', async () => {
+  await withFetch(() => { throw new Error('no HTTP expected'); }, async () => {
+    const bad = (args, re) => assert.rejects(jc.searchUsers(CRED, { ...args, env: CRED.env }), (e) => e.status === 400 && re.test(e.message));
+    await bad({ query: '  ' }, /a search query is required/);
+    await bad({ query: 'A', project: 'KAN', issue: 'KAN-1' }, /--project OR --issue, not both/);
+    await bad({ query: 'A', limit: 'x' }, /--limit must be a whole number from 1 to 50/);
+    await bad({ query: 'A', limit: 0 }, /--limit must be a whole number/);
+  });
+});

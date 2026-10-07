@@ -1727,7 +1727,7 @@ test('a refused grant blocks EVERY subcommand before Jira is touched (AC4/AC5)',
   try {
     const routes = [
       ['GET', '/cli/whoami'], ['GET', '/cli/inbox'], ['GET', '/cli/inbox?consume=KAN-1:1'], ['GET', '/cli/projects'],
-      ['GET', '/cli/show?issue=KAN-1'], ['GET', '/cli/sprint/list?board=B'], ['GET', '/cli/attachment?issue=KAN-1&id=1'],
+      ['GET', '/cli/show?issue=KAN-1'], ['GET', '/cli/sprint/list?board=B'], ['GET', '/cli/attachment?issue=KAN-1&id=1'], ['GET', '/cli/users?query=Anna'],
       ['POST', '/cli/comment'], ['POST', '/cli/transition'], ['POST', '/cli/create-epic'], ['POST', '/cli/add-stories'], ['POST', '/cli/create-issue'], ['POST', '/cli/set-epic'], ['POST', '/cli/edit'], ['POST', '/cli/sprint/create'],
       ['POST', '/cli/attachment/add'],
     ];
@@ -1988,6 +1988,96 @@ test('cli link / unlink / link-types: authorised write, audited, both ends stamp
   } finally {
     restore();
     broker.ownWritesStore.teardown('team-1');
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+// #2898 — a stubbed Jira for `users`: /user/search, /user/assignable/search and
+// the project / issue visibility lookups (KAN visible, OTHER outside scope).
+const ANNA = { accountId: 'acc-anna', displayName: 'Anna Schmidt', emailAddress: 'anna@acme.com', active: true, accountType: 'atlassian' };
+const ANNA_OLD = { accountId: 'acc-anna-old', displayName: 'Anna Old', active: false, accountType: 'atlassian' };
+function stubUsersJira(seen) {
+  const origFetch = global.fetch;
+  const res = (status, body) => ({ ok: status < 400, status, text: async () => JSON.stringify(body) });
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    seen.push({ url: String(url), auth: opts && opts.headers && opts.headers.Authorization });
+    const u = new URL(String(url));
+    if (/\/project\/KAN$/.test(u.pathname)) return res(200, { key: 'KAN' });
+    if (/\/project\/|\/issue\//.test(u.pathname)) return res(404, {});
+    if (/\/user\/assignable\/search$/.test(u.pathname)) return res(200, [ANNA, ANNA_OLD]);
+    if (/\/user\/search$/.test(u.pathname)) return res(200, u.searchParams.get('query') === 'nobody' ? [] : [ANNA, ANNA_OLD]);
+    return res(404, {});
+  };
+  return () => { global.fetch = origFetch; };
+}
+
+test('cli users: name → accountId, assignable narrowing, out-of-scope refusal, audit without personal data (#2898)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
+  broker._setGrantResolver(SERVICE_GRANT);
+  const seen = [];
+  const restore = stubUsersJira(seen);
+  const srv = await listen();
+  try {
+    const all = await call(srv, 'GET', '/cli/users?query=Anna', { token: TOKEN });
+    assert.equal(all.status, 200);
+    assert.deepEqual(all.body.users, [
+      { accountId: 'acc-anna', displayName: 'Anna Schmidt', email: 'anna@acme.com', active: true, accountType: 'atlassian' },
+      { accountId: 'acc-anna-old', displayName: 'Anna Old', email: null, active: false, accountType: 'atlassian' },
+    ]);
+    assert.equal(all.body.assignableOnly, false);
+    assert.equal(all.body.truncated, false);
+
+    const inKan = await call(srv, 'GET', '/cli/users?query=Anna&project=KAN', { token: TOKEN });
+    assert.equal(inKan.status, 200);
+    assert.deepEqual(inKan.body.users.map((u) => u.accountId), ['acc-anna'], 'inactive accounts are left out when narrowing');
+    assert.equal(inKan.body.project, 'KAN');
+    assert.ok(seen.some((s) => /\/user\/assignable\/search\?.*project=KAN/.test(s.url)));
+
+    const none = await call(srv, 'GET', '/cli/users?query=nobody', { token: TOKEN });
+    assert.equal(none.status, 200);
+    assert.deepEqual(none.body.users, []);
+    assert.match(none.body.note, /No user found matching "nobody"/);
+
+    const other = await call(srv, 'GET', '/cli/users?query=Anna&project=OTHER', { token: TOKEN });
+    assert.equal(other.status, 404);
+    assert.match(other.body.error, /Project OTHER was not found, or it is outside this team's Jira scope/);
+    assert.ok(!seen.some((s) => /assignable\/search\?.*project=OTHER/.test(s.url)), 'no user search outside scope');
+
+    assert.equal((await call(srv, 'GET', '/cli/users', { token: TOKEN })).status, 400);
+    assert.equal((await call(srv, 'GET', '/cli/users?query=A&project=KAN&issue=KAN-1', { token: TOKEN })).status, 400);
+    assert.equal((await call(srv, 'GET', '/cli/users?query=A&limit=0', { token: TOKEN })).status, 400);
+
+    const lines = auditLines().filter((l) => l.scopeId === 'team-1' && l.subcommand === 'users');
+    assert.ok(lines.some((l) => l.outcome === 'ok' && l.detail === 'site:2'));
+    assert.ok(lines.some((l) => l.outcome === 'ok' && l.detail === 'KAN:1'));
+    assert.ok(lines.every((l) => !/Anna|anna@|acc-anna/.test(JSON.stringify(l))), 'no query or person in the audit');
+
+    // a read: POST is not a route; no service account → refused before Jira
+    assert.equal((await call(srv, 'POST', '/cli/users', { token: TOKEN, body: {} })).status, 404);
+    const nocred = await call(srv, 'GET', '/cli/users?query=Anna', { token: OTHER });
+    assert.equal(nocred.body.code, 'no-service-account');
+  } finally {
+    restore();
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli users: a chat turn searches with the member\'s own Jira token (#2898)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
+  broker._setGrantResolver(async () => ({ ok: true, mode: 'personal', interactive: true, agentId: 'team-1-dev', userId: 'alice', values: { email: 'a@b.c', 'api-token': 'mine' } }));
+  const seen = [];
+  const restore = stubUsersJira(seen);
+  const srv = await listen();
+  try {
+    const r = await callAs(srv, 'GET', '/cli/users?query=Anna', { token: TOKEN });
+    assert.equal(r.status, 200);
+    assert.equal(seen[0].auth, `Basic ${Buffer.from('a@b.c:mine').toString('base64')}`);
+  } finally {
+    restore();
+    broker._setGrantResolver(SERVICE_GRANT);
     broker.scopeCredentials.delete('team-1');
     srv.close();
   }

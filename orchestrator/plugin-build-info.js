@@ -3,7 +3,8 @@
 // ─── running broker build identity (#2646) ──────────────────────────────────
 //
 // Every broker image carries the git commit it was built from, and its /healthz
-// body reports it as `build: { commit, dirty, commitTime }`
+// body reports it as `build: { commit, dirty, commitTime }` — plus
+// `{ tag, tagDistance }` when the build recorded a release tag (#2893)
 // (broker-sdk/build-info.js). Asking the LIVE sidecar — rather than inspecting
 // the `:latest` image in the local store or a Kubernetes node cache — is what
 // makes the answer honest: a rebuilt image next to an old running container
@@ -22,6 +23,21 @@ const PROBE_TIMEOUT_MS = 2000;
 // it says is rendered on the Plugins page.
 const COMMIT_RE = /^[0-9a-f]{4,64}$/i;
 const COMMIT_TIME_MAX = 64;
+// Release tags only (#2893, the rule of scripts/git-release-tag.sh) and a plain
+// commit count — anything else is dropped, never rendered.
+const RELEASE_TAG_RE = /^v\d{1,9}\.\d{1,9}\.\d{1,9}$/;
+const TAG_DISTANCE_RE = /^\d{1,9}$/;
+
+// `{ tag, tagDistance }` from a raw build, or null when there is no usable
+// pair. The distance arrives as a string (build-info.json, image labels) or a
+// number (/healthz); an empty tag means "no release tag was reachable".
+function normalizeTag(raw) {
+  const tag = typeof raw.tag === 'string' ? raw.tag.trim() : '';
+  const d = raw.tagDistance;
+  const distance = typeof d === 'number' ? String(d) : typeof d === 'string' ? d.trim() : '';
+  if (!RELEASE_TAG_RE.test(tag) || !TAG_DISTANCE_RE.test(distance)) return null;
+  return { tag, tagDistance: Number(distance) };
+}
 
 // Normalise a reported build into `{ commit, dirty, commitTime }`, or null when
 // there is nothing usable. `commit` is "unknown" for a build without git
@@ -36,7 +52,11 @@ function normalizeBuildInfo(raw) {
   const commitTime = typeof raw.commitTime === 'string' && raw.commitTime.length <= COMMIT_TIME_MAX
     ? raw.commitTime.trim()
     : '';
-  return { commit, dirty, commitTime };
+  const out = { commit, dirty, commitTime };
+  // Only a build with a known commit carries a version; a build without tag
+  // info (none reachable, or recorded before #2893) keeps the #2646 shape.
+  const tag = commit !== 'unknown' ? normalizeTag(raw) : null;
+  return tag ? { ...out, ...tag } : out;
 }
 
 // GET <baseUrl>/healthz and return the normalised `build`, or null.
@@ -76,6 +96,9 @@ async function probeRunningBrokerBuilds(entries, running, baseUrlOf, opts = {}) 
 const IMAGE_COMMIT_LABEL = 'org.opencontainers.image.revision';
 const IMAGE_DIRTY_LABEL = 'aee.build.dirty';
 const IMAGE_COMMIT_TIME_LABEL = 'aee.build.commit-time';
+// …and, since #2893, the nearest release tag and distance (empty without one).
+const IMAGE_TAG_LABEL = 'aee.build.tag';
+const IMAGE_TAG_DISTANCE_LABEL = 'aee.build.tag-distance';
 
 // libpod image-inspect body → normalised build, or null when there is no body.
 // libpod reports labels top-level and under Config; either is accepted. An
@@ -90,6 +113,8 @@ function imageBuildFromInspect(body) {
     commit: labels[IMAGE_COMMIT_LABEL],
     dirty: labels[IMAGE_DIRTY_LABEL],
     commitTime: labels[IMAGE_COMMIT_TIME_LABEL],
+    tag: labels[IMAGE_TAG_LABEL],
+    tagDistance: labels[IMAGE_TAG_DISTANCE_LABEL],
   });
 }
 

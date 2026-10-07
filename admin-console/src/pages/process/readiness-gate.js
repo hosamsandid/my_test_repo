@@ -104,3 +104,11 @@ export function readinessSummary(stored) {
   const what = [f.ci ? 'CI' : null, f.conflict ? 'a conflict-free PR' : null].filter(Boolean).join(' and ');
   return `Waits for ${what} (${f.timeoutMinutes} min, then ${TIMEOUT_LABEL}); on failure → ${f.failureLabel}`;
 }
+
+// The short "waits for …" hint of a gated hand-off — "CI + conflict-free",
+// "CI", "conflict-free" — or '' when no gate is on. Shared by the Flow
+// editor's routing rows and the Agent Chat trigger list (#2912).
+export function readinessWaitsFor(stored) {
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return '';
+  return [stored.ci === true ? 'CI' : null, stored.conflict === true ? 'conflict-free' : null].filter(Boolean).join(' + ');
+}

@@ -12,9 +12,9 @@ import { defaultListenerPrompt, handoffVerb, handoffTargetNoun } from './handoff
 import { labelNameError, promptPlaceholderError } from './handoff-validation';
 import { hasChannel } from './channel-ops';
 import {
-  DEFAULT_FAILURE_LABEL, DEFAULT_TIMEOUT_MINUTES, TIMEOUT_LABEL,
   gateable, readinessForm, readinessFormError, readinessFromForm,
 } from './readiness-gate';
+import ReadinessGateFields from './ReadinessGateFields';
 import { isGateLabel, isBrakeLabel } from './label-flags';
 import { defaultGateKind } from './human-gate-ops';
 import { labelEdgeHasListener, setLabelTarget, labelTargetKind } from './outcome-routing';
@@ -2289,44 +2289,6 @@ export function WebhookForm({ to, toName, ops = liveOps, onBack, onClose, onDone
 }
 
 /* ── shared bits ───────────────────────────────────────────────────────── */
-
-// Readiness gate on a PR hand-off (#2795): hold the wake until CI is green and
-// the PR merges cleanly. `value` is a readinessForm() state.
-function ReadinessGateFields({ value, onChange, toLabel, error }) {
-  const set = (patch) => onChange({ ...value, ...patch });
-  const on = value.ci || value.conflict;
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)' }}>
-      <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Before {toLabel} is woken</span>
-      <label style={check}>
-        <input type="checkbox" checked={!!value.ci} onChange={e => set({ ci: e.target.checked })} />
-        Wait for CI — hold the wake until the PR's checks pass
-      </label>
-      <label style={check}>
-        <input type="checkbox" checked={!!value.conflict} onChange={e => set({ conflict: e.target.checked })} />
-        Block on merge conflict — hold the wake until the PR merges cleanly
-      </label>
-      {on && (
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-          <Field label="On failure, set label">
-            <SuffixedLabelInput value={value.failureLabel} onChange={v => set({ failureLabel: v })}
-              placeholder={DEFAULT_FAILURE_LABEL} style={input} />
-          </Field>
-          <Field label="Timeout (minutes)">
-            <input value={value.timeoutMinutes} onChange={e => set({ timeoutMinutes: e.target.value })}
-              inputMode="numeric" placeholder={String(DEFAULT_TIMEOUT_MINUTES)} style={input} />
-          </Field>
-        </div>
-      )}
-      <small style={small}>
-        {on
-          ? <>Failing checks or a conflict remove the hand-off label, set the failure label and comment on the PR. After the timeout the label is removed and <code>{TIMEOUT_LABEL}</code> is set.</>
-          : <>Off: {toLabel} is woken as soon as the label is set, whatever the PR's checks say.</>}
-      </small>
-      {error && <small style={errStyle}>{error}</small>}
-    </div>
-  );
-}
 
 function Field({ label, children }) {
   return (

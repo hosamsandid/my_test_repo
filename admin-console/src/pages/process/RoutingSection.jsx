@@ -22,7 +22,7 @@ import {
 } from './outcome-routing.js';
 import { consumeKey } from './humans-registry-ops';
 import { WAKE_NOTE_MAX, clampWakeNote } from './wake-edge-view.js';
-import { readinessSummary, NEW_HANDOFF_READINESS, newHandoffReadiness } from './readiness-gate.js';
+import { readinessSummary, readinessWaitsFor, NEW_HANDOFF_READINESS, newHandoffReadiness } from './readiness-gate.js';
 
 // The human role currently wired to consume `entry` (or '' if none). #987.
 function humanConsuming(humans, entry) {
@@ -290,7 +290,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
             text={<>Reacts to <strong>{nameOf(c.from)}</strong>'s {noun}
               {c.label ? <> when labeled <code style={codeChip}>{c.label}</code></> : null}
               {c.gate === 'human' ? ' · 👤 human gate' : null}
-              {readinessSummary(c.readiness) ? <span title={readinessSummary(c.readiness)}> · waits for {[c.readiness.ci ? 'CI' : null, c.readiness.conflict ? 'conflict-free' : null].filter(Boolean).join(' + ')}</span> : null}
+              {readinessSummary(c.readiness) ? <span title={readinessSummary(c.readiness)}> · waits for {readinessWaitsFor(c.readiness)}</span> : null}
               {/* Derived claim, read-only (auto) + per-listener opt-out. The flag
                   lives on the PORT because the derived trigger is regenerated on
                   every reconcile — a trigger-level flag would be wiped. */}

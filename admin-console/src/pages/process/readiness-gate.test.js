@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import serverPt from '../../../api/process-template.js';
 import {
   DEFAULT_FAILURE_LABEL, DEFAULT_TIMEOUT_MINUTES, MAX_TIMEOUT_MINUTES, READINESS_EVENTS, NEW_HANDOFF_READINESS,
-  gateable, readinessForm, readinessFormError, readinessFromForm, readinessSummary, newHandoffReadiness,
+  gateable, readinessForm, readinessFormError, readinessFromForm, readinessSummary, newHandoffReadiness, readinessWaitsFor,
 } from './readiness-gate.js';
 import { upsertChannel, editChannel } from './channel-ops.js';
 import { wireLabelHandoff, updateLabelHandoff, wireChannel, updateChannel } from './wiring-engine.js';
@@ -169,7 +169,9 @@ test('source: every PR hand-off dialog offers the gate and passes it to the engi
   assert.match(editLbl, /setReadiness\(readinessForm\(t\.readinessGate\)\)/);
   assert.match(editLbl, /readinessGate: gated \? readinessFromForm\(readiness\) : null/);
   // The two toggles + failure label + timeout.
-  const fields = body('function ReadinessGateFields', 'function Field(');
+  assert.match(s, /import ReadinessGateFields from '\.\/ReadinessGateFields';/);
+  const shared = src('./ReadinessGateFields.jsx');
+  const fields = shared.slice(shared.indexOf('export default function ReadinessGateFields'), shared.indexOf('function Field('));
   for (const re of [/Wait for CI/, /Block on merge conflict/, /On failure, set label/, /Timeout \(minutes\)/]) {
     assert.match(fields, re);
   }
@@ -179,6 +181,7 @@ test('source: the routing inspector keeps the gate when editing and defaults one
   const s = src('./RoutingSection.jsx');
   assert.match(s, /readiness: editChannel\.readiness, wakePrompt: editChannel\.wakePrompt/);
   assert.match(s, /readinessGate: newHandoffReadiness\(wireSpec\.label\)/);
+  assert.match(s, / · waits for \{readinessWaitsFor\(c\.readiness\)\}/, 'the hint wording is shared with Agent Chat (#2912)');
   assert.match(s, /wireSpec\.artifact === 'pr' \? \{ readiness: \{ \.\.\.NEW_HANDOFF_READINESS \} \} : \{\}/);
   // The draft adapter drops a switched-off gate like the live PUT does.
   assert.match(src('./edit-adapters.js'), /if \(t && t\.readinessGate === null\) delete t\.readinessGate;/);
@@ -203,4 +206,13 @@ test('a gate whose default failure label is the wake label is refused, and a new
   assert.equal(readinessFormError(fresh, { wakeLabel: DEFAULT_FAILURE_LABEL }), null, 'a brand-new hand-off with all defaults saves');
   assert.equal(readinessForm(null, { isNew: true, wakeLabel: 'ready-for-review' }).ci, true);
   assert.match(src('./EdgeDialogs.jsx'), /readinessForm\(null, \{ isNew: true, wakeLabel: initialLabel \}\)/);
+});
+
+test('readinessWaitsFor: the short hint shared by the routing rows and Agent Chat (#2912)', () => {
+  assert.equal(readinessWaitsFor({ ci: true, conflict: true }), 'CI + conflict-free');
+  assert.equal(readinessWaitsFor({ ci: true, conflict: false }), 'CI');
+  assert.equal(readinessWaitsFor({ ci: false, conflict: true }), 'conflict-free');
+  assert.equal(readinessWaitsFor({ ci: false, conflict: false }), '');
+  assert.equal(readinessWaitsFor(null), '');
+  assert.equal(readinessWaitsFor([]), '');
 });

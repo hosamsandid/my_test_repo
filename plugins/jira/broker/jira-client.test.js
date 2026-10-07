@@ -1413,6 +1413,232 @@ test('addStoriesToEpic: no key / a malformed key / no stories / a story without 
   });
 });
 
+// ── standalone issue create (#2894) ─────────────────────────────────────────
+
+const PROJECT_TYPES = [
+  { id: '10001', name: 'Story', subtask: false, hierarchyLevel: 0 },
+  { id: '10002', name: 'Task', subtask: false, hierarchyLevel: 0 },
+  { id: '10004', name: 'Fehler', subtask: false, hierarchyLevel: 0 },
+  { id: '10000', name: 'Epic', subtask: false, hierarchyLevel: 1 },
+  { id: '10003', name: 'Subtask', subtask: true, hierarchyLevel: -1 },
+];
+const isProjectGet = (url) => /\/rest\/api\/3\/project\/[^/?]+$/.test(url);
+const isCreateMeta = (url) => /\/rest\/api\/3\/issue\/createmeta\//.test(url);
+const projectResponse = (key = 'KAN', issueTypes = PROJECT_TYPES) => ({ ok: true, status: 200, text: async () => JSON.stringify({ key, issueTypes }) });
+const createMetaResponse = (fields = [
+  { fieldId: 'summary', name: 'Summary', required: true, hasDefaultValue: false },
+  { fieldId: 'reporter', name: 'Reporter', required: true, hasDefaultValue: true },
+  { fieldId: 'project', name: 'Project', required: true, hasDefaultValue: false },
+  { fieldId: 'issuetype', name: 'Issue Type', required: true, hasDefaultValue: false },
+  { fieldId: 'priority', name: 'Priority', required: false, hasDefaultValue: true },
+]) => ({ ok: true, status: 200, text: async () => JSON.stringify({ startAt: 0, maxResults: 100, total: fields.length, fields }) });
+
+function standaloneJira({ project = projectResponse(), meta = createMetaResponse(), create, transitions = transitionsResponse() } = {}) {
+  return (url, opts) => {
+    if (isProjectGet(url)) return typeof project === 'function' ? project(url) : project;
+    if (isCreateMeta(url)) return typeof meta === 'function' ? meta(url) : meta;
+    if (isFieldList(url)) return createFieldList();
+    if (isCreate(url, opts)) return create(JSON.parse(opts.body).fields);
+    if (isTransitionList(url) && (!opts || opts.method !== 'POST')) return transitions;
+    if (isTransitionList(url) && opts.method === 'POST') return { ok: true, status: 204, text: async () => '' };
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  };
+}
+const created201 = (key) => ({ ok: true, status: 201, text: async () => JSON.stringify({ id: '9', key }) });
+
+test('createStandaloneIssue: a Bug with only a summary — key + URL, the project\'s type, no parent (#2894 AC1)', async () => {
+  let sent;
+  await withFetch(standaloneJira({
+    project: projectResponse('KAN', [...PROJECT_TYPES, { id: '10005', name: 'Bug', subtask: false, hierarchyLevel: 0 }]),
+    create: (f) => { sent = f; return created201('KAN-42'); },
+  }), async (calls) => {
+    const seen = [];
+    const r = await jc.createStandaloneIssue(CRED, {
+      projectKey: 'kan', issueType: 'bug', issue: { summary: ' Login fails ' }, allowList: [], onCreated: (k) => seen.push(k), env: CRED.env,
+    });
+    assert.deepEqual(r, { project: 'KAN', issueType: 'Bug', key: 'KAN-42', url: `${jc.apiBaseFor('acme', {})}/browse/KAN-42`, summary: 'Login fails' });
+    assert.deepEqual(sent, { project: { key: 'KAN' }, issuetype: { id: '10005' }, summary: 'Login fails' });
+    assert.deepEqual(seen, ['KAN-42']); // own-writes registration hook
+    assert.match(calls.find((c) => isCreateMeta(c.url)).url, /createmeta\/KAN\/issuetypes\/10005\?/);
+    assert.equal(calls.filter((c) => isTransitionList(c.url)).length, 0, 'no status → no transition');
+  });
+});
+
+test('createStandaloneIssue: Task, Story and a project-specific type name, matched case-insensitively (#2894 AC2)', async () => {
+  for (const [requested, id, name] of [['Task', '10002', 'Task'], ['STORY', '10001', 'Story'], ['fehler', '10004', 'Fehler']]) {
+    await withFetch(standaloneJira({ create: (f) => { assert.deepEqual(f.issuetype, { id }); return created201('KAN-1'); } }), async () => {
+      const r = await jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: requested, issue: { summary: 'S' }, allowList: [], env: CRED.env });
+      assert.equal(r.issueType, name);
+    });
+  }
+});
+
+test('createStandaloneIssue: description, assignee, priority, labels and custom fields on create; status as a follow-up transition (#2894 AC3)', async () => {
+  let sent;
+  await withFetch(standaloneJira({ create: (f) => { sent = f; return created201('KAN-7'); } }), async (calls) => {
+    const r = await jc.createStandaloneIssue(CRED, {
+      projectKey: 'KAN',
+      issueType: 'Task',
+      issue: {
+        summary: 'Do it', description: 'line one\n\nline two', assignee: 'acc-1', priority: 'High',
+        labels: ['web', ' regression '], status: 'In Progress', fields: { Team: '42', 'Story point estimate': '3' },
+      },
+      allowList: ['Team', 'Story point estimate'],
+      attribution: 'by an agent',
+      env: CRED.env,
+    });
+    assert.equal(sent.description.type, 'doc'); // ADF, like update / create-epic
+    assert.equal(sent.description.content.length, 4); // 3 lines (blank one kept) + attribution
+    assert.deepEqual(sent.assignee, { accountId: 'acc-1' });
+    assert.deepEqual(sent.priority, { name: 'High' });
+    assert.deepEqual(sent.labels, ['web', 'regression']);
+    assert.deepEqual(sent.customfield_20001, { id: '42' });
+    assert.equal(sent.customfield_10016, 3);
+    assert.equal('status' in sent, false, 'status is never a create field');
+    assert.equal(r.status, 'In Progress');
+    const createAt = calls.findIndex((c) => isCreate(c.url, c.opts));
+    const transitionAt = calls.findIndex((c) => isTransitionList(c.url) && c.opts && c.opts.method === 'POST');
+    assert.ok(transitionAt > createAt, 'the transition follows the create');
+  });
+});
+
+test('createStandaloneIssue: an unknown type is a 400 listing the project\'s standard types (#2894 AC4)', async () => {
+  await withFetch(standaloneJira({ create: () => { throw new Error('must not create'); } }), async () => {
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: 'Bug', issue: { summary: 'S' }, allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /no issue type "Bug"/.test(e.message) && /Available: Story, Task, Fehler\./.test(e.message),
+    );
+  });
+});
+
+test('createStandaloneIssue: an Epic type points at create-epic; a sub-task type is refused (#2894 AC5)', async () => {
+  await withFetch(standaloneJira({ create: () => { throw new Error('must not create'); } }), async () => {
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: 'epic', issue: { summary: 'S' }, allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /create-epic/.test(e.message),
+    );
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: 'Subtask', issue: { summary: 'S' }, allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /sub-task type/.test(e.message) && /parent/.test(e.message),
+    );
+  });
+  assert.equal(jc.classifyIssueType({ name: 'Épique', hierarchyLevel: 1 }, 'Epic'), 'epic'); // a localised Epic
+  assert.equal(jc.classifyIssueType({ name: 'Teilaufgabe', subtask: true, hierarchyLevel: -1 }, 'Epic'), 'subtask');
+  assert.equal(jc.classifyIssueType({ name: 'Bug', hierarchyLevel: 0 }, 'Epic'), 'standard');
+});
+
+test('createStandaloneIssue: required fields the call does not set are named, before the create (#2894 AC6)', async () => {
+  const meta = createMetaResponse([
+    { fieldId: 'summary', name: 'Summary', required: true, hasDefaultValue: false },
+    { fieldId: 'components', name: 'Components', required: true, hasDefaultValue: false },
+    { fieldId: 'customfield_20001', name: 'Team', required: true, hasDefaultValue: false },
+    { fieldId: 'customfield_30000', name: 'Severity', required: true, hasDefaultValue: true },
+  ]);
+  await withFetch(standaloneJira({ meta, create: () => { throw new Error('must not create'); } }), async () => {
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: 'Task', issue: { summary: 'S' }, allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /not provided: Components, Team\./.test(e.message) && /Nothing was created/.test(e.message),
+    );
+  });
+  // once Team is given, only Components is still missing
+  await withFetch(standaloneJira({ meta, create: () => { throw new Error('must not create'); } }), async () => {
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: 'Task', issue: { summary: 'S', fields: { Team: '1' } }, allowList: [], env: CRED.env }),
+      (e) => /not provided: Components\./.test(e.message),
+    );
+  });
+});
+
+test('createStandaloneIssue: unreadable create metadata skips the pre-check; Jira\'s 400 is mapped to field names', async () => {
+  await withFetch(standaloneJira({
+    meta: { ok: false, status: 403, text: async () => 'nope' },
+    create: () => ({ ok: false, status: 400, text: async () => JSON.stringify({ errorMessages: [], errors: { customfield_20001: 'Team is required.' } }) }),
+  }), async () => {
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: 'Task', issue: { summary: 'S' }, allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /Jira refused to create the issue: Team: Team is required\. Nothing was created\./.test(e.message),
+    );
+  });
+});
+
+test('createStandaloneIssue: an invalid assignee is refused clearly and nothing is created', async () => {
+  await withFetch(standaloneJira({
+    create: () => ({ ok: false, status: 400, text: async () => JSON.stringify({ errors: { assignee: 'User \'nobody\' cannot be assigned issues.' } }) }),
+  }), async (calls) => {
+    let registered = 0;
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, {
+        projectKey: 'KAN', issueType: 'Task', issue: { summary: 'S', assignee: 'nobody' }, allowList: [], onCreated: () => { registered += 1; }, env: CRED.env,
+      }),
+      (e) => e.status === 400 && /assignee "nobody" was rejected/.test(e.message) && /accountId/.test(e.message),
+    );
+    assert.equal(registered, 0);
+    assert.equal(calls.filter((c) => isCreate(c.url, c.opts)).length, 1, 'never retried');
+  });
+});
+
+test('createStandaloneIssue: a custom field off a non-empty allow-list is a 403 before any Jira call (#2894 AC7)', async () => {
+  await withFetch(() => { throw new Error('no HTTP expected'); }, async (calls) => {
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: 'Bug', issue: { summary: 'S', fields: { Team: '42' } }, allowList: ['Sprint'], env: CRED.env }),
+      (e) => e.status === 403 && /Team/.test(e.message),
+    );
+    assert.equal(calls.length, 0);
+  });
+});
+
+test('createStandaloneIssue: a project the account cannot see is outside the team\'s scope (#2894 AC8)', async () => {
+  await withFetch(standaloneJira({
+    project: { ok: false, status: 404, text: async () => '{"errorMessages":["No project could be found with key \'OTHER\'."]}' },
+    create: () => { throw new Error('must not create'); },
+  }), async () => {
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'OTHER', issueType: 'Bug', issue: { summary: 'S' }, allowList: [], env: CRED.env }),
+      (e) => e.status === 404 && /Project OTHER was not found, or it is outside this team's Jira scope/.test(e.message),
+    );
+  });
+});
+
+test('createStandaloneIssue: an impossible status transition still reports the created key + the reason (#2894 AC9)', async () => {
+  await withFetch(standaloneJira({ create: () => created201('KAN-9') }), async () => {
+    const r = await jc.createStandaloneIssue(CRED, {
+      projectKey: 'KAN', issueType: 'Task', issue: { summary: 'S', status: 'Released' }, allowList: [], env: CRED.env,
+    });
+    assert.equal(r.key, 'KAN-9');
+    assert.equal(r.status, undefined);
+    assert.match(r.statusError, /no transition to "Released"/);
+  });
+});
+
+test('createStandaloneIssue: no project / type / summary, or a label with a space, is a 400 up front', async () => {
+  await withFetch(() => { throw new Error('no HTTP expected'); }, async (calls) => {
+    const bad = (args, re) => assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: 'Bug', issue: { summary: 'S' }, allowList: [], env: CRED.env, ...args }),
+      (e) => e.status === 400 && (!re || re.test(e.message)),
+    );
+    await bad({ projectKey: '' });
+    await bad({ issueType: ' ' });
+    await bad({ issue: { summary: '  ' } });
+    await bad({ issue: undefined });
+    await bad({ issue: { summary: 'S', labels: ['two words'] } }, /"two words"/);
+    await bad({ issue: { summary: 'S', labels: 'web' } });
+    assert.equal(calls.length, 0);
+  });
+});
+
+test('missingRequiredFields: required, no default, not set — project/issuetype exempt', () => {
+  const meta = [
+    { fieldId: 'project', name: 'Project', required: true },
+    { fieldId: 'issuetype', name: 'Issue Type', required: true },
+    { fieldId: 'summary', name: 'Summary', required: true },
+    { fieldId: 'reporter', name: 'Reporter', required: true, hasDefaultValue: true },
+    { fieldId: 'duedate', name: 'Due date', required: true },
+    { fieldId: 'labels', name: 'Labels', required: false },
+  ];
+  assert.deepEqual(jc.missingRequiredFields(meta, { summary: 'S' }), ['Due date']);
+  assert.deepEqual(jc.missingRequiredFields(null, {}), []);
+});
+
 // ── board & sprint management (#2450) ───────────────────────────────────────
 
 const AGILE = 'http://fake-jira:8080/rest/agile/1.0';

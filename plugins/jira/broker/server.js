@@ -700,6 +700,46 @@ async function handleCli(req, res, cliPath) {
     }
   }
 
+  // ── one standalone issue, no parent Epic (#2894) ─────────────────────────
+  // The CLI sends `{ project, type, issue: { summary, description?, assignee?,
+  // priority?, labels?, status?, fields? }, issueTypes? }`; the broker creates
+  // exactly one issue of that type in the project (jira.createStandaloneIssue).
+  // Gated like create-epic / add-stories: the same `create` write policy, the
+  // same allow-list, the same own-writes registration; audited as `create-issue`.
+  if (cliPath === '/create-issue' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('create');
+    if (!authz.allow) {
+      auditCall('create-issue', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = credFor();
+    if (!cred) return noCredential('create-issue');
+    const body = parseJson(await readBody(req));
+    const project = String(body.project || '').trim().toUpperCase();
+    if (!project) return sendJson(res, 400, { error: 'a --project key is required' });
+    if (!String(body.type || '').trim()) return sendJson(res, 400, { error: 'an issue --type is required (e.g. Bug, Task, Story)' });
+    if (!body.issue || typeof body.issue !== 'object') return sendJson(res, 400, { error: 'the issue requires a summary' });
+    try {
+      const result = await jira.createStandaloneIssue(cred, {
+        projectKey: project,
+        issueType: body.type,
+        issue: body.issue,
+        allowList: cred.writableCustomFields || [],
+        attribution: `Created by an agent on team "${scopeId}" via Agent Studio.`,
+        issueTypes: body.issueTypes && typeof body.issueTypes === 'object' ? body.issueTypes : undefined,
+        onCreated: (key) => recordOwnWrite(() => {
+          ownWritesStore.recordIssue(scopeId, key);
+          ownWritesStore.recordField(scopeId, key, '*');
+        }),
+      });
+      auditCall('create-issue', 'ok', `${result.key} (${result.issueType})${result.statusError ? ' status transition failed' : ''}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      auditCall('create-issue', failureOutcome(err), `${project}: ${err.message}`);
+      return sendJiraError(err);
+    }
+  }
+
   // ── sprint creation on a board (Agile write, #2450) ──────────────────────
   // Two board-scoped writes: create ONE future sprint, or BULK-generate a run of
   // them up to a target date. Role-gated like every other write (D3); the Jira

@@ -797,3 +797,59 @@ test('aee-jira add-stories: listed in --help; bad payloads are usage errors; wir
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('aee-jira create-issue: listed in --help; flags + --file build the body; usage errors; exit 1 on a failed status (#2894)', async () => {
+  const ws = grantedJiraWorkspace();
+  const help = runJira(['--help'], ws);
+  const flat = help.stdout.replace(/\s+/g, ' '); // argparse wraps the help column
+  assert.match(flat, /create-issue create ONE standalone issue \(Story, Task, Bug, …\) without a parent Epic/);
+  const file = (doc) => { const p = path.join(ws, `p-${Math.random()}.json`); fs.writeFileSync(p, doc); return p; };
+  // --project / --type are required; no summary, a bad --field or a bad payload never reach the broker
+  assert.equal(runJira(['create-issue', '--type', 'Bug', '--summary', 'S'], ws).status, 2);
+  assert.equal(runJira(['create-issue', '--project', 'KAN', '--summary', 'S'], ws).status, 2);
+  assert.equal(runJira(['create-issue', '--project', 'KAN', '--type', 'Bug', '--json'], ws).status, 2);
+  assert.equal(runJira(['create-issue', '--project', 'KAN', '--type', 'Bug', '--summary', 'S', '--field', 'Team', '--json'], ws).status, 2);
+  assert.equal(runJira(['create-issue', '--project', 'KAN', '--type', 'Bug', '--file', file('not json'), '--json'], ws).status, 2);
+  assert.equal(runJira(['create-issue', '--project', 'KAN', '--type', 'Bug', '--file', file('[1]'), '--json'], ws).status, 2);
+
+  const http = require('node:http');
+  const seen = [];
+  let statusError = null;
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, body: JSON.parse(raw) });
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ key: 'KAN-42', url: 'https://x/browse/KAN-42', ...(statusError ? { statusError } : {}) }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const live = grantedJiraWorkspace(`http://127.0.0.1:${port}/`);
+    const payload = file('{"summary":"from file","description":"d","fields":{"Severity":{"id":"7"}}}');
+    let r = await runJiraAsync([
+      'create-issue', '--project', 'KAN', '--type', 'Bug', '--file', payload, '--summary', 'Login fails',
+      '--assignee', 'acc-1', '--priority', 'High', '--label', 'web', '--label', 'regression',
+      '--status', 'In Progress', '--field', 'Team=42', '--field', 'Note=a=b', '--json',
+    ], live);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(seen[0], {
+      method: 'POST', url: '/cli/create-issue',
+      body: {
+        project: 'KAN', type: 'Bug',
+        issue: {
+          summary: 'Login fails', description: 'd', assignee: 'acc-1', priority: 'High', status: 'In Progress',
+          labels: ['web', 'regression'], fields: { Severity: { id: '7' }, Team: '42', Note: 'a=b' },
+        },
+      },
+    });
+    statusError = 'no transition to "Released"';
+    r = await runJiraAsync(['create-issue', '--project', 'KAN', '--type', 'Task', '--summary', 'S', '--status', 'Released', '--json'], live);
+    assert.equal(r.status, 1, 'a failed follow-up transition exits non-zero');
+    assert.equal(JSON.parse(r.stdout.trim()).result.key, 'KAN-42', 'the created key is still printed');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

@@ -21513,12 +21513,19 @@ async function readGitDirty(abs) {
   return { isDirty: lines.length > 0, changesCount: lines.length };
 }
 
-// Short-lived cache for git-info dirty results: collapses concurrent pollers
-// (multiple browser tabs on the same agent) onto one `git status` and serves a
+// Cache for git-info dirty results: collapses concurrent pollers (multiple
+// browser tabs on the same agent) onto one `git status` and serves a
 // recently-computed result without re-spawning (#1683). Branch is read fresh
 // from .git/HEAD on every request (cheap) and never cached.
+// `git status` takes 0.8–2.2 s in large workspaces (#2923), so the TTL sits
+// above ChatPanel's 30-s poll and an expired result is served stale-while-
+// revalidate: every poll after the first answers from memory, and a single
+// background `git status` per agent repo and TTL window refreshes it. Only a
+// first look (or one after GIT_INFO_STALE_MS of silence) waits for git.
+const GIT_INFO_STALE_MS = 10 * 60_000;
 const gitInfoCache = createTtlCache({
-  ttlMs: Number.parseInt(process.env.AEE_GIT_INFO_TTL_MS, 10) || 5000,
+  ttlMs: Number.parseInt(process.env.AEE_GIT_INFO_TTL_MS, 10) || 35_000,
+  staleMs: GIT_INFO_STALE_MS,
 });
 
 app.get('/api/agents/:agentId/git-info', async (req, res) => {
@@ -21533,7 +21540,7 @@ app.get('/api/agents/:agentId/git-info', async (req, res) => {
   try {
     const repos = discoverGitRepos(agentRoot);
     const out = await Promise.all(repos.map(async (r) => {
-      const dirty = await gitInfoCache.getOrCompute(
+      const dirty = await gitInfoCache.getStaleWhileRevalidate(
         `${agentId}::${r.repoPath}`,
         () => readGitDirty(r.abs),
       );

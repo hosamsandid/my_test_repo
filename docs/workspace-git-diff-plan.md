@@ -43,8 +43,10 @@ gehört dem Agenten, nicht dem Bediener.
   `runGitAsync()` (async `execFile`, seit #1683 — vorher `spawnSync`) mit kurzen
   Timeouts (5 s) aufgerufen, damit ein langsamer git-Aufruf den Event-Loop nicht
   blockiert. Die Branch-Ermittlung liest `.git/HEAD` direkt (kein git-Prozess);
-  der `git-info`-Poll cached seinen Dirty-Status kurzlebig (`AEE_GIT_INFO_TTL_MS`,
-  Default 5 s). Sehr große Diffs werden serverseitig gekappt (s. §6).
+  der `git-info`-Poll cached seinen Dirty-Status (`AEE_GIT_INFO_TTL_MS`,
+  Default 35 s, seit #2923 über dem 30-s-Poll) und liefert ein abgelaufenes
+  Ergebnis sofort aus, während ein einzelnes `git status` im Hintergrund
+  nachlädt (stale-while-revalidate, bis 10 min alt). Sehr große Diffs werden serverseitig gekappt (s. §6).
 
 ## 3. UX
 

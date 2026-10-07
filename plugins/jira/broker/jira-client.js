@@ -1807,6 +1807,196 @@ async function addStoriesToEpic(cred, { epicKey, stories, allowList, attribution
   };
 }
 
+// ── one standalone issue, no parent Epic (#2894) ─────────────────────────────
+//
+// The everyday Jira create: ONE new issue of any standard type the project
+// offers (Story, Task, Bug, a localised "Fehler", …), with no parent. Same field
+// contract as the create-epic / add-stories issues (summary / description /
+// assignee / status / custom `fields`), plus `priority` and `labels`. Jira has
+// no create-transaction, so every guard runs before the single create:
+//   1. shape validation — no project / issue type / summary, or a label with
+//      whitespace (Jira labels are single words), is a 400.
+//   2. the custom-field allow-list (403), as in set-field / create-epic.
+//   3. the project lookup — a project Jira does not return to the team's
+//      credential is outside the team's scope (404), worded like add-stories.
+//   4. the issue type, matched case-insensitively against the PROJECT's own
+//      type names (team- and company-managed alike): an unknown name is a 400
+//      listing the types the project offers; an Epic points at create-epic and
+//      a sub-task type is refused (both need a different command / a parent).
+//   5. name → id resolution of the custom fields (400 on an unknown name).
+//   6. the project's required fields for that type (create metadata): a
+//      required field without a default that the call does not set is a 400
+//      naming it, instead of Jira's raw error. An unreadable create metadata
+//      skips this pre-check; Jira's own 400 is then mapped to field names (7).
+//   7. the create itself — a 400 from Jira (e.g. an unknown assignee
+//      accountId) is reported per field, by name; nothing was created.
+// A requested `status` is a follow-up transition (statusApplier): its failure
+// is reported next to the created key, never a hard failure.
+const LABEL_RE = /^\S+$/;
+
+function createIssueError(status, message) {
+  const e = new Error(message);
+  e.status = status;
+  return e;
+}
+
+// Standard (creatable here) vs Epic vs sub-task, from a project issue type. Pure.
+function classifyIssueType(t, epicTypeName) {
+  if (t && (t.subtask === true || Number(t.hierarchyLevel) < 0)) return 'subtask';
+  if (isEpicIssueType(t, epicTypeName)) return 'epic';
+  return 'standard';
+}
+
+// Match the requested type name against the project's types and refuse the
+// ones this command does not create. Pure — throws a 400, returns the type.
+function resolveStandaloneIssueType(projectKey, projectTypes, requested, epicTypeName) {
+  const want = String(requested || '').trim().toLowerCase();
+  const types = Array.isArray(projectTypes) ? projectTypes.filter((t) => t && t.name) : [];
+  const match = types.find((t) => String(t.name).trim().toLowerCase() === want);
+  if (!match) {
+    const standard = types.filter((t) => classifyIssueType(t, epicTypeName) === 'standard').map((t) => t.name);
+    throw createIssueError(400,
+      `project ${projectKey} has no issue type "${String(requested).trim()}". Available: ${standard.join(', ') || '(none)'}. Nothing was created.`);
+  }
+  const kind = classifyIssueType(match, epicTypeName);
+  if (kind === 'epic') {
+    throw createIssueError(400,
+      `${match.name} is an Epic type — use \`aee-jira create-epic\` to create an Epic (with its Stories). Nothing was created.`);
+  }
+  if (kind === 'subtask') {
+    throw createIssueError(400,
+      `${match.name} is a sub-task type, which always needs a parent issue — create-issue only creates standalone issues. Nothing was created.`);
+  }
+  return match;
+}
+
+// The required fields Jira lists for (project, type) that have no default and
+// that `fields` (the create body) does not set. Pure.
+function missingRequiredFields(meta, fields) {
+  const exempt = new Set(['project', 'issuetype']);
+  return (Array.isArray(meta) ? meta : [])
+    .filter((f) => f && f.required && !f.hasDefaultValue)
+    .filter((f) => {
+      const id = String(f.fieldId || f.key || '');
+      return id && !exempt.has(id) && !(id in fields);
+    })
+    .map((f) => String(f.name || f.fieldId || f.key));
+}
+
+// The (project, type) field metadata from Jira's create-meta endpoint, all
+// pages. `null` when it cannot be read — the pre-check is then skipped.
+async function readCreateFieldMeta(base, auth, projectKey, issueTypeId) {
+  const out = [];
+  try {
+    for (let page = 0, startAt = 0; page < MAX_PAGES; page += 1) {
+      const res = await requestJson({
+        base,
+        path: `/rest/api/3/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes/${encodeURIComponent(issueTypeId)}?startAt=${startAt}&maxResults=${PAGE_SIZE}`,
+        authHeader: auth,
+      });
+      const items = Array.isArray(res.fields) ? res.fields : Array.isArray(res.results) ? res.results : [];
+      out.push(...items);
+      startAt += items.length;
+      if (!items.length || (res.total != null ? startAt >= Number(res.total) : items.length < PAGE_SIZE)) break;
+    }
+  } catch {
+    return null;
+  }
+  return out;
+}
+
+// Turn Jira's 400 answer to a create (`{ errorMessages, errors: { fieldId: msg } }`)
+// into one readable refusal, field ids named by their Jira names. Pure.
+function createRejectionMessage(bodyText, catalog, fields) {
+  const body = safeJson(bodyText || '');
+  const parts = [];
+  for (const [id, msg] of Object.entries(body && body.errors && typeof body.errors === 'object' ? body.errors : {})) {
+    if (id === 'assignee' && fields.assignee) {
+      parts.push(`assignee "${fields.assignee.accountId}" was rejected (${msg}) — pass a valid Atlassian accountId of someone assignable in this project`);
+      continue;
+    }
+    const meta = catalog && catalog.byId && catalog.byId.get(id);
+    parts.push(`${meta ? meta.name : id}: ${msg}`);
+  }
+  for (const msg of Array.isArray(body && body.errorMessages) ? body.errorMessages : []) parts.push(String(msg));
+  if (!parts.length) return null;
+  return `Jira refused to create the issue: ${parts.map((p) => p.replace(/[.\s]+$/, '')).join('; ')}. Nothing was created.`;
+}
+
+async function createStandaloneIssue(cred, { projectKey, issueType, issue, allowList, attribution, issueTypes, env, onCreated } = {}) {
+  const requestedProject = String(projectKey || '').trim().toUpperCase();
+  if (!requestedProject) throw createIssueError(400, 'a --project key is required');
+  if (!String(issueType || '').trim()) throw createIssueError(400, 'an issue --type is required (e.g. Bug, Task, Story)');
+  const spec = issue && typeof issue === 'object' ? issue : {};
+  if (!String(spec.summary || '').trim()) throw createIssueError(400, 'the issue requires a summary');
+  if (spec.labels != null && !Array.isArray(spec.labels)) throw createIssueError(400, 'labels must be a list of words');
+  const labels = (spec.labels || []).map((l) => String(l == null ? '' : l).trim()).filter(Boolean);
+  const badLabels = labels.filter((l) => !LABEL_RE.test(l));
+  if (badLabels.length) {
+    throw createIssueError(400, `Jira labels cannot contain spaces: ${badLabels.map((l) => `"${l}"`).join(', ')}. Nothing was created.`);
+  }
+  const priority = spec.priority == null ? '' : String(spec.priority).trim();
+
+  const usedNames = collectCustomFieldNames(spec, []);
+  assertCreateFieldsAllowed(usedNames, allowList);
+
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const epicTypeName = String((issueTypes && issueTypes.epic) || EPIC_ISSUE_TYPE).trim() || EPIC_ISSUE_TYPE;
+
+  // (3) the project must be visible to the team's credential — its scope.
+  let project;
+  try {
+    project = await requestJson({ base, path: `/rest/api/3/project/${encodeURIComponent(requestedProject)}`, authHeader: auth });
+  } catch (e) {
+    if (e.status === 404) {
+      throw createIssueError(404, `Project ${requestedProject} was not found, or it is outside this team's Jira scope (the account cannot see it). Nothing was created.`);
+    }
+    throw e;
+  }
+  const projectKeyActual = String((project && project.key) || requestedProject);
+  // (4) the project's own type names
+  const type = resolveStandaloneIssueType(projectKeyActual, project && project.issueTypes, issueType, epicTypeName);
+
+  const { catalog, fieldMeta } = await resolveCreateFieldMeta(base, auth, usedNames);
+  const fields = buildCreateFields({ projectKey: projectKeyActual, issueTypeName: type.name, spec, fieldMeta, attribution });
+  if (type.id) fields.issuetype = { id: String(type.id) };
+  if (priority) fields.priority = { name: priority };
+  if (labels.length) fields.labels = labels;
+
+  // (6) required fields the call leaves unset
+  if (type.id) {
+    const meta = await readCreateFieldMeta(base, auth, projectKeyActual, type.id);
+    const missing = meta ? missingRequiredFields(meta, fields) : [];
+    if (missing.length) {
+      throw createIssueError(400,
+        `project ${projectKeyActual} requires field(s) for a ${type.name} that were not provided: ${missing.join(', ')}. `
+          + 'Pass them in "fields" by their Jira name. Nothing was created.');
+    }
+  }
+
+  // (7) the create — never retried (F6)
+  let created;
+  try {
+    created = await createIssue(base, auth, fields);
+  } catch (e) {
+    const msg = e.status === 400 ? createRejectionMessage(e.body, catalog, fields) : null;
+    if (msg) throw createIssueError(400, msg);
+    throw e;
+  }
+  if (typeof onCreated === 'function') onCreated(created.key);
+  const siteBase = resolveJiraApiBase(cred.siteUrl);
+  const out = {
+    project: projectKeyActual,
+    issueType: String(type.name),
+    key: created.key,
+    url: `${siteBase}/browse/${encodeURIComponent(created.key)}`,
+    summary: fields.summary,
+  };
+  await statusApplier(cred, env)(created.key, spec.status, out);
+  return out;
+}
+
 // ── board & sprint management (Jira Agile API, #2450) ────────────────────────
 //
 // The first capability that touches Jira's **Agile** surface (`/rest/agile/1.0`,
@@ -2409,6 +2599,12 @@ module.exports = {
   createEpicWithStories,
   addStoriesToEpic,
   isEpicIssueType,
+  // standalone issue create (#2894)
+  classifyIssueType,
+  resolveStandaloneIssueType,
+  missingRequiredFields,
+  createRejectionMessage,
+  createStandaloneIssue,
   EPIC_ISSUE_TYPE,
   STORY_ISSUE_TYPE,
   // board & sprint management (#2450)

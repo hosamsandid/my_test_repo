@@ -40,6 +40,7 @@ ticket is routine and reversible):
     aee-jira attachment add KAN-6 report.pdf part-1.pdf   # upload one or more local files as new attachments
     aee-jira create-epic --project KAN --file plan.json   # create one Epic and its child Stories in one operation
     aee-jira add-stories --epic KAN-12 --file stories.json   # add new Stories to an EXISTING Epic (no new Epic)
+    aee-jira create-issue --project KAN --type Bug --summary "Login fails"   # one standalone issue, no Epic
     aee-jira sprint create --board "Team Scrum Board" --name "Sprint 12" --start 2026-10-26 --end 2026-11-01
     aee-jira sprint bulk-create --board "Team Scrum Board" --name-template "Acc2.0 {MMM}_{weekOfMonth}" --until 2026-12-31
     aee-jira sprint close --board "Team Scrum Board"     # complete the board's active sprint
@@ -99,6 +100,27 @@ named custom field is not on a non-empty writable-custom-fields allow-list. The
 result reports the Epic and, per Story, its key/URL or an error; one failing
 Story does not stop the others, and the CLI exits 1 if any Story failed. Fill
 several Epics with one call each.
+
+`create-issue` creates ONE standalone issue (no parent Epic) of any standard
+type the project offers — Story, Task, Bug, or a project's own type such as
+"Fehler" — matched case-insensitively by the project's own type names:
+
+    aee-jira create-issue --project KAN --type Bug --summary "Login fails" \
+        [--description "..."] [--assignee <accountId>] [--priority High] \
+        [--label regression --label web] [--status "In Progress"] \
+        [--field "Team=42"] [--file issue.json]
+
+--file (or "-" for stdin) is an optional JSON object with the same keys —
+"summary", "description", "assignee", "priority", "labels" (a list),
+"status", "fields" (custom fields by Jira name; an object value is sent
+verbatim) — and the flags win over it. "status" is applied as a follow-up
+transition; if that transition is not possible the issue still exists, and the
+result reports its key next to "statusError" (exit 1). Refused before anything
+is created: a project outside the team's Jira scope, an unknown type (the error
+lists the project's types), an Epic type (use create-epic), a sub-task type, a
+required field the project needs but the call does not set (named in the
+error), a custom field off a non-empty writable-custom-fields allow-list, or a
+value Jira rejects (e.g. an unknown assignee accountId).
 
 `sprint` manages a Scrum board's sprints, the board resolved by its
 human-readable name (e.g. "Accessio 2.0 Scrum Board"). `sprint list` reads the
@@ -573,6 +595,28 @@ def build_parser():
         help='JSON payload describing {"stories": [...]}; omit or use "-" to read stdin',
     )
 
+    p_create_issue = sub.add_parser(
+        "create-issue", parents=[common],
+        help="create ONE standalone issue (Story, Task, Bug, …) without a parent Epic, e.g. "
+             'aee-jira create-issue --project KAN --type Bug --summary "Login fails"',
+    )
+    p_create_issue.add_argument("--project", required=True, help="project key the issue is created in, e.g. KAN")
+    p_create_issue.add_argument("--type", required=True, help='the issue type name as the project calls it, e.g. "Bug", "Task", "Story"')
+    p_create_issue.add_argument("--summary", help="the issue summary (required here or in --file)")
+    p_create_issue.add_argument("--description", help="the description (plain text; blank lines become paragraphs)")
+    p_create_issue.add_argument("--assignee", help="the assignee's Atlassian accountId")
+    p_create_issue.add_argument("--priority", help='the priority name, e.g. "High"')
+    p_create_issue.add_argument("--label", action="append", metavar="LABEL", help="a label (repeatable; Jira labels have no spaces)")
+    p_create_issue.add_argument("--status", help="a status to move the new issue to afterwards (a follow-up transition)")
+    p_create_issue.add_argument(
+        "--field", action="append", metavar="NAME=VALUE",
+        help='a custom field by its Jira name, e.g. --field "Team=42" (repeatable)',
+    )
+    p_create_issue.add_argument(
+        "--file", metavar="PATH",
+        help='optional JSON object with the same keys (summary, description, assignee, priority, labels, status, fields); "-" reads stdin; flags win',
+    )
+
     p_sprint = sub.add_parser("sprint", parents=[common], help="manage a Scrum board's sprints (list / create / bulk-create / close / start / advance)")
     sprint_sub = p_sprint.add_subparsers(dest="sprint_cmd")
 
@@ -770,6 +814,47 @@ def main(argv=None):
         if isinstance(doc.get("issueTypes"), dict):
             body["issueTypes"] = doc["issueTypes"]
         path, method = "/add-stories", "POST"
+    elif args.cmd == "create-issue":
+        issue = {}
+        if args.file:
+            try:
+                raw = _read_payload_text(args.file)
+            except OSError as e:
+                emit({"ok": False, "error": "usage", "message": "cannot read payload file: %s" % e}, as_json)
+                return EXIT_USAGE
+            try:
+                doc = json.loads(raw)
+            except ValueError as e:
+                emit({"ok": False, "error": "usage", "message": "payload is not valid JSON: %s" % e}, as_json)
+                return EXIT_USAGE
+            if not isinstance(doc, dict):
+                emit({"ok": False, "error": "usage", "message": "payload must be a JSON object describing the issue"}, as_json)
+                return EXIT_USAGE
+            issue.update(doc)
+        for key in ("summary", "description", "assignee", "priority", "status"):
+            value = getattr(args, key)
+            if value is not None:
+                issue[key] = value
+        if args.label:
+            issue["labels"] = args.label
+        if args.field:
+            fields = dict(issue["fields"]) if isinstance(issue.get("fields"), dict) else {}
+            for pair in args.field:
+                name, sep, value = pair.partition("=")
+                if not sep or not name.strip():
+                    emit({"ok": False, "error": "usage",
+                          "message": '--field takes NAME=VALUE, e.g. --field "Team=42" (got %r)' % pair}, as_json)
+                    return EXIT_USAGE
+                fields[name.strip()] = value
+            issue["fields"] = fields
+        if not str(issue.get("summary") or "").strip():
+            emit({"ok": False, "error": "usage", "message": "a summary is required (--summary, or \"summary\" in --file)"}, as_json)
+            return EXIT_USAGE
+        issue_types = issue.pop("issueTypes", None)
+        body = {"project": args.project, "type": args.type, "issue": issue}
+        if isinstance(issue_types, dict):
+            body["issueTypes"] = issue_types
+        path, method = "/create-issue", "POST"
     elif args.cmd == "sprint":
         sprint_cmd = getattr(args, "sprint_cmd", None)
         if sprint_cmd == "list":
@@ -852,6 +937,10 @@ def main(argv=None):
     # key + the per-story map above.
     # add-stories follows the same convention (#2890).
     if args.cmd in ("create-epic", "add-stories") and isinstance(result, dict) and result.get("failed"):
+        return EXIT_DOMAIN_ERROR
+    # create-issue (#2894): the issue exists, but the requested status could not
+    # be reached — exit 1 so the caller notices, while still printing the key.
+    if args.cmd == "create-issue" and isinstance(result, dict) and result.get("statusError"):
         return EXIT_DOMAIN_ERROR
     # sprint bulk-create is likewise one operation with per-sprint outcomes: a
     # per-sprint failure surfaces exit 1 while still printing the per-sprint map.

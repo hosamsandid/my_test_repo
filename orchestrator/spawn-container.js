@@ -63,9 +63,9 @@ function perAgentVolumeName(id) {
 // Container hardening (conservative slice). Memory accepts a human suffix
 // (e.g. "2g", "512m"); 0/empty disables that limit.
 function parseBytes(s) {
-  const m = String(s || '').trim().match(/^(\d+)\s*([kKmMgG]?)[bB]?$/);
+  const m = String(s || '').trim().match(/^(\d+)\s*([kKmMgGtT]?)[bB]?$/);
   if (!m) return 0;
-  const mult = { '': 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3 }[m[2].toLowerCase()];
+  const mult = { '': 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3, t: 1024 ** 4 }[m[2].toLowerCase()];
   return Number(m[1]) * mult;
 }
 const AGENT_MEM_LIMIT_BYTES = parseBytes(process.env.AEE_AGENT_MEM_LIMIT || '2g');

@@ -15,6 +15,7 @@ test('parseBytes accepts a human suffix and falls back to 0 on junk', () => {
   assert.equal(parseBytes('2g'), 2 * 1024 ** 3);
   assert.equal(parseBytes('512m'), 512 * 1024 ** 2);
   assert.equal(parseBytes('4gb'), 4 * 1024 ** 3);
+  assert.equal(parseBytes('1t'), 1024 ** 4);
   assert.equal(parseBytes('1073741824'), 1073741824);
   assert.equal(parseBytes(''), 0);
   assert.equal(parseBytes('nope'), 0);

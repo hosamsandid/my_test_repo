@@ -48,6 +48,7 @@ test('parseMemoryQuantity accepts k8s quantities and docker-style suffixes', () 
   assert.equal(parseMemoryQuantity('2g'), '2Gi');
   assert.equal(parseMemoryQuantity('512m'), '512Mi');
   assert.equal(parseMemoryQuantity('2gb'), '2Gi');
+  assert.equal(parseMemoryQuantity('1t'), '1Ti');
   assert.equal(parseMemoryQuantity(''), undefined);
   assert.equal(parseMemoryQuantity('lots'), undefined);
 });
@@ -308,4 +309,21 @@ test('buildPodManifest: a role memoryLimit beats the toolchain and the fleet def
   assert.equal(plain.spec.containers[0].resources.limits.memory, '512Mi');
   const none = buildPodManifest('a1', {}, 'p', [], 'as-agent-jvm:latest', jvm, null);
   assert.equal(none.spec.containers[0].resources.limits.memory, '6Gi');
+});
+
+test('buildPodManifest caps the memory request to a smaller role limit so the API server accepts the pod (#2813 review)', () => {
+  // Default 256Mi request vs a valid 128m role value.
+  const small = buildPodManifest('a1', {}, 'p', [], 'as-agent:latest', null, '128m');
+  assert.equal(small.spec.containers[0].resources.limits.memory, '128Mi');
+  assert.equal(small.spec.containers[0].resources.requests.memory, '128Mi');
+  // A toolchain request above the role limit is capped too.
+  const jvm = { toolchainId: 'jvm', resources: { memoryLimit: '6g', memoryRequest: '1g' } };
+  const capped = buildPodManifest('a1', {}, 'p', [], 'as-agent-jvm:latest', jvm, '512m');
+  assert.equal(capped.spec.containers[0].resources.requests.memory, '512Mi');
+  // Decimal and binary units compare by bytes: 300M (~286Mi) < 512Mi stays.
+  const dec = buildPodManifest('a1', {}, 'p', [], 'as-agent:latest', { resources: { memoryRequest: '300M' } }, '512m');
+  assert.equal(dec.spec.containers[0].resources.requests.memory, '300M');
+  // A request below the limit is untouched.
+  const big = buildPodManifest('a1', {}, 'p', [], 'as-agent:latest', null, '4g');
+  assert.equal(big.spec.containers[0].resources.requests.memory, '256Mi');
 });

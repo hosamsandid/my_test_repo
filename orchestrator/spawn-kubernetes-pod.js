@@ -165,9 +165,20 @@ function parseMemoryQuantity(value) {
   const v = String(value || '').trim();
   if (!v) return undefined;
   if (/^\d+(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?$/.test(v)) return v;
-  const m = v.match(/^(\d+)\s*([kKmMgG])(?:i|b|ib)?$/);
+  const m = v.match(/^(\d+)\s*([kKmMgGtT])(?:i|b|ib)?$/);
   if (!m) return undefined;
   return `${m[1]}${m[2].toUpperCase()}i`;
+}
+
+// Bytes of a quantity `parseMemoryQuantity` returned (plain digits, or a
+// binary/decimal magnitude suffix). Used only to compare request vs limit.
+const QUANTITY_MULT = {
+  '': 1, Ki: 1024, Mi: 1024 ** 2, Gi: 1024 ** 3, Ti: 1024 ** 4, Pi: 1024 ** 5, Ei: 1024 ** 6,
+  K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15, E: 1e18,
+};
+function memoryQuantityBytes(quantity) {
+  const m = /^(\d+)(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?$/.exec(String(quantity || ''));
+  return m ? Number(m[1]) * QUANTITY_MULT[m[2] || ''] : NaN;
 }
 
 // Write to a handle stream only while it is still writable. The log stream,
@@ -482,7 +493,11 @@ function buildPodManifest(id, env, podName, contextMounts, image, toolchain = nu
   const memory = parseMemoryQuantity(memoryLimit)
     || parseMemoryQuantity(resources && resources.memoryLimit)
     || parseMemoryQuantity(AGENT_MEM_LIMIT);
-  const memoryRequest = parseMemoryQuantity(resources && resources.memoryRequest) || '256Mi';
+  // A request above the limit makes the API server reject the pod, and a
+  // valid small role value (e.g. "128m") is below the 256Mi default request —
+  // so the request is capped to the effective limit.
+  let memoryRequest = parseMemoryQuantity(resources && resources.memoryRequest) || '256Mi';
+  if (memory && memoryQuantityBytes(memoryRequest) > memoryQuantityBytes(memory)) memoryRequest = memory;
   const cpuRequest = (resources && resources.cpuRequest) || '100m';
   // Seam #3 equivalent: the agent sees ONLY its own slice of the shared
   // workspace PVC via subPath, mounted at the same /workspace/agents/<id>

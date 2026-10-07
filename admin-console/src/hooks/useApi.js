@@ -47,7 +47,8 @@ export function useApi(url) {
   return { data, loading, error, refetch: fetchData };
 }
 
-export async function apiCall(method, url, body) {
+// `signal` (optional) aborts the request — e.g. a poll's own deadline (#566).
+export async function apiCall(method, url, body, { signal } = {}) {
   // Assist model selection (#1212): attach `X-Assist-Model: <endpointId>:<modelId>`
   // when a selection is set. Non-assist routes ignore it, so it is free to send
   // on every request and any future assist route inherits it for free.
@@ -58,6 +59,7 @@ export async function apiCall(method, url, body) {
       ...assistHeaders(),
     },
     body: body ? JSON.stringify(body) : undefined,
+    signal,
   });
   if (!res.ok) {
     notifyIfUnauthorized(res.status);

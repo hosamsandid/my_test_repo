@@ -49,6 +49,32 @@ test('gatherTeamEntries threads its fleet into every lookup it makes', () => {
   assert.match(b, /teamKnowledgeEnv\(teamId, kfleet\)/);
 });
 
+// #2920: the store sits on NFS — a sync read of every shard blocked the event
+// loop for ~0.5 s per call.
+test('gatherTeamEntries reads the store async, behind the fingerprint cache', () => {
+  const b = body('async function gatherTeamEntries(');
+  assert.doesNotMatch(b, /readFileSync|readdirSync|existsSync|statSync/);
+  assert.match(b, /listStoreFiles\(store, \{ fsp \}\)/);
+  assert.match(b, /await fileSignature\(\[\.\.\.listed\.map\(\(l\) => l\.manifest\), \.\.\.storeFiles, \.\.\.teamOverlayFiles\(teamId\)\]/);
+  assert.match(b, /teamEntriesCache\.get\(teamId, fingerprint, async \(\) => \{\n\s+let read = await readStoreFiles\(storeFiles/);
+  assert.match(b, /JSON\.stringify\(\[\.\.\.originTeams\]/, 're-homing input is part of the fingerprint');
+  const overlays = body('function teamOverlayFiles(');
+  for (const dir of ['KNOWLEDGE_ARCHIVED_DIR', 'KNOWLEDGE_REVIEW_DIR', 'KNOWLEDGE_VALIDITY_DIR', 'KNOWLEDGE_TRIGGERS_DIR']) {
+    assert.match(overlays, new RegExp(dir), `${dir} sidecars are part of the fingerprint`);
+  }
+  // Now async: every call is awaited (or mapped into a Promise.all).
+  assert.doesNotMatch(API_SRC, /(?<!await |function |=> )gatherTeamEntries\(/);
+  assert.doesNotMatch(API_SRC, /(?<!await |function )adHocCandidate\(/);
+});
+
+test('the summary badge is memoised per scope + teams on the entries fingerprints and the minute', () => {
+  const start = API_SRC.indexOf("app.get('/api/knowledge/summary',");
+  const r = API_SRC.slice(start, API_SRC.indexOf('\n});', start));
+  assert.match(r, /Promise\.all\(teamIds\.map\(\(teamId\) => gatherTeamEntries\(teamId, \{ fleet \}\)\)\)/);
+  assert.match(r, /Math\.floor\(now \/ 60_000\), \.\.\.gathered\.map\(\(g\) => g\.fingerprint\)/);
+  assert.match(r, /knowledgeSummaryCache\.get\(`\$\{parsed\.scope\}\|\$\{teamIds\.join\(','\)\}`, fingerprint,/);
+});
+
 test('the sweep helpers no longer read configs themselves', () => {
   for (const name of [
     'function knowledgeTeamVisible(', 'function resolveTeamStorePath(', 'function resolveTeamRepoUrl(', 'function teamAgentIds(',

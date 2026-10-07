@@ -1943,3 +1943,22 @@ test('#2879: two producers\' channels on one label into one consumer give one hi
   ]);
   assert.equal(conflictLints(g).length, 1);
 });
+
+test('#2879: on a labelSuffix\'d team the suffixed revisions-required fix path is exempt', () => {
+  const graph = (suffix) => buildProcessGraph([
+    { id: 'dev', github: { producesPr: true }, emits: [`ready-for-review${suffix}`], triggers: [] },
+    { id: 'rev', channels: [{ artifact: 'pr', from: 'dev', label: `ready-for-review${suffix}`, readiness: { ci: true, conflict: true, failureLabel: `needs-conflict-resolution${suffix}` } }], triggers: [] },
+    { id: 'reworker', channels: [{ artifact: 'pr', from: 'rev', label: `revisions-required${suffix}` }], triggers: [] },
+    { id: 'conflict-solver', triggers: [{ id: 'cs', type: 'github-event', events: ['pull_request.labeled'], labelFilter: `needs-conflict-resolution${suffix}` }] },
+  ]);
+  assert.deepEqual(conflictLints(graph('')), []);
+  assert.deepEqual(conflictLints(graph('-prod')), []);
+});
+
+test('#2879: a disabled PR label listener is not counted as a hand-off', () => {
+  const g = buildProcessGraph([
+    { id: 'merger', triggers: [{ id: 'm', type: 'github-event', enabled: false, events: ['pull_request.labeled'], labelFilter: 'ready-to-merge' }] },
+    SOLVER,
+  ]);
+  assert.deepEqual(conflictLints(g), []);
+});

@@ -21,6 +21,7 @@ const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
 const requestTiming = require('./request-timing');
+const { createCompressionMiddleware, setStaticCacheHeaders, INDEX_CACHE_CONTROL } = require('./http-delivery');
 const { chatUploadBaseName, uniqueFileName } = require('./chat-upload-name');
 const internalAuthClient = require('./internal-auth-client');
 const githubEventLog = require('./github-event-log');
@@ -367,13 +368,18 @@ const perfTiming = requestTiming.createPerfTiming({
   env: process.env, log: (line) => console.log(line),
 });
 if (perfTiming.enabled) app.use('/api', perfTiming.middleware);
+// gzip/brotli for static assets and JSON (#2919); SSE and NDJSON streams are
+// excluded so they keep streaming. Before express.static and every route.
+app.use(createCompressionMiddleware());
 app.use(cors());
 // Document-bundle endpoints (process drafts, the unified flow graph, imported
 // BriefingPack flows) carry the full brief.md / prompt bodies inline, which
 // easily exceeds body-parser's 100kb default. Raise the limit so importing /
 // rendering / saving a multi-BP flow doesn't 413 (#377). Behind the auth gate.
 app.use(express.json({ limit: '10mb' }));
-app.use(express.static(STATIC_DIR));
+// Content-hashed /assets/* are immutable for a year; index.html is revalidated
+// on every load so a deploy takes effect immediately (#2919).
+app.use(express.static(STATIC_DIR, { setHeaders: setStaticCacheHeaders }));
 
 // Allowlist for ids that turn into filesystem path segments. The dotted-
 // segment pattern explicitly rejects "..", leading/trailing dots and
@@ -23044,6 +23050,7 @@ app.get('/api/agents/:agentId/session/:roomId/stream', (req, res) => {
 
 app.get('*path', spaLimiter, (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Not found' });
+  res.setHeader('Cache-Control', INDEX_CACHE_CONTROL);
   res.sendFile(path.join(STATIC_DIR, 'index.html'));
 });
 

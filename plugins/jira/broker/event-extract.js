@@ -315,6 +315,16 @@ function resolveCommentOrigin(issueKey, comment, ownWrites) {
   return opensWithAgentMarker(comment.body) ? 'agent' : 'human';
 }
 
+// A comment's readable body, as a wake carries it: plain text without the
+// agent's own provenance line, cut at COMMENT_BODY_MAX (`truncated` says so).
+// Shared by `comment_added` wakes and the `comments` read (#2899).
+function commentBodyText(body) {
+  const content = body && Array.isArray(body.content) ? body.content : [];
+  const text = adfToText({ type: 'doc', content: opensWithAgentMarker(body) ? content.slice(1) : content });
+  const truncated = text.length > COMMENT_BODY_MAX;
+  return { text: truncated ? `${text.slice(0, COMMENT_BODY_MAX - 1)}…` : text, truncated };
+}
+
 // One `comment_added` event per comment created inside this poll's window
 // (`windowStartIso`, as for issue_created — the JQL window is on `updated`,
 // so an old issue's old comments ride along). A comment without a parseable
@@ -331,9 +341,7 @@ function extractCommentEvents(issue, { projectKey, siteBase, windowStartIso, own
     if (Number.isNaN(created)) continue;
     if (!Number.isNaN(windowStart) && created < windowStart) continue;
     // The agent's own provenance line is not what the reader needs.
-    const content = c.body && Array.isArray(c.body.content) ? c.body.content : [];
-    const text = adfToText({ type: 'doc', content: opensWithAgentMarker(c.body) ? content.slice(1) : content });
-    const truncated = text.length > COMMENT_BODY_MAX;
+    const { text, truncated } = commentBodyText(c.body);
     events.push({
       id: `${issue.key}:c${c.id}`,
       event: 'comment_added',
@@ -344,7 +352,7 @@ function extractCommentEvents(issue, { projectKey, siteBase, windowStartIso, own
       created: c.created,
       author: (c.author && c.author.displayName) || null,
       commentId: String(c.id),
-      body: truncated ? `${text.slice(0, COMMENT_BODY_MAX - 1)}…` : text,
+      body: text,
       ...(truncated ? { bodyTruncated: 'true' } : {}),
       origin: resolveCommentOrigin(issue.key, c, ownWrites),
       issueUrl: siteBase ? `${siteBase}/browse/${issue.key}?focusedCommentId=${encodeURIComponent(c.id)}` : null,
@@ -406,6 +414,7 @@ module.exports = {
   extractCommentEvents,
   resolveCommentOrigin,
   isCommentListTruncated,
+  commentBodyText,
   adfToText,
   AGENT_COMMENT_MARKER,
   COMMENT_BODY_MAX,

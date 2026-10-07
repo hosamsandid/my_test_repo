@@ -15,7 +15,7 @@
 // request with the runtime `fetch`. Same pure-core / I/O-edge split as
 // github-issues-broker/github-client.js and test-mgmt-broker/vendor-client.js.
 
-const { resolveJiraApiBase, adfToText } = require('./event-extract');
+const { resolveJiraApiBase, adfToText, commentBodyText, resolveCommentOrigin } = require('./event-extract');
 
 // One JQL search page is 100 issues; MAX_PAGES caps total issues considered for
 // a single project in a single poll (100 × 20 = 2000) — generous enough that a
@@ -550,6 +550,68 @@ async function getComment(cred, issueKey, commentId, { env } = {}) {
     created: raw.created ? String(raw.created) : null,
     body: adfToText(raw.body),
   };
+}
+
+// An issue's comments, newest first (CLI `comments`, #2899) — one page of
+// `limit` (default 20, at most 100), skipping the newest `offset`. Each body is
+// the wake's plain text (event-extract.js `commentBodyText`): cut at the wake
+// length with `bodyTruncated`, read in full via `show <key> --comment <id>`.
+// `origin` is resolved like a wake's against the scope's own-writes snapshot.
+// Comments the credential may not see are simply not in Jira's answer. An
+// issue the credential cannot see is the standard out-of-scope refusal.
+const COMMENTS_DEFAULT_LIMIT = 20;
+const COMMENTS_MAX_LIMIT = 100;
+async function listComments(cred, issueKey, { limit, offset, ownWrites, env } = {}) {
+  const key = String(issueKey || '').trim();
+  if (!key) throw userErr(400, 'an issue key is required');
+  const wholeNumber = (v, min) => {
+    if (v === undefined || v === null || v === '') return undefined;
+    const n = Number(v);
+    return Number.isInteger(n) && n >= min ? n : null;
+  };
+  const lim = wholeNumber(limit, 1);
+  if (lim === null) throw userErr(400, `--limit must be a whole number from 1 to ${COMMENTS_MAX_LIMIT}`);
+  const cap = Math.min(lim === undefined ? COMMENTS_DEFAULT_LIMIT : lim, COMMENTS_MAX_LIMIT);
+  const off = wholeNumber(offset, 0);
+  if (off === null) throw userErr(400, '--offset must be a whole number of newer comments to skip (0 or more)');
+  const startAt = off === undefined ? 0 : off;
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  let raw;
+  try {
+    raw = await requestJson({
+      base,
+      path: `/rest/api/3/issue/${encodeURIComponent(key)}/comment?orderBy=-created&startAt=${startAt}&maxResults=${cap}`,
+      authHeader: auth,
+    });
+  } catch (err) {
+    if (err.status === 404) throw userErr(404, `${outOfScope('Issue ', key)}.`);
+    throw err;
+  }
+  const values = Array.isArray(raw.comments) ? raw.comments : [];
+  const comments = values.filter((c) => c && c.id != null).map((c) => {
+    const { text, truncated } = commentBodyText(c.body);
+    return {
+      id: String(c.id),
+      author: c.author && c.author.displayName ? String(c.author.displayName) : null,
+      created: c.created ? String(c.created) : null,
+      updated: c.updated ? String(c.updated) : null,
+      body: text,
+      bodyTruncated: truncated,
+      origin: resolveCommentOrigin(key, c, ownWrites),
+    };
+  });
+  const total = typeof raw.total === 'number' ? raw.total : startAt + values.length;
+  const nextOffset = startAt + values.length;
+  const hasMore = values.length > 0 && nextOffset < total;
+  const result = { issue: key, comments, count: comments.length, total, offset: startAt, limit: cap, hasMore };
+  if (hasMore) {
+    result.nextOffset = nextOffset;
+    result.note = `${total - nextOffset} older comment(s) not listed — read them with aee-jira comments ${key} --offset ${nextOffset}.`;
+  } else if (!comments.length) {
+    result.note = startAt ? `No comments past offset ${startAt} (${key} has ${total}).` : `${key} has no comments.`;
+  }
+  return result;
 }
 
 // The full (uncapped) attachment list for one issue — the ownership check
@@ -3155,6 +3217,9 @@ module.exports = {
   fetchFullChangelog,
   getIssue,
   getComment,
+  listComments,
+  COMMENTS_DEFAULT_LIMIT,
+  COMMENTS_MAX_LIMIT,
   getIssueAttachments,
   downloadAttachmentContent,
   getAttachment,

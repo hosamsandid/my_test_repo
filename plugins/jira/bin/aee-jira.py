@@ -26,6 +26,7 @@ Reads:
     aee-jira list --project KAN [--status "Ready for Dev"]   # a project's issues
     aee-jira search --jql "<JQL>" [--fields key,summary,status,Team] [--limit N]   # arbitrary JQL, scoped to your team
     aee-jira show KAN-6 [--fields "Team,Sprint"] [--comment <id>]   # one issue (summary, status, type, assignee, created/updated, parent/epic key, URL, attachments, availableTransitions; --fields adds custom fields; --comment adds one comment in full)
+    aee-jira comments KAN-6 [--limit N] [--offset N]   # the issue's comments, newest first (20 per page)
     aee-jira attachment get KAN-6 10312 [--out path]   # fetch one attachment's content by id
     aee-jira sprint list --board "Team Scrum Board"     # a Scrum board's sprints (resolved by board name)
     aee-jira link-types                           # the site's issue link types: name, outward + inward phrase
@@ -181,6 +182,23 @@ on the issue's edit screen is named). The result lists each requested field
 with its old and new value and "changed" or "unchanged" (already at that value,
 not written). An issue outside the team's Jira scope is refused. Description
 (`update`) and custom fields (`set-field`) have their own commands.
+
+`comments` reads the conversation on an issue, newest first, so you know the
+context before you act or reply (a plain `show` lists no comments):
+
+    aee-jira comments KAN-10                      # the newest 20: id, author, created, updated, body, origin
+    aee-jira comments KAN-10 --limit 5            # only the newest 5 (1-100)
+    aee-jira comments KAN-10 --offset 20          # the next older page (`nextOffset` from the previous result)
+    aee-jira show KAN-10 --comment <id>           # one comment in full when its body was cut (bodyTruncated)
+
+`origin` is "agent" for a comment your team posted through aee-jira and "human"
+otherwise. A body is plain text (mentions read @Name, code and tables as text),
+cut at the same length as a comment_added wake — `bodyTruncated: true` then
+means read it in full with `show --comment <id>`. `updated` differs from
+`created` when a comment was edited. `hasMore: true` means older comments
+exist — read them with `--offset <nextOffset>`. No comments is an empty list,
+not an error; comments your account may not see are simply not listed. An issue
+outside your team's Jira scope is refused.
 
 `users` finds people, so you can assign them: Jira identifies a person by an
 opaque accountId, never by name or e-mail, and every `assignee` (`edit
@@ -590,6 +608,22 @@ def build_parser():
              "the rest of a body cut short (bodyTruncated)",
     )
 
+    p_comments = sub.add_parser(
+        "comments", parents=[common],
+        help="read an issue's comments, newest first (id, author, created, updated, body, origin), "
+             "e.g. aee-jira comments KAN-10 [--limit N] [--offset N]",
+        description="Read the conversation on an issue, newest first: each comment's id, author, created and "
+                    "updated (they differ when it was edited), plain-text body and origin (\"agent\" = posted by "
+                    "your team through aee-jira, else \"human\"). A long body is cut like a comment_added wake "
+                    "(bodyTruncated: true) — read it in full with `aee-jira show <key> --comment <id>`. 20 per "
+                    "page by default; hasMore: true means older comments exist — fetch them with --offset "
+                    "<nextOffset>. No comments is an empty list; comments your account may not see are not "
+                    "listed; an issue outside your team's Jira scope is refused.",
+    )
+    p_comments.add_argument("issue", help="issue key, e.g. KAN-10")
+    p_comments.add_argument("--limit", type=int, help="return at most N comments (1-100, default 20)")
+    p_comments.add_argument("--offset", type=int, help="skip the newest N comments, e.g. a result's nextOffset (default 0)")
+
     p_att = sub.add_parser("attachment", parents=[common], help="read an issue's attachments (list them with `show`)")
     att_sub = p_att.add_subparsers(dest="att_cmd")
     p_att_get = att_sub.add_parser(
@@ -873,6 +907,13 @@ def main(argv=None):
         if args.comment:
             q["comment"] = args.comment
         path = "/show?" + urllib.parse.urlencode(q)
+    elif args.cmd == "comments":
+        q = {"issue": args.issue}
+        if args.limit is not None:
+            q["limit"] = args.limit
+        if args.offset is not None:
+            q["offset"] = args.offset
+        path = "/comments?" + urllib.parse.urlencode(q)
     elif args.cmd == "attachment":
         att_cmd = getattr(args, "att_cmd", None)
         if att_cmd == "add":

@@ -279,6 +279,125 @@ test('getComment: reads one comment in full as plain text (show --comment, the r
   });
 });
 
+// ── listComments (CLI `comments`, #2899) ─────────────────────────────────────
+
+const adfDoc = (...content) => ({ type: 'doc', version: 1, content });
+const para = (text) => ({ type: 'paragraph', content: [{ type: 'text', text }] });
+const jiraComment = (id, created, body, { author = 'Jane', updated = created } = {}) => ({
+  id, created, updated, author: { displayName: author }, body,
+});
+const commentsResponse = (total, comments) => ({ ok: true, status: 200, text: async () => JSON.stringify({ startAt: 0, total, comments }) });
+
+test('listComments: newest first with id, author, created, updated, body and origin (AC1, AC3, edited)', async () => {
+  const agentBody = adfDoc(para('Posted by an agent on team "team-1" via Agent Studio.'), para('Picked this up.'));
+  await withFetch((url) => {
+    assert.match(url, /\/rest\/api\/3\/issue\/KAN-10\/comment\?orderBy=-created&startAt=0&maxResults=20$/);
+    return commentsResponse(3, [
+      jiraComment('103', '2026-10-03T10:00:00.000+0000', adfDoc(para('Third')), { author: 'Anna', updated: '2026-10-04T08:00:00.000+0000' }),
+      jiraComment('102', '2026-10-02T10:00:00.000+0000', agentBody, { author: 'Service Bot' }),
+      jiraComment('101', '2026-10-01T10:00:00.000+0000', adfDoc(para('First')), { author: 'Ben' }),
+    ]);
+  }, async () => {
+    const r = await jc.listComments(CRED, 'KAN-10', { ownWrites: { comments: {} }, env: CRED.env });
+    assert.deepEqual(r.comments, [
+      { id: '103', author: 'Anna', created: '2026-10-03T10:00:00.000+0000', updated: '2026-10-04T08:00:00.000+0000', body: 'Third', bodyTruncated: false, origin: 'human' },
+      { id: '102', author: 'Service Bot', created: '2026-10-02T10:00:00.000+0000', updated: '2026-10-02T10:00:00.000+0000', body: 'Picked this up.', bodyTruncated: false, origin: 'agent' },
+      { id: '101', author: 'Ben', created: '2026-10-01T10:00:00.000+0000', updated: '2026-10-01T10:00:00.000+0000', body: 'First', bodyTruncated: false, origin: 'human' },
+    ]);
+    assert.equal(r.issue, 'KAN-10');
+    assert.equal(r.count, 3);
+    assert.equal(r.total, 3);
+    assert.equal(r.hasMore, false);
+    assert.ok(!('nextOffset' in r));
+  });
+});
+
+test('listComments: origin = agent from the own-writes registry even without the provenance line (AC3)', async () => {
+  await withFetch(() => commentsResponse(2, [
+    jiraComment('7', '2026-10-02T10:00:00Z', adfDoc(para('mine'))),
+    jiraComment('6', '2026-10-01T10:00:00Z', adfDoc(para('theirs'))),
+  ]), async () => {
+    const r = await jc.listComments(CRED, 'KAN-10', { ownWrites: { comments: { 'KAN-10:c7': '2026-10-02T10:00:00Z' } }, env: CRED.env });
+    assert.deepEqual(r.comments.map((c) => [c.id, c.origin]), [['7', 'agent'], ['6', 'human']]);
+  });
+});
+
+test('listComments: 60 comments → newest 20 by default, hasMore + nextOffset, older page via offset (AC2)', async () => {
+  const all = Array.from({ length: 60 }, (_, i) => jiraComment(String(1060 - i), `2026-10-01T10:${String(59 - i).padStart(2, '0')}:00Z`, adfDoc(para(`c${60 - i}`))));
+  await withFetch((url) => {
+    const q = new URL(url).searchParams;
+    const startAt = Number(q.get('startAt'));
+    const max = Number(q.get('maxResults'));
+    return commentsResponse(60, all.slice(startAt, startAt + max));
+  }, async (calls) => {
+    const first = await jc.listComments(CRED, 'KAN-10', { env: CRED.env });
+    assert.equal(first.count, 20);
+    assert.equal(first.comments[0].id, '1060');
+    assert.equal(first.hasMore, true);
+    assert.equal(first.nextOffset, 20);
+    assert.match(first.note, /40 older comment\(s\) not listed — read them with aee-jira comments KAN-10 --offset 20/);
+
+    const last = await jc.listComments(CRED, 'KAN-10', { offset: '40', limit: '50', env: CRED.env });
+    assert.match(calls[calls.length - 1].url, /startAt=40&maxResults=50$/);
+    assert.equal(last.count, 20);
+    assert.equal(last.comments[19].id, '1001');
+    assert.equal(last.hasMore, false);
+    assert.equal(last.offset, 40);
+  });
+});
+
+test('listComments: a long body is cut like a wake with bodyTruncated; mentions / code / tables read as text (AC4)', async () => {
+  const long = 'y'.repeat(5000);
+  const rich = adfDoc(
+    { type: 'paragraph', content: [{ type: 'mention', attrs: { text: '@Anna' } }, { type: 'text', text: ' see' }] },
+    { type: 'codeBlock', content: [{ type: 'text', text: 'npm test' }] },
+    { type: 'table', content: [{ type: 'tableRow', content: [{ type: 'tableCell', content: [para('a')] }, { type: 'tableCell', content: [para('b')] }] }] },
+  );
+  await withFetch(() => commentsResponse(2, [
+    jiraComment('2', '2026-10-02T10:00:00Z', adfDoc(para(long))),
+    jiraComment('1', '2026-10-01T10:00:00Z', rich),
+  ]), async () => {
+    const r = await jc.listComments(CRED, 'KAN-10', { env: CRED.env });
+    const ee = require('./event-extract');
+    assert.equal(r.comments[0].bodyTruncated, true);
+    assert.equal(r.comments[0].body.length, ee.COMMENT_BODY_MAX);
+    assert.ok(r.comments[0].body.endsWith('…'));
+    assert.equal(r.comments[1].bodyTruncated, false);
+    assert.match(r.comments[1].body, /^@Anna see\nnpm test\n/);
+    assert.match(r.comments[1].body, /a\s+b/);
+  });
+});
+
+test('listComments: no comments → empty list with a note, not an error (AC5)', async () => {
+  await withFetch(() => commentsResponse(0, []), async () => {
+    const r = await jc.listComments(CRED, 'KAN-10', { env: CRED.env });
+    assert.deepEqual(r.comments, []);
+    assert.equal(r.count, 0);
+    assert.equal(r.hasMore, false);
+    assert.equal(r.note, 'KAN-10 has no comments.');
+  });
+});
+
+test('listComments: an invisible issue is the standard out-of-scope refusal (AC7); bad limit / offset are 400 before Jira', async () => {
+  await withFetch(() => ({ ok: false, status: 404, text: async () => '{"errorMessages":["Issue does not exist"]}' }), async () => {
+    await assert.rejects(
+      () => jc.listComments(CRED, 'OTHER-1', { env: CRED.env }),
+      (e) => e.status === 404 && /^Issue OTHER-1 was not found, or it is outside this team's Jira scope/.test(e.message),
+    );
+  });
+  await withFetch(() => { throw new Error('no Jira call expected'); }, async (calls) => {
+    for (const opts of [{ limit: '0' }, { limit: 'x' }, { offset: '-1' }, { offset: '1.5' }]) {
+      await assert.rejects(() => jc.listComments(CRED, 'KAN-10', { ...opts, env: CRED.env }), (e) => e.status === 400);
+    }
+    await assert.rejects(() => jc.listComments(CRED, ' ', { env: CRED.env }), (e) => e.status === 400);
+    assert.equal(calls.length, 0);
+  });
+  await withFetch((url) => {
+    assert.match(url, /maxResults=100$/); // capped
+    return commentsResponse(0, []);
+  }, () => jc.listComments(CRED, 'KAN-10', { limit: 500, env: CRED.env }));
+});
+
 test('getIssue: a failed transitions lookup degrades to omitting availableTransitions (#2421)', async () => {
   await withFetch((url) => {
     if (isFieldList(url)) return fieldListResponse();

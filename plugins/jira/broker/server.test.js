@@ -1727,7 +1727,7 @@ test('a refused grant blocks EVERY subcommand before Jira is touched (AC4/AC5)',
   try {
     const routes = [
       ['GET', '/cli/whoami'], ['GET', '/cli/inbox'], ['GET', '/cli/inbox?consume=KAN-1:1'], ['GET', '/cli/projects'],
-      ['GET', '/cli/show?issue=KAN-1'], ['GET', '/cli/sprint/list?board=B'], ['GET', '/cli/attachment?issue=KAN-1&id=1'], ['GET', '/cli/users?query=Anna'],
+      ['GET', '/cli/show?issue=KAN-1'], ['GET', '/cli/sprint/list?board=B'], ['GET', '/cli/attachment?issue=KAN-1&id=1'], ['GET', '/cli/users?query=Anna'], ['GET', '/cli/comments?issue=KAN-1'],
       ['POST', '/cli/comment'], ['POST', '/cli/transition'], ['POST', '/cli/create-epic'], ['POST', '/cli/add-stories'], ['POST', '/cli/create-issue'], ['POST', '/cli/set-epic'], ['POST', '/cli/edit'], ['POST', '/cli/sprint/create'],
       ['POST', '/cli/attachment/add'],
     ];
@@ -2073,6 +2073,115 @@ test('cli users: a chat turn searches with the member\'s own Jira token (#2898)'
   const srv = await listen();
   try {
     const r = await callAs(srv, 'GET', '/cli/users?query=Anna', { token: TOKEN });
+    assert.equal(r.status, 200);
+    assert.equal(seen[0].auth, `Basic ${Buffer.from('a@b.c:mine').toString('base64')}`);
+  } finally {
+    restore();
+    broker._setGrantResolver(SERVICE_GRANT);
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+// #2899 — a stubbed Jira for `comments`: KAN-10 has two comments (one the team
+// posted), KAN-11 none, anything else is invisible (outside the scope).
+function stubCommentsJira(seen) {
+  const origFetch = global.fetch;
+  const res = (status, body) => ({ ok: status < 400, status, text: async () => JSON.stringify(body) });
+  const doc = (text) => ({ type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    seen.push({ url: String(url), auth: opts && opts.headers && opts.headers.Authorization });
+    const u = new URL(String(url));
+    if (/\/issue\/KAN-10\/comment$/.test(u.pathname)) {
+      return res(200, { startAt: 0, total: 2, comments: [
+        { id: '202', created: '2026-10-02T10:00:00Z', updated: '2026-10-02T10:00:00Z', author: { displayName: 'Service Bot' }, body: doc('On it.') },
+        { id: '201', created: '2026-10-01T10:00:00Z', updated: '2026-10-01T12:00:00Z', author: { displayName: 'Anna' }, body: doc('Please fix the login.') },
+      ] });
+    }
+    if (/\/issue\/KAN-11\/comment$/.test(u.pathname)) return res(200, { startAt: 0, total: 0, comments: [] });
+    if (/\/field$/.test(u.pathname)) return res(200, []);
+    if (/\/issue\/KAN-10\/transitions$/.test(u.pathname)) return res(200, { transitions: [] });
+    if (/\/issue\/KAN-10$/.test(u.pathname)) return res(200, { key: 'KAN-10', fields: { summary: 'Login', status: { name: 'To Do' } } });
+    return res(404, {});
+  };
+  return () => { global.fetch = origFetch; };
+}
+
+test('cli comments: newest first with origin from the own-writes registry, empty list, out-of-scope refusal, audit without text (#2899)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
+  broker._setGrantResolver(SERVICE_GRANT);
+  broker.ownWritesStore.recordComment('team-1', 'KAN-10', '202');
+  const seen = [];
+  const restore = stubCommentsJira(seen);
+  const srv = await listen();
+  try {
+    const r = await call(srv, 'GET', '/cli/comments?issue=KAN-10', { token: TOKEN });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.comments, [
+      { id: '202', author: 'Service Bot', created: '2026-10-02T10:00:00Z', updated: '2026-10-02T10:00:00Z', body: 'On it.', bodyTruncated: false, origin: 'agent' },
+      { id: '201', author: 'Anna', created: '2026-10-01T10:00:00Z', updated: '2026-10-01T12:00:00Z', body: 'Please fix the login.', bodyTruncated: false, origin: 'human' },
+    ]);
+    assert.equal(r.body.hasMore, false);
+    assert.match(seen[seen.length - 1].url, /\/issue\/KAN-10\/comment\?orderBy=-created&startAt=0&maxResults=20$/);
+
+    const paged = await call(srv, 'GET', '/cli/comments?issue=KAN-10&limit=5&offset=20', { token: TOKEN });
+    assert.equal(paged.status, 200);
+    assert.match(seen[seen.length - 1].url, /startAt=20&maxResults=5$/);
+
+    const none = await call(srv, 'GET', '/cli/comments?issue=KAN-11', { token: TOKEN });
+    assert.equal(none.status, 200);
+    assert.deepEqual(none.body.comments, []);
+
+    const other = await call(srv, 'GET', '/cli/comments?issue=OTHER-1', { token: TOKEN });
+    assert.equal(other.status, 404);
+    assert.match(other.body.error, /Issue OTHER-1 was not found, or it is outside this team's Jira scope/);
+
+    assert.equal((await call(srv, 'GET', '/cli/comments', { token: TOKEN })).status, 400);
+    assert.equal((await call(srv, 'GET', '/cli/comments?issue=KAN-10&limit=0', { token: TOKEN })).status, 400);
+
+    const lines = auditLines().filter((l) => l.scopeId === 'team-1' && l.subcommand === 'comments');
+    assert.ok(lines.some((l) => l.outcome === 'ok' && l.detail === 'KAN-10:2@0'));
+    assert.ok(lines.every((l) => !/On it|Please fix/.test(JSON.stringify(l))), 'no comment text in the audit');
+
+    // a read: POST is not a route; no service account → refused before Jira
+    assert.equal((await call(srv, 'POST', '/cli/comments', { token: TOKEN, body: {} })).status, 404);
+    const nocred = await call(srv, 'GET', '/cli/comments?issue=KAN-10', { token: OTHER });
+    assert.equal(nocred.body.code, 'no-service-account');
+  } finally {
+    restore();
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli show: a plain show still lists no comments and never reads the comment list (#2899 AC8)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
+  broker._setGrantResolver(SERVICE_GRANT);
+  const seen = [];
+  const restore = stubCommentsJira(seen);
+  const srv = await listen();
+  try {
+    const r = await call(srv, 'GET', '/cli/show?issue=KAN-10', { token: TOKEN });
+    assert.equal(r.status, 200);
+    assert.deepEqual(Object.keys(r.body), ['issue']);
+    assert.ok(!('comments' in r.body.issue) && !('comment' in r.body.issue));
+    assert.ok(!seen.some((s) => /\/comment/.test(s.url)), 'no comment read on a plain show');
+  } finally {
+    restore();
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli comments: a chat turn reads with the member\'s own Jira token (#2899)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
+  broker._setGrantResolver(async () => ({ ok: true, mode: 'personal', interactive: true, agentId: 'team-1-dev', userId: 'alice', values: { email: 'a@b.c', 'api-token': 'mine' } }));
+  const seen = [];
+  const restore = stubCommentsJira(seen);
+  const srv = await listen();
+  try {
+    const r = await callAs(srv, 'GET', '/cli/comments?issue=KAN-10', { token: TOKEN });
     assert.equal(r.status, 200);
     assert.equal(seen[0].auth, `Basic ${Buffer.from('a@b.c:mine').toString('base64')}`);
   } finally {

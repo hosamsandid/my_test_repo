@@ -991,6 +991,29 @@ async function handleCli(req, res, cliPath) {
     }
   }
 
+  // ── an issue's comments, newest first, paged (#2899) ─────────────────────
+  // A read: no write policy. `origin` comes from this scope's own-writes
+  // registry (as on a `comment_added` wake). The audit line records only the
+  // issue and how many comments came back — never their text.
+  if (cliPath === '/comments' && req.method === 'GET') {
+    const cred = credFor();
+    if (!cred) return noCredential('comments');
+    const issue = (params.get('issue') || '').trim();
+    if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });
+    try {
+      const result = await jira.listComments(cred, issue, {
+        limit: params.get('limit') || undefined,
+        offset: params.get('offset') || undefined,
+        ownWrites: ownWritesStore.snapshot(scopeId),
+      });
+      auditCall('comments', 'ok', `${issue}:${result.count}@${result.offset}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      auditCall('comments', failureOutcome(err), `${issue}: ${err.status || 'error'}`);
+      return sendJiraError(err);
+    }
+  }
+
   // ── issue links (#2884) ──────────────────────────────────────────────────
   // `link-types` is a read (the site's types with both phrases). `link` /
   // `unlink` are writes, role-gated like the others (D3) with their own policy

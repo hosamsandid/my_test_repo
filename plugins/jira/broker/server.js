@@ -743,6 +743,44 @@ async function handleCli(req, res, cliPath) {
     }
   }
 
+  // ── standard fields of an EXISTING issue (#2897) ─────────────────────────
+  // The CLI sends `{ issue, summary?, assignee? (null = unassign), priority?,
+  // labels? / components? / fixVersions? ({ set } | { add, remove }), dueDate?
+  // (null = clear) }`; jira.editIssueFields validates everything, resolves the
+  // names and applies the real changes in ONE Jira edit (all or nothing). Its
+  // own `edit` write policy; every changed field is stamped as an own write so
+  // its `field_changed` echo reads `origin: agent`.
+  if (cliPath === '/edit' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('edit');
+    if (!authz.allow) {
+      auditCall('edit', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = credFor();
+    if (!cred) return noCredential('edit');
+    const body = parseJson(await readBody(req));
+    const issue = String(body.issue || '').trim();
+    if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });
+    const changes = {};
+    for (const k of Object.keys(jira.EDIT_FIELDS)) {
+      if (Object.prototype.hasOwnProperty.call(body, k)) changes[k] = body[k];
+    }
+    try {
+      const result = await jira.editIssueFields(cred, issue, {
+        changes,
+        onChanged: (fieldIds) => recordOwnWrite(() => {
+          for (const id of fieldIds) ownWritesStore.recordField(scopeId, issue.toUpperCase(), id);
+        }),
+      });
+      const changed = result.fields.filter((f) => f.outcome === 'changed').map((f) => f.field);
+      auditCall('edit', 'ok', `${result.issue}: ${changed.length ? `changed ${changed.join(', ')}` : 'nothing changed'}${result.unchanged ? `, ${result.unchanged} unchanged` : ''}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      auditCall('edit', failureOutcome(err), `${issue}: ${err.message}`);
+      return sendJiraError(err);
+    }
+  }
+
   // ── one standalone issue, no parent Epic (#2894) ─────────────────────────
   // The CLI sends `{ project, type, issue: { summary, description?, assignee?,
   // priority?, labels?, status?, fields? }, issueTypes? }`; the broker creates

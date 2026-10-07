@@ -929,3 +929,45 @@ test('aee-jira set-epic: listed in --help; target is --epic XOR --none; wired to
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('aee-jira edit: listed in --help; flags build the body; set vs add/remove and an empty edit are usage errors (#2897)', async () => {
+  const ws = grantedJiraWorkspace();
+  const help = runJira(['--help'], ws);
+  const flat = help.stdout.replace(/\s+/g, ' '); // argparse wraps the help column
+  assert.match(flat, /edit change standard fields of an existing issue/);
+  assert.equal(runJira(['edit', 'KAN-10'], ws).status, 2, 'nothing to change');
+  assert.equal(runJira(['edit', 'KAN-10', '--set-labels', 'a', '--add-label', 'b'], ws).status, 2);
+  assert.equal(runJira(['edit', 'KAN-10', '--assignee', 'x', '--unassign'], ws).status, 2);
+  assert.equal(runJira(['edit', 'KAN-10', '--due', '2026-10-31', '--clear-due'], ws).status, 2);
+
+  const http = require('node:http');
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, body: JSON.parse(raw) });
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ issue: 'KAN-10', fields: [], changed: 0, unchanged: 0 }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const live = grantedJiraWorkspace(`http://127.0.0.1:${port}/`);
+    let r = await runJiraAsync(['edit', 'KAN-10', '--summary', 'New', '--assignee', 'acc-1', '--priority', 'High',
+      '--add-label', 'backend', '--add-label', 'api', '--remove-label', 'old', '--set-components', 'Backend',
+      '--remove-fix-version', '1.0', '--due', '2026-10-31', '--json'], live);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(seen[0], { method: 'POST', url: '/cli/edit', body: {
+      issue: 'KAN-10', summary: 'New', assignee: 'acc-1', priority: 'High',
+      labels: { add: ['backend', 'api'], remove: ['old'] }, components: { set: ['Backend'] },
+      fixVersions: { add: [], remove: ['1.0'] }, dueDate: '2026-10-31',
+    } });
+    r = await runJiraAsync(['edit', 'KAN-10', '--unassign', '--clear-due', '--set-labels', '--json'], live);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(seen[1].body, { issue: 'KAN-10', assignee: null, labels: { set: [] }, dueDate: null });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

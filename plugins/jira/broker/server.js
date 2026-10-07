@@ -1007,6 +1007,86 @@ async function handleCli(req, res, cliPath) {
     }
   }
 
+  // ── project versions: list, create, release (#2902) ──────────────────────
+  // `version list` is a read (no write policy). `version create` / `version
+  // release` are writes with their own policy keys, audited like the sprint
+  // writes. Releasing with `moveTo` moves the version's unresolved issues the
+  // way Jira's release dialog does; each moved issue's fix-version change is
+  // stamped as an own write so its `field_changed` echo reads `origin: agent`.
+  if (cliPath === '/version/list' && req.method === 'GET') {
+    const cred = credFor();
+    if (!cred) return noCredential('version-list');
+    const project = (params.get('project') || '').trim();
+    if (!project) return sendJson(res, 400, { error: 'a --project key is required' });
+    try {
+      const result = await jira.listProjectVersions(cred, { projectKey: project });
+      auditCall('version-list', 'ok', `${result.project}:${result.count}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      auditCall('version-list', failureOutcome(err), `${project}: ${err.message}`);
+      return sendJiraError(err);
+    }
+  }
+
+  if (cliPath === '/version/create' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('version-create');
+    if (!authz.allow) {
+      auditCall('version-create', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = credFor();
+    if (!cred) return noCredential('version-create');
+    const body = parseJson(await readBody(req));
+    const project = String(body.project || '').trim();
+    if (!project) return sendJson(res, 400, { error: 'a --project key is required' });
+    try {
+      const result = await jira.createProjectVersion(cred, {
+        projectKey: project,
+        name: body.name,
+        description: body.description,
+        startDate: body.startDate,
+        releaseDate: body.releaseDate,
+      });
+      auditCall('version-create', 'ok', `${result.project}:${result.version.name} (${result.version.id})`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      auditCall('version-create', failureOutcome(err), `${project}: ${err.message}`);
+      return sendJiraError(err);
+    }
+  }
+
+  if (cliPath === '/version/release' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('version-release');
+    if (!authz.allow) {
+      auditCall('version-release', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = credFor();
+    if (!cred) return noCredential('version-release');
+    const body = parseJson(await readBody(req));
+    const project = String(body.project || '').trim();
+    if (!project) return sendJson(res, 400, { error: 'a --project key is required' });
+    try {
+      const result = await jira.releaseProjectVersion(cred, {
+        projectKey: project,
+        name: body.name,
+        releaseDate: body.releaseDate,
+        moveTo: body.moveTo,
+        onMoved: (keys) => recordOwnWrite(() => {
+          for (const key of keys) for (const field of jira.FIX_VERSION_CHANGE_FIELDS) ownWritesStore.recordField(scopeId, key, field);
+        }),
+      });
+      const detail = result.outcome === 'already-released'
+        ? 'already released'
+        : `released ${result.version.releaseDate}, ${result.unresolvedIssues} unresolved${result.movedTo ? ` moved to ${result.movedTo}` : ''}`;
+      auditCall('version-release', 'ok', `${result.project}:${result.version.name} ${detail}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      auditCall('version-release', failureOutcome(err), `${project}: ${err.message}`);
+      return sendJiraError(err);
+    }
+  }
+
   // ── user lookup: name / e-mail → accountId (#2898) ──────────────────────
   // A read: no write policy. The audit line records only where it looked and
   // how many matched — never the query or the people found (personal data).

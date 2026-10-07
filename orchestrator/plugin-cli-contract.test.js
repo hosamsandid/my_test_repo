@@ -1091,3 +1091,51 @@ test('aee-jira edit: listed in --help; flags build the body; set vs add/remove a
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('aee-jira version: listed in --help; list / create / release wired to /version/*; usage errors (#2902)', async () => {
+  const ws = grantedJiraWorkspace();
+  const flat = runJira(['--help'], ws).stdout.replace(/\s+/g, ' ');
+  assert.match(flat, /version a project's versions \(releases\): list \/ create \/ release/);
+  const release = runJira(['version', 'release', '--help'], ws).stdout.replace(/\s+/g, ' ');
+  assert.match(release, /--date DATE release date \(YYYY-MM-DD, default today\)/);
+  assert.match(release, /--move-to MOVE_TO move the version's unresolved issues to this version/);
+  // --project and --name are required; a bare `version` is a usage error — no broker call
+  assert.equal(runJira(['version', 'list'], ws).status, 2);
+  assert.equal(runJira(['version', 'create', '--project', 'KAN'], ws).status, 2);
+  assert.equal(runJira(['version', 'release', '--name', '1.4'], ws).status, 2);
+  assert.equal(runJira(['version', '--json'], ws).status, 2);
+
+  const http = require('node:http');
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, body: raw ? JSON.parse(raw) : undefined });
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ project: 'KAN', outcome: 'released', unresolvedIssues: 3, moved: 0 }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const live = grantedJiraWorkspace(`http://127.0.0.1:${port}/`);
+    for (const args of [
+      ['version', 'list', '--project', 'KAN'],
+      ['version', 'create', '--project', 'KAN', '--name', '1.5', '--description', 'Next', '--start', '2026-10-08', '--release-date', '2026-11-30'],
+      ['version', 'release', '--project', 'KAN', '--name', '1.4'],
+      ['version', 'release', '--project', 'KAN', '--name', '1.4', '--date', '2026-10-05', '--move-to', '1.5'],
+    ]) {
+      const r = await runJiraAsync([...args, '--json'], live);
+      assert.equal(r.status, 0, args.join(' ') + r.stdout + r.stderr); // unresolved issues left behind are not an error
+    }
+    assert.deepEqual(seen, [
+      { method: 'GET', url: '/cli/version/list?project=KAN', body: undefined },
+      { method: 'POST', url: '/cli/version/create', body: { project: 'KAN', name: '1.5', description: 'Next', startDate: '2026-10-08', releaseDate: '2026-11-30' } },
+      { method: 'POST', url: '/cli/version/release', body: { project: 'KAN', name: '1.4' } },
+      { method: 'POST', url: '/cli/version/release', body: { project: 'KAN', name: '1.4', releaseDate: '2026-10-05', moveTo: '1.5' } },
+    ]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

@@ -1788,6 +1788,143 @@ test('a chat turn uses the SENDER\'s own Jira credential on the team\'s site, pe
   }
 });
 
+// ── project versions (#2902) ─────────────────────────────────────────────────
+
+function versionJira({ canAdmin = true, unresolved = 0 } = {}) {
+  const versions = [
+    { id: '10001', name: '1.3', released: true, archived: false, releaseDate: '2026-09-01', self: 'http://jira/rest/api/3/version/10001' },
+    { id: '10002', name: '1.4', released: false, archived: false, startDate: '2026-09-02', releaseDate: '2026-10-31', self: 'http://jira/rest/api/3/version/10002' },
+    { id: '10003', name: '1.5', released: false, archived: false, self: 'http://jira/rest/api/3/version/10003' },
+  ];
+  const writes = [];
+  const handler = async (url, opts) => {
+    const u = new URL(String(url));
+    const method = (opts && opts.method) || 'GET';
+    const ok = (body, status = 200) => ({ ok: true, status, text: async () => JSON.stringify(body) });
+    const no = (status, body) => ({ ok: false, status, text: async () => JSON.stringify(body) });
+    if (u.pathname === '/rest/api/3/project/KAN') return ok({ id: '100', key: 'KAN' });
+    if (u.pathname === '/rest/api/3/project/KAN/versions') return ok(versions);
+    if (/^\/rest\/api\/3\/project\//.test(u.pathname)) return no(404, { errorMessages: ['No project could be found with key \'OTHER\'.'] });
+    if (u.pathname === '/rest/api/3/version' && method === 'POST') {
+      if (!canAdmin) return no(403, { errorMessages: ['You do not have permission'] });
+      const body = JSON.parse(opts.body);
+      writes.push({ method, path: u.pathname, body });
+      const created = { id: '10009', self: 'http://jira/rest/api/3/version/10009', released: false, archived: false, ...body };
+      versions.push(created);
+      return ok(created, 201);
+    }
+    const count = u.pathname.match(/^\/rest\/api\/3\/version\/(\d+)\/unresolvedIssueCount$/);
+    if (count) return ok({ issuesUnresolvedCount: unresolved, issuesCount: unresolved + 2 });
+    if (u.pathname === '/rest/api/3/search/jql') return ok({ issues: Array.from({ length: unresolved }, (_, i) => ({ key: `KAN-${20 + i}` })), isLast: true });
+    const put = u.pathname.match(/^\/rest\/api\/3\/version\/(\d+)$/);
+    if (put && method === 'PUT') {
+      if (!canAdmin) return no(403, { errorMessages: ['You do not have permission'] });
+      const body = JSON.parse(opts.body);
+      writes.push({ method, path: u.pathname, body });
+      const v = versions.find((x) => x.id === put[1]);
+      Object.assign(v, { released: body.released, releaseDate: body.releaseDate });
+      return ok(v);
+    }
+    return no(404, {});
+  };
+  return { handler, writes };
+}
+
+async function withVersionJira(opts, fn) {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'verco', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  const jira = versionJira(opts);
+  global.fetch = async (url, o) => (String(url).includes('127.0.0.1') ? origFetch(url, o) : jira.handler(url, o));
+  const srv = await listen();
+  try {
+    await fn(srv, jira.writes);
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+}
+
+test('cli: /version/list returns the versions unreleased first, audited (#2902 AC1)', async () => {
+  await withVersionJira({}, async (srv) => {
+    const r = await call(srv, 'GET', '/cli/version/list?project=kan', { token: TOKEN });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.project, 'KAN');
+    assert.deepEqual(r.body.versions.map((v) => [v.name, v.released]), [['1.4', false], ['1.5', false], ['1.3', true]]);
+    assert.ok(auditLines().some((l) => l.subcommand === 'version-list' && l.outcome === 'ok' && l.detail === 'KAN:3'));
+    const gone = await call(srv, 'GET', '/cli/version/list?project=OTHER', { token: TOKEN });
+    assert.equal(gone.status, 404);
+    assert.match(gone.body.error, /Project OTHER was not found, or it is outside this team's Jira scope/);
+    assert.equal((await call(srv, 'GET', '/cli/version/list', { token: TOKEN })).status, 400);
+  });
+});
+
+test('cli writes: /version/create creates a version, refuses a duplicate name, audited (#2902 AC2/AC3/AC8)', async () => {
+  await withVersionJira({}, async (srv, writes) => {
+    const r = await call(srv, 'POST', '/cli/version/create', { token: TOKEN, body: { project: 'KAN', name: '1.6', releaseDate: '2026-12-01' } });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.version.name, '1.6');
+    assert.deepEqual(writes[0].body, { name: '1.6', projectId: 100, releaseDate: '2026-12-01' });
+    assert.ok(auditLines().some((l) => l.subcommand === 'version-create' && l.outcome === 'ok' && l.detail === 'KAN:1.6 (10009)'));
+    const list = await call(srv, 'GET', '/cli/version/list?project=KAN', { token: TOKEN });
+    assert.ok(list.body.versions.some((v) => v.name === '1.6' && v.releaseDate === '2026-12-01'));
+
+    const dup = await call(srv, 'POST', '/cli/version/create', { token: TOKEN, body: { project: 'KAN', name: '1.5' } });
+    assert.equal(dup.status, 409);
+    assert.match(dup.body.error, /project KAN already has a version "1\.5" \(unreleased\)\. Nothing was created\./);
+    assert.equal(writes.length, 1, 'a duplicate is refused before Jira is asked to create');
+    assert.ok(auditLines().some((l) => l.subcommand === 'version-create' && l.outcome === 'domain-error' && /^KAN: /.test(l.detail)));
+  });
+});
+
+test('cli writes: /version/release releases, moves unresolved issues and stamps them as own writes (#2902 AC4/AC5/AC8)', async () => {
+  await withVersionJira({ unresolved: 2 }, async (srv, writes) => {
+    const r = await call(srv, 'POST', '/cli/version/release', { token: TOKEN, body: { project: 'KAN', name: '1.4', releaseDate: '2026-10-07', moveTo: '1.5' } });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.outcome, 'released');
+    assert.equal(r.body.unresolvedIssues, 2);
+    assert.equal(r.body.movedTo, '1.5');
+    assert.deepEqual(writes[0].body, { released: true, releaseDate: '2026-10-07', moveUnfixedIssuesTo: 'http://jira/rest/api/3/version/10003' });
+    const own = broker.ownWritesStore.snapshot('team-1');
+    for (const k of ['KAN-20|fixversions', 'KAN-21|fixversions', 'KAN-20|fix version']) assert.ok(own.fields[k], `own write ${k}`);
+    assert.ok(auditLines().some((l) => l.subcommand === 'version-release' && l.outcome === 'ok'
+      && l.detail === 'KAN:1.4 released 2026-10-07, 2 unresolved moved to 1.5'));
+    const again = await call(srv, 'POST', '/cli/version/release', { token: TOKEN, body: { project: 'KAN', name: '1.4' } });
+    assert.equal(again.status, 200);
+    assert.equal(again.body.outcome, 'already-released');
+    assert.equal(writes.length, 1);
+  });
+});
+
+test('cli writes: a 403 from Jira on a version write names the missing permission (#2902 AC6)', async () => {
+  await withVersionJira({ canAdmin: false }, async (srv) => {
+    for (const [url, body] of [['/cli/version/create', { project: 'KAN', name: '2.0' }], ['/cli/version/release', { project: 'KAN', name: '1.4' }]]) {
+      const r = await call(srv, 'POST', url, { token: TOKEN, body });
+      assert.equal(r.status, 403, url);
+      assert.match(r.body.error, /may not manage versions in project KAN \(403\) — creating and releasing versions needs the Jira "Administer Projects" permission/);
+    }
+  });
+});
+
+test('cli writes: version-create / version-release are gated by their own policy, audited when denied (#2902 AC8)', async () => {
+  const policy = require('./broker-policy');
+  const orig = policy.authorizeWrite;
+  policy.authorizeWrite = (op) => (op.startsWith('version-') ? { allow: false, code: 'scope-not-allowed', reason: 'not for you' } : orig(op));
+  try {
+    await withVersionJira({}, async (srv, writes) => {
+      for (const [url, sub] of [['/cli/version/create', 'version-create'], ['/cli/version/release', 'version-release']]) {
+        const r = await call(srv, 'POST', url, { token: TOKEN, body: { project: 'KAN', name: '1.4' } });
+        assert.equal(r.status, 403);
+        assert.deepEqual(r.body, { error: 'not for you', code: 'scope-not-allowed' });
+        assert.ok(auditLines().some((l) => l.subcommand === sub && l.outcome === 'denied' && l.detail === 'scope-not-allowed'));
+      }
+      assert.equal(writes.length, 0);
+    });
+  } finally {
+    policy.authorizeWrite = orig;
+  }
+});
+
 test('a refused grant blocks EVERY subcommand before Jira is touched (AC4/AC5)', async () => {
   broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
   broker._setGrantResolver(async () => ({
@@ -1800,8 +1937,9 @@ test('a refused grant blocks EVERY subcommand before Jira is touched (AC4/AC5)',
   try {
     const routes = [
       ['GET', '/cli/whoami'], ['GET', '/cli/inbox'], ['GET', '/cli/inbox?consume=KAN-1:1'], ['GET', '/cli/projects'],
-      ['GET', '/cli/show?issue=KAN-1'], ['GET', '/cli/sprint/list?board=B'], ['GET', '/cli/attachment?issue=KAN-1&id=1'], ['GET', '/cli/users?query=Anna'], ['GET', '/cli/comments?issue=KAN-1'],
+      ['GET', '/cli/show?issue=KAN-1'], ['GET', '/cli/sprint/list?board=B'], ['GET', '/cli/attachment?issue=KAN-1&id=1'], ['GET', '/cli/users?query=Anna'], ['GET', '/cli/comments?issue=KAN-1'], ['GET', '/cli/version/list?project=KAN'],
       ['POST', '/cli/comment'], ['POST', '/cli/transition'], ['POST', '/cli/create-epic'], ['POST', '/cli/add-stories'], ['POST', '/cli/add-subtasks'], ['POST', '/cli/create-issue'], ['POST', '/cli/set-epic'], ['POST', '/cli/edit'], ['POST', '/cli/sprint/create'],
+      ['POST', '/cli/version/create'], ['POST', '/cli/version/release'],
       ['POST', '/cli/attachment/add'],
     ];
     for (const [method, url] of routes) {

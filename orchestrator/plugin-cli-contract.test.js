@@ -793,6 +793,43 @@ test('aee-jira users: listed in --help; --project/--issue exclusive; wired to GE
   }
 });
 
+test('aee-jira comments: listed in --help; an issue key is required; wired to GET /comments (#2899)', async () => {
+  const ws = grantedJiraWorkspace();
+  const flat = runJira(['--help'], ws).stdout.replace(/\s+/g, ' ');
+  assert.match(flat, /comments read an issue's comments, newest first \(id, author, created, updated, body, origin\)/);
+  assert.match(flat, /e\.g\. aee-jira comments KAN-10 \[--limit N\] \[--offset N\]/);
+  assert.match(runJira(['comments', '--help'], ws).stdout.replace(/\s+/g, ' '), /Read the conversation on an issue, newest first/);
+  // an issue key is required; --limit / --offset are whole numbers — usage errors, no broker call
+  assert.equal(runJira(['comments', '--json'], ws).status, 2);
+  assert.equal(runJira(['comments', 'KAN-10', '--limit', 'many', '--json'], ws).status, 2);
+
+  const http = require('node:http');
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    seen.push({ method: req.method, url: req.url });
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ issue: 'KAN-10', comments: [], count: 0, total: 0, offset: 0, limit: 20, hasMore: false, note: 'KAN-10 has no comments.' }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const live = grantedJiraWorkspace(`http://127.0.0.1:${port}/`);
+    for (const args of [
+      ['comments', 'KAN-10'],
+      ['comments', 'KAN-10', '--limit', '5', '--offset', '20'],
+    ]) {
+      const r = await runJiraAsync([...args, '--json'], live);
+      assert.equal(r.status, 0, args.join(' ') + r.stdout + r.stderr); // no comments is not an error
+    }
+    assert.deepEqual(seen, [
+      { method: 'GET', url: '/cli/comments?issue=KAN-10' },
+      { method: 'GET', url: '/cli/comments?issue=KAN-10&limit=5&offset=20' },
+    ]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('aee-jira add-stories: listed in --help; bad payloads are usage errors; wired to /add-stories; exit 1 on a failed story (#2890)', async () => {
   const ws = grantedJiraWorkspace();
   const help = runJira(['--help'], ws);

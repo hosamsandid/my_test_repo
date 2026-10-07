@@ -151,25 +151,8 @@ not in the list, so they stay reachable while the list is collapsed:
 current flow to a portable bundle with no repositories and no secrets in it, so
 a design can be shared or version-controlled.
 
-**What a role takes with it.** An export, *Edit as draft*, a shared draft and
-*Create team…* all keep each role's own settings: its **prompt mode**
-(inherit, additional or exclusive) and its own prompt text, together with the
-flow's **team prompt**. Also kept: the **model** pin, the **memory limit**, the
-PR/issue flags and the **Scaling** setup (workspace and work items included).
-What stays behind is everything that belongs to a team's infrastructure:
-repositories, context folders, environment variables, the model provider, MCP
-servers, skills and plugins.
-
-When you create a team from the bundle, a pinned model is used only if the new
-team's model provider offers it. Otherwise you get the warning *"model X not
-available in provider Y — using default"*. A memory limit above the platform
-ceiling is lowered to the ceiling, also with a warning. The import preview
-warns when a role set to *inherit* meets a flow that has no team prompt.
-
-In a draft's node inspector you can set a role's **prompt mode**, **model** and
-**memory limit**. Leave the model or memory empty to use the default. On a live
-team the inspector shows the memory limit, the effective limit and where that
-limit comes from. A change applies the next time the agent's container starts.
+Export and *Create team…* keep each role's prompt mode, model, memory limit,
+PR/issue flags and Scaling.
 
 **Every row in the list has a context menu** — right-click it, press the `Menu`
 key (or `Shift+F10`), or use the `⋮` that appears when you hover. A **draft**

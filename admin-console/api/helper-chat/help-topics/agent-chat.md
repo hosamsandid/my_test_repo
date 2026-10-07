@@ -827,21 +827,7 @@ most consequential thing in this form, so it is not below the plugin grants.
   live context, mounted **read-only** by default; tick read-write to let the
   agent change files on the host. Saving re-provisions the agent's container.
   Offered only on the local / self-hosted stack.
-- **Memory limit** — how much memory this agent's container may use, e.g.
-  `4g` or `512m`. Leave it empty for the platform default. Below the field you
-  see the **effective limit and where it comes from**: this setting, the
-  environment's toolchain, or the platform default. A value here wins even
-  when the toolchain allows more, and both values are shown. Values above the
-  platform ceiling (8g unless your operator changed it) are refused. A change
-  applies the **next time the container starts**; a running container, and any
-  running pool instance, keeps its current limit. Not offered on an Agent Team
-  itself, because the team runs no container of its own.
-- **Scaling** (members only) — turns the role into an agent pool. Besides the
-  instance cap and the teardown timers, you choose the **Workspace**: a clean
-  git checkout per instance, a copied input folder, or no repository at all.
-  For the last two, list the **work items** (one per line) and the **output
-  directory**, plus an optional input directory. The pool spawns one instance
-  per item and reaps it once that item's output appears.
+- **Memory limit** — container memory, e.g. `4g`; empty = default.
 
 ### The team's configuration tabs, in detail
 

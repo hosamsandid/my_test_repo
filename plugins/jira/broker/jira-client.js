@@ -2247,6 +2247,141 @@ async function createStandaloneIssue(cred, { projectKey, issueType, issue, allow
   return out;
 }
 
+// ── new Sub-tasks under an EXISTING standard issue (#2900) ───────────────────
+//
+// Split a Story, Task or Bug into smaller pieces: N new Sub-tasks under the
+// issue named by its key, in the parent's own project. Per Sub-task the field
+// contract of create-issue (#2894): summary / description / assignee /
+// priority / labels / status / custom `fields`, plus an optional sub-task
+// `type` (the call's `defaultType`, the CLI's --type). Guards before any create:
+//   1. shape — a malformed parent key, no Sub-tasks, or one without a summary
+//      is a 400; the custom-field allow-list is a 403.
+//   2. the parent lookup — a key Jira does not return (absent, or outside the
+//      team's scope) is a 404; an Epic or a Sub-task as parent is a 400 (Jira
+//      allows neither).
+//   3. the project's sub-task types (team- and company-managed alike, matched
+//      by the project's own names — "Sub-task", "Unteraufgabe", …): none is a
+//      400 (Sub-tasks disabled); several with no type named is a 400 listing
+//      them. Exactly one is used without being named.
+// Then each Sub-task in turn: an unknown or non-sub-task type, a required field
+// it leaves unset, or Jira's own create refusal fails THAT Sub-task only — the
+// others are still created. A requested `status` is a follow-up transition.
+const SUBTASK_PARENT_REFUSALS = Object.freeze({
+  epic: (key, name) => `${key} is an ${name} — Jira does not allow Sub-tasks directly under an Epic; pick a Story, Task or Bug as the parent`,
+  subtask: (key, name) => `${key} is itself a ${name} — a Sub-task cannot have Sub-tasks; pick its parent issue instead`,
+});
+
+// Match one Sub-task's requested type against the project's sub-task types.
+// Pure — throws a 400 (no "Nothing was created" tail: per Sub-task), returns the type.
+function resolveSubtaskType(projectKey, projectTypes, subtaskTypes, requested) {
+  const want = String(requested || '').trim();
+  if (!want) return subtaskTypes[0]; // exactly one — checked up front
+  const names = subtaskTypes.map((t) => t.name).join(', ');
+  const match = (Array.isArray(projectTypes) ? projectTypes : [])
+    .find((t) => t && t.name && String(t.name).trim().toLowerCase() === want.toLowerCase());
+  if (!match) throw createIssueError(400, `project ${projectKey} has no issue type "${want}". Sub-task types: ${names}.`);
+  if (!subtaskTypes.includes(match)) throw createIssueError(400, `${match.name} is not a sub-task type. Sub-task types: ${names}.`);
+  return match;
+}
+
+async function addSubtasksToIssue(cred, { parentKey, subtasks, defaultType, allowList, attribution, issueTypes, env, onCreated } = {}) {
+  const key = String(parentKey || '').trim().toUpperCase();
+  if (!key) throw createIssueError(400, 'a --parent key is required');
+  if (!ISSUE_KEY_RE.test(key)) throw createIssueError(400, `"${String(parentKey).trim()}" is not a Jira issue key (expected e.g. KAN-10)`);
+  const list = Array.isArray(subtasks) ? subtasks : [];
+  if (!list.length) throw createIssueError(400, 'at least one sub-task is required');
+  list.forEach((s, i) => {
+    if (!s || typeof s !== 'object' || !String(s.summary || '').trim()) throw createIssueError(400, `sub-task #${i + 1} requires a summary`);
+  });
+  validateEpicChildExtras(list);
+  const fallbackType = String(defaultType || '').trim();
+
+  const usedNames = collectCustomFieldNames(null, list);
+  assertCreateFieldsAllowed(usedNames, allowList);
+
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const epicTypeName = String((issueTypes && issueTypes.epic) || EPIC_ISSUE_TYPE).trim() || EPIC_ISSUE_TYPE;
+
+  // (2) the parent must exist, be visible, and be a standard issue.
+  let raw;
+  try {
+    raw = await requestJson({ base, path: `/rest/api/3/issue/${encodeURIComponent(key)}?fields=issuetype,project,summary`, authHeader: auth });
+  } catch (e) {
+    if (e.status === 404) throw createIssueError(404, `${outOfScope('Issue ', key)}. Nothing was created.`);
+    throw e;
+  }
+  const fields = (raw && raw.fields) || {};
+  const actualKey = String(raw.key || key);
+  const parentKind = classifyIssueType(fields.issuetype, epicTypeName);
+  if (parentKind !== 'standard') {
+    const typeName = (fields.issuetype && fields.issuetype.name) || parentKind;
+    throw createIssueError(400, `${SUBTASK_PARENT_REFUSALS[parentKind](actualKey, typeName)}. Nothing was created.`);
+  }
+  const project = String((fields.project && fields.project.key) || actualKey.replace(/-\d+$/, ''));
+
+  // (3) the project's own sub-task types.
+  const proj = await requestJson({ base, path: `/rest/api/3/project/${encodeURIComponent(project)}`, authHeader: auth });
+  const projectTypes = ((proj && proj.issueTypes) || []).filter((t) => t && t.name);
+  const subtaskTypes = projectTypes.filter((t) => classifyIssueType(t, epicTypeName) === 'subtask');
+  if (!subtaskTypes.length) {
+    throw createIssueError(400, `project ${project} has no sub-task issue type — Sub-tasks are disabled there (a Jira admin can enable them). Nothing was created.`);
+  }
+  if (subtaskTypes.length > 1 && !fallbackType && list.some((s) => !String(s.type || '').trim())) {
+    throw createIssueError(400,
+      `project ${project} has several sub-task types (${subtaskTypes.map((t) => t.name).join(', ')}) — name one with --type or a per-sub-task "type". Nothing was created.`);
+  }
+
+  const { catalog, fieldMeta } = await resolveCreateFieldMeta(base, auth, usedNames);
+  const siteBase = resolveJiraApiBase(cred.siteUrl);
+  const browseUrl = (k) => `${siteBase}/browse/${encodeURIComponent(k)}`;
+  const applyStatus = statusApplier(cred, env);
+  const metaByType = new Map(); // type id → create metadata (or null), per call
+
+  const results = [];
+  for (const s of list) {
+    const summary = String(s.summary).trim();
+    try {
+      const type = resolveSubtaskType(project, projectTypes, subtaskTypes, String(s.type || '').trim() || fallbackType);
+      const createFields = buildCreateFields({ projectKey: project, issueTypeName: type.name, spec: s, fieldMeta, attribution });
+      createFields.parent = { key: actualKey };
+      applyPriorityAndLabels(s, createFields);
+      if (type.id) {
+        createFields.issuetype = { id: String(type.id) };
+        if (!metaByType.has(type.id)) metaByType.set(type.id, await readCreateFieldMeta(base, auth, project, type.id));
+        const meta = metaByType.get(type.id);
+        const missing = meta ? missingRequiredFields(meta, createFields) : [];
+        if (missing.length) {
+          throw createIssueError(400,
+            `project ${project} requires field(s) for a ${type.name} that were not provided: ${missing.join(', ')}. `
+              + 'Pass them in "fields" by their Jira name.');
+        }
+      }
+      let created;
+      try {
+        created = await createIssue(base, auth, createFields);
+      } catch (e) {
+        const msg = e.status === 400 ? createRejectionMessage(e.body, catalog, createFields, '') : null;
+        throw msg ? createIssueError(400, msg) : e;
+      }
+      if (typeof onCreated === 'function') onCreated(created.key);
+      const out = { summary, issueType: String(type.name), key: created.key, url: browseUrl(created.key), ok: true };
+      await applyStatus(created.key, s.status, out);
+      results.push(out);
+    } catch (err) {
+      results.push({ summary, ok: false, error: err.message });
+    }
+  }
+
+  return {
+    project,
+    parent: { key: actualKey, url: browseUrl(actualKey), summary: String(fields.summary || ''), issueType: String((fields.issuetype && fields.issuetype.name) || '') },
+    subtasks: results,
+    created: results.filter((r) => r.ok).length,
+    failed: results.filter((r) => !r.ok).length,
+  };
+}
+
 // ── put EXISTING issues under an Epic, move them, take them out (#2895) ──────
 //
 // Backlog grooming: set the parent Epic of one or more existing standard issues
@@ -3251,6 +3386,7 @@ module.exports = {
   collectCustomFieldNames,
   createEpicWithStories,
   addStoriesToEpic,
+  addSubtasksToIssue,
   isEpicIssueType,
   // standalone issue create (#2894)
   classifyIssueType,

@@ -3157,3 +3157,144 @@ test('searchUsers: usage refusals before any HTTP (empty query, project + issue,
     await bad({ query: 'A', limit: 0 }, /--limit must be a whole number/);
   });
 });
+
+// ── new Sub-tasks under an existing standard issue (#2900) ──────────────────
+
+function subtaskJira({ parent = issueResponse('KAN-10', 'Story', { hierarchyLevel: 0 }), project = projectResponse(), meta = createMetaResponse(), create } = {}) {
+  const fallback = standaloneJira({ project, meta, create });
+  return (url, opts) => (isIssueGet(url, opts) ? parent : fallback(url, opts));
+}
+
+test('addSubtasksToIssue: three Sub-tasks under KAN-10 — parent set, the project\'s one sub-task type used unnamed (#2900 AC1)', async () => {
+  const sent = [];
+  await withFetch(subtaskJira({ create: (f) => { sent.push(f); return created201(`KAN-${10 + sent.length}`); } }), async (calls) => {
+    const seen = [];
+    const r = await jc.addSubtasksToIssue(CRED, {
+      parentKey: ' kan-10 ', subtasks: [{ summary: 'A' }, { summary: 'B' }, { summary: 'C' }], allowList: [], onCreated: (k) => seen.push(k), env: CRED.env,
+    });
+    assert.equal(r.project, 'KAN');
+    assert.equal(r.parent.key, 'KAN-10');
+    assert.equal(r.parent.issueType, 'Story');
+    assert.equal(r.created, 3);
+    assert.equal(r.failed, 0);
+    assert.deepEqual(r.subtasks.map((s) => [s.key, s.issueType]), [['KAN-11', 'Subtask'], ['KAN-12', 'Subtask'], ['KAN-13', 'Subtask']]);
+    assert.ok(sent.every((f) => f.parent.key === 'KAN-10' && f.issuetype.id === '10003' && f.project.key === 'KAN'));
+    assert.deepEqual(seen, ['KAN-11', 'KAN-12', 'KAN-13']); // own-writes registration hook
+    assert.equal(calls.filter((c) => isCreateMeta(c.url)).length, 1, 'create metadata read once per type');
+  });
+});
+
+test('addSubtasksToIssue: optional fields as in create-issue; status as a follow-up transition (#2900 AC2)', async () => {
+  let sent;
+  await withFetch(subtaskJira({ create: (f) => { sent = f; return created201('KAN-11'); } }), async () => {
+    const r = await jc.addSubtasksToIssue(CRED, {
+      parentKey: 'KAN-10',
+      subtasks: [{ summary: 'S', description: 'why', assignee: 'acc-1', priority: 'High', labels: ['web'], status: 'In Progress', fields: { Team: '42' } }],
+      allowList: [], attribution: 'by an agent', env: CRED.env,
+    });
+    assert.equal(sent.description.type, 'doc');
+    assert.deepEqual(sent.assignee, { accountId: 'acc-1' });
+    assert.deepEqual(sent.priority, { name: 'High' });
+    assert.deepEqual(sent.labels, ['web']);
+    assert.deepEqual(sent.customfield_20001, { id: '42' });
+    assert.equal(r.subtasks[0].status, 'In Progress');
+  });
+});
+
+test('addSubtasksToIssue: an Epic or a Sub-task as parent is refused before any create (#2900 AC3)', async () => {
+  for (const [parent, re] of [
+    [issueResponse('KAN-1', 'Epic', { hierarchyLevel: 1 }), /KAN-1 is an Epic — Jira does not allow Sub-tasks directly under an Epic.*Nothing was created\.$/],
+    [issueResponse('KAN-2', 'Unteraufgabe', { hierarchyLevel: -1 }), /KAN-2 is itself a Unteraufgabe — a Sub-task cannot have Sub-tasks.*Nothing was created\.$/],
+  ]) {
+    await withFetch(subtaskJira({ parent, create: () => { throw new Error('must not create'); } }), async () => {
+      await assert.rejects(jc.addSubtasksToIssue(CRED, { parentKey: 'KAN-1', subtasks: [{ summary: 'S' }], allowList: [], env: CRED.env }), (e) => e.status === 400 && re.test(e.message));
+    });
+  }
+});
+
+test('addSubtasksToIssue: a project without a sub-task type is refused (#2900 AC4)', async () => {
+  await withFetch(subtaskJira({ project: projectResponse('KAN', PROJECT_TYPES.filter((t) => !t.subtask)), create: () => { throw new Error('must not create'); } }), async () => {
+    await assert.rejects(
+      jc.addSubtasksToIssue(CRED, { parentKey: 'KAN-10', subtasks: [{ summary: 'S' }], allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /project KAN has no sub-task issue type — Sub-tasks are disabled there/.test(e.message),
+    );
+  });
+});
+
+test('addSubtasksToIssue: one failing Sub-task (missing required field, Jira refusal, wrong type) does not stop the others (#2900 AC5)', async () => {
+  const meta = createMetaResponse([
+    { fieldId: 'summary', name: 'Summary', required: true, hasDefaultValue: false },
+    { fieldId: 'parent', name: 'Parent', required: true, hasDefaultValue: false },
+    { fieldId: 'customfield_20001', name: 'Team', required: true, hasDefaultValue: false },
+  ]);
+  let n = 0;
+  await withFetch(subtaskJira({
+    meta,
+    create: (f) => {
+      if (f.summary === 'refused') return { ok: false, status: 400, text: async () => JSON.stringify({ errors: { assignee: 'User does not exist' } }) };
+      n += 1;
+      return created201(`KAN-${20 + n}`);
+    },
+  }), async () => {
+    const r = await jc.addSubtasksToIssue(CRED, {
+      parentKey: 'KAN-10',
+      subtasks: [
+        { summary: 'ok', fields: { Team: '1' } },
+        { summary: 'no team' },
+        { summary: 'refused', assignee: 'nobody', fields: { Team: '1' } },
+        { summary: 'a story', type: 'Story', fields: { Team: '1' } },
+        { summary: 'ok too', fields: { Team: '1' } },
+      ],
+      allowList: [], env: CRED.env,
+    });
+    assert.equal(r.created, 2);
+    assert.equal(r.failed, 3);
+    assert.deepEqual(r.subtasks.map((s) => s.key || null), ['KAN-21', null, null, null, 'KAN-22']);
+    assert.match(r.subtasks[1].error, /requires field\(s\) for a Subtask that were not provided: Team\./);
+    assert.match(r.subtasks[2].error, /assignee "nobody" was rejected \(User does not exist\)/);
+    assert.match(r.subtasks[3].error, /^Story is not a sub-task type\. Sub-task types: Subtask\.$/);
+  });
+});
+
+test('addSubtasksToIssue: a parent outside the team\'s scope is a 404 with the standard wording (#2900 AC6)', async () => {
+  await withFetch((url, opts) => {
+    if (isIssueGet(url, opts)) return { ok: false, status: 404, text: async () => '{"errorMessages":["Issue does not exist"]}' };
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    await assert.rejects(
+      jc.addSubtasksToIssue(CRED, { parentKey: 'OTHER-1', subtasks: [{ summary: 'S' }], allowList: [], env: CRED.env }),
+      (e) => e.status === 404 && e.message === "Issue OTHER-1 was not found, or it is outside this team's Jira scope (the account cannot see it). Nothing was created.",
+    );
+  });
+});
+
+test('addSubtasksToIssue: several sub-task types — a named type is matched case-insensitively; none named is refused listing them (edge case)', async () => {
+  const types = [...PROJECT_TYPES, { id: '10009', name: 'Unteraufgabe', subtask: true, hierarchyLevel: -1 }];
+  const sent = [];
+  await withFetch(subtaskJira({ project: projectResponse('KAN', types), create: (f) => { sent.push(f); return created201(`KAN-${30 + sent.length}`); } }), async (calls) => {
+    const r = await jc.addSubtasksToIssue(CRED, {
+      parentKey: 'KAN-10', defaultType: 'unteraufgabe', subtasks: [{ summary: 'A' }, { summary: 'B', type: 'SUBTASK' }], allowList: [], env: CRED.env,
+    });
+    assert.deepEqual(r.subtasks.map((s) => s.issueType), ['Unteraufgabe', 'Subtask']);
+    assert.deepEqual(sent.map((f) => f.issuetype.id), ['10009', '10003']);
+    const before = calls.length;
+    await assert.rejects(
+      jc.addSubtasksToIssue(CRED, { parentKey: 'KAN-10', subtasks: [{ summary: 'A' }], allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /several sub-task types \(Subtask, Unteraufgabe\) — name one with --type.*Nothing was created\./.test(e.message),
+    );
+    assert.equal(calls.slice(before).filter((c) => isCreate(c.url, c.opts)).length, 0);
+  });
+});
+
+test('addSubtasksToIssue: shape and allow-list guards run before any Jira call', async () => {
+  await withFetch(() => { throw new Error('no Jira call expected'); }, async (calls) => {
+    const bad = (args, status, re) => assert.rejects(jc.addSubtasksToIssue(CRED, { allowList: [], env: CRED.env, ...args }), (e) => e.status === status && re.test(e.message));
+    await bad({ subtasks: [{ summary: 'S' }] }, 400, /a --parent key is required/);
+    await bad({ parentKey: 'nope', subtasks: [{ summary: 'S' }] }, 400, /is not a Jira issue key/);
+    await bad({ parentKey: 'KAN-1', subtasks: [] }, 400, /at least one sub-task is required/);
+    await bad({ parentKey: 'KAN-1', subtasks: [{ summary: 'S' }, {}] }, 400, /sub-task #2 requires a summary/);
+    await bad({ parentKey: 'KAN-1', subtasks: [{ summary: 'S', labels: ['two words'] }] }, 400, /labels cannot contain spaces/);
+    await bad({ parentKey: 'KAN-1', subtasks: [{ summary: 'S', fields: { Team: '1' } }], allowList: ['Other'] }, 403, /not writable by agents: Team/);
+    assert.equal(calls.length, 0);
+  });
+});

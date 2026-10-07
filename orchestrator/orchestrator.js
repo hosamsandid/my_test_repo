@@ -45,6 +45,7 @@ const githubEventLog = require("./github-event-log");
 const githubRefire = require("./github-refire");
 const commentFilter = require("./comment-filter");
 const internalAuth = require("./internal-auth");
+const requestTiming = require("./request-timing");
 
 // Internal-API authentication for :4002 (#1456, GOV-PLATFORM-2). Resolved ONCE
 // at module load: the config is a deployment property, and re-reading it per
@@ -16027,10 +16028,24 @@ async function main() {
   reconcilePluginsAndAttachments()
     .catch((err) => console.warn(`[Orchestrator] plugin reconcile at boot failed: ${err.message}`));
 
+  // Request timing for the internal API (#555): same `[perf]` measurement as
+  // the console's (request-timing.js is byte-identical on both sides). The raw
+  // server has no `req.route`, so keys come from the collapsed URL.
+  // AEE_PERF_LOG=0 disables; AEE_SLOW_REQUEST_MS sets the slow-log threshold.
+  const perfTiming = requestTiming.createPerfTiming({
+    env: process.env, log: (line) => console.log(line),
+  });
+  try { perfTiming.start(); } catch (err) { console.error(`[Orchestrator] Perf reporter failed to start: ${err.message}`); }
+
   // Internal API — used by admin-console to manage agents
   const internalApi = http.createServer((req, res) => {
+    // Timing only attaches `finish`/`close` listeners — it decides nothing, so it
+    // can sit above the auth gate without weakening it (denied requests are timed too).
+    perfTiming.track(req, res);
+
     // ── Internal-API auth gate (#1456, GOV-PLATFORM-2) ─────────────────────
-    // FIRST statement of the handler, deliberately: this server is a ~4 400-line
+    // FIRST decision of the handler (only the passive timing hook above precedes
+    // it), deliberately: this server is a ~4 400-line
     // if-ladder with no middleware chain, so "one auth middleware at the internal
     // server mount" can only mean the top of the dispatcher. Every route below —
     // including the `/internal/admin/` delegation on the very next line and the

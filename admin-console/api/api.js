@@ -20,6 +20,7 @@ const {
 const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
+const requestTiming = require('./request-timing');
 const { chatUploadBaseName, uniqueFileName } = require('./chat-upload-name');
 const internalAuthClient = require('./internal-auth-client');
 const githubEventLog = require('./github-event-log');
@@ -357,6 +358,16 @@ const app = express();
 // Trust one hop (the GKE/IAP load balancer) so express-rate-limit can read
 // the real client IP from X-Forwarded-For without throwing a ValidationError.
 app.set('trust proxy', 1);
+// Request timing (#555). The FIRST /api middleware, so it observes every /api
+// request — CORS preflights, body-parse time, the global limiter's 429s and the
+// auth gate's denials included. It only attaches finish/close listeners and
+// decides nothing. Logs a request over AEE_SLOW_REQUEST_MS at once (capped per
+// route); the `[perf]` summary (top routes + event-loop delay) is printed once a
+// minute by the reporter started in app.listen. AEE_PERF_LOG=0 disables both.
+const perfTiming = requestTiming.createPerfTiming({
+  env: process.env, log: (line) => console.log(line),
+});
+if (perfTiming.enabled) app.use('/api', perfTiming.middleware);
 app.use(cors());
 // Document-bundle endpoints (process drafts, the unified flow graph, imported
 // BriefingPack flows) carry the full brief.md / prompt bodies inline, which
@@ -23306,4 +23317,5 @@ app.listen(4000, '0.0.0.0', () => {
     if (failed) setTimeout(() => { sweepInternalTransport().catch(logSweepError); }, 60_000).unref();
   }).catch(logSweepError);
   try { startLlmHealthPoller(); } catch (err) { console.error(`[Admin] Model Provider health poller failed to start: ${err.message}`); }
+  try { perfTiming.start(); } catch (err) { console.error(`[Admin] Perf reporter failed to start: ${err.message}`); }
 });

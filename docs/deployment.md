@@ -340,6 +340,14 @@ A practical starting point for a pilot of ~10 agents: 8 vCPU, 32 GiB RAM, 100 Gi
 then measure, because real usage depends entirely on how busy the agents are. (The GCP VM
 runbook pilots ~5 concurrent agents on an `e2-standard-4` — 4 vCPU / 16 GB / 64 GB disk.)
 
+**Measuring it.** The admin console and the orchestrator each print one `[perf]` line a
+minute — request count, client-aborted count, slow count, event-loop delay p50/p99/max
+(net of the 20 ms sampling interval, so an idle loop reads ≈0), and the top routes by
+total time with n/p50/p90/max — and log a request slower than `AEE_SLOW_REQUEST_MS`
+(default `500`) at once as `[perf] slow …`, at most 5 per route per minute (the rest
+show as `slow-suppressed=` in the summary). `AEE_PERF_LOG=0` turns both off. All
+`[perf]` lines go to stdout: `podman logs admin-console | grep '\[perf\]'` (on Kubernetes:
+`kubectl logs deploy/admin-console -n <namespace> | grep '\[perf\]'`).
 The chat rail's roster (`GET /api/matrix/agents`) is built once per `AGENT_ROSTER_TTL_MS`
 (default `2000`) and shared by every tab and user. A successful roster-affecting console
 mutation (create, rename, enable/disable, delete, environment rename, a new DM room)

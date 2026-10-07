@@ -283,3 +283,15 @@ test('the split generation is a fallback, never a guess about size', () => {
   // No prompt-length / role-count heuristic decides it.
   assert.doesNotMatch(s, /messages[\s\S]{0,40}\.length\s*>\s*\d{3}/);
 });
+
+// #2915: an answer-only turn (a question about the flow, or a refused request)
+// carries no bundle — it must never render Apply/Discard or reach the live diff.
+test('#2915: an answer-only turn is committed as answered, never offered for apply', () => {
+  const provider = code(PROVIDER);
+  const panel = code(PANEL);
+  assert.match(provider, /answer: !!body\.answer/, 'the provider keeps the answer flag on the pending turn');
+  assert.match(panel, /status: p\.answer \? 'answered' : 'proposed'/, 'an answer row never renders as a proposal');
+  assert.match(panel, /pending && pending\.answer && copilot\) commitPending\('answered'\)/, 'an answer is committed straight away');
+  assert.match(panel, /pending\.baseBundle && pending\.bundle \? diffLiveProposal/, 'no live diff against a missing bundle');
+  assert.match(panel, /entry\.status !== 'answered' &&/, 'an answered card has no status footer');
+});

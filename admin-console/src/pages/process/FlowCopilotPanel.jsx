@@ -137,7 +137,7 @@ export default function FlowCopilotPanel({
   // A live proposal's change list, grouped (AC3) — diffed against the bundle
   // the turn was generated from, which is what Apply checks the team against.
   const liveItems = useMemo(
-    () => (isTeam && pending && pending.baseBundle ? diffLiveProposal(pending.baseBundle, pending.bundle).items : null),
+    () => (isTeam && pending && pending.baseBundle && pending.bundle ? diffLiveProposal(pending.baseBundle, pending.bundle).items : null),
     [isTeam, pending],
   );
 
@@ -148,7 +148,7 @@ export default function FlowCopilotPanel({
     const rows = [];
     if (p.userText) rows.push({ id: 'turn-user', role: 'user', content: p.userText });
     rows.push({
-      id: `turn-proposal-${p.id}`, role: 'assistant', status: 'proposed',
+      id: `turn-proposal-${p.id}`, role: 'assistant', status: p.answer ? 'answered' : 'proposed',
       summary: p.summary, changes: p.changes, lints: p.lints, ok: p.ok,
       bundle: p.bundle, hasPreview: !!p.graph,
     });
@@ -194,7 +194,7 @@ export default function FlowCopilotPanel({
   // would duplicate the card.
   const persistedTurnRef = useRef(null);
   useEffect(() => {
-    if (!pending || !onPersistHistory || persistedTurnRef.current === pending.id) return;
+    if (!pending || pending.answer || !onPersistHistory || persistedTurnRef.current === pending.id) return;
     persistedTurnRef.current = pending.id;
     onPersistHistory(toPersistedMessages([...messagesRef.current, ...turnRows(pending)]));
   }, [pending, onPersistHistory, turnRows]);
@@ -237,6 +237,12 @@ export default function FlowCopilotPanel({
     copilot.resolvePending(pending.id);
     if (onPreview) onPreview(null);
   }, [pending, onPersistHistory, onPreview, copilot, turnRows]);
+
+  // An answer-only turn (#2915 — a question about the flow, or a refused
+  // request) has nothing to apply or discard: commit it straight away.
+  useEffect(() => {
+    if (pending && pending.answer && copilot) commitPending('answered');
+  }, [pending, copilot, commitPending]);
 
   // Live team, step 1 (AC4/AC15): refuse on a team that moved since the turn
   // was generated, otherwise open the confirmation with in-progress work.
@@ -706,7 +712,7 @@ function ProposalCard({ entry, actionable, live, liveItems, applying, onApply, o
             </span>
           )}
         </div>
-      ) : (
+      ) : entry.status !== 'answered' && (
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', display: 'flex', alignItems: 'center', gap: 4 }}>
           {entry.status === 'applied' && <><Check size={12} style={{ color: 'var(--eb-status-success, #16a34a)' }} /> Applied ✓</>}
           {entry.status === 'discarded' && 'Discarded'}

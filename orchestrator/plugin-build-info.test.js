@@ -25,6 +25,18 @@ test('normalizeBuildInfo: no object → null; junk commit → unknown (never an 
   assert.equal(normalizeBuildInfo({ commit: 'abc1234', dirty: true }).dirty, '');
 });
 
+// #2893: the release tag + distance pass through; anything else is dropped.
+test('normalizeBuildInfo: keeps a release tag + distance, drops junk', () => {
+  assert.deepEqual(
+    normalizeBuildInfo({ commit: 'abc1234', dirty: '', commitTime: '', tag: 'v0.4.0', tagDistance: 12 }),
+    { commit: 'abc1234', dirty: '', commitTime: '', tag: 'v0.4.0', tagDistance: 12 },
+  );
+  assert.equal(normalizeBuildInfo({ commit: 'abc1234', tag: 'v0.4.0', tagDistance: '0' }).tagDistance, 0);
+  for (const extra of [{ tag: 'v0.4.0' }, { tag: '', tagDistance: '' }, { tag: 'v1-test', tagDistance: 1 }, { tag: '<b>', tagDistance: 1 }, { tag: 'v0.4.0', tagDistance: -3 }]) {
+    assert.deepEqual(normalizeBuildInfo({ commit: 'abc1234', ...extra }), { commit: 'abc1234', dirty: '', commitTime: '' }, JSON.stringify(extra));
+  }
+});
+
 test('probeBrokerBuild: reads build from the sidecar /healthz', async () => {
   let url = null;
   const build = await probeBrokerBuild('http://aee-plugin-jira:4009', {
@@ -73,6 +85,19 @@ test('imageBuildFromInspect: reads the OCI build labels (top-level or Config)', 
   const want = { commit: 'bbbbbbb', dirty: 'dirty', commitTime: '2026-09-30T21:08:25+02:00' };
   assert.deepEqual(imageBuildFromInspect({ Labels: LABELS }), want);
   assert.deepEqual(imageBuildFromInspect({ Labels: null, Config: { Labels: LABELS } }), want);
+});
+
+// #2893 AC8: the release tag labels; empty labels (no tag reachable at build
+// time) keep the hash-only shape.
+test('imageBuildFromInspect: reads the release tag labels', () => {
+  assert.deepEqual(
+    imageBuildFromInspect({ Labels: { ...LABELS, 'aee.build.tag': 'v0.4.0', 'aee.build.tag-distance': '12' } }),
+    { commit: 'bbbbbbb', dirty: 'dirty', commitTime: '2026-09-30T21:08:25+02:00', tag: 'v0.4.0', tagDistance: 12 },
+  );
+  assert.deepEqual(
+    imageBuildFromInspect({ Labels: { ...LABELS, 'aee.build.tag': '', 'aee.build.tag-distance': '' } }),
+    { commit: 'bbbbbbb', dirty: 'dirty', commitTime: '2026-09-30T21:08:25+02:00' },
+  );
 });
 
 test('imageBuildFromInspect: unlabelled image → unknown; no body → null', () => {

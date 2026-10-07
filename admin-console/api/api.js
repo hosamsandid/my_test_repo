@@ -10,6 +10,7 @@ const http = require('http');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { runArchiveTool, streamArchiveTool, describeArchiveFailure } = require('./archive');
+const { normalizeDisplayName } = require('./agent-display-name');
 const {
   WORKSPACE_ZIP_MAX_BYTES,
   WORKSPACE_ZIP_MAX_FILES,
@@ -3074,6 +3075,12 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   if (liveSuffix) req.body = stampLiveLabels(req.body || {}, liveSuffix, { keep: teamForeignLabelsFor(id, cfg) });
   const { displayName, role, enabled, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, wipLimit, autoDispatch, pool, github, channels, assistLlmEndpointId } = req.body;
 
+  // ── Display name (#2679) ──────────────────────────────────────────────────
+  // Required: trimmed and non-empty, or the agent renders nameless. Checked up
+  // front so a blank name can't ride along with a half-applied write.
+  const normDisplayName = normalizeDisplayName(displayName);
+  if (normDisplayName.error) return res.status(400).json({ error: normDisplayName.error });
+
   // ── Label registry (#928/#981) ────────────────────────────────────────────
   // The gate/brake flags live on the TEAM agent (like `stages`) — the live
   // Flow Editor writes them here. Validate up front so a bad shape can't
@@ -3281,7 +3288,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // (The orchestrator's enable/disable already wrote enabled itself; the
   // team-prompt and team-skills branches above also wrote canonically.)
   const fresh = readJsonFile(cfgPath, cfg);
-  if (displayName !== undefined) fresh.displayName = displayName;
+  if (normDisplayName.value !== undefined) fresh.displayName = normDisplayName.value;
   if (role !== undefined) fresh.role = role;
   // ── Team-owned skill grant (skill-grants.js) ──────────────────────────────
   // `skills` lives on the construct itself: a team agent carries the team's

@@ -55,7 +55,7 @@ import {
   labelStyle, inputStyle, helpTextStyle, PrimaryBtn, SecondaryBtn,
 } from './form-kit.jsx';
 import {
-  buildInitialForm, buildEditSubmit, hasOwnSkills, poolSectionError, skillsListUrl,
+  buildInitialForm, buildEditSubmit, displayNameError, hasOwnSkills, poolSectionError, skillsListUrl,
 } from './agent-edit-form-model.js';
 import { inheritedMcpPreview, switchMcpMode, memberMcpBlockers } from './member-mcp-view.js';
 import { TEAM_CONFIG_TABS, ENV_TAB_IDS, resolveTeamConfigTab } from './team-config-tabs-view.js';
@@ -540,7 +540,8 @@ export default function AgentEditForm({
     mcpEnvId ? `/api/environments/${encodeURIComponent(mcpEnvId)}` : null,
   );
   const mcpBlockers = isMember ? memberMcpBlockers(form.inheritMcp, form.mcpRows) : [];
-  const canSubmit = !!form.displayName && mcpBlockers.length === 0;
+  const nameError = displayNameError(form);
+  const canSubmit = !nameError && mcpBlockers.length === 0;
 
   const isTeam = agent.role === 'team';
   // Team-axis Parallelism (wipLimit + Flow Supervisor) is now configurable
@@ -652,7 +653,7 @@ export default function AgentEditForm({
       )}
 
       {(!isTeam || activeTab === 'general') && (
-        <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} />
+        <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} error={nameError} />
       )}
 
       {/* The prompt is the most important thing in this form, so it sits

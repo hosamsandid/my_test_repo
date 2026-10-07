@@ -335,3 +335,25 @@ test('B2: a dropped setting next to a real edit — the edit applies, the drop i
   assert.deepEqual(plan.steps.map(s => s.label), ['update trigger rv']);
   assert.deepEqual(plan.notApplied.map(it => it.key), ['role:changed:reviewer#triggerSettings']);
 });
+
+test('#2915: switching a trigger\'s readiness gate off is written as null, not reported as not applied', () => {
+  const live = GH_LIVE();
+  live.roles[1].triggers[0].readinessGate = { ci: true, conflict: true };
+  const proposed = clone(live);
+  delete proposed.roles[1].triggers[0].readinessGate;
+  const diff = diffLiveProposal(live, proposed);
+  assert.deepEqual(diff.items.map(it => [it.key, it.applicable]), [['role:changed:reviewer', true]]);
+  const plan = planLiveApply(diff, { teamId: 'acme', memberIds: MEMBERS });
+  assert.deepEqual(plan.steps.map(s => s.label), ['update trigger rv']);
+  assert.equal(plan.steps[0].body.readinessGate, null, 'the route clears the gate on null');
+  assert.deepEqual(plan.notApplied, []);
+});
+
+test('#2915: setting a trigger\'s readiness gate is a plain trigger update', () => {
+  const live = GH_LIVE();
+  const proposed = clone(live);
+  proposed.roles[1].triggers[0].readinessGate = { ci: true, conflict: false };
+  const plan = planLiveApply(diffLiveProposal(live, proposed), { teamId: 'acme', memberIds: MEMBERS });
+  assert.deepEqual(plan.steps.map(s => s.label), ['update trigger rv']);
+  assert.deepEqual(plan.steps[0].body.readinessGate, { ci: true, conflict: false });
+});

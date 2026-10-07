@@ -13,6 +13,7 @@ const path = require('node:path');
 const http = require('node:http');
 const zlib = require('node:zlib');
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 
 const {
   IMMUTABLE_CACHE_CONTROL, INDEX_CACHE_CONTROL,
@@ -41,7 +42,9 @@ function buildApp(staticDir) {
     res.write(JSON.stringify({ step: 1 }) + '\n');
     req.on('close', () => res.end());
   });
-  app.get('*path', (req, res) => {
+  // Mirrors api.js's spaLimiter (CodeQL js/missing-rate-limiting on sendFile).
+  const spaLimiter = rateLimit({ windowMs: 60_000, max: 3000, standardHeaders: true, legacyHeaders: false });
+  app.get('*path', spaLimiter, (req, res) => {
     res.setHeader('Cache-Control', INDEX_CACHE_CONTROL);
     res.sendFile(path.join(staticDir, 'index.html'));
   });

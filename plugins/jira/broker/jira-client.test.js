@@ -2639,3 +2639,259 @@ test('parentWriteRefusal: Jira\'s reason, readable; a 404 reads as outside the t
   assert.equal(jc.parentWriteRefusal(err(400, '{"errorMessages":["Nope."]}'), 'KAN-1'), 'Jira refused the change: Nope');
   assert.equal(jc.parentWriteRefusal(err(500, 'oops'), 'KAN-1'), 'mapped');
 });
+
+// ── standard fields of an existing issue (#2897) ─────────────────────────────
+
+// A tiny in-memory Jira for `edit`: GET /issue/<KEY>?fields=…, PUT /issue/<KEY>
+// (`fields` + `update` add/remove ops, applied like Jira does), the site's
+// priorities and the project's components / versions. `put` may answer a PUT
+// itself (a refusal).
+function editJira(issues, { put } = {}) {
+  const puts = [];
+  const PRIORITIES = [{ id: '1', name: 'Highest' }, { id: '2', name: 'High' }, { id: '3', name: 'Medium' }, { id: '4', name: 'Low' }];
+  const COMPONENTS = [{ id: '10', name: 'Backend' }, { id: '11', name: 'Frontend' }, { id: '12', name: 'API' }];
+  const VERSIONS = [{ id: '20', name: '1.0' }, { id: '21', name: '1.1' }, { id: '22', name: '2.0' }];
+  const json = (body, status = 200) => ({ ok: status < 400, status, text: async () => (body === undefined ? '' : JSON.stringify(body)) });
+  const handler = (url, opts) => {
+    const u = String(url);
+    if (/\/rest\/api\/3\/priority$/.test(u)) return json(PRIORITIES);
+    if (/\/rest\/api\/3\/project\/KAN\/components$/.test(u)) return json(COMPONENTS);
+    if (/\/rest\/api\/3\/project\/KAN\/versions$/.test(u)) return json(VERSIONS);
+    const m = u.match(/\/rest\/api\/3\/issue\/([^/?]+)(\?fields=(.*))?$/);
+    if (!m) throw new Error(`unexpected ${opts && opts.method} ${url}`);
+    const key = decodeURIComponent(m[1]);
+    const issue = issues[key];
+    if (!issue) return json({ errorMessages: ['Issue does not exist or you do not have permission to see it.'] }, 404);
+    if (opts && opts.method === 'PUT') {
+      const body = JSON.parse(opts.body);
+      puts.push({ key, body });
+      if (put) { const r = put(key, body); if (r) return r; }
+      Object.assign(issue, body.fields || {});
+      for (const [id, ops] of Object.entries(body.update || {})) {
+        let list = issue[id] || [];
+        const nameOf = (v) => (typeof v === 'object' ? v.name : v);
+        for (const op of ops) {
+          if (op.add !== undefined) list = [...list, op.add];
+          if (op.remove !== undefined) list = list.filter((x) => nameOf(x) !== nameOf(op.remove));
+        }
+        issue[id] = list;
+      }
+      return json(undefined, 204);
+    }
+    return json({ key, fields: { project: { key: 'KAN' }, ...issue } });
+  };
+  return { handler, puts };
+}
+
+const KAN10 = () => ({
+  summary: 'Old title',
+  assignee: { accountId: 'acc-anna', displayName: 'Anna' },
+  priority: { name: 'Medium' },
+  labels: ['web', 'urgent'],
+  components: [{ name: 'Frontend' }],
+  fixVersions: [{ name: '1.0' }],
+  duedate: null,
+});
+
+test('isIsoDate: a real YYYY-MM-DD only', () => {
+  assert.equal(jc.isIsoDate('2026-10-31'), true);
+  assert.equal(jc.isIsoDate('2028-02-29'), true);
+  for (const bad of ['2026-02-30', '2026-13-01', '31.10.2026', '2026-10-31T10:00:00Z', '', null, '2026-1-5']) {
+    assert.equal(jc.isIsoDate(bad), false, String(bad));
+  }
+});
+
+test('editIssueFields: changes the summary; `show` returns the new summary (#2897 AC1)', async () => {
+  const issues = { 'KAN-10': KAN10() };
+  const { handler, puts } = editJira(issues);
+  await withFetch(handler, async () => {
+    const seen = [];
+    const r = await jc.editIssueFields(CRED, 'kan-10', { changes: { summary: '  New title ' }, env: CRED.env, onChanged: (ids) => seen.push(ids) });
+    assert.equal(r.issue, 'KAN-10');
+    assert.equal(r.url, 'https://acme.atlassian.net/browse/KAN-10');
+    assert.deepEqual(r.fields, [{ field: 'summary', from: 'Old title', to: 'New title', outcome: 'changed' }]);
+    assert.deepEqual([r.changed, r.unchanged], [1, 0]);
+    assert.deepEqual(puts.map((p) => p.body), [{ fields: { summary: 'New title' } }]);
+    assert.deepEqual(seen, [['summary']]);
+  });
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return fieldListResponse();
+    if (isTransitionList(url)) return transitionsResponse();
+    return handler(url, opts);
+  }, async () => {
+    const shown = await jc.getIssue(CRED, 'KAN-10', { env: CRED.env });
+    assert.equal(shown.summary, 'New title');
+  });
+});
+
+test('editIssueFields: sets the assignee by accountId and unassigns (#2897 AC2)', async () => {
+  const issues = { 'KAN-10': KAN10() };
+  const { handler, puts } = editJira(issues);
+  await withFetch(handler, async () => {
+    let r = await jc.editIssueFields(CRED, 'KAN-10', { changes: { assignee: 'acc-bob' }, env: CRED.env });
+    assert.deepEqual(r.fields, [{ field: 'assignee', from: 'acc-anna', to: 'acc-bob', outcome: 'changed' }]);
+    r = await jc.editIssueFields(CRED, 'KAN-10', { changes: { assignee: null }, env: CRED.env });
+    assert.deepEqual(r.fields, [{ field: 'assignee', from: 'acc-bob', to: null, outcome: 'changed' }]);
+    assert.deepEqual(puts.map((p) => p.body), [{ fields: { assignee: { accountId: 'acc-bob' } } }, { fields: { assignee: null } }]);
+  });
+});
+
+test('editIssueFields: priority by name (case-insensitive); unknown lists the site priorities (#2897 AC3)', async () => {
+  const issues = { 'KAN-10': KAN10() };
+  const { handler, puts } = editJira(issues);
+  await withFetch(handler, async () => {
+    const r = await jc.editIssueFields(CRED, 'KAN-10', { changes: { priority: 'high' }, env: CRED.env });
+    assert.deepEqual(r.fields, [{ field: 'priority', from: 'Medium', to: 'High', outcome: 'changed' }]);
+    assert.deepEqual(puts[0].body, { fields: { priority: { name: 'High' } } });
+    await assert.rejects(
+      jc.editIssueFields(CRED, 'KAN-10', { changes: { priority: 'Blocker' }, env: CRED.env }),
+      (e) => e.status === 400 && /no priority "Blocker"\. Available: Highest, High, Medium, Low\. Nothing was changed/.test(e.message),
+    );
+    assert.equal(puts.length, 1);
+  });
+});
+
+test('editIssueFields: labels added/removed individually keep the others; replaced as a whole (#2897 AC4)', async () => {
+  const issues = { 'KAN-10': KAN10() };
+  const { handler, puts } = editJira(issues);
+  await withFetch(handler, async () => {
+    let r = await jc.editIssueFields(CRED, 'KAN-10', { changes: { labels: { add: ['backend', 'web'], remove: ['urgent', 'absent'] } }, env: CRED.env });
+    assert.deepEqual(r.fields, [{ field: 'labels', from: ['web', 'urgent'], to: ['web', 'backend'], outcome: 'changed' }]);
+    // only the real changes, as add/remove ops — the other labels are not resent
+    assert.deepEqual(puts[0].body, { update: { labels: [{ add: 'backend' }, { remove: 'urgent' }] } });
+    assert.deepEqual(issues['KAN-10'].labels, ['web', 'backend']);
+    r = await jc.editIssueFields(CRED, 'KAN-10', { changes: { labels: { set: ['ops'] } }, env: CRED.env });
+    assert.deepEqual(r.fields[0].to, ['ops']);
+    assert.deepEqual(puts[1].body, { fields: { labels: ['ops'] } });
+    r = await jc.editIssueFields(CRED, 'KAN-10', { changes: { labels: { set: [] } }, env: CRED.env });
+    assert.deepEqual(puts[2].body, { fields: { labels: [] } });
+  });
+});
+
+test('editIssueFields: components and fix versions by name; unknown lists the project values (#2897 AC5)', async () => {
+  const issues = { 'KAN-10': KAN10() };
+  const { handler, puts } = editJira(issues);
+  await withFetch(handler, async () => {
+    const r = await jc.editIssueFields(CRED, 'KAN-10', {
+      changes: { components: { add: ['backend'], remove: ['Frontend'] }, fixVersions: { set: ['1.1', '2.0'] } },
+      env: CRED.env,
+    });
+    assert.deepEqual(r.fields, [
+      { field: 'components', from: ['Frontend'], to: ['Backend'], outcome: 'changed' },
+      { field: 'fixVersions', from: ['1.0'], to: ['1.1', '2.0'], outcome: 'changed' },
+    ]);
+    assert.deepEqual(puts[0].body, {
+      fields: { fixVersions: [{ name: '1.1' }, { name: '2.0' }] },
+      update: { components: [{ add: { name: 'Backend' } }, { remove: { name: 'Frontend' } }] },
+    });
+    await assert.rejects(
+      jc.editIssueFields(CRED, 'KAN-10', { changes: { components: { add: ['Mobile'] } }, env: CRED.env }),
+      (e) => e.status === 400 && /project KAN has no component "Mobile"\. Available: Backend, Frontend, API/.test(e.message),
+    );
+    await assert.rejects(
+      jc.editIssueFields(CRED, 'KAN-10', { changes: { fixVersions: { remove: ['9.9'] } }, env: CRED.env }),
+      (e) => e.status === 400 && /project KAN has no version "9\.9"\. Available: 1\.0, 1\.1, 2\.0/.test(e.message),
+    );
+    assert.equal(puts.length, 1);
+  });
+});
+
+test('editIssueFields: due date set and cleared; an invalid date is refused before Jira is called (#2897 AC6)', async () => {
+  const issues = { 'KAN-10': KAN10() };
+  const { handler, puts } = editJira(issues);
+  await withFetch(handler, async (calls) => {
+    let r = await jc.editIssueFields(CRED, 'KAN-10', { changes: { dueDate: '2026-10-31' }, env: CRED.env });
+    assert.deepEqual(r.fields, [{ field: 'dueDate', from: null, to: '2026-10-31', outcome: 'changed' }]);
+    r = await jc.editIssueFields(CRED, 'KAN-10', { changes: { dueDate: null }, env: CRED.env });
+    assert.deepEqual(r.fields, [{ field: 'dueDate', from: '2026-10-31', to: null, outcome: 'changed' }]);
+    assert.deepEqual(puts.map((p) => p.body), [{ fields: { duedate: '2026-10-31' } }, { fields: { duedate: null } }]);
+    const before = calls.length;
+    for (const bad of ['31.10.2026', '2026-02-30']) {
+      await assert.rejects(
+        jc.editIssueFields(CRED, 'KAN-10', { changes: { dueDate: bad }, env: CRED.env }),
+        (e) => e.status === 400 && /is not a valid due date — use YYYY-MM-DD/.test(e.message),
+      );
+    }
+    assert.equal(calls.length, before, 'Jira was not called');
+  });
+});
+
+test('editIssueFields: several fields in ONE edit; unchanged ones are reported, not sent (#2897 AC7, edge case)', async () => {
+  const issues = { 'KAN-10': KAN10() };
+  const { handler, puts } = editJira(issues);
+  await withFetch(handler, async () => {
+    const seen = [];
+    const r = await jc.editIssueFields(CRED, 'KAN-10', {
+      changes: { summary: 'Old title', priority: 'Highest', labels: { add: ['web'] }, dueDate: '2026-12-01', assignee: 'acc-anna' },
+      env: CRED.env,
+      onChanged: (ids) => seen.push(ids),
+    });
+    assert.deepEqual(r.fields.map((f) => [f.field, f.outcome]), [
+      ['summary', 'unchanged'], ['assignee', 'unchanged'], ['priority', 'changed'], ['labels', 'unchanged'], ['dueDate', 'changed'],
+    ]);
+    assert.deepEqual([r.changed, r.unchanged], [2, 3]);
+    assert.equal(puts.length, 1);
+    assert.deepEqual(puts[0].body, { fields: { priority: { name: 'Highest' }, duedate: '2026-12-01' } });
+    assert.deepEqual(seen, [['priority', 'duedate']]);
+    // everything already at its value: success, no write, no own-write stamp
+    const again = await jc.editIssueFields(CRED, 'KAN-10', { changes: { priority: 'Highest' }, env: CRED.env, onChanged: (ids) => seen.push(ids) });
+    assert.deepEqual([again.changed, again.unchanged], [0, 1]);
+    assert.equal(puts.length, 1);
+    assert.equal(seen.length, 1);
+  });
+});
+
+test('editIssueFields: a Jira refusal is readable, names the field, and nothing is reported changed (#2897 AC7/AC8, edge case)', async () => {
+  const issues = { 'KAN-10': KAN10() };
+  const { handler } = editJira(issues, {
+    put: (key, body) => {
+      if (body.fields && body.fields.duedate) {
+        return { ok: false, status: 400, text: async () => JSON.stringify({ errors: { duedate: "Field 'duedate' cannot be set. It is not on the appropriate screen, or unknown." } }) };
+      }
+      if (body.fields && body.fields.assignee) {
+        return { ok: false, status: 400, text: async () => JSON.stringify({ errors: { assignee: "User 'acc-zed' cannot be assigned issues." } }) };
+      }
+      return null;
+    },
+  });
+  await withFetch(handler, async () => {
+    const seen = [];
+    await assert.rejects(
+      jc.editIssueFields(CRED, 'KAN-10', { changes: { summary: 'X', dueDate: '2026-12-01' }, env: CRED.env, onChanged: (ids) => seen.push(ids) }),
+      (e) => e.status === 400
+        && /Due date cannot be changed on KAN-10 — the field is not on the issue's edit screen in Jira/.test(e.message)
+        && /Nothing was changed\.$/.test(e.message),
+    );
+    await assert.rejects(
+      jc.editIssueFields(CRED, 'KAN-10', { changes: { assignee: 'acc-zed' }, env: CRED.env, onChanged: (ids) => seen.push(ids) }),
+      (e) => /Jira refused the edit of KAN-10: Assignee: User 'acc-zed' cannot be assigned issues/.test(e.message),
+    );
+    assert.deepEqual(seen, [], 'a refused edit is never stamped as changed');
+    assert.equal(issues['KAN-10'].summary, 'Old title');
+  });
+});
+
+test('editIssueFields: outside the team scope is the standard 404 refusal (#2897 AC10)', async () => {
+  const { handler, puts } = editJira({});
+  await withFetch(handler, async () => {
+    await assert.rejects(
+      jc.editIssueFields(CRED, 'OTHER-1', { changes: { summary: 'x' }, env: CRED.env }),
+      (e) => e.status === 404 && /OTHER-1 was not found, or it is outside this team's Jira scope/.test(e.message),
+    );
+    assert.equal(puts.length, 0);
+  });
+});
+
+test('normalizeIssueEdit: shape refusals before Jira (labels with spaces, set+add, empty, add+remove)', () => {
+  const bad = (changes, re) => assert.throws(() => jc.normalizeIssueEdit(changes), (e) => e.status === 400 && re.test(e.message));
+  bad({ labels: { add: ['needs review'] } }, /label "needs review" contains a space — Jira labels are single words \(use e\.g\. "needs-review"\)/);
+  bad({ labels: { set: ['a b'] } }, /contains a space/);
+  bad({ labels: { set: ['a'], add: ['b'] } }, /replace the whole list or add\/remove single values, not both/);
+  bad({ components: { add: ['API'], remove: ['api'] } }, /"API" is both added and removed/);
+  bad({ fixVersions: {} }, /nothing to set, add or remove/);
+  bad({ summary: '  ' }, /summary cannot be empty/);
+  bad({ priority: '' }, /a priority name is required/);
+  bad({}, /nothing to change/);
+  assert.deepEqual(jc.normalizeIssueEdit({ assignee: '', dueDate: '' }), { assignee: null, dueDate: null });
+  assert.deepEqual(jc.normalizeIssueEdit({ labels: { add: ['a', 'A', 'b'] } }), { labels: { add: ['a', 'b'], remove: [] } });
+});

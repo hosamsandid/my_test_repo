@@ -904,6 +904,97 @@ test('cli writes: /set-epic is gated by its own `set-epic` policy, audited when 
   }
 });
 
+test('cli writes: /edit changes standard fields in one Jira edit, own writes per field, audit (#2897)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'editco', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  const puts = [];
+  const issue = { summary: 'Old', priority: { name: 'Medium' }, labels: ['web'], components: [], fixVersions: [], duedate: null, assignee: null };
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    const u = String(url);
+    const ok = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+    if (/\/priority$/.test(u)) return ok([{ name: 'High' }, { name: 'Medium' }]);
+    if (/\/project\/KAN\/components$/.test(u)) return ok([{ name: 'Backend' }]);
+    const m = u.match(/\/rest\/api\/3\/issue\/([^/?]+)/);
+    if (!m || decodeURIComponent(m[1]) !== 'KAN-10') return { ok: false, status: 404, text: async () => '{"errorMessages":["Issue does not exist or you do not have permission to see it."]}' };
+    if (opts && opts.method === 'PUT') {
+      puts.push(JSON.parse(opts.body));
+      return { ok: true, status: 204, text: async () => '' };
+    }
+    return ok({ key: 'KAN-10', fields: { project: { key: 'KAN' }, ...issue } });
+  };
+  const srv = await listen();
+  try {
+    const r = await call(srv, 'POST', '/cli/edit', { token: TOKEN, body: {
+      issue: 'kan-10', summary: 'New', priority: 'Medium', labels: { add: ['backend'] }, components: { set: ['backend'] }, dueDate: '2026-10-31', assignee: 'acc-1',
+    } });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.issue, 'KAN-10');
+    assert.deepEqual(r.body.fields.map((f) => [f.field, f.outcome]), [
+      ['summary', 'changed'], ['assignee', 'changed'], ['priority', 'unchanged'], ['labels', 'changed'], ['components', 'changed'], ['dueDate', 'changed'],
+    ]);
+    assert.deepEqual(puts, [{
+      fields: { summary: 'New', assignee: { accountId: 'acc-1' }, components: [{ name: 'Backend' }], duedate: '2026-10-31' },
+      update: { labels: [{ add: 'backend' }] },
+    }]);
+    const own = broker.ownWritesStore.snapshot('team-1');
+    for (const k of ['KAN-10|summary', 'KAN-10|assignee', 'KAN-10|labels', 'KAN-10|components', 'KAN-10|duedate']) assert.ok(own.fields[k], `own write ${k}`);
+    assert.equal(own.fields['KAN-10|priority'], undefined, 'an unchanged field wrote nothing');
+    assert.ok(auditLines().some((l) => l.subcommand === 'edit' && l.outcome === 'ok'
+      && l.detail === 'KAN-10: changed summary, assignee, labels, components, dueDate, 1 unchanged'));
+
+    // refusals before Jira: invalid date, label with a space, nothing to change, no issue
+    const bad = await call(srv, 'POST', '/cli/edit', { token: TOKEN, body: { issue: 'KAN-10', dueDate: '31.10.2026' } });
+    assert.equal(bad.status, 400);
+    assert.match(bad.body.error, /not a valid due date/);
+    assert.equal((await call(srv, 'POST', '/cli/edit', { token: TOKEN, body: { issue: 'KAN-10', labels: { add: ['a b'] } } })).status, 400);
+    assert.equal((await call(srv, 'POST', '/cli/edit', { token: TOKEN, body: { issue: 'KAN-10' } })).status, 400);
+    assert.equal((await call(srv, 'POST', '/cli/edit', { token: TOKEN, body: { summary: 'x' } })).status, 400);
+    // outside the scope (404)
+    const gone = await call(srv, 'POST', '/cli/edit', { token: TOKEN, body: { issue: 'OTHER-1', summary: 'x' } });
+    assert.equal(gone.status, 404);
+    assert.match(gone.body.error, /OTHER-1 was not found, or it is outside this team's Jira scope/);
+    assert.ok(auditLines().some((l) => l.subcommand === 'edit' && l.outcome === 'domain-error' && /^OTHER-1: /.test(l.detail)));
+    assert.equal(puts.length, 1, 'no refused call wrote anything');
+
+    const nocred = await call(srv, 'POST', '/cli/edit', { token: OTHER, body: { issue: 'X-1', summary: 'x' } });
+    assert.equal(nocred.status, 400);
+    assert.equal(nocred.body.code, 'no-service-account');
+    assert.equal((await call(srv, 'GET', '/cli/edit', { token: TOKEN })).status, 404);
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli writes: /edit is gated by its own `edit` policy, audited when denied (#2897)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
+  const policy = require('./broker-policy');
+  const orig = policy.authorizeWrite;
+  policy.authorizeWrite = (op) => (op === 'edit' ? { allow: false, code: 'scope-not-allowed', reason: 'not for you' } : orig(op));
+  const origFetch = global.fetch;
+  const jiraCalls = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    jiraCalls.push(url);
+    throw new Error('Jira must not be called');
+  };
+  const srv = await listen();
+  try {
+    const r = await call(srv, 'POST', '/cli/edit', { token: TOKEN, body: { issue: 'KAN-1', summary: 'x' } });
+    assert.equal(r.status, 403);
+    assert.deepEqual(r.body, { error: 'not for you', code: 'scope-not-allowed' });
+    assert.equal(jiraCalls.length, 0);
+    assert.ok(auditLines().some((l) => l.subcommand === 'edit' && l.outcome === 'denied' && l.detail === 'scope-not-allowed'));
+  } finally {
+    policy.authorizeWrite = orig;
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
 test('cli writes: /add-stories is denied by the same `create` policy as /create-epic, same error shape (#2890 AC10)', async () => {
   broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
   const policy = require('./broker-policy');
@@ -1637,7 +1728,7 @@ test('a refused grant blocks EVERY subcommand before Jira is touched (AC4/AC5)',
     const routes = [
       ['GET', '/cli/whoami'], ['GET', '/cli/inbox'], ['GET', '/cli/inbox?consume=KAN-1:1'], ['GET', '/cli/projects'],
       ['GET', '/cli/show?issue=KAN-1'], ['GET', '/cli/sprint/list?board=B'], ['GET', '/cli/attachment?issue=KAN-1&id=1'],
-      ['POST', '/cli/comment'], ['POST', '/cli/transition'], ['POST', '/cli/create-epic'], ['POST', '/cli/add-stories'], ['POST', '/cli/create-issue'], ['POST', '/cli/set-epic'], ['POST', '/cli/sprint/create'],
+      ['POST', '/cli/comment'], ['POST', '/cli/transition'], ['POST', '/cli/create-epic'], ['POST', '/cli/add-stories'], ['POST', '/cli/create-issue'], ['POST', '/cli/set-epic'], ['POST', '/cli/edit'], ['POST', '/cli/sprint/create'],
       ['POST', '/cli/attachment/add'],
     ];
     for (const [method, url] of routes) {

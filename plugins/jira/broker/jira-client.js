@@ -2233,6 +2233,255 @@ async function setParentEpic(cred, { epicKey, issueKeys, issueTypes, env, onChan
   };
 }
 
+// ── standard fields of an existing issue (#2897) ─────────────────────────────
+//
+// The everyday ticket upkeep `update` (description) and `set-field` (custom
+// fields) do not cover: summary, assignee, priority, labels, components, fix
+// versions and due date of ONE existing issue, several of them in one call.
+// Every guard runs before the single edit, so Jira either applies all requested
+// changes or none:
+//   1. shape validation (400, before Jira is called) — an empty summary, a label
+//      with whitespace (Jira labels are single words), a due date that is not a
+//      real `YYYY-MM-DD`, a list field given both a replacement and add/remove,
+//      or a name both added and removed.
+//   2. the issue lookup — a 404 means outside this team's scope (the account
+//      cannot see it), worded like set-epic.
+//   3. name resolution — a priority against the site's priorities, components /
+//      fix versions against the issue's project; an unknown name is a 400 that
+//      lists what exists. Nothing is created here (components / versions are
+//      managed in Jira, versions: #2902).
+//   4. the edit itself: ONE `PUT /issue/<key>` with only the fields that change
+//      (scalars in `fields`, list add/remove as `update` ops so other values on
+//      the issue are untouched). A field already at its target value is reported
+//      `unchanged` and not sent; when nothing changes, Jira is not written.
+//      Jira's refusal is mapped per field by name — a field missing from the
+//      issue's edit screen is named as such.
+// `onChanged(fieldIds)` fires after the edit lands, before the answer, so the
+// own-writes registry knows the echo's fields (Jira changelog `fieldId`s).
+
+// The editable standard fields: CLI/broker key → Jira field id + display label.
+const EDIT_FIELDS = Object.freeze({
+  summary: { id: 'summary', label: 'Summary' },
+  assignee: { id: 'assignee', label: 'Assignee' },
+  priority: { id: 'priority', label: 'Priority' },
+  labels: { id: 'labels', label: 'Labels' },
+  components: { id: 'components', label: 'Components' },
+  fixVersions: { id: 'fixVersions', label: 'Fix versions' },
+  dueDate: { id: 'duedate', label: 'Due date' },
+});
+const EDIT_LIST_FIELDS = ['labels', 'components', 'fixVersions'];
+const DUE_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+const editErr = (status, message) => { const e = new Error(message); e.status = status; return e; };
+
+// A real calendar date in `YYYY-MM-DD` (2026-02-30 is refused). Pure.
+function isIsoDate(value) {
+  const m = DUE_DATE_RE.exec(String(value == null ? '' : value));
+  if (!m) return false;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return d.getUTCFullYear() === Number(m[1]) && d.getUTCMonth() === Number(m[2]) - 1 && d.getUTCDate() === Number(m[3]);
+}
+
+// One list-field spec (`{ set } | { add?, remove? }`) as trimmed, de-duplicated
+// name arrays. Pure — throws a 400 on a bad shape.
+function normalizeListEdit(key, spec) {
+  const label = EDIT_FIELDS[key].label.toLowerCase();
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) throw editErr(400, `${label}: expected { set } or { add, remove }`);
+  const names = (v, what) => {
+    if (v === undefined) return undefined;
+    if (!Array.isArray(v)) throw editErr(400, `${label} to ${what} must be a list`);
+    const out = [];
+    for (const raw of v) {
+      const s = String(raw == null ? '' : raw).trim();
+      if (!s) throw editErr(400, `${label}: an empty name is not allowed`);
+      if (!out.some((o) => o.toLowerCase() === s.toLowerCase())) out.push(s);
+    }
+    return out;
+  };
+  const set = names(spec.set, 'set');
+  const add = names(spec.add, 'add') || [];
+  const remove = names(spec.remove, 'remove') || [];
+  if (set && (add.length || remove.length)) throw editErr(400, `${label}: replace the whole list or add/remove single values, not both`);
+  if (!set && !add.length && !remove.length) throw editErr(400, `${label}: nothing to set, add or remove`);
+  const both = add.filter((a) => remove.some((r) => r.toLowerCase() === a.toLowerCase()));
+  if (both.length) throw editErr(400, `${label}: "${both[0]}" is both added and removed`);
+  if (key === 'labels') {
+    const spaced = [...(set || []), ...add, ...remove].find((l) => /\s/.test(l));
+    if (spaced) throw editErr(400, `label "${spaced}" contains a space — Jira labels are single words (use e.g. "${spaced.replace(/\s+/g, '-')}")`);
+  }
+  return set ? { set } : { add, remove };
+}
+
+// The requested changes, validated and normalised (step 1). Pure.
+function normalizeIssueEdit(changes) {
+  const c = changes && typeof changes === 'object' ? changes : {};
+  const has = (k) => Object.prototype.hasOwnProperty.call(c, k) && c[k] !== undefined;
+  const out = {};
+  if (has('summary')) {
+    const s = String(c.summary == null ? '' : c.summary).trim();
+    if (!s) throw editErr(400, 'the summary cannot be empty');
+    if (/[\r\n]/.test(s)) throw editErr(400, 'the summary must be a single line');
+    out.summary = s;
+  }
+  if (has('assignee')) {
+    const a = c.assignee == null ? '' : String(c.assignee).trim();
+    out.assignee = a || null; // null = unassign
+  }
+  if (has('priority')) {
+    const p = String(c.priority == null ? '' : c.priority).trim();
+    if (!p) throw editErr(400, 'a priority name is required (e.g. "High")');
+    out.priority = p;
+  }
+  for (const key of EDIT_LIST_FIELDS) if (has(key)) out[key] = normalizeListEdit(key, c[key]);
+  if (has('dueDate')) {
+    const d = c.dueDate == null ? '' : String(c.dueDate).trim();
+    if (d && !isIsoDate(d)) throw editErr(400, `"${d}" is not a valid due date — use YYYY-MM-DD, e.g. 2026-10-31`);
+    out.dueDate = d || null; // null = clear
+  }
+  if (!Object.keys(out).length) {
+    throw editErr(400, 'nothing to change — name at least one of: summary, assignee, priority, labels, components, fix versions, due date');
+  }
+  return out;
+}
+
+// Match requested names against the existing ones (case-insensitive) and return
+// the canonical names; an unknown one is a 400 listing what exists. Pure.
+function resolveNamed(requested, existing, what, where) {
+  const avail = (Array.isArray(existing) ? existing : []).map((x) => String((x && x.name) || '')).filter(Boolean);
+  return requested.map((name) => {
+    const hit = avail.find((a) => a.toLowerCase() === name.toLowerCase());
+    if (!hit) throw editErr(400, `${where} has no ${what} "${name}". Available: ${avail.join(', ') || '(none)'}. Nothing was changed.`);
+    return hit;
+  });
+}
+
+const sameNames = (a, b) => a.length === b.length && a.every((x) => b.some((y) => y.toLowerCase() === x.toLowerCase()));
+
+// Jira's refusal of the edit, readable and per field (step 4). Pure.
+function editRefusalMessage(err, key) {
+  if (err.status === 404) return `${outOfScope('', key)}. Nothing was changed.`;
+  const body = safeJson(err.body || '');
+  const labelOf = (id) => {
+    const hit = Object.values(EDIT_FIELDS).find((f) => f.id.toLowerCase() === String(id).toLowerCase());
+    return hit ? hit.label : id;
+  };
+  const parts = [];
+  for (const [id, msg] of Object.entries(body && body.errors && typeof body.errors === 'object' ? body.errors : {})) {
+    const text = String(msg);
+    parts.push(/cannot be set|not on the appropriate screen/i.test(text)
+      ? `${labelOf(id)} cannot be changed on ${key} — the field is not on the issue's edit screen in Jira (${text.replace(/[.\s]+$/, '')})`
+      : `${labelOf(id)}: ${text}`);
+  }
+  for (const msg of Array.isArray(body && body.errorMessages) ? body.errorMessages : []) parts.push(String(msg));
+  if (!parts.length) return `${err.message} Nothing was changed.`;
+  const prefix = err.status === 403 ? `the Jira account may not edit ${key} (403)` : `Jira refused the edit of ${key}`;
+  return `${prefix}: ${parts.map((p) => p.replace(/[.\s]+$/, '')).join('; ')}. Nothing was changed.`;
+}
+
+async function editIssueFields(cred, issueKey, { changes, env, onChanged } = {}) {
+  const key = String(issueKey == null ? '' : issueKey).trim().toUpperCase();
+  if (!key) throw editErr(400, 'an issue key is required');
+  if (!ISSUE_KEY_RE.test(key)) throw editErr(400, `"${String(issueKey).trim()}" is not a Jira issue key (expected e.g. KAN-10)`);
+  const want = normalizeIssueEdit(changes);
+
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const readFields = ['project', ...Object.keys(want).map((k) => EDIT_FIELDS[k].id)].join(',');
+  let raw;
+  try {
+    raw = await requestJson({ base, path: `/rest/api/3/issue/${encodeURIComponent(key)}?fields=${encodeURIComponent(readFields)}`, authHeader: auth });
+  } catch (e) {
+    if (e.status === 404) throw editErr(404, `${outOfScope('', key)}. Nothing was changed.`);
+    throw e;
+  }
+  const cur = (raw && raw.fields) || {};
+  const projectKey = String((cur.project && cur.project.key) || key.replace(/-\d+$/, ''));
+  const names = (list) => (Array.isArray(list) ? list : []).map((x) => (x && typeof x === 'object' ? String(x.name || '') : String(x))).filter(Boolean);
+
+  // Name resolution (step 3) — only for the fields actually requested.
+  if (want.priority) {
+    const priorities = await requestJson({ base, path: '/rest/api/3/priority', authHeader: auth });
+    [want.priority] = resolveNamed([want.priority], priorities, 'priority', 'this Jira site');
+  }
+  for (const [k, what, sub] of [['components', 'component', 'components'], ['fixVersions', 'version', 'versions']]) {
+    if (!want[k]) continue;
+    const existing = await requestJson({ base, path: `/rest/api/3/project/${encodeURIComponent(projectKey)}/${sub}`, authHeader: auth });
+    for (const op of ['set', 'add', 'remove']) {
+      if (want[k][op]) want[k][op] = resolveNamed(want[k][op], existing, what, `project ${projectKey}`);
+    }
+  }
+
+  // Diff against the current values; only real changes go into the edit.
+  const fields = {};
+  const update = {};
+  const report = [];
+  const note = (k, from, to, changed) => report.push({ field: k, from, to, outcome: changed ? 'changed' : 'unchanged' });
+  if ('summary' in want) {
+    const from = cur.summary == null ? null : String(cur.summary);
+    const changed = from !== want.summary;
+    if (changed) fields.summary = want.summary;
+    note('summary', from, want.summary, changed);
+  }
+  if ('assignee' in want) {
+    const from = cur.assignee && cur.assignee.accountId ? String(cur.assignee.accountId) : null;
+    const changed = from !== want.assignee;
+    if (changed) fields.assignee = want.assignee ? { accountId: want.assignee } : null;
+    note('assignee', from, want.assignee, changed);
+  }
+  if ('priority' in want) {
+    const from = cur.priority && cur.priority.name ? String(cur.priority.name) : null;
+    const changed = !from || from.toLowerCase() !== want.priority.toLowerCase();
+    if (changed) fields.priority = { name: want.priority };
+    note('priority', from, want.priority, changed);
+  }
+  for (const k of EDIT_LIST_FIELDS) {
+    if (!want[k]) continue;
+    const from = names(cur[EDIT_FIELDS[k].id]);
+    const has = (n) => from.some((f) => f.toLowerCase() === n.toLowerCase());
+    const wrap = (n) => (k === 'labels' ? n : { name: n });
+    let to;
+    if (want[k].set) {
+      to = want[k].set;
+      if (!sameNames(from, to)) fields[EDIT_FIELDS[k].id] = to.map(wrap);
+    } else {
+      const adds = want[k].add.filter((n) => !has(n));
+      const removes = want[k].remove.filter(has);
+      const ops = [...adds.map((n) => ({ add: wrap(n) })), ...removes.map((n) => ({ remove: wrap(n) }))];
+      if (ops.length) update[EDIT_FIELDS[k].id] = ops;
+      to = [...from.filter((f) => !removes.some((r) => r.toLowerCase() === f.toLowerCase())), ...adds];
+    }
+    note(k, from, to, !sameNames(from, to));
+  }
+  if ('dueDate' in want) {
+    const from = cur.duedate ? String(cur.duedate) : null;
+    const changed = from !== want.dueDate;
+    if (changed) fields.duedate = want.dueDate;
+    note('dueDate', from, want.dueDate, changed);
+  }
+
+  const changedIds = [...Object.keys(fields), ...Object.keys(update)];
+  if (changedIds.length) {
+    const body = {};
+    if (Object.keys(fields).length) body.fields = fields;
+    if (Object.keys(update).length) body.update = update;
+    try {
+      // A write — NOT retried on a transport failure (F6).
+      await requestJson({ base, path: `/rest/api/3/issue/${encodeURIComponent(key)}`, method: 'PUT', authHeader: auth, body });
+    } catch (e) {
+      throw editErr(e.status, editRefusalMessage(e, key));
+    }
+    if (typeof onChanged === 'function') onChanged(changedIds);
+  }
+  const siteBase = resolveJiraApiBase(cred.siteUrl);
+  return {
+    issue: key,
+    url: `${siteBase}/browse/${encodeURIComponent(key)}`,
+    fields: report,
+    changed: report.filter((r) => r.outcome === 'changed').length,
+    unchanged: report.filter((r) => r.outcome === 'unchanged').length,
+  };
+}
+
 // ── board & sprint management (Jira Agile API, #2450) ────────────────────────
 //
 // The first capability that touches Jira's **Agile** surface (`/rest/agile/1.0`,
@@ -2849,6 +3098,12 @@ module.exports = {
   EPIC_CHILD_FIELD,
   EPIC_ISSUE_TYPE,
   STORY_ISSUE_TYPE,
+  // standard fields of an existing issue (#2897)
+  EDIT_FIELDS,
+  isIsoDate,
+  normalizeIssueEdit,
+  editRefusalMessage,
+  editIssueFields,
   // board & sprint management (#2450)
   MAX_BULK_SPRINTS,
   parseUtcDay,

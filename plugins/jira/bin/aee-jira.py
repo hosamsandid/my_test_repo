@@ -44,6 +44,8 @@ ticket is routine and reversible):
     aee-jira create-issue --project KAN --type Bug --summary "Login fails"   # one standalone issue, no Epic
     aee-jira set-epic KAN-30 KAN-31 --epic KAN-12   # put EXISTING issues under an Epic (or move them to it)
     aee-jira set-epic KAN-30 --none               # take an existing issue out of its Epic
+    aee-jira edit KAN-10 --summary "New title" --priority High --add-label backend   # change standard fields
+    aee-jira edit KAN-10 --assignee <accountId> --due 2026-10-31    # (--unassign / --clear-due to empty them)
     aee-jira sprint create --board "Team Scrum Board" --name "Sprint 12" --start 2026-10-26 --end 2026-11-01
     aee-jira sprint bulk-create --board "Team Scrum Board" --name-template "Acc2.0 {MMM}_{weekOfMonth}" --until 2026-12-31
     aee-jira sprint close --board "Team Scrum Board"     # complete the board's active sprint
@@ -156,6 +158,28 @@ sub-task — neither is moved —, or Jira's own refusal, e.g. a missing Edit
 permission). One failing key never stops the others; a key listed twice is
 handled once; the CLI exits 1 if any issue failed. `show` then reports the new
 `parent`.
+
+`edit` changes the standard fields of ONE existing issue — several in one call:
+
+    aee-jira edit KAN-10 [--summary "..."] [--assignee <accountId> | --unassign]
+        [--priority High] [--due 2026-10-31 | --clear-due]
+        [--add-label L]... [--remove-label L]... [--set-labels [L ...]]
+        [--add-component C]... [--remove-component C]... [--set-components [C ...]]
+        [--add-fix-version V]... [--remove-fix-version V]... [--set-fix-versions [V ...]]
+
+--add-* / --remove-* change single values and leave the issue's other values
+alone; --set-* replaces the whole list (with no names it empties it), and a
+list is either replaced or edited, not both. Labels are single words (no
+spaces). The assignee is an Atlassian accountId. Priorities are matched by name
+against the site's priorities, components and fix versions by name against the
+issue's project (case-insensitive) — an unknown name is refused with the list
+of what exists; nothing is created. The due date is YYYY-MM-DD. Everything is
+checked first and the changes are applied in ONE Jira edit, so either all of
+them land or none does; Jira's refusal is shown per field (a field that is not
+on the issue's edit screen is named). The result lists each requested field
+with its old and new value and "changed" or "unchanged" (already at that value,
+not written). An issue outside the team's Jira scope is refused. Description
+(`update`) and custom fields (`set-field`) have their own commands.
 
 `sprint` manages a Scrum board's sprints, the board resolved by its
 human-readable name (e.g. "Accessio 2.0 Scrum Board"). `sprint list` reads the
@@ -667,6 +691,28 @@ def build_parser():
     set_epic_target.add_argument("--epic", help="key of the Epic the issues go under, e.g. KAN-12")
     set_epic_target.add_argument("--none", action="store_true", help="take the issues out of their Epic (no parent afterwards)")
 
+    p_edit = sub.add_parser(
+        "edit", parents=[common],
+        help="change standard fields of an existing issue (summary, assignee, priority, labels, components, "
+             'fix versions, due date), e.g. aee-jira edit KAN-10 --priority High --add-label backend',
+    )
+    p_edit.add_argument("issue", help="issue key, e.g. KAN-10")
+    p_edit.add_argument("--summary", help="the new one-line title")
+    g_assignee = p_edit.add_mutually_exclusive_group()
+    g_assignee.add_argument("--assignee", metavar="ACCOUNT_ID", help="assign to this Atlassian accountId")
+    g_assignee.add_argument("--unassign", action="store_true", help="remove the assignee")
+    p_edit.add_argument("--priority", help='priority by name, e.g. "High"')
+    g_due = p_edit.add_mutually_exclusive_group()
+    g_due.add_argument("--due", metavar="YYYY-MM-DD", help="set the due date")
+    g_due.add_argument("--clear-due", action="store_true", help="clear the due date")
+    for flag, noun in (("label", "label"), ("component", "component"), ("fix-version", "fix version")):
+        p_edit.add_argument("--add-%s" % flag, action="append", metavar="NAME", help="add a %s (repeatable)" % noun)
+        p_edit.add_argument("--remove-%s" % flag, action="append", metavar="NAME", help="remove a %s (repeatable)" % noun)
+        p_edit.add_argument(
+            "--set-%ss" % flag, nargs="*", metavar="NAME",
+            help="replace all %ss with these (none = empty the list)" % noun,
+        )
+
     p_sprint = sub.add_parser("sprint", parents=[common], help="manage a Scrum board's sprints (list / create / bulk-create / close / start / advance)")
     sprint_sub = p_sprint.add_subparsers(dest="sprint_cmd")
 
@@ -916,6 +962,36 @@ def main(argv=None):
         else:
             body["epic"] = args.epic
         path, method = "/set-epic", "POST"
+    elif args.cmd == "edit":
+        body = {"issue": args.issue}
+        if args.summary is not None:
+            body["summary"] = args.summary
+        if args.assignee is not None or args.unassign:
+            body["assignee"] = None if args.unassign else args.assignee
+        if args.priority is not None:
+            body["priority"] = args.priority
+        for flag, key in (("label", "labels"), ("component", "components"), ("fix_version", "fixVersions")):
+            adds = getattr(args, "add_%s" % flag) or []
+            removes = getattr(args, "remove_%s" % flag) or []
+            replace = getattr(args, "set_%ss" % flag)
+            if replace is not None and (adds or removes):
+                dash = flag.replace("_", "-")
+                emit({"ok": False, "error": "usage",
+                      "message": "--set-%ss replaces the whole list; do not combine it with --add-%s / --remove-%s" % (dash, dash, dash)}, as_json)
+                return EXIT_USAGE
+            if replace is not None:
+                body[key] = {"set": replace}
+            elif adds or removes:
+                body[key] = {"add": adds, "remove": removes}
+        if args.due is not None or args.clear_due:
+            body["dueDate"] = None if args.clear_due else args.due
+        if len(body) == 1:
+            emit({"ok": False, "error": "usage",
+                  "message": "nothing to change — pass at least one of --summary, --assignee/--unassign, --priority, "
+                             "--add-/--remove-/--set-labels, --add-/--remove-/--set-components, "
+                             "--add-/--remove-/--set-fix-versions, --due/--clear-due"}, as_json)
+            return EXIT_USAGE
+        path, method = "/edit", "POST"
     elif args.cmd == "sprint":
         sprint_cmd = getattr(args, "sprint_cmd", None)
         if sprint_cmd == "list":

@@ -94,8 +94,9 @@ export function HelperChatProvider({ children }) {
   // can open the panel straight into a given face.
   const [mode, setMode] = useState('chat');
 
-  // The curated per-page help topic set, fetched once (concept §4: the client
-  // resolves route→topic locally so face-switching is instant/offline). Starts
+  // The curated per-page help topic set, fetched once on the panel's first open
+  // (concept §4: the client resolves route→topic locally so face-switching is
+  // instant/offline). Starts
   // empty and stays empty on a fetch failure — the panel then just renders the
   // Overview fallback. The provider sits inside BrowserRouter (index.jsx), so
   // useLocation is safe here.
@@ -123,23 +124,34 @@ export function HelperChatProvider({ children }) {
 
   // Only fetched once a session exists (#2616): the provider is mounted above
   // the auth gate, so an unconditional mount-time fetch hit the protected
-  // endpoint from the login screen and logged a 401 there. Re-runs on login.
+  // endpoint from the login screen and logged a 401 there. And only on the
+  // panel's first open (#2918): the corpus is ~350 KB, so a page load with the
+  // panel closed must not pay for it. Fetched once per session; a logout resets
+  // it, so the next login refetches on the next open.
   const { authenticated } = useAuth();
+  const [pageHelpLoaded, setPageHelpLoaded] = useState(false);
   useEffect(() => {
-    if (!authenticated) return undefined;
+    if (!authenticated) {
+      setPageHelpLoaded(false);
+      return undefined;
+    }
+    if (!isOpen || pageHelpLoaded) return undefined;
     let alive = true;
     (async () => {
       try {
         const res = await fetch('/api/helper/page-help', { headers: { ...assistHeaders() } });
         if (!res.ok) return;
         const data = await res.json();
-        if (alive && data) setPageHelp(data);
+        if (alive && data) {
+          setPageHelp(data);
+          setPageHelpLoaded(true);
+        }
       } catch {
-        // Keep the empty set — Overview fallback still renders.
+        // Keep the empty set — Overview fallback still renders; the next open retries.
       }
     })();
     return () => { alive = false; };
-  }, [authenticated]);
+  }, [authenticated, isOpen, pageHelpLoaded]);
 
   // A synchronous mirror of the list so sendMessage builds the request from the
   // just-appended user turn without waiting for a state flush.

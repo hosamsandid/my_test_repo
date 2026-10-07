@@ -853,3 +853,45 @@ test('aee-jira create-issue: listed in --help; flags + --file build the body; us
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('aee-jira set-epic: listed in --help; target is --epic XOR --none; wired to /set-epic; exit 1 on a failed issue (#2895)', async () => {
+  const ws = grantedJiraWorkspace();
+  const help = runJira(['--help'], ws);
+  const flat = help.stdout.replace(/\s+/g, ' '); // argparse wraps the help column
+  assert.match(flat, /set-epic put EXISTING issues under an Epic, move them to it, or take them out/);
+  assert.match(flat, /aee-jira set-epic KAN-30 KAN-31 --epic KAN-12/);
+  // a target is required, and only one; at least one issue key
+  assert.equal(runJira(['set-epic', 'KAN-30'], ws).status, 2);
+  assert.equal(runJira(['set-epic', 'KAN-30', '--epic', 'KAN-12', '--none'], ws).status, 2);
+  assert.equal(runJira(['set-epic', '--epic', 'KAN-12'], ws).status, 2);
+
+  const http = require('node:http');
+  const seen = [];
+  let failed = 0;
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, body: JSON.parse(raw) });
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ epic: null, issues: [], changed: 1, unchanged: 0, failed }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const live = grantedJiraWorkspace(`http://127.0.0.1:${port}/`);
+    let r = await runJiraAsync(['set-epic', 'KAN-30', 'KAN-31', '--epic', 'KAN-12', '--json'], live);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(seen[0], { method: 'POST', url: '/cli/set-epic', body: { issues: ['KAN-30', 'KAN-31'], epic: 'KAN-12' } });
+    r = await runJiraAsync(['set-epic', 'KAN-30', '--none', '--json'], live);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(seen[1].body, { issues: ['KAN-30'], remove: true });
+    failed = 1;
+    r = await runJiraAsync(['set-epic', 'KAN-30', '--epic', 'KAN-12', '--json'], live);
+    assert.equal(r.status, 1, 'a per-issue failure exits non-zero, like add-stories');
+    assert.equal(JSON.parse(r.stdout.trim()).result.failed, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

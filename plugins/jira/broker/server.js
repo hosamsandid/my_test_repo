@@ -700,6 +700,46 @@ async function handleCli(req, res, cliPath) {
     }
   }
 
+  // ── parent Epic of EXISTING issues: put under, move, take out (#2895) ────
+  // The CLI sends `{ epic: "<KEY>", issues[] }` or `{ remove: true, issues[] }`
+  // — removal is explicit, so a missing epic is never read as "take out". The
+  // broker checks the target is a visible Epic, then re-parents each issue
+  // (jira.setParentEpic) with a per-issue outcome. Its own `set-epic` write
+  // policy; every changed parent is stamped as an own write on the issue (and
+  // `Epic Child` on both Epics) so the echo reads `origin: agent`.
+  if (cliPath === '/set-epic' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('set-epic');
+    if (!authz.allow) {
+      auditCall('set-epic', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = credFor();
+    if (!cred) return noCredential('set-epic');
+    const body = parseJson(await readBody(req));
+    const remove = body.remove === true;
+    const epicKey = String(body.epic || '').trim().toUpperCase();
+    if (remove && epicKey) return sendJson(res, 400, { error: 'name a target --epic or --none, not both' });
+    if (!remove && !epicKey) return sendJson(res, 400, { error: 'a target --epic key (or --none to take the issues out of their Epic) is required' });
+    if (!Array.isArray(body.issues) || !body.issues.length) return sendJson(res, 400, { error: 'at least one issue key is required' });
+    const target = remove ? 'none' : epicKey;
+    try {
+      const result = await jira.setParentEpic(cred, {
+        epicKey: remove ? null : epicKey,
+        issueKeys: body.issues,
+        issueTypes: body.issueTypes && typeof body.issueTypes === 'object' ? body.issueTypes : undefined,
+        onChanged: (key, { from, to }) => recordOwnWrite(() => {
+          for (const field of jira.PARENT_CHANGE_FIELDS) ownWritesStore.recordField(scopeId, key, field);
+          for (const epic of [from, to].filter(Boolean)) ownWritesStore.recordField(scopeId, epic, jira.EPIC_CHILD_FIELD);
+        }),
+      });
+      auditCall('set-epic', 'ok', `${target}: ${result.changed} changed, ${result.unchanged} unchanged, ${result.failed} failed of ${result.issues.length}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      auditCall('set-epic', failureOutcome(err), `${target}: ${err.message}`);
+      return sendJiraError(err);
+    }
+  }
+
   // ── one standalone issue, no parent Epic (#2894) ─────────────────────────
   // The CLI sends `{ project, type, issue: { summary, description?, assignee?,
   // priority?, labels?, status?, fields? }, issueTypes? }`; the broker creates

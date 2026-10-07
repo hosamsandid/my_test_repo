@@ -41,6 +41,8 @@ ticket is routine and reversible):
     aee-jira create-epic --project KAN --file plan.json   # create one Epic and its child Stories in one operation
     aee-jira add-stories --epic KAN-12 --file stories.json   # add new Stories to an EXISTING Epic (no new Epic)
     aee-jira create-issue --project KAN --type Bug --summary "Login fails"   # one standalone issue, no Epic
+    aee-jira set-epic KAN-30 KAN-31 --epic KAN-12   # put EXISTING issues under an Epic (or move them to it)
+    aee-jira set-epic KAN-30 --none               # take an existing issue out of its Epic
     aee-jira sprint create --board "Team Scrum Board" --name "Sprint 12" --start 2026-10-26 --end 2026-11-01
     aee-jira sprint bulk-create --board "Team Scrum Board" --name-template "Acc2.0 {MMM}_{weekOfMonth}" --until 2026-12-31
     aee-jira sprint close --board "Team Scrum Board"     # complete the board's active sprint
@@ -121,6 +123,19 @@ lists the project's types), an Epic type (use create-epic), a sub-task type, a
 required field the project needs but the call does not set (named in the
 error), a custom field off a non-empty writable-custom-fields allow-list, or a
 value Jira rejects (e.g. an unknown assignee accountId).
+
+`set-epic` re-parents issues that already exist: every listed issue goes under
+the Epic named by --epic (moved there if it is under another Epic), or with
+--none is taken out of its Epic (no parent afterwards). The target is checked
+first: a key that does not exist or is outside the team's Jira scope, or an
+issue that is not an Epic, is refused and nothing is changed. Then each issue
+gets its own outcome — "added", "moved" (with the old Epic), "removed",
+"unchanged" ("already under KAN-12" / "has no parent Epic", a success) or
+"failed" with the reason (not found / outside the team's scope, an Epic or a
+sub-task — neither is moved —, or Jira's own refusal, e.g. a missing Edit
+permission). One failing key never stops the others; a key listed twice is
+handled once; the CLI exits 1 if any issue failed. `show` then reports the new
+`parent`.
 
 `sprint` manages a Scrum board's sprints, the board resolved by its
 human-readable name (e.g. "Accessio 2.0 Scrum Board"). `sprint list` reads the
@@ -617,6 +632,16 @@ def build_parser():
         help='optional JSON object with the same keys (summary, description, assignee, priority, labels, status, fields); "-" reads stdin; flags win',
     )
 
+    p_set_epic = sub.add_parser(
+        "set-epic", parents=[common],
+        help="put EXISTING issues under an Epic, move them to it, or take them out (--none), e.g. "
+             "aee-jira set-epic KAN-30 KAN-31 --epic KAN-12",
+    )
+    p_set_epic.add_argument("issues", nargs="+", metavar="KEY", help="the existing issues to re-parent, e.g. KAN-30 KAN-31")
+    set_epic_target = p_set_epic.add_mutually_exclusive_group(required=True)
+    set_epic_target.add_argument("--epic", help="key of the Epic the issues go under, e.g. KAN-12")
+    set_epic_target.add_argument("--none", action="store_true", help="take the issues out of their Epic (no parent afterwards)")
+
     p_sprint = sub.add_parser("sprint", parents=[common], help="manage a Scrum board's sprints (list / create / bulk-create / close / start / advance)")
     sprint_sub = p_sprint.add_subparsers(dest="sprint_cmd")
 
@@ -855,6 +880,13 @@ def main(argv=None):
         if isinstance(issue_types, dict):
             body["issueTypes"] = issue_types
         path, method = "/create-issue", "POST"
+    elif args.cmd == "set-epic":
+        body = {"issues": args.issues}
+        if args.none:
+            body["remove"] = True
+        else:
+            body["epic"] = args.epic
+        path, method = "/set-epic", "POST"
     elif args.cmd == "sprint":
         sprint_cmd = getattr(args, "sprint_cmd", None)
         if sprint_cmd == "list":
@@ -936,7 +968,8 @@ def main(argv=None):
     # automated caller notices a partial result, while still printing the Epic
     # key + the per-story map above.
     # add-stories follows the same convention (#2890).
-    if args.cmd in ("create-epic", "add-stories") and isinstance(result, dict) and result.get("failed"):
+    # set-epic likewise reports one outcome per issue (#2895).
+    if args.cmd in ("create-epic", "add-stories", "set-epic") and isinstance(result, dict) and result.get("failed"):
         return EXIT_DOMAIN_ERROR
     # create-issue (#2894): the issue exists, but the requested status could not
     # be reached — exit 1 so the caller notices, while still printing the key.

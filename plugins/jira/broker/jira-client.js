@@ -1997,6 +1997,153 @@ async function createStandaloneIssue(cred, { projectKey, issueType, issue, allow
   return out;
 }
 
+// ── put EXISTING issues under an Epic, move them, take them out (#2895) ──────
+//
+// Backlog grooming: set the parent Epic of one or more existing standard issues
+// (Story, Task, Bug, …) — or clear it (`epicKey` null). Only Epic ↔ standard
+// issue parenting: an Epic or a sub-task in the list is refused per issue.
+// Order of work:
+//   1. shape — a malformed target key or an empty list is a 400.
+//   2. the target lookup — a key Jira does not return (absent, or not visible to
+//      the team's credential = outside the team's scope) is a 404; an issue
+//      that is not an Epic is a 400 naming its type. Nothing is changed.
+//   3. each issue in turn (duplicates once, no cap): read it, refuse an Epic /
+//      sub-task, skip one already under the target (`unchanged`, a success),
+//      else write the parent. A per-issue failure is recorded and the loop
+//      continues, so one bad key never hides the others.
+// The write uses the native `parent` field — Jira Cloud's parent for both
+// project styles — and falls back to the site's Epic Link field when Jira
+// rejects `parent` (400) on an older company-managed configuration.
+
+// Jira's changelog names for a parent change on the child issue: `parent` /
+// `IssueParentAssociation` (native parent) and `Epic Link` (classic). The Epic
+// side logs `Epic Child`. The broker stamps these as own writes.
+const PARENT_CHANGE_FIELDS = Object.freeze(['parent', 'IssueParentAssociation', 'Epic Link']);
+const EPIC_CHILD_FIELD = 'Epic Child';
+
+const parentErr = (status, message) => { const e = new Error(message); e.status = status; return e; };
+const outOfScope = (what, key) => `${what}${key} was not found, or it is outside this team's Jira scope (the account cannot see it)`;
+
+// Jira's own reason for a refused edit (`{ errorMessages, errors }`), readable.
+function parentWriteRefusal(err, key) {
+  if (err.status === 404) return `${outOfScope('', key)}.`;
+  const body = safeJson(err.body || '');
+  const parts = [];
+  for (const [field, msg] of Object.entries(body && body.errors && typeof body.errors === 'object' ? body.errors : {})) parts.push(`${field}: ${msg}`);
+  for (const msg of Array.isArray(body && body.errorMessages) ? body.errorMessages : []) parts.push(String(msg));
+  if (!parts.length) return err.message;
+  const prefix = err.status === 403 ? `the Jira account may not edit ${key} (403)` : 'Jira refused the change';
+  return `${prefix}: ${parts.map((p) => p.replace(/[.\s]+$/, '')).join('; ')}`;
+}
+
+async function writeParent(base, auth, key, epicKey, epicLinkId) {
+  const viaParent = { parent: epicKey ? { key: epicKey } : null };
+  const attempts = epicLinkId ? [viaParent, { [epicLinkId]: epicKey || null }] : [viaParent];
+  let first = null;
+  for (const fields of attempts) {
+    try {
+      // A write — NOT retried on a transport failure (F6).
+      await requestJson({ base, path: `/rest/api/3/issue/${encodeURIComponent(key)}`, method: 'PUT', authHeader: auth, body: { fields } });
+      return;
+    } catch (e) {
+      if (!first) first = e;
+      if (e.status !== 400) throw e;
+    }
+  }
+  throw first;
+}
+
+// `onChanged(issueKey, { from, to })` fires the moment each parent write lands
+// (before the next one), so the own-writes registry knows it before any poll.
+async function setParentEpic(cred, { epicKey, issueKeys, issueTypes, env, onChanged } = {}) {
+  const removing = epicKey == null || String(epicKey).trim() === '';
+  const target = removing ? null : String(epicKey).trim().toUpperCase();
+  if (target && !ISSUE_KEY_RE.test(target)) throw parentErr(400, `"${String(epicKey).trim()}" is not a Jira issue key (expected e.g. KAN-12)`);
+  const keys = [];
+  for (const k of Array.isArray(issueKeys) ? issueKeys : []) {
+    const norm = String(k == null ? '' : k).trim().toUpperCase();
+    if (norm && !keys.includes(norm)) keys.push(norm);
+  }
+  if (!keys.length) throw parentErr(400, 'at least one issue key is required');
+
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const epicTypeName = String((issueTypes && issueTypes.epic) || EPIC_ISSUE_TYPE).trim() || EPIC_ISSUE_TYPE;
+  const siteBase = resolveJiraApiBase(cred.siteUrl);
+  const browseUrl = (k) => `${siteBase}/browse/${encodeURIComponent(k)}`;
+
+  let epic = null;
+  if (target) {
+    let raw;
+    try {
+      raw = await requestJson({ base, path: `/rest/api/3/issue/${encodeURIComponent(target)}?fields=issuetype,summary`, authHeader: auth });
+    } catch (e) {
+      if (e.status === 404) throw parentErr(404, `${outOfScope('Epic ', target)}. Nothing was changed.`);
+      throw e;
+    }
+    const f = (raw && raw.fields) || {};
+    const actual = String(raw.key || target);
+    if (classifyIssueType(f.issuetype, epicTypeName) !== 'epic') {
+      const typeName = (f.issuetype && f.issuetype.name) || 'unknown type';
+      throw parentErr(400, `${actual} is a ${typeName}, not an Epic — issues can only be put under an Epic. Nothing was changed.`);
+    }
+    epic = { key: actual, url: browseUrl(actual), summary: String(f.summary || '') };
+  }
+
+  const epicLinkId = await resolveEpicLinkFieldId(base, auth);
+  const readFields = ['issuetype', 'summary', 'parent', ...(epicLinkId ? [epicLinkId] : [])].join(',');
+  const results = [];
+  for (const key of keys) {
+    const out = { issue: key };
+    try {
+      if (!ISSUE_KEY_RE.test(key)) throw parentErr(400, `"${key}" is not a Jira issue key (expected e.g. KAN-30)`);
+      let raw;
+      try {
+        raw = await requestJson({ base, path: `/rest/api/3/issue/${encodeURIComponent(key)}?fields=${encodeURIComponent(readFields)}`, authHeader: auth });
+      } catch (e) {
+        if (e.status === 404) throw parentErr(404, `${outOfScope('', key)}.`);
+        throw e;
+      }
+      const f = (raw && raw.fields) || {};
+      const typeName = (f.issuetype && f.issuetype.name) || 'issue';
+      const kind = classifyIssueType(f.issuetype, epicTypeName);
+      if (kind === 'epic') throw parentErr(400, `${key} is an Epic — an Epic cannot be put under or taken out of another Epic`);
+      if (kind === 'subtask') throw parentErr(400, `${key} is a ${typeName} — a sub-task's parent is a standard issue, not an Epic; it is not moved`);
+      const from = parentKeyOf(f, epicLinkId);
+      out.from = from;
+      out.to = epic ? epic.key : null;
+      if ((from || null) === out.to) {
+        out.ok = true;
+        out.outcome = 'unchanged';
+        out.message = epic ? `already under ${epic.key}` : 'has no parent Epic';
+      } else {
+        try {
+          await writeParent(base, auth, key, out.to, epicLinkId);
+        } catch (e) {
+          throw parentErr(e.status, parentWriteRefusal(e, key));
+        }
+        if (typeof onChanged === 'function') onChanged(key, { from, to: out.to });
+        out.ok = true;
+        out.outcome = !epic ? 'removed' : from ? 'moved' : 'added';
+        out.message = !epic ? `removed from ${from}` : from ? `moved from ${from} to ${epic.key}` : `added to ${epic.key}`;
+      }
+    } catch (err) {
+      out.ok = false;
+      out.outcome = 'failed';
+      out.error = err.message;
+    }
+    results.push(out);
+  }
+
+  return {
+    epic,
+    issues: results,
+    changed: results.filter((r) => r.ok && r.outcome !== 'unchanged').length,
+    unchanged: results.filter((r) => r.outcome === 'unchanged').length,
+    failed: results.filter((r) => !r.ok).length,
+  };
+}
+
 // ── board & sprint management (Jira Agile API, #2450) ────────────────────────
 //
 // The first capability that touches Jira's **Agile** surface (`/rest/agile/1.0`,
@@ -2605,6 +2752,11 @@ module.exports = {
   missingRequiredFields,
   createRejectionMessage,
   createStandaloneIssue,
+  // parent Epic of existing issues (#2895)
+  setParentEpic,
+  parentWriteRefusal,
+  PARENT_CHANGE_FIELDS,
+  EPIC_CHILD_FIELD,
   EPIC_ISSUE_TYPE,
   STORY_ISSUE_TYPE,
   // board & sprint management (#2450)

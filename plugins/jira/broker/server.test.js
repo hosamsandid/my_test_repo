@@ -753,6 +753,110 @@ test('cli writes: /add-stories creates stories under an existing Epic, registers
   }
 });
 
+test('cli writes: /set-epic re-parents existing issues, per-issue outcomes, own writes, audit (#2895)', async () => {
+  // A distinct site keeps the process-lifetime field catalog off other fixtures.
+  broker.scopeCredentials.set('team-1', { 'site-url': 'setepicco', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  const puts = [];
+  const ISSUES = {
+    'KAN-5': { type: 'Epic', level: 1 }, 'KAN-12': { type: 'Epic', level: 1 }, 'KAN-7': { type: 'Story', level: 0 },
+    'KAN-30': { type: 'Story', level: 0 }, 'KAN-31': { type: 'Task', level: 0, parent: 'KAN-5' }, 'KAN-32': { type: 'Bug', level: 0, parent: 'KAN-12' },
+  };
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    if (String(url).match(/\/rest\/api\/3\/field$/)) return { ok: true, status: 200, text: async () => '[]' };
+    const m = String(url).match(/\/rest\/api\/3\/issue\/([^/?]+)/);
+    const issue = m && ISSUES[decodeURIComponent(m[1])];
+    if (!issue) return { ok: false, status: 404, text: async () => '{"errorMessages":["Issue does not exist or you do not have permission to see it."]}' };
+    if (opts && opts.method === 'PUT') {
+      const { fields } = JSON.parse(opts.body);
+      puts.push([decodeURIComponent(m[1]), fields]);
+      issue.parent = fields.parent ? fields.parent.key : null;
+      return { ok: true, status: 204, text: async () => '' };
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      key: decodeURIComponent(m[1]),
+      fields: { summary: 'S', issuetype: { name: issue.type, hierarchyLevel: issue.level }, ...(issue.parent ? { parent: { key: issue.parent } } : {}) },
+    }) };
+  };
+  const srv = await listen();
+  try {
+    const ok = await call(srv, 'POST', '/cli/set-epic', { token: TOKEN, body: { epic: 'kan-12', issues: ['KAN-30', 'KAN-31', 'KAN-32', 'KAN-5', 'GONE-1', 'KAN-30'] } });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.epic.key, 'KAN-12');
+    assert.deepEqual(ok.body.issues.map((i) => [i.issue, i.outcome]), [
+      ['KAN-30', 'added'], ['KAN-31', 'moved'], ['KAN-32', 'unchanged'], ['KAN-5', 'failed'], ['GONE-1', 'failed'],
+    ]);
+    assert.match(ok.body.issues[4].error, /GONE-1 was not found, or it is outside this team's Jira scope/);
+    assert.deepEqual(puts, [['KAN-30', { parent: { key: 'KAN-12' } }], ['KAN-31', { parent: { key: 'KAN-12' } }]]);
+    const own = broker.ownWritesStore.snapshot('team-1');
+    for (const k of ['KAN-30|parent', 'KAN-30|issueparentassociation', 'KAN-30|epic link', 'KAN-31|parent', 'KAN-12|epic child', 'KAN-5|epic child']) {
+      assert.ok(own.fields[k], `own write ${k}`);
+    }
+    assert.equal(own.fields['KAN-32|parent'], undefined, 'an unchanged issue wrote nothing');
+    assert.ok(auditLines().some((l) => l.subcommand === 'set-epic' && l.outcome === 'ok' && l.detail === 'KAN-12: 2 changed, 1 unchanged, 2 failed of 5'));
+
+    // take out of the Epic
+    const out = await call(srv, 'POST', '/cli/set-epic', { token: TOKEN, body: { remove: true, issues: ['KAN-30'] } });
+    assert.equal(out.status, 200);
+    assert.equal(out.body.epic, null);
+    assert.deepEqual(out.body.issues.map((i) => i.message), ['removed from KAN-12']);
+    assert.deepEqual(puts.slice(-1), [['KAN-30', { parent: null }]]);
+
+    const before = puts.length;
+    // the target is refused before anything changes: outside scope (404), not an Epic (400)
+    const missing = await call(srv, 'POST', '/cli/set-epic', { token: TOKEN, body: { epic: 'OTHER-1', issues: ['KAN-30'] } });
+    assert.equal(missing.status, 404);
+    assert.match(missing.body.error, /Epic OTHER-1 was not found, or it is outside this team's Jira scope/);
+    const notEpic = await call(srv, 'POST', '/cli/set-epic', { token: TOKEN, body: { epic: 'KAN-7', issues: ['KAN-30'] } });
+    assert.equal(notEpic.status, 400);
+    assert.match(notEpic.body.error, /KAN-7 is a Story, not an Epic/);
+    // shape: no target, both targets, no issues → 400
+    assert.equal((await call(srv, 'POST', '/cli/set-epic', { token: TOKEN, body: { issues: ['KAN-30'] } })).status, 400);
+    assert.equal((await call(srv, 'POST', '/cli/set-epic', { token: TOKEN, body: { epic: 'KAN-12', remove: true, issues: ['KAN-30'] } })).status, 400);
+    assert.equal((await call(srv, 'POST', '/cli/set-epic', { token: TOKEN, body: { epic: 'KAN-12', issues: [] } })).status, 400);
+    assert.equal(puts.length, before, 'no refused call changed anything');
+
+    // no service account → 400 no-service-account
+    const nocred = await call(srv, 'POST', '/cli/set-epic', { token: OTHER, body: { epic: 'X-1', issues: ['X-2'] } });
+    assert.equal(nocred.status, 400);
+    assert.equal(nocred.body.code, 'no-service-account');
+    // POST only
+    assert.equal((await call(srv, 'GET', '/cli/set-epic', { token: TOKEN })).status, 404);
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli writes: /set-epic is gated by its own `set-epic` policy, audited when denied (#2895)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
+  const policy = require('./broker-policy');
+  const orig = policy.authorizeWrite;
+  policy.authorizeWrite = (op) => (op === 'set-epic' ? { allow: false, code: 'scope-not-allowed', reason: 'not for you' } : orig(op));
+  const origFetch = global.fetch;
+  const jiraCalls = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    jiraCalls.push(url);
+    throw new Error('Jira must not be called');
+  };
+  const srv = await listen();
+  try {
+    const r = await call(srv, 'POST', '/cli/set-epic', { token: TOKEN, body: { epic: 'KAN-1', issues: ['KAN-2'] } });
+    assert.equal(r.status, 403);
+    assert.deepEqual(r.body, { error: 'not for you', code: 'scope-not-allowed' });
+    assert.equal(jiraCalls.length, 0);
+    assert.ok(auditLines().some((l) => l.subcommand === 'set-epic' && l.outcome === 'denied' && l.detail === 'scope-not-allowed'));
+  } finally {
+    policy.authorizeWrite = orig;
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
 test('cli writes: /add-stories is denied by the same `create` policy as /create-epic, same error shape (#2890 AC10)', async () => {
   broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'svc@b.c', 'api-token': 'svc-tok' });
   const policy = require('./broker-policy');
@@ -1486,7 +1590,7 @@ test('a refused grant blocks EVERY subcommand before Jira is touched (AC4/AC5)',
     const routes = [
       ['GET', '/cli/whoami'], ['GET', '/cli/inbox'], ['GET', '/cli/inbox?consume=KAN-1:1'], ['GET', '/cli/projects'],
       ['GET', '/cli/show?issue=KAN-1'], ['GET', '/cli/sprint/list?board=B'], ['GET', '/cli/attachment?issue=KAN-1&id=1'],
-      ['POST', '/cli/comment'], ['POST', '/cli/transition'], ['POST', '/cli/create-epic'], ['POST', '/cli/add-stories'], ['POST', '/cli/create-issue'], ['POST', '/cli/sprint/create'],
+      ['POST', '/cli/comment'], ['POST', '/cli/transition'], ['POST', '/cli/create-epic'], ['POST', '/cli/add-stories'], ['POST', '/cli/create-issue'], ['POST', '/cli/set-epic'], ['POST', '/cli/sprint/create'],
       ['POST', '/cli/attachment/add'],
     ];
     for (const [method, url] of routes) {

@@ -325,6 +325,35 @@ test('field_changed for an issue link (#2884): a link the broker created/removed
   assert.equal(human.origin, 'human');
 });
 
+test('field_changed for a parent Epic change (#2895 AC10): the broker set-epic stamps make every echo origin agent', () => {
+  const { extractFieldChangeEvents } = require('./event-extract');
+  const { OwnWritesStore } = require('./own-writes-store');
+  const { PARENT_CHANGE_FIELDS, EPIC_CHILD_FIELD } = require('./jira-client');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const at = Date.parse('2026-01-01T11:58:00.000Z');
+  const store = new OwnWritesStore({ stateDir: fs.mkdtempSync(path.join(os.tmpdir(), 'jira-own-parent-')), now: () => at - 2000 });
+  // what the broker's /set-epic route records for one moved issue (KAN-6: KAN-5 → KAN-12)
+  for (const f of PARENT_CHANGE_FIELDS) store.recordField('team-1', 'KAN-6', f);
+  for (const epic of ['KAN-5', 'KAN-12']) store.recordField('team-1', epic, EPIC_CHILD_FIELD);
+  const own = store.snapshot('team-1');
+  // Jira's changelog items: native parent (team-managed), Epic Link (company-managed), Epic Child (on the Epic)
+  const childItems = [
+    { field: 'IssueParentAssociation', fieldtype: 'jira', from: '10005', fromString: 'KAN-5', to: '10012', toString: 'KAN-12' },
+    { field: 'Parent', fieldId: 'parent', fieldtype: 'jira', from: '10005', fromString: 'KAN-5', to: '10012', toString: 'KAN-12' },
+    { field: 'Epic Link', fieldId: 'customfield_10014', fieldtype: 'custom', from: '10005', fromString: 'KAN-5', to: '10012', toString: 'KAN-12' },
+  ];
+  const events = extractFieldChangeEvents(fieldIssue(childItems), { ownWrites: own });
+  assert.equal(events.length, 3);
+  assert.ok(events.every((e) => e.origin === 'agent'), JSON.stringify(events.map((e) => [e.field, e.origin])));
+  const epicItem = { field: 'Epic Child', fieldtype: 'custom', from: null, fromString: null, to: '10006', toString: 'KAN-6' };
+  const [epicEcho] = extractFieldChangeEvents({ ...fieldIssue([epicItem]), key: 'KAN-12' }, { ownWrites: own });
+  assert.equal(epicEcho.origin, 'agent');
+  // a human re-parenting the same issue (no stamp in that scope) stays human
+  assert.ok(extractFieldChangeEvents(fieldIssue(childItems), { ownWrites: store.snapshot('team-2') }).every((e) => e.origin === 'human'));
+});
+
 test('describeEvent: field_changed reads "<key>: <field> <from> → <to>" with ∅ for a missing side', () => {
   const { describeEvent } = require('./event-extract');
   assert.equal(describeEvent({ event: 'field_changed', issueKey: 'KAN-6', field: 'assignee', from: null, to: 'Bob' }), 'KAN-6: assignee ∅ → Bob');

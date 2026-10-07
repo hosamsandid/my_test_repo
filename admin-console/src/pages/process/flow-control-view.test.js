@@ -257,6 +257,20 @@ test('BoardRow renders In stage for done rows too, with the view\'s tooltip (#65
   assert.match(jsx, /title=\{row\.inStageTitle\}/);
 });
 
+test('#2934: done rows keep full text contrast — no opacity on board rows, a check icon marks them instead (#651 source guard)', () => {
+  const jsx = fs.readFileSync(path.join(here, '..', 'FlowControl.jsx'), 'utf8');
+  const body = jsx.slice(jsx.indexOf('function BoardTable'), jsx.indexOf('function StageProgress'));
+  assert.doesNotMatch(body, /opacity:/);
+  const recent = jsx.slice(jsx.indexOf('function RecentlyCompleted'), jsx.indexOf('function BoardTable'));
+  assert.doesNotMatch(recent, /opacity:/);
+  assert.match(body, /\{row\.done && <CheckCircle2 [^>]*aria-hidden="true"/);
+  // The non-colour cue also holds in the view: done rows get their own section and status text.
+  const v = boardView({ stages: STAGES, rows: [doneRow({ id: 'd' }), row({ id: 'a' })] }, NOW);
+  assert.deepEqual(v.doneRows.map((r) => r.id), ['d']);
+  assert.equal(v.doneRows[0].statusText, 'done');
+  assert.ok(v.activeRows.every((r) => !r.done));
+});
+
 test('rowView: the step list is exactly the team\'s own stages — no fixed vocabulary', () => {
   const kitchen = [
     { id: 'draft', label: 'Draft' }, { id: 'k-chef', label: 'Chef' },
@@ -382,7 +396,7 @@ test('FlowControl wires the chat links: router Link, stage cell and Working-now 
   assert.match(jsx, /<style>\{CHAT_LINK_CSS\}<\/style>/);
   assert.match(jsx, /if \(!chat\) return children;/);
   assert.match(jsx, /<RouterLink to=\{chat\.to\} title=\{chat\.label\} aria-label=\{chat\.label\} className=\{CHAT_LINK_CLASS\}/);
-  assert.match(jsx, /<ChatLink chat=\{row\.chat\}>\s*<div[^>]*>\{row\.stageLabel\}<\/div>\s*<div[^>]*>\{row\.statusText\}<\/div>\s*<\/ChatLink>/);
+  assert.match(jsx, /<ChatLink chat=\{row\.chat\}>\s*<div[^>]*>(?:\s*\{row\.done && <CheckCircle2 [^>]*\/>\}\s*)?\{row\.stageLabel\}\s*<\/div>\s*<div[^>]*>\{row\.statusText\}<\/div>\s*<\/ChatLink>/);
   assert.match(jsx, /<ChatLink chat=\{s\.chat\}>\s*\{s\.role\}/);
 });
 

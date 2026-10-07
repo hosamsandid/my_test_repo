@@ -772,9 +772,12 @@ function EmptyCell({ cell }) {
   return <span role="img" title={cell.title} aria-label={cell.title} style={style}>{cell.text}</span>;
 }
 
+// Done rows are set apart by their own "Recently completed" section and a
+// check icon in the Stage cell — never by `opacity`, which would pull every
+// link and muted text in the row below WCAG AA contrast (#2934).
 function BoardRow({ row, canManage, busy, onRemove }) {
   return (
-    <tr style={{ opacity: row.done ? 0.65 : 1 }}>
+    <tr>
       <td style={{ ...numberCellStyle, ...numberTextStyle }}>
         {row.issue.empty ? <EmptyCell cell={row.issue} /> : <Link href={row.issue.url}>{row.issue.text}</Link>}
       </td>
@@ -793,7 +796,10 @@ function BoardRow({ row, canManage, busy, onRemove }) {
       <td style={cellStyle}><StageProgress steps={row.steps} blocked={row.blocked} /></td>
       <td style={cellStyle}>
         <ChatLink chat={row.chat}>
-          <div style={{ color: 'var(--eb-text-primary)' }}>{row.stageLabel}</div>
+          <div style={{ color: 'var(--eb-text-primary)', display: 'flex', alignItems: 'center', gap: 4 }}>
+            {row.done && <CheckCircle2 size={12} aria-hidden="true" style={{ color: 'var(--eb-status-success, #16a34a)', flexShrink: 0 }} />}
+            {row.stageLabel}
+          </div>
           <div style={mutedStyle}>{row.statusText}</div>
         </ChatLink>
         {row.gateText && <div style={mutedStyle} title={row.gateTitle}>⏳ {row.gateText}</div>}

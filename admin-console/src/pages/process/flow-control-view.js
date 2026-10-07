@@ -165,7 +165,67 @@ export function gateHoldTitle(gateHold, { now = Date.now() } = {}) {
   return `${pr}'s hand-off is held until the PR is green and conflict-free${held ? ` (held ${held})` : ''}. The next agent is woken then; a failure or timeout is labelled and commented on the PR.`;
 }
 
-export function rowView(row, stages, { now = Date.now(), singleRepo = true } = {}) {
+// ---------------------------------------------------------------------------
+// PR hand-off gates (#2914)
+// ---------------------------------------------------------------------------
+
+// Whether a PR hand-off waits before it wakes its agent: "waits for CI",
+// "waits for conflict-free", "waits for CI + conflict-free" or "not gated".
+export function handoffGateText(h) {
+  const what = [h && h.ci ? 'CI' : null, h && h.conflict ? 'conflict-free' : null].filter(Boolean);
+  return what.length ? `waits for ${what.join(' + ')}` : 'not gated';
+}
+
+// Where the gate is changed, or null when the viewer may not change it (AC4):
+// a flow-derived hand-off in the Flow Editor (the receiving node's routing
+// tab), a raw trigger in Agent Chat → Triggers (its edit form).
+export function handoffEditLink(h, { teamId = null, canManage = false } = {}) {
+  if (!canManage || !h || typeof h.agentId !== 'string' || !h.agentId) return null;
+  const agent = encodeURIComponent(h.agentId);
+  if (h.flowManaged) {
+    if (!teamId) return null;
+    return { to: `/flows?proc=${encodeURIComponent(teamId)}&node=${agent}&tab=routing`, label: `Change in the Flow Editor (${h.to || h.agentId})` };
+  }
+  if (typeof h.triggerId !== 'string' || !h.triggerId) return null;
+  return { to: `/chats/${agent}?rail=triggers&trigger=${encodeURIComponent(h.triggerId)}`, label: `Change in Agent Chat → Triggers (${h.to || h.agentId})` };
+}
+
+function handoffWake(h) {
+  return h.label ? `the label ${h.label} is set` : 'the PR is opened';
+}
+
+// One line of the board's "Hand-off gates" list.
+export function handoffView(h, opts = {}) {
+  const gated = !!(h.ci || h.conflict);
+  const from = Array.isArray(h.from) && h.from.length ? h.from.join(' / ') : 'A person';
+  const to = h.to || h.agentId;
+  return {
+    id: h.id,
+    from,
+    to,
+    label: h.label || null,
+    gated,
+    text: handoffGateText(h),
+    title: gated
+      ? `${to} is woken once ${handoffWake(h)} and the PR is ${[h.ci ? 'green' : null, h.conflict ? 'conflict-free' : null].filter(Boolean).join(' and ')}.`
+      : `${to} is woken as soon as ${handoffWake(h)} — even while CI is running or the PR conflicts with its base.`,
+    edit: handoffEditLink(h, opts),
+  };
+}
+
+// The row hint for a PR parked behind an ungated hand-off (AC2), or null.
+export const UNGATED_TEXT = 'hand-off not gated';
+
+export function ungatedView(u, opts = {}) {
+  if (!u || typeof u !== 'object') return null;
+  return {
+    text: UNGATED_TEXT,
+    title: `The hand-off to ${u.to || u.agentId}${u.label ? ` (${u.label})` : ''} does not wait for CI or a conflict-free PR — the PR was handed on as it was.`,
+    edit: handoffEditLink(u, opts),
+  };
+}
+
+export function rowView(row, stages, { now = Date.now(), singleRepo = true, teamId = null, canManage = false } = {}) {
   const list = Array.isArray(stages) ? stages : [];
   const current = Number.isInteger(row.stageIndex) ? row.stageIndex : list.findIndex((s) => s.id === row.stageId);
   const steps = list.map((s, i) => ({
@@ -195,6 +255,7 @@ export function rowView(row, stages, { now = Date.now(), singleRepo = true } = {
     removable: !!row.removable,
     gateText: gateHoldText(row.gateHold),
     gateTitle: gateHoldTitle(row.gateHold, { now }),
+    ungated: ungatedView(row.ungatedHandoff, { teamId, canManage }),
   };
 }
 
@@ -483,7 +544,7 @@ export function retentionHint(hours) {
 export function boardView(data, now = Date.now()) {
   const d = data || {};
   const repos = Array.isArray(d.repos) ? d.repos : [];
-  const opts = { now, singleRepo: repos.length <= 1 };
+  const opts = { now, singleRepo: repos.length <= 1, teamId: d.teamId || null, canManage: !!d.canManage };
   const stages = Array.isArray(d.stages) ? d.stages : [];
   const rows = (Array.isArray(d.rows) ? d.rows : []).map((r) => rowView(r, stages, opts));
   const activeRows = rows.filter((r) => !r.done);
@@ -498,6 +559,7 @@ export function boardView(data, now = Date.now()) {
   return {
     stages,
     roles: Array.isArray(d.roles) ? d.roles : [],
+    handoffs: (Array.isArray(d.handoffs) ? d.handoffs : []).filter((h) => h && h.id).map((h) => handoffView(h, opts)),
     sessions: working.sessions,
     pools: working.pools,
     held: Array.isArray(d.held) ? d.held : [],

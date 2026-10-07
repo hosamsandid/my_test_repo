@@ -51,6 +51,11 @@ import {
   chatLink,
   CHAT_LINK_CLASS,
   CHAT_LINK_CSS,
+  handoffGateText,
+  handoffEditLink,
+  handoffView,
+  ungatedView,
+  UNGATED_TEXT,
 } from './flow-control-view.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -676,6 +681,62 @@ test('#2795: a PR held by its hand-off gate shows "waiting for CI" on the row', 
   assert.match(jsx, /\{row\.gateText && <div style=\{mutedStyle\} title=\{row\.gateTitle\}>⏳ \{row\.gateText\}<\/div>\}/);
 });
 
+// #2914 — per hand-off gate state, with a link to change it.
+const HANDOFF = {
+  id: 't-merger:t-merge', agentId: 't-merger', triggerId: 't-merge', label: 'ready-to-merge',
+  to: 'Merger', toStageId: 't-merger', from: ['Doc Sync', 'Conflict Solver'], flowManaged: true, ci: false, conflict: false,
+};
+
+test('#2914: each PR hand-off reads waits for CI / conflict-free / both / not gated (AC1)', () => {
+  assert.equal(handoffGateText({ ci: true, conflict: false }), 'waits for CI');
+  assert.equal(handoffGateText({ ci: false, conflict: true }), 'waits for conflict-free');
+  assert.equal(handoffGateText({ ci: true, conflict: true }), 'waits for CI + conflict-free');
+  assert.equal(handoffGateText({ ci: false, conflict: false }), 'not gated');
+  assert.equal(handoffGateText(null), 'not gated');
+  const v = handoffView(HANDOFF, { teamId: 't', canManage: true });
+  assert.equal(v.from, 'Doc Sync / Conflict Solver');
+  assert.equal(v.to, 'Merger');
+  assert.equal(v.gated, false);
+  assert.equal(v.text, 'not gated');
+  assert.match(v.title, /^Merger is woken as soon as the label ready-to-merge is set — even while CI is running/);
+  const gated = handoffView({ ...HANDOFF, label: null, from: [], ci: true, conflict: true }, {});
+  assert.equal(gated.from, 'A person');
+  assert.equal(gated.title, 'Merger is woken once the PR is opened and the PR is green and conflict-free.');
+});
+
+test('#2914: the gate links to where it is changed — Flow Editor or Agent Chat → Triggers; no link without edit rights (AC3, AC4)', () => {
+  assert.deepEqual(handoffEditLink(HANDOFF, { teamId: 't', canManage: true }), {
+    to: '/flows?proc=t&node=t-merger&tab=routing', label: 'Change in the Flow Editor (Merger)',
+  });
+  assert.deepEqual(handoffEditLink({ ...HANDOFF, flowManaged: false, triggerId: 'gh 1' }, { teamId: 't', canManage: true }), {
+    to: '/chats/t-merger?rail=triggers&trigger=gh%201', label: 'Change in Agent Chat → Triggers (Merger)',
+  });
+  assert.equal(handoffEditLink(HANDOFF, { teamId: 't', canManage: false }), null);
+  assert.equal(handoffEditLink(HANDOFF, { teamId: null, canManage: true }), null);
+  assert.equal(handoffView(HANDOFF, { teamId: 't' }).edit, null);
+  // boardView threads the team and the viewer's rights through.
+  const data = { teamId: 't', stages: STAGES, rows: [], handoffs: [HANDOFF, null], generatedAt: ago(0) };
+  assert.equal(boardView({ ...data, canManage: true }, NOW).handoffs[0].edit.to, '/flows?proc=t&node=t-merger&tab=routing');
+  assert.equal(boardView(data, NOW).handoffs.length, 1);
+  assert.equal(boardView(data, NOW).handoffs[0].edit, null);
+  assert.deepEqual(boardView({}, NOW).handoffs, []);
+});
+
+test('#2914: a PR row parked behind an ungated hand-off says so, linked when the viewer may change it (AC2)', () => {
+  const u = { id: HANDOFF.id, agentId: 't-merger', triggerId: 't-merge', label: 'ready-to-merge', to: 'Merger', flowManaged: true };
+  const r = rowView(row({ ungatedHandoff: u }), STAGES, { now: NOW, teamId: 't', canManage: true });
+  assert.equal(r.ungated.text, UNGATED_TEXT);
+  assert.equal(r.ungated.text, 'hand-off not gated');
+  assert.match(r.ungated.title, /^The hand-off to Merger \(ready-to-merge\) does not wait for CI or a conflict-free PR/);
+  assert.equal(r.ungated.edit.to, '/flows?proc=t&node=t-merger&tab=routing');
+  assert.equal(rowView(row({ ungatedHandoff: u }), STAGES, { now: NOW }).ungated.edit, null);
+  assert.equal(rowView(row(), STAGES, { now: NOW }).ungated, null);
+  assert.equal(ungatedView(null), null);
+  const jsx = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'FlowControl.jsx'), 'utf8');
+  assert.match(jsx, /row\.ungated && <GateNote note=\{row\.ungated\}/);
+  assert.match(jsx, /<HandoffGates handoffs=\{view\.handoffs\}/);
+});
+
 // #2848 — running instances nested beneath their pool line.
 test('groupWorkingNow: pooled instances go beneath their own pool, in server order (AC1, AC2, edge: stable order)', () => {
   const v = boardView({
@@ -796,4 +857,17 @@ test('Adopt copy: title, confirmation and notice (#2877)', () => {
   assert.equal(adoptNotice({ adopted: 0 }), null);
   const topic = fs.readFileSync(HELP_TOPIC, 'utf8').replace(/\s+/g, ' ');
   assert.ok(topic.includes(ADOPT_CONFIRM_TEXT), 'flow-control.md must quote ADOPT_CONFIRM_TEXT');
+});
+
+test('#2914 — the raw-trigger "Change" link opens that trigger in Agent Chat → Triggers', () => {
+  const read = (...p) => fs.readFileSync(path.join(here, '..', ...p), 'utf8');
+  const chat = read('AgentChat.jsx');
+  assert.match(chat, /searchParams\.get\('trigger'\)/);
+  assert.match(chat, /tab: 'triggers', \.\.\.\(requestedTrigger \? \{ triggerId: requestedTrigger \}/);
+  assert.match(chat, /next\.delete\('trigger'\)/);
+  assert.match(read('agent-chat', 'RightRail.jsx'), /<TriggersPanel [^>]*focusRequest=\{openTabRequest && openTabRequest\.tab === 'triggers' && openTabRequest\.triggerId/);
+  const panel = read('agent-chat', 'TriggersPanel.jsx');
+  assert.match(panel, /focusRequest = null \}\) \{/);
+  assert.match(panel, /listedTriggers\.find\(\(t\) => t\.id === focusRequest\.triggerId\)/);
+  assert.match(panel, /setEditTarget\(hit\)/);
 });

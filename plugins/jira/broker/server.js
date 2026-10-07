@@ -663,11 +663,13 @@ async function handleCli(req, res, cliPath) {
   }
 
   // ── new Stories under an EXISTING Epic (#2890) ───────────────────────────
-  // The CLI sends `{ epic: "<KEY>", stories[], issueTypes? }`; the broker checks
-  // the key is a visible Epic, then creates each story under it in the Epic's
-  // project (jira.addStoriesToEpic) — never a new Epic. Gated exactly like
-  // create-epic: the same `create` write policy, the same allow-list, the same
-  // own-writes registration per created key; audited as `add-stories`.
+  // The CLI sends `{ epic: "<KEY>", stories[], type?, issueTypes? }`; the broker
+  // checks the key is a visible Epic, then creates each story under it in the
+  // Epic's project (jira.addStoriesToEpic) — never a new Epic. `type` (the
+  // CLI's --type) and a per-entry `type` pick any standard issue type (#2896).
+  // Gated exactly like create-epic: the same `create` write policy, the same
+  // allow-list, the same own-writes registration per created key; audited as
+  // `add-stories`.
   if (cliPath === '/add-stories' && req.method === 'POST') {
     const authz = brokerPolicy.authorizeWrite('create');
     if (!authz.allow) {
@@ -684,6 +686,7 @@ async function handleCli(req, res, cliPath) {
       const result = await jira.addStoriesToEpic(cred, {
         epicKey,
         stories: body.stories,
+        defaultType: typeof body.type === 'string' ? body.type : undefined,
         allowList: cred.writableCustomFields || [],
         attribution: `Created by an agent on team "${scopeId}" via Agent Studio.`,
         issueTypes: body.issueTypes && typeof body.issueTypes === 'object' ? body.issueTypes : undefined,
@@ -696,6 +699,124 @@ async function handleCli(req, res, cliPath) {
       return sendJson(res, 200, result);
     } catch (err) {
       auditCall('add-stories', failureOutcome(err), `${epicKey}: ${err.message}`);
+      return sendJiraError(err);
+    }
+  }
+
+  // ── parent Epic of EXISTING issues: put under, move, take out (#2895) ────
+  // The CLI sends `{ epic: "<KEY>", issues[] }` or `{ remove: true, issues[] }`
+  // — removal is explicit, so a missing epic is never read as "take out". The
+  // broker checks the target is a visible Epic, then re-parents each issue
+  // (jira.setParentEpic) with a per-issue outcome. Its own `set-epic` write
+  // policy; every changed parent is stamped as an own write on the issue (and
+  // `Epic Child` on both Epics) so the echo reads `origin: agent`.
+  if (cliPath === '/set-epic' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('set-epic');
+    if (!authz.allow) {
+      auditCall('set-epic', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = credFor();
+    if (!cred) return noCredential('set-epic');
+    const body = parseJson(await readBody(req));
+    const remove = body.remove === true;
+    const epicKey = String(body.epic || '').trim().toUpperCase();
+    if (remove && epicKey) return sendJson(res, 400, { error: 'name a target --epic or --none, not both' });
+    if (!remove && !epicKey) return sendJson(res, 400, { error: 'a target --epic key (or --none to take the issues out of their Epic) is required' });
+    if (!Array.isArray(body.issues) || !body.issues.length) return sendJson(res, 400, { error: 'at least one issue key is required' });
+    const target = remove ? 'none' : epicKey;
+    try {
+      const result = await jira.setParentEpic(cred, {
+        epicKey: remove ? null : epicKey,
+        issueKeys: body.issues,
+        issueTypes: body.issueTypes && typeof body.issueTypes === 'object' ? body.issueTypes : undefined,
+        onChanged: (key, { from, to }) => recordOwnWrite(() => {
+          for (const field of jira.PARENT_CHANGE_FIELDS) ownWritesStore.recordField(scopeId, key, field);
+          for (const epic of [from, to].filter(Boolean)) ownWritesStore.recordField(scopeId, epic, jira.EPIC_CHILD_FIELD);
+        }),
+      });
+      auditCall('set-epic', 'ok', `${target}: ${result.changed} changed, ${result.unchanged} unchanged, ${result.failed} failed of ${result.issues.length}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      auditCall('set-epic', failureOutcome(err), `${target}: ${err.message}`);
+      return sendJiraError(err);
+    }
+  }
+
+  // ── standard fields of an EXISTING issue (#2897) ─────────────────────────
+  // The CLI sends `{ issue, summary?, assignee? (null = unassign), priority?,
+  // labels? / components? / fixVersions? ({ set } | { add, remove }), dueDate?
+  // (null = clear) }`; jira.editIssueFields validates everything, resolves the
+  // names and applies the real changes in ONE Jira edit (all or nothing). Its
+  // own `edit` write policy; every changed field is stamped as an own write so
+  // its `field_changed` echo reads `origin: agent`.
+  if (cliPath === '/edit' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('edit');
+    if (!authz.allow) {
+      auditCall('edit', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = credFor();
+    if (!cred) return noCredential('edit');
+    const body = parseJson(await readBody(req));
+    const issue = String(body.issue || '').trim();
+    if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });
+    const changes = {};
+    for (const k of Object.keys(jira.EDIT_FIELDS)) {
+      if (Object.prototype.hasOwnProperty.call(body, k)) changes[k] = body[k];
+    }
+    try {
+      const result = await jira.editIssueFields(cred, issue, {
+        changes,
+        onChanged: (fieldIds) => recordOwnWrite(() => {
+          for (const id of fieldIds) ownWritesStore.recordField(scopeId, issue.toUpperCase(), id);
+        }),
+      });
+      const changed = result.fields.filter((f) => f.outcome === 'changed').map((f) => f.field);
+      auditCall('edit', 'ok', `${result.issue}: ${changed.length ? `changed ${changed.join(', ')}` : 'nothing changed'}${result.unchanged ? `, ${result.unchanged} unchanged` : ''}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      auditCall('edit', failureOutcome(err), `${issue}: ${err.message}`);
+      return sendJiraError(err);
+    }
+  }
+
+  // ── one standalone issue, no parent Epic (#2894) ─────────────────────────
+  // The CLI sends `{ project, type, issue: { summary, description?, assignee?,
+  // priority?, labels?, status?, fields? }, issueTypes? }`; the broker creates
+  // exactly one issue of that type in the project (jira.createStandaloneIssue).
+  // Gated like create-epic / add-stories: the same `create` write policy, the
+  // same allow-list, the same own-writes registration; audited as `create-issue`.
+  if (cliPath === '/create-issue' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('create');
+    if (!authz.allow) {
+      auditCall('create-issue', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = credFor();
+    if (!cred) return noCredential('create-issue');
+    const body = parseJson(await readBody(req));
+    const project = String(body.project || '').trim().toUpperCase();
+    if (!project) return sendJson(res, 400, { error: 'a --project key is required' });
+    if (!String(body.type || '').trim()) return sendJson(res, 400, { error: 'an issue --type is required (e.g. Bug, Task, Story)' });
+    if (!body.issue || typeof body.issue !== 'object') return sendJson(res, 400, { error: 'the issue requires a summary' });
+    try {
+      const result = await jira.createStandaloneIssue(cred, {
+        projectKey: project,
+        issueType: body.type,
+        issue: body.issue,
+        allowList: cred.writableCustomFields || [],
+        attribution: `Created by an agent on team "${scopeId}" via Agent Studio.`,
+        issueTypes: body.issueTypes && typeof body.issueTypes === 'object' ? body.issueTypes : undefined,
+        onCreated: (key) => recordOwnWrite(() => {
+          ownWritesStore.recordIssue(scopeId, key);
+          ownWritesStore.recordField(scopeId, key, '*');
+        }),
+      });
+      auditCall('create-issue', 'ok', `${result.key} (${result.issueType})${result.statusError ? ' status transition failed' : ''}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      auditCall('create-issue', failureOutcome(err), `${project}: ${err.message}`);
       return sendJiraError(err);
     }
   }
@@ -842,6 +963,53 @@ async function handleCli(req, res, cliPath) {
       return sendJson(res, 200, result);
     } catch (err) {
       auditCall('sprint-advance', failureOutcome(err), `${board}: ${err.message}`);
+      return sendJiraError(err);
+    }
+  }
+
+  // ── user lookup: name / e-mail → accountId (#2898) ──────────────────────
+  // A read: no write policy. The audit line records only where it looked and
+  // how many matched — never the query or the people found (personal data).
+  if (cliPath === '/users' && req.method === 'GET') {
+    const cred = credFor();
+    if (!cred) return noCredential('users');
+    const project = (params.get('project') || '').trim();
+    const issue = (params.get('issue') || '').trim();
+    const where = project || issue || 'site';
+    try {
+      const result = await jira.searchUsers(cred, {
+        query: params.get('query') || '',
+        project: project || undefined,
+        issue: issue || undefined,
+        limit: params.get('limit') || undefined,
+      });
+      auditCall('users', 'ok', `${where}:${result.count}${result.truncated ? '+' : ''}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      auditCall('users', failureOutcome(err), `${where}: ${err.status || 'error'}`);
+      return sendJiraError(err);
+    }
+  }
+
+  // ── an issue's comments, newest first, paged (#2899) ─────────────────────
+  // A read: no write policy. `origin` comes from this scope's own-writes
+  // registry (as on a `comment_added` wake). The audit line records only the
+  // issue and how many comments came back — never their text.
+  if (cliPath === '/comments' && req.method === 'GET') {
+    const cred = credFor();
+    if (!cred) return noCredential('comments');
+    const issue = (params.get('issue') || '').trim();
+    if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });
+    try {
+      const result = await jira.listComments(cred, issue, {
+        limit: params.get('limit') || undefined,
+        offset: params.get('offset') || undefined,
+        ownWrites: ownWritesStore.snapshot(scopeId),
+      });
+      auditCall('comments', 'ok', `${issue}:${result.count}@${result.offset}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      auditCall('comments', failureOutcome(err), `${issue}: ${err.status || 'error'}`);
       return sendJiraError(err);
     }
   }

@@ -60,14 +60,34 @@ building the broker image, seeding the registry, installing, then granting:
 
    ```bash
    podman image inspect localhost/aee-plugin-jira:latest \
-     --format '{{index .Labels "org.opencontainers.image.revision"}} {{index .Labels "aee.build.commit-time"}}'
+     --format '{{index .Labels "org.opencontainers.image.revision"}} {{index .Labels "aee.build.commit-time"}} {{index .Labels "aee.build.tag"}}+{{index .Labels "aee.build.tag-distance"}}'
    ```
 
+   Since #2893 the identity also carries the nearest **release tag** and the
+   number of commits since it (`GIT_TAG` / `GIT_TAG_DISTANCE` →
+   `AEE_BUILD_TAG` / `AEE_BUILD_TAG_DISTANCE`, labels `aee.build.tag` /
+   `aee.build.tag-distance`), computed by `scripts/git-release-tag.sh`: only
+   `v<major>.<minor>.<patch>` tags count, the nearest one wins, and several on
+   one commit resolve to the highest version. Both are empty when no release tag
+   is reachable (no tags, a shallow clone without fetched tags) — never a build
+   failure. The `make plugin-images` summary prints them next to the commit.
+   The Plugins page reads the version as:
+
+   | Build | Shown as |
+   |---|---|
+   | exactly on a tag | `v0.4.0` |
+   | 12 commits after it | `v0.4.0+12 (5500e15)` |
+   | dirty working tree | `v0.4.0+12 (5500e15-dirty)` (on the tag: `v0.4.0 (5500e15-dirty)`) |
+   | no tag info | `5500e15` — the hash, as before |
+
+   The mismatch hints keep comparing commits, never tags.
+
    A running broker reports the same values on `GET /healthz` as
-   `build: { commit, dirty, commitTime }` (Broker SDK `healthEndpoint`); the
-   orchestrator asks every live sidecar, so the Plugins page shows what the
-   container really runs, not what `:latest` points at now. Another build path
-   must pass the three `--build-arg`s, or the image reports `unknown`.
+   `build: { commit, dirty, commitTime[, tag, tagDistance] }` (Broker SDK
+   `healthEndpoint`); the orchestrator asks every live sidecar, so the Plugins
+   page shows what the container really runs, not what `:latest` points at now.
+   Another build path must pass the same `--build-arg`s (`PLUGIN_BUILD_ARGS`),
+   or the image reports `unknown` (without the tag args: the hash only).
 
 2. **Seed the registry** so operators can see the plugin:
 
@@ -77,7 +97,8 @@ building the broker image, seeding the registry, installing, then granting:
 
    Copies `plugins/<id>/` into the pool volume → the operator registry at
    `/workspace/plugins/<id>/`.
-   Every seeded plugin gets a `build-info.json` (`{ commit, dirty, commitTime }`)
+   Every seeded plugin gets a `build-info.json`
+   (`{ commit, dirty, commitTime, tag, tagDistance }`)
    with the same identity; installing copies it into the registry, so the
    **Installed files** line on the Plugins page names the commit the manifest
    and CLI came from.

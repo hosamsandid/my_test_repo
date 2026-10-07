@@ -753,6 +753,83 @@ test('aee-jira: link / unlink read as a sentence — first key, type words, last
   }
 });
 
+test('aee-jira users: listed in --help; --project/--issue exclusive; wired to GET /users (#2898)', async () => {
+  const ws = grantedJiraWorkspace();
+  const help = runJira(['--help'], ws);
+  const flat = help.stdout.replace(/\s+/g, ' ');
+  assert.match(flat, /users find Jira users by name or e-mail → their accountId/);
+  assert.match(runJira(['users', '--help'], ws).stdout.replace(/\s+/g, ' '), /Find people so you can assign them\. Jira identifies a person by an opaque accountId/);
+  assert.match(flat, /aee-jira users "Anna" --project KAN, then aee-jira edit KAN-10 --assignee <accountId>/);
+  // a query is required; --project and --issue are mutually exclusive — usage errors, no broker call
+  assert.equal(runJira(['users', '--json'], ws).status, 2);
+  assert.equal(runJira(['users', 'Anna', '--project', 'KAN', '--issue', 'KAN-1', '--json'], ws).status, 2);
+
+  const http = require('node:http');
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    seen.push({ method: req.method, url: req.url });
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ query: 'Anna', users: [], count: 0, truncated: false, note: 'No user found matching "Anna".' }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const live = grantedJiraWorkspace(`http://127.0.0.1:${port}/`);
+    for (const args of [
+      ['users', 'Anna Schmidt'],
+      ['users', 'anna@acme.com', '--project', 'KAN', '--limit', '5'],
+      ['users', 'Anna', '--issue', 'KAN-10'],
+    ]) {
+      const r = await runJiraAsync([...args, '--json'], live);
+      assert.equal(r.status, 0, args.join(' ') + r.stdout + r.stderr); // no match is not an error
+    }
+    assert.deepEqual(seen, [
+      { method: 'GET', url: '/cli/users?query=Anna+Schmidt' },
+      { method: 'GET', url: '/cli/users?query=anna%40acme.com&project=KAN&limit=5' },
+      { method: 'GET', url: '/cli/users?query=Anna&issue=KAN-10' },
+    ]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('aee-jira comments: listed in --help; an issue key is required; wired to GET /comments (#2899)', async () => {
+  const ws = grantedJiraWorkspace();
+  const flat = runJira(['--help'], ws).stdout.replace(/\s+/g, ' ');
+  assert.match(flat, /comments read an issue's comments, newest first \(id, author, created, updated, body, origin\)/);
+  assert.match(flat, /e\.g\. aee-jira comments KAN-10 \[--limit N\] \[--offset N\]/);
+  assert.match(runJira(['comments', '--help'], ws).stdout.replace(/\s+/g, ' '), /Read the conversation on an issue, newest first/);
+  // an issue key is required; --limit / --offset are whole numbers — usage errors, no broker call
+  assert.equal(runJira(['comments', '--json'], ws).status, 2);
+  assert.equal(runJira(['comments', 'KAN-10', '--limit', 'many', '--json'], ws).status, 2);
+
+  const http = require('node:http');
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    seen.push({ method: req.method, url: req.url });
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ issue: 'KAN-10', comments: [], count: 0, total: 0, offset: 0, limit: 20, hasMore: false, note: 'KAN-10 has no comments.' }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const live = grantedJiraWorkspace(`http://127.0.0.1:${port}/`);
+    for (const args of [
+      ['comments', 'KAN-10'],
+      ['comments', 'KAN-10', '--limit', '5', '--offset', '20'],
+    ]) {
+      const r = await runJiraAsync([...args, '--json'], live);
+      assert.equal(r.status, 0, args.join(' ') + r.stdout + r.stderr); // no comments is not an error
+    }
+    assert.deepEqual(seen, [
+      { method: 'GET', url: '/cli/comments?issue=KAN-10' },
+      { method: 'GET', url: '/cli/comments?issue=KAN-10&limit=5&offset=20' },
+    ]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('aee-jira add-stories: listed in --help; bad payloads are usage errors; wired to /add-stories; exit 1 on a failed story (#2890)', async () => {
   const ws = grantedJiraWorkspace();
   const help = runJira(['--help'], ws);
@@ -793,6 +870,180 @@ test('aee-jira add-stories: listed in --help; bad payloads are usage errors; wir
     r = await runJiraAsync(['add-stories', '--epic', 'KAN-1', '--file', payload, '--json'], live);
     assert.equal(r.status, 1, 'a partial result exits non-zero, like create-epic');
     assert.equal(JSON.parse(r.stdout.trim()).result.failed, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('aee-jira add-stories: --type and an "issues" payload add any standard type under the Epic (#2896)', async () => {
+  const ws = grantedJiraWorkspace();
+  const flat = runJira(['add-stories', '--help'], ws).stdout.replace(/\s+/g, ' ');
+  assert.match(flat, /--type TYPE issue type for every issue in the call \(default Story\)/);
+  const file = (doc) => { const p = path.join(ws, `p-${Math.random()}.json`); fs.writeFileSync(p, doc); return p; };
+  assert.equal(runJira(['add-stories', '--epic', 'KAN-1', '--type', 'Bug', '--file', file('{"issues":[]}'), '--json'], ws).status, 2);
+
+  const http = require('node:http');
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, body: JSON.parse(raw) });
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ epic: { key: 'KAN-12' }, stories: [], created: 2, failed: 0 }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const live = grantedJiraWorkspace(`http://127.0.0.1:${port}/`);
+    const payload = file('{"issues":[{"summary":"Login fails"},{"type":"Task","summary":"Rotate keys","labels":["ops"]}]}');
+    const r = await runJiraAsync(['add-stories', '--epic', 'KAN-12', '--type', 'Bug', '--file', payload, '--json'], live);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(seen[0], {
+      method: 'POST', url: '/cli/add-stories',
+      body: { epic: 'KAN-12', type: 'Bug', stories: [{ summary: 'Login fails' }, { type: 'Task', summary: 'Rotate keys', labels: ['ops'] }] },
+    });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('aee-jira create-issue: listed in --help; flags + --file build the body; usage errors; exit 1 on a failed status (#2894)', async () => {
+  const ws = grantedJiraWorkspace();
+  const help = runJira(['--help'], ws);
+  const flat = help.stdout.replace(/\s+/g, ' '); // argparse wraps the help column
+  assert.match(flat, /create-issue create ONE standalone issue \(Story, Task, Bug, …\) without a parent Epic/);
+  const file = (doc) => { const p = path.join(ws, `p-${Math.random()}.json`); fs.writeFileSync(p, doc); return p; };
+  // --project / --type are required; no summary, a bad --field or a bad payload never reach the broker
+  assert.equal(runJira(['create-issue', '--type', 'Bug', '--summary', 'S'], ws).status, 2);
+  assert.equal(runJira(['create-issue', '--project', 'KAN', '--summary', 'S'], ws).status, 2);
+  assert.equal(runJira(['create-issue', '--project', 'KAN', '--type', 'Bug', '--json'], ws).status, 2);
+  assert.equal(runJira(['create-issue', '--project', 'KAN', '--type', 'Bug', '--summary', 'S', '--field', 'Team', '--json'], ws).status, 2);
+  assert.equal(runJira(['create-issue', '--project', 'KAN', '--type', 'Bug', '--file', file('not json'), '--json'], ws).status, 2);
+  assert.equal(runJira(['create-issue', '--project', 'KAN', '--type', 'Bug', '--file', file('[1]'), '--json'], ws).status, 2);
+
+  const http = require('node:http');
+  const seen = [];
+  let statusError = null;
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, body: JSON.parse(raw) });
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ key: 'KAN-42', url: 'https://x/browse/KAN-42', ...(statusError ? { statusError } : {}) }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const live = grantedJiraWorkspace(`http://127.0.0.1:${port}/`);
+    const payload = file('{"summary":"from file","description":"d","fields":{"Severity":{"id":"7"}}}');
+    let r = await runJiraAsync([
+      'create-issue', '--project', 'KAN', '--type', 'Bug', '--file', payload, '--summary', 'Login fails',
+      '--assignee', 'acc-1', '--priority', 'High', '--label', 'web', '--label', 'regression',
+      '--status', 'In Progress', '--field', 'Team=42', '--field', 'Note=a=b', '--json',
+    ], live);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(seen[0], {
+      method: 'POST', url: '/cli/create-issue',
+      body: {
+        project: 'KAN', type: 'Bug',
+        issue: {
+          summary: 'Login fails', description: 'd', assignee: 'acc-1', priority: 'High', status: 'In Progress',
+          labels: ['web', 'regression'], fields: { Severity: { id: '7' }, Team: '42', Note: 'a=b' },
+        },
+      },
+    });
+    statusError = 'no transition to "Released"';
+    r = await runJiraAsync(['create-issue', '--project', 'KAN', '--type', 'Task', '--summary', 'S', '--status', 'Released', '--json'], live);
+    assert.equal(r.status, 1, 'a failed follow-up transition exits non-zero');
+    assert.equal(JSON.parse(r.stdout.trim()).result.key, 'KAN-42', 'the created key is still printed');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('aee-jira set-epic: listed in --help; target is --epic XOR --none; wired to /set-epic; exit 1 on a failed issue (#2895)', async () => {
+  const ws = grantedJiraWorkspace();
+  const help = runJira(['--help'], ws);
+  const flat = help.stdout.replace(/\s+/g, ' '); // argparse wraps the help column
+  assert.match(flat, /set-epic put EXISTING issues under an Epic, move them to it, or take them out/);
+  assert.match(flat, /aee-jira set-epic KAN-30 KAN-31 --epic KAN-12/);
+  // a target is required, and only one; at least one issue key
+  assert.equal(runJira(['set-epic', 'KAN-30'], ws).status, 2);
+  assert.equal(runJira(['set-epic', 'KAN-30', '--epic', 'KAN-12', '--none'], ws).status, 2);
+  assert.equal(runJira(['set-epic', '--epic', 'KAN-12'], ws).status, 2);
+
+  const http = require('node:http');
+  const seen = [];
+  let failed = 0;
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, body: JSON.parse(raw) });
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ epic: null, issues: [], changed: 1, unchanged: 0, failed }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const live = grantedJiraWorkspace(`http://127.0.0.1:${port}/`);
+    let r = await runJiraAsync(['set-epic', 'KAN-30', 'KAN-31', '--epic', 'KAN-12', '--json'], live);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(seen[0], { method: 'POST', url: '/cli/set-epic', body: { issues: ['KAN-30', 'KAN-31'], epic: 'KAN-12' } });
+    r = await runJiraAsync(['set-epic', 'KAN-30', '--none', '--json'], live);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(seen[1].body, { issues: ['KAN-30'], remove: true });
+    failed = 1;
+    r = await runJiraAsync(['set-epic', 'KAN-30', '--epic', 'KAN-12', '--json'], live);
+    assert.equal(r.status, 1, 'a per-issue failure exits non-zero, like add-stories');
+    assert.equal(JSON.parse(r.stdout.trim()).result.failed, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('aee-jira edit: listed in --help; flags build the body; set vs add/remove and an empty edit are usage errors (#2897)', async () => {
+  const ws = grantedJiraWorkspace();
+  const help = runJira(['--help'], ws);
+  const flat = help.stdout.replace(/\s+/g, ' '); // argparse wraps the help column
+  assert.match(flat, /edit change standard fields of an existing issue/);
+  assert.equal(runJira(['edit', 'KAN-10'], ws).status, 2, 'nothing to change');
+  assert.equal(runJira(['edit', 'KAN-10', '--set-labels', 'a', '--add-label', 'b'], ws).status, 2);
+  assert.equal(runJira(['edit', 'KAN-10', '--assignee', 'x', '--unassign'], ws).status, 2);
+  assert.equal(runJira(['edit', 'KAN-10', '--due', '2026-10-31', '--clear-due'], ws).status, 2);
+
+  const http = require('node:http');
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, body: JSON.parse(raw) });
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ issue: 'KAN-10', fields: [], changed: 0, unchanged: 0 }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const live = grantedJiraWorkspace(`http://127.0.0.1:${port}/`);
+    let r = await runJiraAsync(['edit', 'KAN-10', '--summary', 'New', '--assignee', 'acc-1', '--priority', 'High',
+      '--add-label', 'backend', '--add-label', 'api', '--remove-label', 'old', '--set-components', 'Backend',
+      '--remove-fix-version', '1.0', '--due', '2026-10-31', '--json'], live);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(seen[0], { method: 'POST', url: '/cli/edit', body: {
+      issue: 'KAN-10', summary: 'New', assignee: 'acc-1', priority: 'High',
+      labels: { add: ['backend', 'api'], remove: ['old'] }, components: { set: ['Backend'] },
+      fixVersions: { add: [], remove: ['1.0'] }, dueDate: '2026-10-31',
+    } });
+    r = await runJiraAsync(['edit', 'KAN-10', '--unassign', '--clear-due', '--set-labels', '--json'], live);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(seen[1].body, { issue: 'KAN-10', assignee: null, labels: { set: [] }, dueDate: null });
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

@@ -41,16 +41,4 @@ function buildAgentStatus({ id, cfg, running, status, dmRoom, sessionFileExists 
   };
 }
 
-// Is a cache entry built at `builtAt` still fresh at `now` for the given TTL?
-// A short TTL (a few seconds, below the 5s poll beat) collapses bursts of
-// near-simultaneous requests — multiple tabs/users, or a scope-varying set —
-// onto a single filesystem + orchestrator sweep, without the status display
-// going meaningfully stale.
-function statusCacheFresh(builtAt, now, ttlMs) {
-  if (typeof builtAt !== 'number' || typeof now !== 'number') return false;
-  if (!(ttlMs > 0)) return false;
-  const age = now - builtAt;
-  return age >= 0 && age < ttlMs;
-}
-
-module.exports = { buildAgentStatus, statusCacheFresh };
+module.exports = { buildAgentStatus };

@@ -32,6 +32,7 @@ const { computeScope, canManageTeam, canManageAgent, visibleTeam } = require('./
 const { userDirectory } = require('./draft-access');
 
 const API_SRC = fs.readFileSync(path.join(__dirname, 'api.js'), 'utf8');
+const ROSTER_SRC = fs.readFileSync(path.join(__dirname, 'matrix-agent-roster.js'), 'utf8');
 
 function stripComments(src) {
   // Line comments FIRST: a `//` comment naming a route path contains a `/*`
@@ -108,13 +109,27 @@ const CHECKS = {
     // which is why the projection has to be the thing that is checked.
     assert.doesNotMatch(r, /callAdmin|proxyAdmin|denyAdmin|scope\.all|visibleUser/);
   },
+  // Since #566 the row is shaped in the pure matrix-agent-roster.js
+  // (`projectRoster`), so this check reads THAT source; the route only has to
+  // hand it the real predicates (next check).
   'chat-ships-canmanageteam'(src) {
-    const r = route(src, MARKERS.chatList);
-    assert.match(r, /canManage: canManageAgent\(scope, agentMetaForScope\(cfg\)\)/, 'unchanged');
+    const at = src.indexOf('function projectRoster(');
+    assert.ok(at >= 0, 'projectRoster moved — this guard needs re-pointing');
+    const r = stripComments(src.slice(at, src.indexOf('\n}\n', at)));
+    assert.match(r, /canManage: access\.canManageAgent\(scope, meta\)/, 'unchanged');
     assert.match(
       r,
-      /cfg\.role === 'team' \? \{ canManageTeam: canManageTeam\(scope, id\) \}/,
+      /isTeam \? \{ canManageTeam: access\.canManageTeam\(scope, id\) \}/,
       'the member-list right must be its own field, computed with its own predicate',
+    );
+  },
+  'chat-route-hands-the-real-predicates'(src) {
+    const r = route(src, MARKERS.chatList);
+    assert.match(r, /getScope\(req\)/);
+    assert.match(r, /projectRoster\(entries, scope, \{ includeDisabled, includeStubs \}, ROSTER_ACCESS\)/);
+    assert.match(
+      stripComments(src),
+      /const ROSTER_ACCESS = \{ visibleAgent, canManageAgent, canChatAgent, canManageTeam \};/,
     );
   },
 };
@@ -223,7 +238,8 @@ test('AC10 — the directory exposes display name and email ONLY', () => {
 /* ── The one real gap #2041 §7.1 named: the chat payload's predicate ──── */
 
 test('the chat list ships an explicit canManageTeam on team rows', () => {
-  CHECKS['chat-ships-canmanageteam'](API_SRC);
+  CHECKS['chat-ships-canmanageteam'](ROSTER_SRC);
+  CHECKS['chat-route-hands-the-real-predicates'](API_SRC);
 });
 
 test('the explicit field is not merely canManage under another name', () => {
@@ -264,8 +280,11 @@ test('every source check above fails on a sabotaged api.js (mutation proof)', ()
       'const teamId = req.query && req.query.teamId;',
       'const teamId = req.body && req.body.teamId;'],
     ['chat-ships-canmanageteam', 'the chat payload goes back to inferring the member-list right',
-      "...(cfg.role === 'team' ? { canManageTeam: canManageTeam(scope, id) } : {}),",
-      ''],
+      "...(isTeam ? { canManageTeam: access.canManageTeam(scope, id) } : {}),",
+      '', ROSTER_SRC],
+    ['chat-route-hands-the-real-predicates', 'the route stops passing canManageTeam to the projection',
+      'const ROSTER_ACCESS = { visibleAgent, canManageAgent, canChatAgent, canManageTeam };',
+      'const ROSTER_ACCESS = { visibleAgent, canManageAgent, canChatAgent, canManageTeam: canManageAgent };'],
     ['list-reads-not-manages', 'the read is narrowed to Team Admins, breaking AC9',
       'res.json(scope.all ? data : data.filter(m => visibleTeam(scope, m.teamId)));',
       'res.json(scope.all ? data : data.filter(m => canManageTeam(scope, m.teamId)));'],
@@ -274,13 +293,13 @@ test('every source check above fails on a sabotaged api.js (mutation proof)', ()
       "const teamId = req.body && req.body.teamId; if (soleAdmin(teamId)) return denyAdmin(res, 'last-team-admin');"],
   ];
 
-  for (const [checkName, what, from, to] of mutations) {
+  for (const [checkName, what, from, to, src = API_SRC] of mutations) {
     assert.equal(
-      API_SRC.split(from).length - 1, 1,
+      src.split(from).length - 1, 1,
       `mutation anchor must occur exactly once, else the wrong code is mutated (${what})`,
     );
-    const mutated = API_SRC.replace(from, to);
-    assert.notEqual(mutated, API_SRC, `the mutation must change something (${what})`);
+    const mutated = src.replace(from, to);
+    assert.notEqual(mutated, src, `the mutation must change something (${what})`);
     assert.throws(
       () => CHECKS[checkName](mutated),
       err => err instanceof assert.AssertionError,
@@ -288,6 +307,6 @@ test('every source check above fails on a sabotaged api.js (mutation proof)', ()
     );
     // …and it must still pass on the real source, so the check is not simply
     // broken for both.
-    CHECKS[checkName](API_SRC);
+    CHECKS[checkName](src);
   }
 });

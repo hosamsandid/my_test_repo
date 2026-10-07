@@ -340,6 +340,32 @@ total time with n/p50/p90/max — and log a request slower than `AEE_SLOW_REQUES
 show as `slow-suppressed=` in the summary). `AEE_PERF_LOG=0` turns both off. All
 `[perf]` lines go to stdout: `podman logs admin-console | grep '\[perf\]'` (on Kubernetes:
 `kubectl logs deploy/admin-console -n <namespace> | grep '\[perf\]'`).
+The chat rail's roster (`GET /api/matrix/agents`) is built once per `AGENT_ROSTER_TTL_MS`
+(default `2000`) and shared by every tab and user. A successful roster-affecting console
+mutation (create, rename, enable/disable, delete, environment rename, a new DM room)
+clears it; changes the orchestrator makes on its own (pool spawn/reap, idle reclaim)
+show within one TTL. `AGENT_ROSTER_TTL_MS=0` turns the cache off: every request then
+runs its own full, unscoped fleet sweep, which is more work than the pre-#566 per-caller
+sweep, so it is a kill switch rather than a faithful "before" baseline.
+`/api/agents/statuses` is served stale-while-revalidate (#570): within
+`AGENT_STATUSES_TTL_MS` (default `5000`) a poll gets the cached set; after that, up to
+`AGENT_STATUSES_MAX_STALE_MS` (default `30000`), it gets the cached set at once while one
+rebuild runs in the background. The same console mutations invalidate it: the next poll
+still gets the cached set and starts the rebuild. A failed rebuild is not retried for one
+`AGENT_STATUSES_TTL_MS` (a poll that has to wait gets the same answer), and a failure
+streak logs once when it starts and once when it recovers. `AGENT_STATUSES_TTL_MS=0`
+turns it off. The rebuild's orchestrator hop (`/internal/agents/processes`) is one request
+at a time, shared by every rebuild, with a hard deadline of `AGENT_PROCESSES_TIMEOUT_MS`
+(default `60000`, at or above the orchestrator's observed stall). A rebuild waits at most
+`AGENT_PROCESSES_WAIT_MS` (default `3000`) on it and otherwise uses the last good runtime
+view: for as long as that request is still running (a slow orchestrator never turns agents
+offline), and for `AGENT_PROCESSES_LAST_VIEW_MAX_MS` (default `15000`) after a failed answer.
+With no view left, agents read offline. Right after a console restart there is no view yet,
+so if the orchestrator takes longer than the wait, agents read offline until its first answer
+lands. The trade-off: a lone 5 s poller now sees a status change about one poll later than
+before (it gets the previous build while the next one runs). A stopped agent can read running
+for up to last-view + max-stale (~45 s) while the orchestrator refuses connections, and up to
+last-view + deadline + max-stale (~105 s) while it accepts them but never answers.
 
 ---
 

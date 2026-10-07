@@ -99,6 +99,15 @@ GIT_CONTRIBUTORS := $(shell git log --format='%aN%x09%aE' 2>/dev/null | sort | u
 # the sidebar About box in place of the hash (#1741). Empty when git is absent —
 # the frontend falls back to "unknown".
 GIT_COMMIT_TIME := $(shell git show -s --format=%cI HEAD 2>/dev/null || echo)
+# Nearest release tag (v<major>.<minor>.<patch>) and how many commits HEAD is
+# past it, for the plugin build identity (#2893): the Plugins page shows
+# `v0.4.0` on the tag and `v0.4.0+12 (5500e15)` after it. Both are empty when no
+# release tag is reachable (no tags, a shallow clone without fetched tags, a
+# tarball) — the page then shows the hash alone. See scripts/git-release-tag.sh
+# for the rules (release tags only; several tags on one commit → highest).
+GIT_TAG_INFO := $(shell sh scripts/git-release-tag.sh 2>/dev/null)
+GIT_TAG := $(word 1,$(GIT_TAG_INFO))
+GIT_TAG_DISTANCE := $(word 2,$(GIT_TAG_INFO))
 # Make doesn't export its own variables to recipe subprocesses by default —
 # without this, podman-compose would never see GIT_COMMIT/GIT_DIRTY/GIT_COMMIT_TIME/
 # GIT_CONTRIBUTORS and the docker-compose.yml `${GIT_COMMIT:-unknown}` interpolation
@@ -138,15 +147,22 @@ build: plugin-images
 # corresponding plugins/<id>/plugin.json.
 #
 # PLUGIN_BUILD_ARGS stamps every broker image with this checkout's git identity
-# (#2646) — the same GIT_COMMIT / GIT_DIRTY / GIT_COMMIT_TIME the console shows.
+# (#2646) — the same GIT_COMMIT / GIT_DIRTY / GIT_COMMIT_TIME the console shows —
+# plus the nearest release tag and distance (GIT_TAG / GIT_TAG_DISTANCE, #2893).
 # The running broker reports it on /healthz and the Plugins page shows it;
-# `podman image inspect --format '{{index .Labels "org.opencontainers.image.revision"}}' <image>`
+# `podman image inspect --format '{{index .Labels "org.opencontainers.image.revision"}} {{index .Labels "aee.build.tag"}}' <image>`
 # reads it without starting anything.
 PLUGIN_BUILD_ARGS = --build-arg AEE_BUILD_COMMIT=$(GIT_COMMIT) \
 	--build-arg AEE_BUILD_DIRTY=$(GIT_DIRTY) \
-	--build-arg AEE_BUILD_COMMIT_TIME=$(GIT_COMMIT_TIME)
+	--build-arg AEE_BUILD_COMMIT_TIME=$(GIT_COMMIT_TIME) \
+	--build-arg AEE_BUILD_TAG=$(GIT_TAG) \
+	--build-arg AEE_BUILD_TAG_DISTANCE=$(GIT_TAG_DISTANCE)
+# ", v0.4.0" / ", v0.4.0+12" / "" — appended to the progress lines of
+# plugin-images and seed-plugins.
+GIT_TAG_SUFFIX = $(if $(GIT_TAG),$(comma) $(GIT_TAG)$(if $(filter-out 0,$(GIT_TAG_DISTANCE)),+$(GIT_TAG_DISTANCE)))
+comma := ,
 plugin-images:
-	@echo "Building plugin broker images (commit $(GIT_COMMIT)$(if $(GIT_DIRTY),-dirty))..."
+	@echo "Building plugin broker images (commit $(GIT_COMMIT)$(if $(GIT_DIRTY),-dirty)$(GIT_TAG_SUFFIX))..."
 	podman build $(PLUGIN_BUILD_ARGS) -t localhost/aee-plugin-podman-sandbox:latest -f plugins/podman-sandbox/broker/Dockerfile .
 	podman build $(PLUGIN_BUILD_ARGS) -t localhost/aee-plugin-test-mgmt:latest -f plugins/test-mgmt/broker/Dockerfile .
 	podman build $(PLUGIN_BUILD_ARGS) -t localhost/aee-plugin-netzplan:latest -f plugins/netzplan/broker/Dockerfile .
@@ -155,7 +171,7 @@ plugin-images:
 	podman build $(PLUGIN_BUILD_ARGS) -t localhost/aee-plugin-gke:latest -f plugins/gke/broker/Dockerfile .
 	podman build $(PLUGIN_BUILD_ARGS) -t localhost/aee-plugin-jira:latest -f plugins/jira/broker/Dockerfile .
 	@echo "Done. Plugin broker images:"
-	@podman images --filter reference='localhost/aee-plugin-*' --format '  {{.Repository}}:{{.Tag}}  commit {{index .Labels "org.opencontainers.image.revision"}}'
+	@podman images --filter reference='localhost/aee-plugin-*' --format '  {{.Repository}}:{{.Tag}}  commit {{index .Labels "org.opencontainers.image.revision"}}{{with index .Labels "aee.build.tag"}}  tag {{.}} +{{index $$.Labels "aee.build.tag-distance"}}{{end}}'
 
 agent-image:
 	@n=0; max=3; \
@@ -317,20 +333,22 @@ seed-mcp-servers:
 # identity (#2646). Install copies the pool dir, so the registry copy keeps the
 # commit it was installed from, and the Plugins page can compare it with the
 # commit the running broker reports. Values are plain hash / ISO date / "dirty"
-# strings, so printf into JSON needs no escaping.
+# / release tag / digit strings, so printf into JSON needs no escaping. The tag
+# and distance (#2893) are empty when no release tag is reachable.
 SEED_PLUGINS_SCRIPT = rm -rf /pool/plugins && mkdir -p /pool/plugins && cp -r /src/. /pool/plugins/ && \
 	for d in /pool/plugins/*/; do [ -f "$$d/plugin.json" ] || continue; \
-	  printf '"'"'{"commit":"%s","dirty":"%s","commitTime":"%s"}\n'"'"' "$${AEE_BUILD_COMMIT:-unknown}" "$$AEE_BUILD_DIRTY" "$$AEE_BUILD_COMMIT_TIME" > "$$d/build-info.json"; done
+	  printf '"'"'{"commit":"%s","dirty":"%s","commitTime":"%s","tag":"%s","tagDistance":"%s"}\n'"'"' "$${AEE_BUILD_COMMIT:-unknown}" "$$AEE_BUILD_DIRTY" "$$AEE_BUILD_COMMIT_TIME" "$$AEE_BUILD_TAG" "$$AEE_BUILD_TAG_DISTANCE" > "$$d/build-info.json"; done
 seed-plugins:
 	@if [ ! -d "$(CURDIR)/plugins" ]; then \
 	  echo "ERROR: $(CURDIR)/plugins not found in repo" >&2; \
 	  exit 1; \
 	fi
-	@echo "Seeding plugins into volume $(SKILL_POOL_VOLUME) (commit $(GIT_COMMIT)$(if $(GIT_DIRTY),-dirty))..."
+	@echo "Seeding plugins into volume $(SKILL_POOL_VOLUME) (commit $(GIT_COMMIT)$(if $(GIT_DIRTY),-dirty)$(GIT_TAG_SUFFIX))..."
 	podman run --rm --security-opt label=disable \
 	  -v $(SKILL_POOL_VOLUME):/pool \
 	  -v $(CURDIR)/plugins:/src:ro \
 	  -e AEE_BUILD_COMMIT="$(GIT_COMMIT)" -e AEE_BUILD_DIRTY="$(GIT_DIRTY)" -e AEE_BUILD_COMMIT_TIME="$(GIT_COMMIT_TIME)" \
+	  -e AEE_BUILD_TAG="$(GIT_TAG)" -e AEE_BUILD_TAG_DISTANCE="$(GIT_TAG_DISTANCE)" \
 	  alpine sh -c '$(SEED_PLUGINS_SCRIPT)'
 	@echo "Done. Pool plugins contents:"
 	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/plugins/

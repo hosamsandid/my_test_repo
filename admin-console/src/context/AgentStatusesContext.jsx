@@ -9,6 +9,12 @@ import { useAuth } from '../auth/AuthContext';
 // subscriber reads the same payload, so the endpoint is requested at most once
 // per interval regardless of how many components need it. Mirrors the
 // MaintenanceModeContext pattern (mounted above the router in index.jsx).
+//
+// Deliberately NOT paused in a hidden tab, unlike the roster and sessions-active
+// polls (#566): the "an agent you messaged is back" browser notification
+// (AgentBackNotificationContext, #2397) reads this poll and exists precisely
+// for when the console is in the background. The server side is a shared 2 s
+// TTL build, so a background tab costs one scope filter per tick.
 
 const AgentStatusesContext = createContext(null);
 

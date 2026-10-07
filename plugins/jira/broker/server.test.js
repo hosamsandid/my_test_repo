@@ -753,6 +753,53 @@ test('cli writes: /add-stories creates stories under an existing Epic, registers
   }
 });
 
+test('cli writes: /add-stories with a type creates a Bug and a Task under the Epic; a bad type fails only its issue (#2896)', async () => {
+  // A distinct site keeps the process-lifetime field catalog off other fixtures.
+  broker.scopeCredentials.set('team-1', { 'site-url': 'addtypedco', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  const created = [];
+  global.fetch = async (url, opts) => {
+    const u = String(url);
+    if (u.includes('127.0.0.1')) return origFetch(url, opts);
+    if (u.match(/\/rest\/api\/3\/field$/)) return { ok: true, status: 200, text: async () => '[]' };
+    if (u.match(/\/rest\/api\/3\/issue\/KAN-12\?fields=/)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'KAN-12', fields: { summary: 'Payments', project: { key: 'KAN' }, issuetype: { name: 'Epic', hierarchyLevel: 1 } } }) };
+    }
+    if (u.match(/\/rest\/api\/3\/project\/KAN$/)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'KAN', issueTypes: [
+        { id: '1', name: 'Story', hierarchyLevel: 0 }, { id: '2', name: 'Task', hierarchyLevel: 0 },
+        { id: '3', name: 'Bug', hierarchyLevel: 0 }, { id: '4', name: 'Epic', hierarchyLevel: 1 },
+      ] }) };
+    }
+    if (u.includes('/rest/api/3/issue/createmeta/')) return { ok: true, status: 200, text: async () => JSON.stringify({ total: 0, fields: [] }) };
+    if (opts && opts.method === 'POST' && u.match(/\/rest\/api\/3\/issue$/)) {
+      created.push(JSON.parse(opts.body).fields);
+      return { ok: true, status: 201, text: async () => JSON.stringify({ key: `KAN-${200 + created.length}` }) };
+    }
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  };
+  const srv = await listen();
+  try {
+    const r = await call(srv, 'POST', '/cli/add-stories', {
+      token: TOKEN,
+      body: { epic: 'KAN-12', type: 'bug', stories: [{ summary: 'Login fails' }, { summary: 'Rotate keys', type: 'Task' }, { summary: 'X', type: 'Initiative' }] },
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.created, 2);
+    assert.equal(r.body.failed, 1);
+    assert.deepEqual(r.body.stories.map((s) => s.issueType || null), ['Bug', 'Task', null]);
+    assert.match(r.body.stories[2].error, /no issue type "Initiative"\. Available: Story, Task, Bug\./);
+    assert.deepEqual(created.map((f) => [f.issuetype.id, f.parent.key]), [['3', 'KAN-12'], ['2', 'KAN-12']]);
+    const own = broker.ownWritesStore.snapshot('team-1');
+    assert.ok(own.issues['KAN-201'] && own.issues['KAN-202'], 'typed issues are own writes (origin = agent)');
+    assert.ok(auditLines().some((l) => l.subcommand === 'add-stories' && l.outcome === 'ok' && l.detail === 'KAN-12 +2/3 stories'));
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
 test('cli writes: /set-epic re-parents existing issues, per-issue outcomes, own writes, audit (#2895)', async () => {
   // A distinct site keeps the process-lifetime field catalog off other fixtures.
   broker.scopeCredentials.set('team-1', { 'site-url': 'setepicco', email: 'a@b.c', 'api-token': 'tok' });

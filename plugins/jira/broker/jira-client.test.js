@@ -1626,6 +1626,183 @@ test('createStandaloneIssue: no project / type / summary, or a label with a spac
   });
 });
 
+// ── any standard issue type under an existing Epic (#2896) ──────────────────
+
+const EPIC_PROJECT_TYPES = [...PROJECT_TYPES, { id: '10005', name: 'Bug', subtask: false, hierarchyLevel: 0 }];
+
+function epicChildJira({ epicLinkId, project = projectResponse('KAN', EPIC_PROJECT_TYPES), meta = createMetaResponse(), create, transitions = transitionsResponse() } = {}) {
+  return (url, opts) => {
+    if (isIssueGet(url, opts)) return issueResponse('KAN-12', 'Epic', { hierarchyLevel: 1 });
+    if (isProjectGet(url)) return project;
+    if (isCreateMeta(url)) return typeof meta === 'function' ? meta(url) : meta;
+    if (isFieldList(url)) return createFieldList(epicLinkId);
+    if (isCreate(url, opts)) return create(JSON.parse(opts.body).fields);
+    if (isTransitionList(url) && (!opts || opts.method !== 'POST')) return transitions;
+    if (isTransitionList(url) && opts.method === 'POST') return { ok: true, status: 204, text: async () => '' };
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  };
+}
+
+test('addStoriesToEpic: a Bug and a Task under the Epic in one call, each with the parent + its own type (#2896 AC1/AC8)', async () => {
+  const sent = [];
+  await withFetch(epicChildJira({ create: (f) => { sent.push(f); return created201(`KAN-${40 + sent.length}`); } }), async (calls) => {
+    const seen = [];
+    const r = await jc.addStoriesToEpic(CRED, {
+      epicKey: 'KAN-12',
+      stories: [
+        { type: 'Bug', summary: 'Login fails', priority: 'High', labels: ['web', ' regression '] },
+        { type: 'Task', summary: 'Rotate keys', status: 'In Progress' },
+      ],
+      allowList: [],
+      onCreated: (k) => seen.push(k),
+      env: CRED.env,
+    });
+    assert.equal(r.created, 2);
+    assert.equal(r.failed, 0);
+    assert.deepEqual(r.stories.map((s) => [s.key, s.issueType, s.ok]), [['KAN-41', 'Bug', true], ['KAN-42', 'Task', true]]);
+    assert.equal(r.stories[1].status, 'In Progress');
+    assert.deepEqual(sent[0].issuetype, { id: '10005' });
+    assert.deepEqual(sent[1].issuetype, { id: '10002' });
+    for (const f of sent) assert.deepEqual(f.parent, { key: 'KAN-12' });
+    assert.deepEqual(sent[0].priority, { name: 'High' });
+    assert.deepEqual(sent[0].labels, ['web', 'regression']);
+    assert.deepEqual(seen, ['KAN-41', 'KAN-42'], 'each registered as an own write (origin = agent)');
+    assert.equal(calls.filter((c) => isProjectGet(c.url)).length, 1, 'project types read once');
+  });
+});
+
+test('addStoriesToEpic: --type is the default, matched case-insensitively against the project\'s own names; a per-issue type wins (#2896 AC2)', async () => {
+  const sent = [];
+  await withFetch(epicChildJira({ create: (f) => { sent.push(f); return created201(`KAN-${50 + sent.length}`); } }), async () => {
+    const r = await jc.addStoriesToEpic(CRED, {
+      epicKey: 'KAN-12', defaultType: 'fehler', stories: [{ summary: 'A' }, { summary: 'B', type: 'STORY' }], allowList: [], env: CRED.env,
+    });
+    assert.deepEqual(r.stories.map((s) => s.issueType), ['Fehler', 'Story']);
+    assert.deepEqual(sent.map((f) => f.issuetype.id), ['10004', '10001']);
+  });
+});
+
+test('addStoriesToEpic: company-managed — a typed issue is linked via the Epic Link field (#2896 edge case)', async () => {
+  await withFetch(epicChildJira({
+    epicLinkId: 'customfield_10014',
+    create: (f) => {
+      assert.equal(f.customfield_10014, 'KAN-12');
+      assert.equal('parent' in f, false);
+      return created201('KAN-60');
+    },
+  }), async () => {
+    const r = await jc.addStoriesToEpic(CRED, { epicKey: 'KAN-12', stories: [{ type: 'Task', summary: 'S' }], allowList: [], env: CRED.env });
+    assert.equal(r.stories[0].key, 'KAN-60');
+  });
+});
+
+test('addStoriesToEpic: no type anywhere is the unchanged Story create — no project / create-metadata reads (#2896 AC3)', async () => {
+  await withFetch(epicChildJira({
+    create: (f) => {
+      assert.deepEqual(f.issuetype, { name: 'Story' });
+      return created201('KAN-70');
+    },
+  }), async (calls) => {
+    const r = await jc.addStoriesToEpic(CRED, { epicKey: 'KAN-12', stories: [{ summary: 'S' }], allowList: [], env: CRED.env });
+    assert.deepEqual(r.stories, [{ summary: 'S', key: 'KAN-70', url: `${jc.apiBaseFor('acme', {})}/browse/KAN-70`, ok: true }]);
+    assert.equal(calls.filter((c) => isProjectGet(c.url) || isCreateMeta(c.url)).length, 0);
+  });
+});
+
+test('addStoriesToEpic: an unknown, Epic or sub-task type fails only that issue; the others are created (#2896 AC4)', async () => {
+  const sent = [];
+  await withFetch(epicChildJira({ create: (f) => { sent.push(f); return created201(`KAN-${80 + sent.length}`); } }), async () => {
+    const r = await jc.addStoriesToEpic(CRED, {
+      epicKey: 'KAN-12',
+      stories: [
+        { type: 'Improvement', summary: 'unknown' },
+        { type: 'epic', summary: 'nested epic' },
+        { type: 'Subtask', summary: 'sub' },
+        { type: 'Bug', summary: 'fine' },
+      ],
+      allowList: [],
+      env: CRED.env,
+    });
+    assert.equal(r.created, 1);
+    assert.equal(r.failed, 3);
+    assert.match(r.stories[0].error, /no issue type "Improvement"\. Available: Story, Task, Fehler, Bug\.$/);
+    assert.match(r.stories[1].error, /Epic is an Epic type — an Epic cannot be created under another Epic/);
+    assert.match(r.stories[2].error, /Subtask is a sub-task type/);
+    assert.equal(r.stories[3].key, 'KAN-81');
+    assert.equal(sent.length, 1);
+  });
+});
+
+test('addStoriesToEpic: a project-required field the issue does not set is named, per issue (#2896 AC5)', async () => {
+  const meta = (url) => (/issuetypes\/10005\?/.test(url)
+    ? createMetaResponse([{ fieldId: 'components', name: 'Components', required: true, hasDefaultValue: false }])
+    : createMetaResponse());
+  const sent = [];
+  await withFetch(epicChildJira({ meta, create: (f) => { sent.push(f); return created201('KAN-90'); } }), async (calls) => {
+    const r = await jc.addStoriesToEpic(CRED, {
+      epicKey: 'KAN-12', stories: [{ type: 'Bug', summary: 'b1' }, { type: 'Task', summary: 't' }, { type: 'bug', summary: 'b2' }], allowList: [], env: CRED.env,
+    });
+    assert.deepEqual(r.stories.map((s) => s.ok), [false, true, false]);
+    assert.match(r.stories[0].error, /requires field\(s\) for a Bug that were not provided: Components\./);
+    assert.equal(sent.length, 1);
+    assert.equal(calls.filter((c) => isCreateMeta(c.url)).length, 2, 'create metadata read once per type');
+  });
+});
+
+test('addStoriesToEpic: Jira\'s create 400 for a typed issue is mapped to field names, per issue', async () => {
+  await withFetch(epicChildJira({
+    meta: { ok: false, status: 403, text: async () => 'nope' },
+    create: () => ({ ok: false, status: 400, text: async () => JSON.stringify({ errors: { customfield_20001: 'Team is required.' } }) }),
+  }), async () => {
+    const r = await jc.addStoriesToEpic(CRED, { epicKey: 'KAN-12', stories: [{ type: 'Task', summary: 'S' }], allowList: [], env: CRED.env });
+    assert.equal(r.stories[0].ok, false);
+    assert.equal(r.stories[0].error, 'Jira refused to create the issue: Team: Team is required.');
+  });
+});
+
+test('addStoriesToEpic: a typed call on a non-Epic or an out-of-scope key is refused like before (#2896 AC6)', async () => {
+  await withFetch((url, opts) => {
+    if (isIssueGet(url, opts)) return issueResponse('KAN-7', 'Task', { hierarchyLevel: 0 });
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    await assert.rejects(
+      () => jc.addStoriesToEpic(CRED, { epicKey: 'KAN-7', defaultType: 'Bug', stories: [{ summary: 'S' }], allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /KAN-7 is a Task, not an Epic — add-stories only adds new issues under an existing Epic/.test(e.message),
+    );
+  });
+  await withFetch((url, opts) => {
+    if (isIssueGet(url, opts)) return { ok: false, status: 404, text: async () => '{}' };
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    await assert.rejects(
+      () => jc.addStoriesToEpic(CRED, { epicKey: 'NOPE-1', stories: [{ type: 'Bug', summary: 'S' }], allowList: [], env: CRED.env }),
+      (e) => e.status === 404 && /outside this team's Jira scope/.test(e.message),
+    );
+  });
+});
+
+test('addStoriesToEpic: a failed follow-up status still reports the typed issue as created (#2896 AC7)', async () => {
+  await withFetch(epicChildJira({ create: () => created201('KAN-95') }), async () => {
+    const r = await jc.addStoriesToEpic(CRED, { epicKey: 'KAN-12', stories: [{ type: 'Bug', summary: 'S', status: 'Released' }], allowList: [], env: CRED.env });
+    assert.equal(r.stories[0].ok, true);
+    assert.equal(r.stories[0].key, 'KAN-95');
+    assert.match(r.stories[0].statusError, /no transition to "Released"/);
+  });
+});
+
+test('addStoriesToEpic: a label with a space or a non-string type is a 400 before any Jira call', async () => {
+  await withFetch(() => { throw new Error('no HTTP expected'); }, async (calls) => {
+    const bad = (stories, re) => assert.rejects(
+      () => jc.addStoriesToEpic(CRED, { epicKey: 'KAN-12', stories, allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && re.test(e.message),
+    );
+    await bad([{ summary: 'S' }, { summary: 'T', labels: ['two words'] }], /"two words" \(issue #2\)/);
+    await bad([{ summary: 'S', labels: 'web' }], /labels must be a list/);
+    await bad([{ summary: 'S', type: 5 }], /type must be an issue type name/);
+    assert.equal(calls.length, 0);
+  });
+});
+
 test('missingRequiredFields: required, no default, not set — project/issuetype exempt', () => {
   const meta = [
     { fieldId: 'project', name: 'Project', required: true },

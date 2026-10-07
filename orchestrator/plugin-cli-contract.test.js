@@ -798,6 +798,40 @@ test('aee-jira add-stories: listed in --help; bad payloads are usage errors; wir
   }
 });
 
+test('aee-jira add-stories: --type and an "issues" payload add any standard type under the Epic (#2896)', async () => {
+  const ws = grantedJiraWorkspace();
+  const flat = runJira(['add-stories', '--help'], ws).stdout.replace(/\s+/g, ' ');
+  assert.match(flat, /--type TYPE issue type for every issue in the call \(default Story\)/);
+  const file = (doc) => { const p = path.join(ws, `p-${Math.random()}.json`); fs.writeFileSync(p, doc); return p; };
+  assert.equal(runJira(['add-stories', '--epic', 'KAN-1', '--type', 'Bug', '--file', file('{"issues":[]}'), '--json'], ws).status, 2);
+
+  const http = require('node:http');
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, body: JSON.parse(raw) });
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ epic: { key: 'KAN-12' }, stories: [], created: 2, failed: 0 }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const live = grantedJiraWorkspace(`http://127.0.0.1:${port}/`);
+    const payload = file('{"issues":[{"summary":"Login fails"},{"type":"Task","summary":"Rotate keys","labels":["ops"]}]}');
+    const r = await runJiraAsync(['add-stories', '--epic', 'KAN-12', '--type', 'Bug', '--file', payload, '--json'], live);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(seen[0], {
+      method: 'POST', url: '/cli/add-stories',
+      body: { epic: 'KAN-12', type: 'Bug', stories: [{ summary: 'Login fails' }, { type: 'Task', summary: 'Rotate keys', labels: ['ops'] }] },
+    });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('aee-jira create-issue: listed in --help; flags + --file build the body; usage errors; exit 1 on a failed status (#2894)', async () => {
   const ws = grantedJiraWorkspace();
   const help = runJira(['--help'], ws);

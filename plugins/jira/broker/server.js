@@ -663,11 +663,13 @@ async function handleCli(req, res, cliPath) {
   }
 
   // ── new Stories under an EXISTING Epic (#2890) ───────────────────────────
-  // The CLI sends `{ epic: "<KEY>", stories[], issueTypes? }`; the broker checks
-  // the key is a visible Epic, then creates each story under it in the Epic's
-  // project (jira.addStoriesToEpic) — never a new Epic. Gated exactly like
-  // create-epic: the same `create` write policy, the same allow-list, the same
-  // own-writes registration per created key; audited as `add-stories`.
+  // The CLI sends `{ epic: "<KEY>", stories[], type?, issueTypes? }`; the broker
+  // checks the key is a visible Epic, then creates each story under it in the
+  // Epic's project (jira.addStoriesToEpic) — never a new Epic. `type` (the
+  // CLI's --type) and a per-entry `type` pick any standard issue type (#2896).
+  // Gated exactly like create-epic: the same `create` write policy, the same
+  // allow-list, the same own-writes registration per created key; audited as
+  // `add-stories`.
   if (cliPath === '/add-stories' && req.method === 'POST') {
     const authz = brokerPolicy.authorizeWrite('create');
     if (!authz.allow) {
@@ -684,6 +686,7 @@ async function handleCli(req, res, cliPath) {
       const result = await jira.addStoriesToEpic(cred, {
         epicKey,
         stories: body.stories,
+        defaultType: typeof body.type === 'string' ? body.type : undefined,
         allowList: cred.writableCustomFields || [],
         attribution: `Created by an agent on team "${scopeId}" via Agent Studio.`,
         issueTypes: body.issueTypes && typeof body.issueTypes === 'object' ? body.issueTypes : undefined,

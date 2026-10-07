@@ -1663,17 +1663,27 @@ function statusApplier(cred, env) {
 // the native `parent`; company-managed (classic) uses the Epic Link custom field
 // — mirror the #2415 read side: a site with an Epic Link field id uses it, else
 // `parent`. A per-story failure is recorded and the loop continues (no
-// create-transaction); returns the per-story outcome list.
-async function createStoriesUnderEpic({ base, auth, projectKey, epicKey, storyList, storyTypeName, catalog, fieldMeta, attribution, applyStatus, browseUrl, onCreated }) {
+// create-transaction); returns the per-story outcome list. The optional
+// `prepare(spec, fields)` hook (add-stories, #2896) finishes one issue's create
+// body — its type, priority, labels — and may throw to refuse just that issue;
+// it returns extra outcome keys (e.g. `issueType`). `mapCreateError(err, fields)`
+// may turn Jira's create refusal into a readable one.
+async function createStoriesUnderEpic({ base, auth, projectKey, epicKey, storyList, storyTypeName, catalog, fieldMeta, attribution, applyStatus, browseUrl, onCreated, prepare, mapCreateError }) {
   const storyResults = [];
   for (const s of storyList) {
     try {
       const storyFields = buildCreateFields({ projectKey, issueTypeName: storyTypeName, spec: s, fieldMeta, attribution });
       if (catalog.epicLinkId) storyFields[catalog.epicLinkId] = epicKey;
       else storyFields.parent = { key: epicKey };
-      const created = await createIssue(base, auth, storyFields);
+      const extra = typeof prepare === 'function' ? await prepare(s, storyFields) : null;
+      let created;
+      try {
+        created = await createIssue(base, auth, storyFields);
+      } catch (e) {
+        throw (typeof mapCreateError === 'function' && mapCreateError(e, storyFields)) || e;
+      }
       if (typeof onCreated === 'function') onCreated(created.key);
-      const out = { summary: String(s.summary).trim(), key: created.key, url: browseUrl(created.key), ok: true };
+      const out = { summary: String(s.summary).trim(), ...(extra || {}), key: created.key, url: browseUrl(created.key), ok: true };
       await applyStatus(created.key, s.status, out);
       storyResults.push(out);
     } catch (err) {
@@ -1741,7 +1751,46 @@ async function createEpicWithStories(cred, { projectKey, epic, stories, allowLis
 //      the team's credential, which is the team's project scope) is a 404; an
 //      issue that is not an Epic is a 400 naming its actual type.
 //   4. name → id resolution of the custom fields (400 on an unknown name).
+//
+// Any standard issue type under the Epic (#2896): a story entry may name its
+// `type` (and the call a `defaultType`, the CLI's --type), plus `priority` and
+// `labels` — create-issue's field contract. As soon as a type is named, the
+// Epic's project types are read once and each issue's type is matched against
+// them case-insensitively; an unknown, Epic or sub-task type, or a field the
+// project requires for that type but the issue does not set, fails THAT issue
+// only — the others are still created. With no type anywhere the call is the
+// #2890 Story create, unchanged (no extra Jira reads).
 const ISSUE_KEY_RE = /^[A-Z][A-Z0-9_]*-\d+$/;
+
+// Per-issue refusals for a type under an Epic (#2896) — the other issues in
+// the call still go through, so no "Nothing was created" tail.
+const EPIC_CHILD_TYPE_REFUSALS = Object.freeze({
+  epic: (name) => `${name} is an Epic type — an Epic cannot be created under another Epic (use \`aee-jira create-epic\` for a new Epic)`,
+  subtask: (name) => `${name} is a sub-task type — a sub-task belongs under a Story or Task, not directly under an Epic`,
+  tail: '',
+});
+
+// Shape-check the add-stories extras up front, like create-issue: `labels` is a
+// list of single words, `type` a name. Pure — throws a 400.
+function validateEpicChildExtras(storyList) {
+  storyList.forEach((s, i) => {
+    if (s.type != null && typeof s.type !== 'string') throw createIssueError(400, `issue #${i + 1}: type must be an issue type name, e.g. "Bug"`);
+    if (s.labels == null) return;
+    if (!Array.isArray(s.labels)) throw createIssueError(400, `issue #${i + 1}: labels must be a list of words`);
+    const bad = s.labels.map((l) => String(l == null ? '' : l).trim()).filter((l) => l && !LABEL_RE.test(l));
+    if (bad.length) {
+      throw createIssueError(400, `Jira labels cannot contain spaces: ${bad.map((l) => `"${l}"`).join(', ')} (issue #${i + 1}). Nothing was created.`);
+    }
+  });
+}
+
+// `priority` / `labels` onto one create body (create-issue's contract). Pure.
+function applyPriorityAndLabels(spec, fields) {
+  const priority = spec.priority == null ? '' : String(spec.priority).trim();
+  if (priority) fields.priority = { name: priority };
+  const labels = (Array.isArray(spec.labels) ? spec.labels : []).map((l) => String(l == null ? '' : l).trim()).filter(Boolean);
+  if (labels.length) fields.labels = labels;
+}
 
 // An issue counts as an Epic when its type carries the Epic name (or the
 // payload's `issueTypes.epic` override, for a renamed type) or sits on Jira's
@@ -1752,12 +1801,15 @@ function isEpicIssueType(issuetype, epicTypeName) {
   return Number(issuetype.hierarchyLevel) === 1;
 }
 
-async function addStoriesToEpic(cred, { epicKey, stories, allowList, attribution, issueTypes, env, onCreated } = {}) {
+async function addStoriesToEpic(cred, { epicKey, stories, defaultType, allowList, attribution, issueTypes, env, onCreated } = {}) {
   const key = String(epicKey || '').trim().toUpperCase();
   if (!key) { const e = new Error('an --epic key is required'); e.status = 400; throw e; }
   if (!ISSUE_KEY_RE.test(key)) { const e = new Error(`"${String(epicKey).trim()}" is not a Jira issue key (expected e.g. KAN-12)`); e.status = 400; throw e; }
   const storyList = validateStoryList(stories);
   if (!storyList.length) { const e = new Error('at least one story is required'); e.status = 400; throw e; }
+  validateEpicChildExtras(storyList);
+  const fallbackType = String(defaultType || '').trim();
+  const typed = Boolean(fallbackType) || storyList.some((s) => String(s.type || '').trim());
 
   const usedNames = collectCustomFieldNames(null, storyList);
   assertCreateFieldsAllowed(usedNames, allowList);
@@ -1783,7 +1835,7 @@ async function addStoriesToEpic(cred, { epicKey, stories, allowList, attribution
   const actualKey = String(raw.key || key);
   if (!isEpicIssueType(fields.issuetype, epicTypeName)) {
     const typeName = (fields.issuetype && fields.issuetype.name) || 'unknown type';
-    const e = new Error(`${actualKey} is a ${typeName}, not an Epic — add-stories only adds Stories under an existing Epic. Nothing was created.`);
+    const e = new Error(`${actualKey} is a ${typeName}, not an Epic — add-stories only adds new issues under an existing Epic. Nothing was created.`);
     e.status = 400;
     throw e;
   }
@@ -1793,9 +1845,41 @@ async function addStoriesToEpic(cred, { epicKey, stories, allowList, attribution
   const siteBase = resolveJiraApiBase(cred.siteUrl);
   const browseUrl = (k) => `${siteBase}/browse/${encodeURIComponent(k)}`;
 
+  // (#2896) the Epic's project types, read once when any issue names a type.
+  let projectTypes = null;
+  if (typed) {
+    const proj = await requestJson({ base, path: `/rest/api/3/project/${encodeURIComponent(project)}`, authHeader: auth });
+    projectTypes = (proj && proj.issueTypes) || [];
+  }
+  const metaByType = new Map(); // type id → create metadata (or null), per call
+  const prepare = async (s, storyFields) => {
+    applyPriorityAndLabels(s, storyFields);
+    if (!typed) return null;
+    const wanted = String(s.type || '').trim() || fallbackType || storyTypeName;
+    const type = resolveProjectIssueType(project, projectTypes, wanted, epicTypeName, EPIC_CHILD_TYPE_REFUSALS);
+    if (type.id) {
+      storyFields.issuetype = { id: String(type.id) };
+      if (!metaByType.has(type.id)) metaByType.set(type.id, await readCreateFieldMeta(base, auth, project, type.id));
+      const meta = metaByType.get(type.id);
+      const missing = meta ? missingRequiredFields(meta, storyFields) : [];
+      if (missing.length) {
+        throw createIssueError(400,
+          `project ${project} requires field(s) for a ${type.name} that were not provided: ${missing.join(', ')}. `
+            + 'Pass them in "fields" by their Jira name.');
+      }
+    } else {
+      storyFields.issuetype = { name: String(type.name) };
+    }
+    return { issueType: String(type.name) };
+  };
+  const mapCreateError = (e, storyFields) => {
+    const msg = typed && e.status === 400 ? createRejectionMessage(e.body, catalog, storyFields, '') : null;
+    return msg ? createIssueError(400, msg) : null;
+  };
+
   const storyResults = await createStoriesUnderEpic({
     base, auth, projectKey: project, epicKey: actualKey, storyList, storyTypeName, catalog, fieldMeta, attribution,
-    applyStatus: statusApplier(cred, env), browseUrl, onCreated,
+    applyStatus: statusApplier(cred, env), browseUrl, onCreated, prepare, mapCreateError,
   });
 
   return {
@@ -1848,26 +1932,30 @@ function classifyIssueType(t, epicTypeName) {
 }
 
 // Match the requested type name against the project's types and refuse the
-// ones this command does not create. Pure — throws a 400, returns the type.
-function resolveStandaloneIssueType(projectKey, projectTypes, requested, epicTypeName) {
+// ones the caller does not create. `refusals` words the Epic / sub-task refusal
+// and the message tail per command. Pure — throws a 400, returns the type.
+const STANDALONE_TYPE_REFUSALS = Object.freeze({
+  epic: (name) => `${name} is an Epic type — use \`aee-jira create-epic\` to create an Epic (with its Stories)`,
+  subtask: (name) => `${name} is a sub-task type, which always needs a parent issue — create-issue only creates standalone issues`,
+  tail: ' Nothing was created.',
+});
+
+function resolveProjectIssueType(projectKey, projectTypes, requested, epicTypeName, refusals) {
   const want = String(requested || '').trim().toLowerCase();
   const types = Array.isArray(projectTypes) ? projectTypes.filter((t) => t && t.name) : [];
   const match = types.find((t) => String(t.name).trim().toLowerCase() === want);
   if (!match) {
     const standard = types.filter((t) => classifyIssueType(t, epicTypeName) === 'standard').map((t) => t.name);
     throw createIssueError(400,
-      `project ${projectKey} has no issue type "${String(requested).trim()}". Available: ${standard.join(', ') || '(none)'}. Nothing was created.`);
+      `project ${projectKey} has no issue type "${String(requested).trim()}". Available: ${standard.join(', ') || '(none)'}.${refusals.tail}`);
   }
   const kind = classifyIssueType(match, epicTypeName);
-  if (kind === 'epic') {
-    throw createIssueError(400,
-      `${match.name} is an Epic type — use \`aee-jira create-epic\` to create an Epic (with its Stories). Nothing was created.`);
-  }
-  if (kind === 'subtask') {
-    throw createIssueError(400,
-      `${match.name} is a sub-task type, which always needs a parent issue — create-issue only creates standalone issues. Nothing was created.`);
-  }
+  if (kind === 'epic' || kind === 'subtask') throw createIssueError(400, `${refusals[kind](match.name)}.${refusals.tail}`);
   return match;
+}
+
+function resolveStandaloneIssueType(projectKey, projectTypes, requested, epicTypeName) {
+  return resolveProjectIssueType(projectKey, projectTypes, requested, epicTypeName, STANDALONE_TYPE_REFUSALS);
 }
 
 // The required fields Jira lists for (project, type) that have no default and
@@ -1906,8 +1994,9 @@ async function readCreateFieldMeta(base, auth, projectKey, issueTypeId) {
 }
 
 // Turn Jira's 400 answer to a create (`{ errorMessages, errors: { fieldId: msg } }`)
-// into one readable refusal, field ids named by their Jira names. Pure.
-function createRejectionMessage(bodyText, catalog, fields) {
+// into one readable refusal, field ids named by their Jira names. `tail` ends
+// the message (add-stories reports per issue, so it passes ''). Pure.
+function createRejectionMessage(bodyText, catalog, fields, tail = ' Nothing was created.') {
   const body = safeJson(bodyText || '');
   const parts = [];
   for (const [id, msg] of Object.entries(body && body.errors && typeof body.errors === 'object' ? body.errors : {})) {
@@ -1920,7 +2009,7 @@ function createRejectionMessage(bodyText, catalog, fields) {
   }
   for (const msg of Array.isArray(body && body.errorMessages) ? body.errorMessages : []) parts.push(String(msg));
   if (!parts.length) return null;
-  return `Jira refused to create the issue: ${parts.map((p) => p.replace(/[.\s]+$/, '')).join('; ')}. Nothing was created.`;
+  return `Jira refused to create the issue: ${parts.map((p) => p.replace(/[.\s]+$/, '')).join('; ')}.${tail}`;
 }
 
 async function createStandaloneIssue(cred, { projectKey, issueType, issue, allowList, attribution, issueTypes, env, onCreated } = {}) {
@@ -2749,6 +2838,7 @@ module.exports = {
   // standalone issue create (#2894)
   classifyIssueType,
   resolveStandaloneIssueType,
+  resolveProjectIssueType,
   missingRequiredFields,
   createRejectionMessage,
   createStandaloneIssue,

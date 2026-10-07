@@ -40,6 +40,7 @@ ticket is routine and reversible):
     aee-jira attachment add KAN-6 report.pdf part-1.pdf   # upload one or more local files as new attachments
     aee-jira create-epic --project KAN --file plan.json   # create one Epic and its child Stories in one operation
     aee-jira add-stories --epic KAN-12 --file stories.json   # add new Stories to an EXISTING Epic (no new Epic)
+    aee-jira add-stories --epic KAN-12 --type Bug --file bugs.json   # ... or Bugs, Tasks, any standard type
     aee-jira create-issue --project KAN --type Bug --summary "Login fails"   # one standalone issue, no Epic
     aee-jira set-epic KAN-30 KAN-31 --epic KAN-12   # put EXISTING issues under an Epic (or move them to it)
     aee-jira set-epic KAN-30 --none               # take an existing issue out of its Epic
@@ -102,6 +103,25 @@ named custom field is not on a non-empty writable-custom-fields allow-list. The
 result reports the Epic and, per Story, its key/URL or an error; one failing
 Story does not stop the others, and the CLI exits 1 if any Story failed. Fill
 several Epics with one call each.
+
+Any standard issue type can go under the Epic, not only Stories: --type sets
+the type for every issue in the call, and an issue's own "type" wins over it
+(so one call can add a Bug and a Task). Types are the Epic project's own names,
+matched case-insensitively ("bug", a localised "Fehler"). Each issue may also
+carry "priority" and "labels", like create-issue; "issues" is accepted as the
+array's name instead of "stories":
+
+    {
+      "issues": [
+        { "type": "Bug", "summary": "Login fails", "priority": "High" },
+        { "type": "Task", "summary": "Rotate keys", "labels": ["ops"] }
+      ]
+    }
+
+An unknown type (the error lists the project's types), an Epic or sub-task
+type, or a field the project requires for that type but the issue does not
+set fails only that issue — the others are still created, and each result
+names its "issueType". Without any type the Stories are created as before.
 
 `create-issue` creates ONE standalone issue (no parent Epic) of any standard
 type the project offers — Story, Task, Bug, or a project's own type such as
@@ -602,12 +622,17 @@ def build_parser():
     p_add_stories = sub.add_parser(
         "add-stories", parents=[common],
         help="add new Stories to an EXISTING Epic (payload from --file or stdin), e.g. "
-             "aee-jira add-stories --epic KAN-12 --file stories.json",
+             "aee-jira add-stories --epic KAN-12 --file stories.json; --type Bug (or a per-issue \"type\") "
+             "adds Bugs, Tasks or any standard type instead",
     )
     p_add_stories.add_argument("--epic", required=True, help="key of the existing Epic the Stories go under, e.g. KAN-12")
     p_add_stories.add_argument(
+        "--type",
+        help='issue type for every issue in the call (default Story), e.g. "Bug", "Task"; a per-issue "type" wins',
+    )
+    p_add_stories.add_argument(
         "--file", metavar="PATH",
-        help='JSON payload describing {"stories": [...]}; omit or use "-" to read stdin',
+        help='JSON payload describing {"stories": [...]} (or {"issues": [...]}); omit or use "-" to read stdin',
     )
 
     p_create_issue = sub.add_parser(
@@ -831,11 +856,15 @@ def main(argv=None):
         except ValueError as e:
             emit({"ok": False, "error": "usage", "message": "payload is not valid JSON: %s" % e}, as_json)
             return EXIT_USAGE
-        if not isinstance(doc, dict) or not isinstance(doc.get("stories"), list) or not doc["stories"]:
+        # #2896: "issues" reads better than "stories" for Bugs and Tasks.
+        entries = doc.get("stories", doc.get("issues")) if isinstance(doc, dict) else None
+        if not isinstance(entries, list) or not entries:
             emit({"ok": False, "error": "usage",
-                  "message": 'payload must be a JSON object with a non-empty "stories" array'}, as_json)
+                  "message": 'payload must be a JSON object with a non-empty "stories" (or "issues") array'}, as_json)
             return EXIT_USAGE
-        body = {"epic": args.epic, "stories": doc["stories"]}
+        body = {"epic": args.epic, "stories": entries}
+        if args.type:
+            body["type"] = args.type
         if isinstance(doc.get("issueTypes"), dict):
             body["issueTypes"] = doc["issueTypes"]
         path, method = "/add-stories", "POST"

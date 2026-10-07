@@ -299,7 +299,8 @@ async function resolveEpicLinkFieldId(base, auth) {
 
 // The agent-facing standard columns a `--fields` selection may name (below);
 // declared here so `partitionFields` can be defined before them.
-// (AGENT_ISSUE_COLUMNS is the source of truth — see near shapeAgentIssue.)
+// (AGENT_ISSUE_COLUMNS + STANDARD_READ_COLUMNS are the source of truth — see
+// near shapeAgentIssue.)
 
 // Split a caller's `--fields` list into standard columns (the projection over a
 // shaped issue) and custom-field names (resolved to ids and surfaced under
@@ -310,7 +311,7 @@ function partitionFields(fields) {
   const columns = [];
   const customNames = [];
   for (const f of list) {
-    if (AGENT_ISSUE_COLUMNS.includes(f)) columns.push(f);
+    if (SELECTABLE_COLUMNS.includes(f)) columns.push(f);
     else customNames.push(f);
   }
   return { columns, customNames };
@@ -475,7 +476,7 @@ async function getIssue(cred, issueKey, { env, customFields } = {}) {
   // agent-requested custom fields (#2416). Both read one cached field catalog.
   const epicLinkFieldId = await resolveEpicLinkFieldId(base, auth);
   const custom = await resolveCustomFieldSelection(base, auth, customFields);
-  const fieldList = ['summary', 'status', 'description', 'assignee', 'issuetype', 'attachment', 'created', 'updated', 'parent', 'issuelinks'];
+  const fieldList = ['summary', 'status', 'description', 'assignee', 'issuetype', 'attachment', 'created', 'updated', 'parent', 'issuelinks', ...Object.values(STANDARD_READ_FIELDS)];
   if (epicLinkFieldId) fieldList.push(epicLinkFieldId);
   for (const id of custom.ids) if (!fieldList.includes(id)) fieldList.push(id);
   const raw = await requestJson({
@@ -501,6 +502,9 @@ async function getIssue(cred, issueKey, { env, customFields } = {}) {
     // Always present — `[]` when the issue has none.
     links: shapeIssueLinks(fields.issuelinks, String(raw.key || issueKey)),
     url: `${resolveJiraApiBase(cred.siteUrl)}/browse/${encodeURIComponent(raw.key || issueKey)}`,
+    // Priority, labels, reporter, components, fix versions, due date (#2901).
+    // Always present — `null` / `[]` when unset.
+    ...shapeStandardReadFields(fields),
   };
   // Requested custom fields (#2416). Only surfaced when some were requested, so
   // a plain `show` is byte-identical to before. An unset field is `null` (not a
@@ -974,6 +978,42 @@ async function searchUsers(cred, { query, project, issue, limit, env } = {}) {
 const AGENT_ISSUE_FIELDS = ['summary', 'status', 'assignee', 'updated', 'issuetype', 'parent'];
 const AGENT_ISSUE_COLUMNS = ['key', 'summary', 'status', 'issueType', 'assignee', 'updated', 'parent', 'url'];
 
+// Built-in fields `show` always returns and `search --fields` may name as extra
+// columns (#2901): agent column → Jira field id. Not part of the default
+// `search`/`list` row (AGENT_ISSUE_COLUMNS stays unchanged) — requested from
+// Jira only when a `--fields` selection names them.
+const STANDARD_READ_FIELDS = Object.freeze({
+  priority: 'priority',
+  labels: 'labels',
+  reporter: 'reporter',
+  components: 'components',
+  fixVersions: 'fixVersions',
+  dueDate: 'duedate',
+});
+const STANDARD_READ_COLUMNS = Object.keys(STANDARD_READ_FIELDS);
+// Every column a `--fields` selection may name, in output order.
+const SELECTABLE_COLUMNS = [...AGENT_ISSUE_COLUMNS, ...STANDARD_READ_COLUMNS];
+
+// The #2901 standard fields of one raw issue, agent-shaped. An unset (or
+// hidden — e.g. a project without a priority scheme) value is `null` for a
+// single value and `[]` for a list, so "empty" is distinguishable from "not
+// read". A reporter without a display name (deleted account) is `null`.
+function shapeStandardReadFields(fields) {
+  const f = fields || {};
+  const names = (list) => (Array.isArray(list) ? list : [])
+    .map((x) => (x && typeof x === 'object' ? x.name : x))
+    .filter((n) => typeof n === 'string' && n)
+    .map(String);
+  return {
+    priority: f.priority && f.priority.name ? String(f.priority.name) : null,
+    labels: names(f.labels),
+    reporter: f.reporter && f.reporter.displayName ? String(f.reporter.displayName) : null,
+    components: names(f.components),
+    fixVersions: names(f.fixVersions),
+    dueDate: f.duedate ? String(f.duedate) : null,
+  };
+}
+
 // Narrow one raw search issue to the agent-facing columns (used by both
 // `listProjectIssues` and `searchIssues`). `siteBase` builds the browse URL;
 // `epicLinkFieldId` (when the site has one) lets a classic project's epic key
@@ -1005,9 +1045,9 @@ function agentRequestFields(epicLinkFieldId) {
 // silently-dropped field. `key` is always kept: it is the issue's identity.
 function assertColumns(fields) {
   if (!Array.isArray(fields) || fields.length === 0) return;
-  const unknown = fields.filter((f) => !AGENT_ISSUE_COLUMNS.includes(f));
+  const unknown = fields.filter((f) => !SELECTABLE_COLUMNS.includes(f));
   if (unknown.length) {
-    const e = new Error(`unknown --fields: ${unknown.join(', ')}. Valid columns: ${AGENT_ISSUE_COLUMNS.join(', ')}`);
+    const e = new Error(`unknown --fields: ${unknown.join(', ')}. Valid columns: ${SELECTABLE_COLUMNS.join(', ')}`);
     e.status = 400;
     throw e;
   }
@@ -1017,7 +1057,7 @@ function pickAgentColumns(issue, fields) {
   if (!Array.isArray(fields) || fields.length === 0) return issue;
   const keep = new Set(['key', ...fields]);
   const out = {};
-  for (const col of AGENT_ISSUE_COLUMNS) if (keep.has(col)) out[col] = issue[col];
+  for (const col of SELECTABLE_COLUMNS) if (keep.has(col)) out[col] = issue[col];
   return out;
 }
 
@@ -1102,7 +1142,9 @@ async function searchIssues(cred, { jql, fields, customFields, limit, env } = {}
   const siteBase = resolveJiraApiBase(cred.siteUrl);
   const epicLinkFieldId = await resolveEpicLinkFieldId(base, auth); // #2415
   const custom = await resolveCustomFieldSelection(base, auth, customFields); // #2416
-  const reqFields = [...agentRequestFields(epicLinkFieldId), ...custom.ids];
+  // #2901 standard columns are read from Jira only when `--fields` names them.
+  const extraColumns = (Array.isArray(fields) ? fields : []).filter((f) => STANDARD_READ_COLUMNS.includes(f));
+  const reqFields = [...agentRequestFields(epicLinkFieldId), ...extraColumns.map((c) => STANDARD_READ_FIELDS[c]), ...custom.ids];
   const issues = [];
   let nextPageToken;
   for (let page = 0; page < MAX_PAGES && issues.length < cap; page += 1) {
@@ -1120,8 +1162,9 @@ async function searchIssues(cred, { jql, fields, customFields, limit, env } = {}
       },
     });
     for (const raw of Array.isArray(result.issues) ? result.issues : []) {
-      const shaped = shapeAgentIssue(raw, siteBase, epicLinkFieldId);
+      let shaped = shapeAgentIssue(raw, siteBase, epicLinkFieldId);
       if (!shaped.key) continue;
+      if (extraColumns.length) shaped = { ...shaped, ...shapeStandardReadFields(raw.fields) };
       const row = pickAgentColumns(shaped, fields);
       // Custom fields are additive: they ride alongside the projected columns
       // (never narrowed away by `--fields`), so `search --fields Team` returns
@@ -3346,6 +3389,8 @@ module.exports = {
   clampSearchLimit,
   pickAgentColumns,
   AGENT_ISSUE_COLUMNS,
+  STANDARD_READ_COLUMNS,
+  shapeStandardReadFields,
   SEARCH_DEFAULT_LIMIT,
   SEARCH_MAX_LIMIT,
   searchJql,

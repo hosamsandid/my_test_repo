@@ -25,7 +25,7 @@ Reads:
     aee-jira statuses --project KAN               # every workflow status the project supports, grouped by issue type
     aee-jira list --project KAN [--status "Ready for Dev"]   # a project's issues
     aee-jira search --jql "<JQL>" [--fields key,summary,status,Team] [--limit N]   # arbitrary JQL, scoped to your team
-    aee-jira show KAN-6 [--fields "Team,Sprint"] [--comment <id>]   # one issue (summary, status, type, assignee, created/updated, parent/epic key, URL, attachments, availableTransitions; --fields adds custom fields; --comment adds one comment in full)
+    aee-jira show KAN-6 [--fields "Team,Sprint"] [--comment <id>]   # one issue (summary, status, type, assignee, created/updated, parent/epic key, URL, priority, labels, reporter, components, fixVersions, dueDate, attachments, availableTransitions; --fields adds custom fields; --comment adds one comment in full)
     aee-jira comments KAN-6 [--limit N] [--offset N]   # the issue's comments, newest first (20 per page)
     aee-jira attachment get KAN-6 10312 [--out path]   # fetch one attachment's content by id
     aee-jira sprint list --board "Team Scrum Board"     # a Scrum board's sprints (resolved by board name)
@@ -615,7 +615,8 @@ def build_parser():
         "--fields",
         help="comma-separated fields to return (default all standard columns): standard "
              "columns key,summary,status,issueType,assignee,updated,parent,url narrow the "
-             'row; any other name is read as a custom field (e.g. "status,Team")',
+             "row; priority,labels,reporter,components,fixVersions,dueDate add those "
+             'columns; any other name is read as a custom field (e.g. "status,Team")',
     )
     p_search.add_argument("--limit", type=int, help="cap the number of issues returned (default 100, max 2000)")
 

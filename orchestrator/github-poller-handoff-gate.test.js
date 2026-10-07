@@ -522,3 +522,29 @@ test('review B2: the internal label fast-path holds a gated listener through the
   assert.match(branch, /continue;\s*\}\s*\/\/ Enqueue first/, 'a gated listener never reaches enqueuePending');
   assert.match(body, /status: 'held', reason: 'readiness-gate'/, 'the Event Log row says held');
 });
+
+test('#2879: a PR that turns conflicting while its hand-off is held goes to the conflict solver via the failure label', withLog(async () => {
+  const { poller, enqueued } = makePoller();
+  const solver = {
+    agentId: 'team-conflict-solver', triggerId: 'solve-on-needs-conflict-resolution',
+    events: new Set(['pull_request.labeled']), labelFilter: 'needs-conflict-resolution', horizon: null,
+    claimAdd: 'needs-conflict-resolution:wip', readinessGate: null,
+  };
+  const subs = [reviewer({ ...GATE, failureLabel: 'needs-conflict-resolution' }), reworker(), solver];
+  openPrs = [prNode(30, SHA_A)];
+  checksBySha = { [SHA_A]: [running('build')] };
+
+  await handOff(poller, subs, labeledEvent(30, WAKE));
+  await pass(poller, subs);
+  assert.equal(enqueued.length, 0, 'held while CI runs');
+
+  // main moves on: the same head now conflicts with the base.
+  openPrs = [prNode(30, SHA_A, { mergeable: 'CONFLICTING' })];
+  await pass(poller, subs);
+  assert.equal(enqueued.length, 0, 'the reviewer is not woken into a conflicting PR');
+  assert.deepEqual(writes[1].body, { labels: ['needs-conflict-resolution'] });
+  assert.match(writes[2].body.body, /merge conflict with `main`/);
+
+  await handOff(poller, subs, labeledEvent(30, 'needs-conflict-resolution'));
+  assert.deepEqual(enqueued.map((e) => e.agentId), ['team-conflict-solver']);
+}));

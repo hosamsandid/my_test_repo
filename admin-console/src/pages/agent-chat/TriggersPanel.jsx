@@ -2057,7 +2057,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
  * mutates the draft bundle (ops.mode === 'draft'), skips the live-only
  * lookups (env repos, emit suggestions) and stops polling.
  */
-export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp = null }) {
+export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp = null, focusRequest = null }) {
   const ops = opsProp || liveOps;
   const isDraft = ops.mode === 'draft';
   const [triggers, setTriggers]   = useState([]);
@@ -2210,6 +2210,21 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
   // not a subscription, so it never appears here. Existing loop entries in
   // triggers.json keep running — they are just hidden from this list.
   const listedTriggers = triggers.filter(isStandingSubscription);
+
+  // #2914: `?rail=triggers&trigger=<id>` (Flow Control's "Change" link on a
+  // raw hand-off) opens that trigger's edit panel once the list has it.
+  // Consumed once per request (`ts`); an unknown id just shows the list.
+  const focusedRef = useRef(null);
+  useEffect(() => {
+    if (!focusRequest || !focusRequest.triggerId || focusedRef.current === focusRequest.ts) return;
+    const hit = listedTriggers.find((t) => t.id === focusRequest.triggerId);
+    if (!hit) {
+      if (!loading && triggers.length) focusedRef.current = focusRequest.ts;
+      return;
+    }
+    focusedRef.current = focusRequest.ts;
+    setEditTarget(hit);
+  }, [focusRequest, listedTriggers, loading, triggers.length]);
 
   /* ── Toolbar ──────────────────────────────────────────────────────── */
   const toolbar = (

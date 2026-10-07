@@ -636,6 +636,79 @@ test('buildFlowBoard: a PR hand-off held by its CI / conflict gate shows what it
 });
 
 // ---------------------------------------------------------------------------
+// PR hand-off gates (#2914)
+// ---------------------------------------------------------------------------
+
+// The SDLC team with real PR hand-offs: the review hand-off is a gated raw
+// trigger, the merge hand-off an ungated flow-derived one, the Developer's
+// issue hand-off is no PR hand-off at all.
+const prTrig = (labelFilter, extra = {}) => trig(labelFilter, { events: ['pull_request.labeled'], ...extra });
+function gatedTeam({ reviewGate = { ci: true, conflict: true }, mergeGate = null } = {}) {
+  return SDLC.map((m) => {
+    if (m.id === 't-developer') return { ...m, triggers: [trig('ready', { events: ['issues.labeled'] })] };
+    if (m.id === 't-reviewer') return { ...m, triggers: [prTrig('ready-for-review', reviewGate ? { readinessGate: reviewGate } : {})] };
+    if (m.id === 't-merger') {
+      return { ...m, triggers: [prTrig('ready-to-merge', { channel: true, ...(mergeGate ? { readinessGate: mergeGate } : {}) }), prTrig('ready-to-merge:wip')] };
+    }
+    return m;
+  });
+}
+
+test('buildFlowBoard: lists every PR hand-off with its gate state, in stage order (#2914)', () => {
+  const b = board({ members: gatedTeam({ reviewGate: { ci: true, conflict: false } }) });
+  assert.deepEqual(b.handoffs, [
+    {
+      id: 't-reviewer:t-ready-for-review', agentId: 't-reviewer', triggerId: 't-ready-for-review', label: 'ready-for-review',
+      to: 'Code Reviewer', toStageId: 't-reviewer', from: ['Developer', 'Reworker'], flowManaged: false, ci: true, conflict: false,
+    },
+    {
+      id: 't-merger:t-ready-to-merge', agentId: 't-merger', triggerId: 't-ready-to-merge', label: 'ready-to-merge',
+      to: 'Merger', toStageId: 't-merger', from: ['Doc Sync', 'Conflict Solver'], flowManaged: true, ci: false, conflict: false,
+    },
+  ]);
+  // Issue hand-offs, claim listeners, switched-off triggers and pool instances are no PR hand-offs.
+  const off = gatedTeam().map((m) => (m.id === 't-reviewer' ? { ...m, triggers: m.triggers.map((t) => ({ ...t, enabled: false })) } : m));
+  assert.deepEqual(board({ members: off }).handoffs.map((h) => h.agentId), ['t-merger']);
+  // Both toggles off reads as not gated, like the poller.
+  const both = board({ members: gatedTeam({ reviewGate: { ci: false, conflict: false } }) }).handoffs[0];
+  assert.equal(both.ci || both.conflict, false);
+});
+
+test('buildFlowBoard: an unlabelled PR-open hand-off names its channel producers (#2914)', () => {
+  const members = [
+    { id: 'x-writer', displayName: 'Writer', triggers: [trig('go')] },
+    { id: 'x-editor', displayName: 'Editor', channels: [{ artifact: 'pr', from: 'writer' }], triggers: [{ id: 'e', type: 'github-event', channel: true, events: ['pull_request.opened'], readinessGate: { conflict: true } }] },
+  ];
+  const b = fb.buildFlowBoard({ members, teamId: 'x', now: NOW });
+  assert.deepEqual(b.handoffs.map((h) => [h.label, h.from, h.flowManaged, h.ci, h.conflict]), [[null, ['Writer'], true, false, true]]);
+});
+
+test('buildFlowBoard: a PR row parked behind an ungated hand-off says so; gated, held, issue-only and done rows do not (#2914)', () => {
+  const ev = delivered(9, 't-developer', 120);
+  const github = (prLabels, issueExtra = {}) => ({ issues: [issue(9, issueExtra)], prs: [pr(90, { labels: prLabels, closes: [9] })] });
+  const rowOf = (b) => b.rows.find((r) => r.id === 'o/r#9');
+
+  const atMerge = rowOf(board({ members: gatedTeam(), github: github(['ready-to-merge']), events: [ev] }));
+  assert.equal(atMerge.stageId, 't-merger');
+  assert.deepEqual(atMerge.ungatedHandoff, {
+    id: 't-merger:t-ready-to-merge', agentId: 't-merger', triggerId: 't-ready-to-merge', label: 'ready-to-merge', to: 'Merger', flowManaged: true,
+  });
+  // The claim label still names the hand-off it came through.
+  assert.equal(rowOf(board({ members: gatedTeam(), github: github(['ready-to-merge:wip']), events: [ev] })).ungatedHandoff.id, 't-merger:t-ready-to-merge');
+  // Gated hand-off → no hint.
+  assert.equal(rowOf(board({ members: gatedTeam({ mergeGate: { ci: true } }), github: github(['ready-to-merge']), events: [ev] })).ungatedHandoff, null);
+  assert.equal(rowOf(board({ members: gatedTeam(), github: github(['ready-for-review']), events: [ev] })).ungatedHandoff, null);
+  // An active hold already explains the row.
+  const held = board({ members: gatedTeam(), github: github(['ready-to-merge']), events: [ev], gateHolds: [{ repo: 'o/r', number: 90, agentId: 't-merger', waitingFor: ['ci'], heldAt: iso(1) }] });
+  assert.equal(rowOf(held).ungatedHandoff, null);
+  // The Developer's hand-off is an issue hand-off; done rows carry nothing.
+  const dev = board({ members: gatedTeam(), github: { issues: [issue(9, { labels: ['ready'] })], prs: [] } });
+  assert.equal(rowOf(dev).ungatedHandoff, null);
+  const done = board({ members: gatedTeam(), github: github(['ready-to-merge'], { state: 'closed', closedAt: iso(5) }), events: [ev] });
+  assert.equal(rowOf(done).ungatedHandoff, null);
+});
+
+// ---------------------------------------------------------------------------
 // Parked on an undelivered wake (#2872)
 // ---------------------------------------------------------------------------
 

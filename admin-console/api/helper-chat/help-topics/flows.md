@@ -147,12 +147,8 @@ not in the list, so they stay reachable while the list is collapsed:
   BriefingPack directory out of an agent's workspace and lays it out as an
   editable draft. If you have never used BriefingPacks, skip past it.
 
-**Export** (on the canvas toolbar) is the other half of Import: it writes the
-current flow to a portable bundle with no repositories and no secrets in it, so
-a design can be shared or version-controlled.
-
-Export and *Create team…* keep each role's prompt mode, model, memory limit,
-PR/issue flags and Scaling.
+**Export** (canvas toolbar) writes a portable bundle: roles keep prompt mode,
+model, memory, PR/issue flags and Scaling; no repositories or secrets.
 
 **Every row in the list has a context menu** — right-click it, press the `Menu`
 key (or `Shift+F10`), or use the `⋮` that appears when you hover. A **draft**

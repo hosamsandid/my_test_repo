@@ -43,6 +43,9 @@ import {
   TRIGGER_TIME_ZONE, browserTimeZone, schedulerTimeZone, cronZoneNote, onceScheduleLabel, triggerTiming, pastOnceHint,
 } from './trigger-timing.js';
 import { triggerIssue, triggerRowKey } from './trigger-issues.js';
+import { readinessFormError } from '../process/readiness-gate.js';
+import ReadinessGateFields from '../process/ReadinessGateFields';
+import { showsReadinessGate, readinessFormFor, readinessWakeWhen, readinessGateBody, readinessHint } from './trigger-readiness.js';
 import { webhookCurlExample, WEBHOOK_GITHUB_HINT, WEBHOOK_SECRET_WARNING } from './webhook-hint.js';
 import { triggerRepoOptions, environmentRepoOptions, triggerRepoWarning } from './trigger-repo-status.js';
 import {
@@ -391,6 +394,9 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
   const ghSummary = (trigger.type === 'github-event' && !isDataFlow)
     ? summarizeGithubEventTrigger(trigger)
     : null;
+  // #2912: a gated PR hand-off says what it waits for ("waits for CI +
+  // conflict-free"), like the Flow editor's routing rows.
+  const gateHint = ghSummary ? readinessHint(trigger) : null;
   let schedule;
   if (isDataFlow) {
     schedule = summarizePushSchedule(trigger, nameOf);
@@ -542,6 +548,7 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
               </>
             )}
             {ghSummary.comments.length > 0 && ` · ${ghSummary.comments.join(' · ')}`}
+            {gateHint && <span title={gateHint.title}>{` · ${gateHint.text}`}</span>}
           </span>
         </div>
       )}
@@ -775,7 +782,7 @@ function PushedByPicker({ roster, selected, onToggle }) {
   );
 }
 
-export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues, agentId, ops = liveOps, allowTypeChange = false, allowLoopType = true, lockType = null, submitLabel = null }) {
+export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues, agentId, ops = liveOps, allowTypeChange = false, allowLoopType = true, lockType = null, submitLabel = null, showReadinessGate = false, agentName = null }) {
   const isEdit = !!initialValues;
   const typeLocked = isEdit && !allowTypeChange;
   // Loop-launch mode (#1020): the composer launcher reuses this form pinned to
@@ -858,12 +865,20 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     // as condition rows (`{key, value}`), folded back on save. No rows = no
     // filter. The keys on offer come from the plugin's declared vocabulary.
     conditions:  conditionsFromFilter(initialValues?.payloadFilter),
+    // Hand-off readiness gate (#2795/#2912): a readinessForm() state — the
+    // stored gate on edit, off on create (never gated silently).
+    readiness:   readinessFormFor(initialValues),
   }));
   const isDataFlow = form.type === 'data-flow';
   const showLabelFilter = form.type === 'github-event'
     && form.events.some(e => LABEL_FILTERABLE_EVENTS.has(e));
   const showBranchFilter = form.type === 'github-event' && form.events.includes('push');
   const showCommentFilter = form.type === 'github-event' && showsCommentFilter(form.events);
+  // Readiness gate (#2912): Agent Chat only (the Flow editor's dialogs carry
+  // their own), and only on a PR hand-off — the events the API can gate.
+  const showGate = showReadinessGate && showsReadinessGate(form.type, form.events);
+  const gateWakeLabel = showLabelFilter ? form.labelFilter.trim() : '';
+  const readinessErr = showGate ? readinessFormError(form.readiness, { wakeLabel: gateWakeLabel }) : null;
   const [copyDone, setCopyDone] = useState(null); // 'path' | 'secret' | null
   const [secretVisible, setSecretVisible] = useState(!isEdit);
   const [formError, setFormError] = useState(null);
@@ -1109,6 +1124,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       if (branchError) { setFormError(branchError); return; }
       const commentError = showCommentFilter ? commentFilterFormError(form) : null;
       if (commentError) { setFormError(commentError); return; }
+      if (readinessErr) { setFormError(readinessErr); return; }
     }
     if (isDataFlow) {
       if (!form.repo && !isDraftMode) { setFormError('A repository is required (the team repo agents push to).'); return; }
@@ -1196,6 +1212,14 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       body.claim = claimBodyFor({
         labelFilter: body.labelFilter, events: form.events, claimOn: form.claimOn, isEdit,
       });
+      // Readiness gate (#2912): only a change is sent on edit (`null` clears
+      // it), so editing other fields of a gated trigger leaves the gate as is.
+      if (showReadinessGate) {
+        const gate = readinessGateBody({
+          show: showGate, form: form.readiness, stored: initialValues?.readinessGate, isEdit,
+        });
+        if (gate !== undefined) body.readinessGate = gate;
+      }
     }
     // Producer filter (#2571) — pure decision in trigger-summary.js.
     const pb = pushedByBodyFor({
@@ -1832,6 +1856,16 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               </div>
             </div>
           )}
+
+          {showGate && (
+            <ReadinessGateFields
+              value={form.readiness}
+              onChange={v => set('readiness', v)}
+              toLabel={agentName || agentId || 'the agent'}
+              when={readinessWakeWhen(form.events)}
+              error={readinessErr}
+            />
+          )}
         </div>
       )}
 
@@ -2053,6 +2087,19 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
     statusAgentRef.current = agentId;
     setTriggerStatus(null);
   }, [agentId]);
+
+  // #2912: the readiness gate section names the agent ("Before Developer is
+  // woken"). Live agents only; the id on failure.
+  const [agentDisplayName, setAgentDisplayName] = useState(null);
+  useEffect(() => {
+    setAgentDisplayName(null);
+    if (isDraft || !agentId) return undefined;
+    let cancelled = false;
+    apiCall('GET', `/api/agents/${encodeURIComponent(agentId)}`)
+      .then((cfg) => { if (!cancelled && cfg && cfg.displayName) setAgentDisplayName(cfg.displayName); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [agentId, isDraft]);
 
   // #2858: label fields show a suffixed team's labels as base + chip. Inside
   // the Flow editor the canvas already provides the team's suffix; on its own
@@ -2280,6 +2327,8 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
           ops={ops}
           saving={saving}
           allowLoopType={false}
+          showReadinessGate
+          agentName={agentDisplayName}
           onSave={handleSave}
           onCancel={() => setAddOpen(false)}
         />
@@ -2293,6 +2342,8 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
             initialValues={editTarget}
             saving={saving}
             allowLoopType={false}
+            showReadinessGate
+            agentName={agentDisplayName}
             onSave={handleEditSave}
             onCancel={() => setEditTarget(null)}
           />

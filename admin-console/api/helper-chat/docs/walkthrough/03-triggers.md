@@ -50,6 +50,8 @@ After choosing GitHub event as the type, I first pick the Repository the agent s
 
 You can see the two that drove our earlier demo highlighted here — Issue opened and Issue labeled. That's exactly how the hand-offs worked: the Business Analyst's issue getting the ready label was an issues.labeled event, and that's what set the Developer in motion. Typically you'd narrow it further with a label filter — react only to the ready label, not every label — so an agent responds to precisely the signal it cares about. This is the trigger type that turns GitHub itself into the team's nervous system: work moves, labels get applied, and the right agent wakes up for the right event, entirely on its own.
 
+On a PR hand-off the panel also offers Wait for CI and Block on merge conflict.
+
 ## Data flow — agent dependency (slide 21)
 
 Screenshot: trigger panel — type "Data flow — agent dependency", the explanatory note about waking on any push visible.

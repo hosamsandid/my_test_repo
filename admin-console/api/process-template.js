@@ -661,6 +661,28 @@ function normalizeReadinessGate(t) {
   return t;
 }
 
+// Write a gate edited on a flow-derived channel listener back onto the PR
+// channel ports it derives from (#2912). The listener is stripped and
+// regenerated from the ports on every reconcile, so a gate stored only on the
+// trigger would be lost — and the Flow editor, which reads the ports, would
+// show something else. Every contributing channel gets the same gate, so the
+// merged (fan-in) gate the reconcile derives is exactly the edited one; `null`
+// (or both toggles off) clears it on all of them. Returns the new channels, or
+// null when no port of `consumerId` derives `triggerId`. Pure.
+function applyChannelTriggerReadiness(channels, consumerId, triggerId, gate) {
+  const r = cleanReadiness(gate);
+  let hit = false;
+  const next = (Array.isArray(channels) ? channels : []).map((ch) => {
+    if (!ch || ch.artifact === 'issue' || typeof ch.from !== 'string' || !ch.from || ch.from === consumerId) return ch;
+    const label = typeof ch.label === 'string' && ch.label.trim() ? ch.label.trim() : '';
+    if (channelTriggerId(consumerId, 'pr', label) !== triggerId) return ch;
+    hit = true;
+    const { readiness: _old, ...rest } = ch;
+    return r ? { ...rest, readiness: r } : rest;
+  });
+  return hit ? next : null;
+}
+
 // The label a gate sets on failure (the default when none is authored).
 function readinessFailureLabel(r) {
   const c = cleanReadiness(r);
@@ -2352,7 +2374,7 @@ module.exports = {
   completedLabelFor, COMPLETED_SUFFIX,
   POSTCONDITIONS, cleanPostcondition, strictestPostcondition, channelPostcondition,
   // Hand-off readiness gate (#2795)
-  readinessError, cleanReadiness, mergeReadiness, triggerReadiness, readinessFailureLabel, normalizeReadinessGate,
+  readinessError, cleanReadiness, mergeReadiness, triggerReadiness, readinessFailureLabel, normalizeReadinessGate, applyChannelTriggerReadiness,
   READINESS_DEFAULT_FAILURE_LABEL, READINESS_DEFAULT_TIMEOUT_MINUTES, READINESS_MAX_TIMEOUT_MINUTES, READINESS_EVENTS,
   // Chat-launched loops (#1020)
   launchedLoopConflict,

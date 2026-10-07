@@ -142,7 +142,7 @@ const { missingWakeLabels, wakeLabelRepos, missingWakeLabelLints, missingWakeLab
 const { normalizeBranchFilter } = require('./branch-filter');
 const { normalizeCommentFilter } = require('./comment-filter');
 const { newTriggerIdError, annotateTriggerList, stripTriggerAnnotations, resolveTriggerIndex } = require('./trigger-validate');
-const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext, normalizeReadinessGate, cleanReadiness, readinessError } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext, normalizeReadinessGate, cleanReadiness, readinessError, applyChannelTriggerReadiness } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { rederiveTeamDataFlow } = require('./derived-data-flow');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
@@ -6938,6 +6938,12 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   normalizeCommentFilter(merged);
   // Readiness gate (#2795) — as on POST; `null` clears it.
   normalizeReadinessGate(merged);
+  // A gate edited on a flow-derived channel listener (#2912) is written back
+  // to the consumer's PR channel ports — the reconcile regenerates the listener
+  // from them, so the Flow editor and Agent Chat show the same gate.
+  const channelWriteBack = isChannelTrigger(prev) && reqTrigger && 'readinessGate' in reqTrigger
+    ? applyChannelTriggerReadiness(agentCfg && agentCfg.channels, id, triggerId, merged.readinessGate || null)
+    : null;
   // Producer filter (#2571) — same route-level check as POST; `null` clears it.
   const pbf = applyPushedBy(merged, { ownerId: id, lookupAgent: readAgentConfigForFilter });
   if (pbf.error) return res.status(400).json({ error: pbf.error });
@@ -6959,10 +6965,21 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
     if (!merged.activatedAt) merged.activatedAt = now;
   }
   triggers[idx] = merged;
+  if (channelWriteBack) {
+    const cfgPath = path.join(agentDir, 'config.json');
+    const fresh = readJsonFile(cfgPath, agentCfg);
+    fresh.channels = channelWriteBack;
+    writeJsonAtomic(cfgPath, fresh);
+  }
   try {
     await putTriggers(id, triggers);
   } catch (err) {
     return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
+  }
+  // The ports changed: re-derive the team's channel listeners (#380), exactly
+  // as a Flow-editor port write does.
+  if (channelWriteBack && agentCfg && agentCfg.parentTeamId) {
+    await reconcileTeamGithubChannels(agentCfg.parentTeamId);
   }
   // Consumer write (#1007) — see the POST handler.
   await reconcileTeamOutcomesForAgent(id);

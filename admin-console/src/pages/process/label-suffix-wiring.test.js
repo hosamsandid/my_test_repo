@@ -20,8 +20,11 @@ test('every label field in the hand-off / channel / gate / event dialogs is a Su
     assert.doesNotMatch(src, new RegExp(`<input [^>]*onChange=\\{e => ${setter}\\(e\\.target\\.value\\)\\}`), `${setter} must use SuffixedLabelInput`);
     assert.match(src, new RegExp(`<SuffixedLabelInput [^>]*onChange=\\{${setter}\\}`), setter);
   }
-  assert.match(src, /<SuffixedLabelInput value=\{value\.failureLabel\} onChange=\{v => set\(\{ failureLabel: v \}\)\}/);
-  assert.equal((src.match(/<SuffixedLabelInput /g) || []).length, 12);
+  assert.equal((src.match(/<SuffixedLabelInput /g) || []).length, 11);
+  // The gate's failure label lives in the shared ReadinessGateFields (#2912).
+  const gate = read('ReadinessGateFields.jsx');
+  assert.match(gate, /import SuffixedLabelInput from '..\/..\/components\/SuffixedLabelInput';/);
+  assert.match(gate, /<SuffixedLabelInput value=\{value\.failureLabel\} onChange=\{v => set\(\{ failureLabel: v \}\)\}/);
 });
 
 test('an outcome\'s setLabel action uses the suffixed field', () => {

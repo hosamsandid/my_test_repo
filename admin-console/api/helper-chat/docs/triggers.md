@@ -100,6 +100,7 @@ On a channel port the same object is the channel's `readiness` field; the derive
 - **Restarts**: holds live in the poller's `state.json` and survive an orchestrator restart; a failed GitHub write is retried on the next cycle.
 - **Fan-in**: when several PR channels share one listener, their gates are combined — each toggle is on if any channel enables it; the first channel's explicit failure label / timeout wins.
 - **Defaults**: the core, extended and dispatched SDLC templates gate their PR hand-offs, and a new PR hand-off drawn in the Flow editor starts with both gates on. Existing teams are not changed — their hand-offs stay ungated until switched on in the hand-off dialog.
+- **Agent Chat → Triggers** sets the same gate (new triggers ungated) and writes it back to a derived listener's channels.
 
 Visible in the **GitHub Event Log** (`held — waiting for CI / conflict-free`, then `delivered · gate cleared` or `not woken (gate failed / timed out / cancelled)`), on the agent's **Events** tab, and as **waiting for CI** on the PR's row in **Flow Control**. Only PR hand-offs can be gated; issue hand-offs are not.
 

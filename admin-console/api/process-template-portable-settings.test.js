@@ -8,7 +8,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles,
-  buildMemberFromTemplate, resolveBundleModels, promptModeWarnings, portableTeamPrompt,
+  buildMemberFromTemplate, resolveBundleModels, staleModelPin, promptModeWarnings, portableTeamPrompt,
 } = require('./process-template');
 
 const liveRoles = [
@@ -112,7 +112,7 @@ test('invalid role settings are rejected with a message naming the role (AC4)', 
   assert.equal(validateProcessTemplate({ ...base({}), teamPrompt: 5 }).ok, false);
 });
 
-test('materialise clamps a memory requirement above the ceiling, with a warning (AC6)', () => {
+test('materialise clamps a memory requirement above the ceiling, with a warning (AC5)', () => {
   const raw = { processTemplateVersion: 1, name: 'x', roles: [{ id: 'dev', systemPrompt: 'p', memoryLimit: '16g', triggers: [] }] };
   const { bundle, warnings } = coerceImportBundle(raw, { clampMemory: true, memoryCeiling: '8g' });
   assert.equal(bundle.roles[0].memoryLimit, '8g');
@@ -147,4 +147,24 @@ test('portableTeamPrompt replaces the repo and team name with placeholders (AC17
     'Team {{teamName}} works on {{repoFullName}}.',
   );
   assert.equal(portableTeamPrompt('   ', { repoFullName: 'org/repo' }), '');
+});
+
+test('portableTeamPrompt replaces the team name only as a whole word (review S1)', () => {
+  assert.equal(
+    portableTeamPrompt('You are on **QA**. Run QAT and SQA checks; QA owns it.', { teamName: 'QA' }),
+    'You are on **{{teamName}}**. Run QAT and SQA checks; {{teamName}} owns it.',
+  );
+  assert.equal(portableTeamPrompt('Team A.B (x) here', { teamName: 'A.B (x)' }), 'Team {{teamName}} here');
+  assert.equal(portableTeamPrompt('Team AxB here', { teamName: 'A.B' }), 'Team AxB here', 'regex characters are literal');
+});
+
+test('staleModelPin: a pending pin is dropped with a note once a provider without it is bound (AC9)', () => {
+  const ep = { id: 'p1', name: 'Proxy', models: [{ id: 'm1' }] };
+  assert.equal(staleModelPin({ id: 'a', modelOverride: 'm1' }, ep), null, 'served → applied as is');
+  assert.equal(staleModelPin({ id: 'a', modelOverride: 'm9' }, ep),
+    'model m9 not available in provider Proxy — using default (agent a)');
+  assert.equal(staleModelPin({ id: 'a', modelOverride: 'm9' }, null), null, 'still no provider → stays pending');
+  assert.equal(staleModelPin({ id: 'a' }, ep), null, 'no pin');
+  assert.equal(staleModelPin({ id: 'a', modelOverride: 'm9', llmEndpointOverride: 'p2' }, ep), null,
+    'a per-agent provider override is not affected by the environment provider');
 });

@@ -1195,9 +1195,10 @@ function coerceImportBundle(raw, { clampMemory = false, memoryCeiling: ceiling }
 // Model availability at materialisation (#2813 AC9). A role's `model` becomes
 // the member's `modelOverride` only when the team's model provider serves it;
 // otherwise the role runs on the environment default and a warning says so.
-// With no provider bound yet the pin is kept pending (it is re-validated when
-// a provider is chosen, like any model override). Pure: `endpoint` is the
-// provider record ({ id, name, models[] }) or null. Returns a NEW role list.
+// With no provider bound yet the pin is kept pending; PUT /api/environments/:id
+// re-checks it with `staleModelPin` once the environment gets a provider.
+// Pure: `endpoint` is the provider record ({ id, name, models[] }) or null.
+// Returns a NEW role list.
 function resolveBundleModels(roles, endpoint) {
   const warnings = [];
   const out = (roles || []).map((r) => {
@@ -1213,6 +1214,20 @@ function resolveBundleModels(roles, endpoint) {
     return rest;
   });
   return { roles: out, warnings };
+}
+
+// A member's model pin checked against the provider its environment was just
+// bound to (#2813 AC9: a pin kept pending at materialise is applied once a
+// provider is chosen, or dropped with a note when that provider does not
+// serve it). Pure: returns the note when the pin must be dropped, else null.
+// No pin, no provider, or a per-agent provider override (whose own routes
+// re-validate the pin) → null.
+function staleModelPin(cfg, endpoint) {
+  if (!cfg || !endpoint || cfg.llmEndpointOverride) return null;
+  const model = typeof cfg.modelOverride === 'string' ? cfg.modelOverride : '';
+  if (!model) return null;
+  if ((endpoint.models || []).some((m) => m && m.id === model)) return null;
+  return `model ${model} not available in provider ${endpoint.name || endpoint.id} — using default (agent ${cfg.id})`;
 }
 
 // Preview lints for the portable prompt settings (#2813 edge case): an
@@ -1236,7 +1251,12 @@ function portableTeamPrompt(text, { repoFullName, teamName } = {}) {
   if (typeof text !== 'string' || !text.trim()) return '';
   let out = text;
   if (repoFullName) out = out.split(repoFullName).join('{{repoFullName}}');
-  if (teamName) out = out.split(teamName).join('{{teamName}}');
+  // Whole words only: a team named e.g. "QA" must not rewrite "QA" inside
+  // "QAT" or "SQA" in a custom team prompt.
+  if (teamName) {
+    const escaped = teamName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, 'gu'), '{{teamName}}');
+  }
   return out;
 }
 
@@ -2439,7 +2459,7 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
 module.exports = {
   buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles,
   // Portable role settings (#2813)
-  resolveBundleModels, promptModeWarnings, portableTeamPrompt, substituteVars,
+  resolveBundleModels, staleModelPin, promptModeWarnings, portableTeamPrompt, substituteVars,
   buildMemberFromTemplate, liftTriggerEmits,
   expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview,
   // Direct agent-to-agent hand-off (#2031): the derived consumer listener.

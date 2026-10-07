@@ -141,7 +141,7 @@ const { missingWakeLabels, wakeLabelRepos, missingWakeLabelLints, missingWakeLab
 const { normalizeBranchFilter } = require('./branch-filter');
 const { normalizeCommentFilter } = require('./comment-filter');
 const { newTriggerIdError, annotateTriggerList, stripTriggerAnnotations, resolveTriggerIndex } = require('./trigger-validate');
-const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext, normalizeReadinessGate, cleanReadiness, readinessError, resolveBundleModels, promptModeWarnings, portableTeamPrompt, substituteVars } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext, normalizeReadinessGate, cleanReadiness, readinessError, resolveBundleModels, staleModelPin, promptModeWarnings, portableTeamPrompt, substituteVars } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { rederiveTeamDataFlow } = require('./derived-data-flow');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
@@ -6082,6 +6082,29 @@ function pruneIncompatibleModelOverride(cfg, endpointId) {
   if (!ep || !(ep.models || []).some(m => m.id === cfg.modelOverride)) {
     delete cfg.modelOverride;
   }
+}
+
+// #2813 AC9: after an environment's provider changed, drop every bound
+// member's model pin the new provider does not serve (see staleModelPin).
+// Returns one warning per dropped pin; no provider bound → pins stay pending.
+function dropStaleEnvModelPins(env) {
+  const endpoint = env && env.llmEndpointId
+    ? (listLlmEndpoints().find(e => e.id === env.llmEndpointId) || null)
+    : null;
+  if (!endpoint) return [];
+  const warnings = [];
+  for (const id of listAgentDirs()) {
+    const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
+    const cfg = readJsonFile(cfgPath, null);
+    if (!cfg || cfg.environmentId !== env.id) continue;
+    const note = staleModelPin(cfg, endpoint);
+    if (!note) continue;
+    delete cfg.modelOverride;
+    writeJsonAtomic(cfgPath, cfg);
+    console.warn(`[api] ${note}`);
+    warnings.push(note);
+  }
+  return warnings;
 }
 
 // Ask the orchestrator to recreate the agent's running container so a new
@@ -17134,6 +17157,13 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
   // image is immutable for its whole lifetime, so a toolchain change reaches a
   // RUNNING agent only by recreating it. The console warns about the interruption
   // before the save, as the personal-credential rotate panel does.
+  // #2813 AC9: a model pin the bound members carry (e.g. one kept pending
+  // when the team was created before a provider was bound) is checked against
+  // the NEW provider before the respawn below, so no member starts on a model
+  // its provider does not serve. Dropped pins are named in the response.
+  const modelPinsDropped = (env.llmEndpointId || null) !== prevLlmEndpointId
+    ? dropStaleEnvModelPins(env)
+    : [];
   if ((env.githubTokenId || null) !== prevGithubTokenId) {
     notifyEnvCredentialChange(env.id, 'githubTokenId-changed');
   } else if ((env.toolchainId || null) !== prevToolchainId) {
@@ -17158,6 +17188,7 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
   res.json({
     ...env,
     previousRepositories: prevRepositories,
+    ...(modelPinsDropped.length ? { modelWarnings: modelPinsDropped } : {}),
     ...(mcpApply ? { mcpApply } : {}),
     ...(promptRebuild ? { promptRebuild } : {}),
   });
@@ -17771,9 +17802,6 @@ app.delete('/api/agent-templates/:id', (req, res) => {
   res.json({ deleted: id, revertedToDefault: hasDefault });
 });
 
-// Generic, role-agnostic team prompt. Each member can override this with
-// its role-specific prompt; members that don't override inherit this text
-// and pick up edits via /api/agents/:id PUT (systemPromptTemplate).
 // The team agent's prompt template at materialise (#2813): the bundle's own
 // `teamPrompt` (placeholders substituted for THIS team) when it carries one,
 // else the platform default.
@@ -17799,6 +17827,9 @@ function gateBundleModels(planned, envId) {
   return { warnings, templateFor: (t) => byTemplate.get(t) || t };
 }
 
+// Generic, role-agnostic team prompt. Each member can override this with
+// its role-specific prompt; members that don't override inherit this text
+// and pick up edits via /api/agents/:id PUT (systemPromptTemplate).
 function defaultTeamPrompt(vars) {
   // A repo-less team (#1623) has no repository to collaborate on and no GitHub
   // hand-off surface, so drop the repo sentence and the gh-as-agent line.

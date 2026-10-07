@@ -28,6 +28,7 @@ const {
   READINESS_DEFAULT_FAILURE_LABEL,
   READINESS_DEFAULT_TIMEOUT_MINUTES,
 } = require('./process-template');
+const { findConflictSolver } = require('./conflict-solver');
 
 const arr = (v) => (Array.isArray(v) ? v : []);
 const str = (v) => (typeof v === 'string' ? v.trim() : '');
@@ -98,24 +99,6 @@ function handoffName(h) {
   const from = h.from.length ? h.from.join(' / ') : '?';
   const via = h.kind === 'channel' ? `${h.artifact === 'pr' ? 'PR' : 'issue'} channel` : `trigger \`${h.triggerId}\``;
   return `${from} → ${h.consumer} (${via}${h.label ? `, label \`${h.label}\`` : ''})`;
-}
-
-/**
- * The conflict-solver role (#2879): one that listens for
- * `pull_request.merge_conflict`, else one whose id / name / role says
- * "conflict". Its wake label is the label it is woken on. null when the team
- * has none, or when it has no label to be woken on.
- */
-function findConflictSolver(bundle) {
-  const roles = arr(bundle && bundle.roles).filter(r => isObj(r) && r.id);
-  const byEvent = roles.find(r => arr(r.triggers).some(t => isObj(t) && arr(t.events).includes('pull_request.merge_conflict')));
-  const byName = roles.find(r => /conflict/i.test([r.id, r.displayName, r.role].map(str).join(' ')));
-  const role = byEvent || byName;
-  if (!role) return null;
-  const listener = arr(role.triggers).find(t => isObj(t) && t.type === 'github-event' && str(t.labelFilter));
-  const channel = arr(role.channels).find(c => isObj(c) && c.artifact === 'pr' && str(c.label));
-  const wakeLabel = listener ? str(listener.labelFilter) : (channel ? str(channel.label) : '');
-  return wakeLabel ? { id: role.id, wakeLabel } : null;
 }
 
 function gateLine(h) {

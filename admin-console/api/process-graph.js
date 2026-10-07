@@ -47,7 +47,11 @@ const {
 // Claim-label convention (#958) — the suffix is defined once, in process-template,
 // so the lint below can never drift from what the expanders derive. Acyclic:
 // process-template requires only ./outcomes, never this module.
-const { CLAIM_SUFFIX, rawTriggerError, triggerReadiness, readinessFailureLabel } = require('./process-template');
+const {
+  CLAIM_SUFFIX, rawTriggerError, triggerReadiness, readinessFailureLabel, cleanReadiness,
+  READINESS_EVENTS, READINESS_DEFAULT_FAILURE_LABEL,
+} = require('./process-template');
+const { findConflictSolver } = require('./conflict-solver');
 
 // ─── gate/brake classification (#928) ────────────────────────────────────────
 //
@@ -1046,6 +1050,56 @@ function computeLints(nodes, edges, classifier) {
     for (const label of unheard) {
       lints.push({ code: 'gate-failure-label-unheard', severity: 'warning', nodeId: n.id, label,
         message: `\`${n.id}\` has a CI/conflict-gated hand-off that sets \`${label}\` on failure, but nothing listens on \`${label}\` — a failed hand-off stalls unnoticed.` });
+    }
+  }
+  // pr-handoff-conflict-unrouted (#2879). A PR that turns conflicting after its
+  // hand-off label was applied is otherwise woken into the next stage and parks
+  // there. When the team has a conflict solver, every forward PR hand-off should
+  // block on merge conflicts and send the PR to the solver's wake label. Repair
+  // routes are exempt — the solver's own input, its wake label, and any label a
+  // gate already sends failures to (the default `revisions-required` included):
+  // gating the fix path would bounce the PR away from the agent fixing it.
+  // `info`: the team may deliberately leave conflicts to its reworker.
+  const solver = findConflictSolver({ roles: nodes.filter(n => !n.synthetic) });
+  if (solver) {
+    const repairLabels = new Set([solver.wakeLabel, READINESS_DEFAULT_FAILURE_LABEL]);
+    for (const n of nodes) {
+      for (const ch of (Array.isArray(n.channels) ? n.channels : [])) {
+        if (ch && ch.artifact === 'pr') { const fl = readinessFailureLabel(ch.readiness); if (fl) repairLabels.add(fl); }
+      }
+      for (const t of (n.triggers || [])) { const fl = readinessFailureLabel(triggerReadiness(t)); if (fl) repairLabels.add(fl); }
+    }
+    for (const n of nodes) {
+      if (n.synthetic || n.id === solver.id) continue;
+      const handoffs = [];
+      for (const ch of (Array.isArray(n.channels) ? n.channels : [])) {
+        if (!ch || ch.artifact !== 'pr') continue;
+        handoffs.push({ label: typeof ch.label === 'string' ? ch.label.trim() : '', gate: cleanReadiness(ch.readiness) });
+      }
+      for (const t of (n.triggers || [])) {
+        // A derived channel listener is the channel port above, already counted.
+        if (!t || t.type !== 'github-event' || t.channel || t.dataFlow) continue;
+        if (!(Array.isArray(t.events) ? t.events : []).some(e => READINESS_EVENTS.includes(e))) continue;
+        handoffs.push({ label: typeof t.labelFilter === 'string' ? t.labelFilter.trim() : '', gate: triggerReadiness(t) });
+      }
+      const seen = new Set(); // two producers' channels on one label → one hint
+      for (const h of handoffs) {
+        if (h.label && repairLabels.has(h.label)) continue;
+        const gated = !!(h.gate && h.gate.conflict);
+        const key = `${h.label}|${gated}|${gated ? h.gate.failureLabel || '' : ''}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const what = h.label ? `the PR hand-off on \`${h.label}\`` : 'the PR hand-off';
+        const base = { code: 'pr-handoff-conflict-unrouted', severity: 'info', nodeId: n.id,
+          ...(h.label ? { label: h.label } : {}), solverId: solver.id, wakeLabel: solver.wakeLabel };
+        if (!gated) {
+          lints.push({ ...base, gated: false,
+            message: `\`${n.id}\` is woken by ${what} even when the PR has a merge conflict — block it on merge conflicts with failure label \`${solver.wakeLabel}\` so \`${solver.id}\` resolves the conflict first.` });
+        } else if ((h.gate.failureLabel || READINESS_DEFAULT_FAILURE_LABEL) !== solver.wakeLabel) {
+          lints.push({ ...base, gated: true,
+            message: `${what[0].toUpperCase()}${what.slice(1)} into \`${n.id}\` sends a conflicting PR to \`${h.gate.failureLabel || READINESS_DEFAULT_FAILURE_LABEL}\`, not to the conflict solver \`${solver.id}\` — use its wake label \`${solver.wakeLabel}\` as the failure label.` });
+        }
+      }
     }
   }
   // The former `direct-handoff-candidate` hint (#2032) only ever fired on edges

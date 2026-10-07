@@ -1843,3 +1843,103 @@ test('#2795: a listener on the failure label clears the lint and is wired from t
 test('#2795: an ungated flow raises no gate lint', () => {
   assert.ok(!lintCodes(labelHandoffGraph()).includes('gate-failure-label-unheard'));
 });
+
+// ── #2879: route merge conflicts on PR hand-offs to the conflict solver ──────
+
+const SOLVER = {
+  id: 'conflict-solver', displayName: 'Conflict Solver',
+  triggers: [{ id: 'cs', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'needs-conflict-resolution' }],
+};
+const conflictLints = (g) => g.lints.filter(x => x.code === 'pr-handoff-conflict-unrouted');
+
+test('#2879: with a conflict solver, an ungated PR hand-off gets an info hint naming the solver and its wake label', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', github: { producesPr: true }, emits: ['ready-for-review'], triggers: [] },
+    { id: 'rev', channels: [{ artifact: 'pr', from: 'dev', label: 'ready-for-review' }], triggers: [] },
+    { id: 'merger', triggers: [{ id: 'm', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-to-merge', readinessGate: { ci: true, conflict: false } }] },
+    SOLVER,
+  ]);
+  const l = conflictLints(g);
+  assert.deepEqual(l.map(x => [x.nodeId, x.label, x.gated]), [['rev', 'ready-for-review', false], ['merger', 'ready-to-merge', false]]);
+  assert.equal(l[0].severity, 'info');
+  assert.equal(l[0].solverId, 'conflict-solver');
+  assert.equal(l[0].wakeLabel, 'needs-conflict-resolution');
+  assert.match(l[0].message, /`needs-conflict-resolution`/);
+});
+
+test('#2879: a conflict gate whose failure label is not the solver wake label is hinted; the solver label clears it', () => {
+  const graph = (failureLabel) => buildProcessGraph([
+    { id: 'dev', github: { producesPr: true }, emits: ['ready-for-review'], triggers: [] },
+    { id: 'rev', channels: [{ artifact: 'pr', from: 'dev', label: 'ready-for-review', readiness: { ci: true, conflict: true, ...(failureLabel ? { failureLabel } : {}) } }], triggers: [] },
+    SOLVER,
+  ]);
+  const l = conflictLints(graph());
+  assert.equal(l.length, 1);
+  assert.equal(l[0].gated, true);
+  assert.match(l[0].message, /`revisions-required`, not to the conflict solver/);
+  assert.deepEqual(conflictLints(graph('needs-conflict-resolution')), []);
+});
+
+test('#2879: repair routes and the solver itself are exempt; no solver means no hint', () => {
+  const nodes = [
+    { id: 'dev', github: { producesPr: true }, emits: ['ready-for-review'], triggers: [] },
+    { id: 'rev', channels: [{ artifact: 'pr', from: 'dev', label: 'ready-for-review', readiness: { ci: true, conflict: true, failureLabel: 'needs-conflict-resolution' } }], triggers: [] },
+    { id: 'reworker', triggers: [{ id: 'r', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'revisions-required' }] },
+    { id: 'ci-fixer', triggers: [{ id: 'f', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'fix-ci' }] },
+    { id: 'merger', triggers: [{ id: 'm', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-to-merge', readinessGate: { ci: true, conflict: true, failureLabel: 'fix-ci' } }] },
+    // An issue hand-off can't be gated — never hinted.
+    { id: 'impl', triggers: [{ id: 'i', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' }] },
+  ];
+  const l = conflictLints(buildProcessGraph([...nodes, SOLVER]));
+  assert.deepEqual(l.map(x => x.nodeId), ['merger'], 'only the merger gate sends conflicts elsewhere');
+  assert.deepEqual(conflictLints(buildProcessGraph(nodes)), []);
+});
+
+test('#2879: a derived channel listener is not counted twice beside its channel port', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', github: { producesPr: true }, emits: ['ready-for-review'], triggers: [] },
+    {
+      id: 'rev',
+      channels: [{ artifact: 'pr', from: 'dev', label: 'ready-for-review' }],
+      triggers: [{ id: 'd', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review', channel: true }],
+    },
+    SOLVER,
+  ]);
+  assert.equal(conflictLints(g).length, 1);
+});
+
+test('#2879: the conflict solver is also found by its merge_conflict listener', () => {
+  const g = buildProcessGraph([
+    { id: 'rev', channels: [{ artifact: 'pr', from: 'dev', label: 'ready-for-review' }], triggers: [] },
+    { id: 'fixer', triggers: [
+      { id: 'mc', type: 'github-event', events: ['pull_request.merge_conflict'] },
+      { id: 'lab', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'resolve-me' },
+    ] },
+  ]);
+  assert.deepEqual(conflictLints(g).map(x => [x.solverId, x.wakeLabel]), [['fixer', 'resolve-me']]);
+});
+
+test('#2879: every shipped process template gates its forward PR hand-offs on merge conflicts', () => {
+  const dir = path.join(__dirname, '..', '..', 'orchestrator', 'skill-pool', 'process-templates');
+  const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+  assert.ok(files.length > 0);
+  for (const f of files) {
+    const tpl = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+    // A solver added to the template turns every conflict-ungated PR hand-off
+    // into a `gated: false` hint; a gated one only asks for the solver's label.
+    const g = buildProcessGraph([...tpl.roles, SOLVER]);
+    const ungated = conflictLints(g).filter(x => !x.gated);
+    assert.deepEqual(ungated.map(x => `${x.nodeId} ${x.label || '(opened)'}`), [], `${f}: PR hand-offs without a conflict gate`);
+  }
+});
+
+test('#2879: two producers\' channels on one label into one consumer give one hint', () => {
+  const g = buildProcessGraph([
+    { id: 'rev', channels: [
+      { artifact: 'pr', from: 'dev-a', label: 'ready-for-review' },
+      { artifact: 'pr', from: 'dev-b', label: 'ready-for-review' },
+    ], triggers: [] },
+    SOLVER,
+  ]);
+  assert.equal(conflictLints(g).length, 1);
+});

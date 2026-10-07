@@ -41,6 +41,7 @@ const POLICY = Object.freeze({
   'sprint-advance': { scopes: ['team'] },
   link: { scopes: ['team'] },
   unlink: { scopes: ['team'] },
+  'set-epic': { scopes: ['team'] },
 });
 
 // Wired but empty — see the header.

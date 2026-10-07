@@ -2282,3 +2282,183 @@ test('removeIssueLink: a link that does not exist is a clear 404 and nothing is 
     assert.equal(calls.length, 0);
   });
 });
+
+// ── parent Epic of EXISTING issues (#2895) ───────────────────────────────────
+
+// A tiny in-memory Jira: GET /issue/<KEY>?fields=… and PUT /issue/<KEY>, the
+// parent kept as the native `parent` (team-managed) or, with `epicLinkId`, in the
+// Epic Link field too (company-managed). `rejectParent` models an older classic
+// project that refuses a native `parent` write (400) and needs the Epic Link field.
+function parentJira(issues, { epicLinkId = null, rejectParent = false, put } = {}) {
+  const puts = [];
+  const handler = (url, opts) => {
+    if (isFieldList(url)) return fieldListResponse(epicLinkId);
+    const m = String(url).match(/\/rest\/api\/3\/issue\/([^/?]+)(\?fields=(.*))?$/);
+    if (!m) throw new Error(`unexpected ${opts && opts.method} ${url}`);
+    const key = decodeURIComponent(m[1]);
+    const issue = issues[key];
+    if (!issue) return { ok: false, status: 404, text: async () => '{"errorMessages":["Issue does not exist or you do not have permission to see it."]}' };
+    if (opts && opts.method === 'PUT') {
+      const { fields } = JSON.parse(opts.body);
+      puts.push({ key, fields });
+      if (put) { const r = put(key, fields); if (r) return r; }
+      if ('parent' in fields) {
+        if (rejectParent) return { ok: false, status: 400, text: async () => '{"errors":{"parent":"Field cannot be set."}}' };
+        issue.parent = fields.parent ? fields.parent.key : null;
+      } else if (epicLinkId && epicLinkId in fields) {
+        issue.parent = fields[epicLinkId];
+      }
+      return { ok: true, status: 204, text: async () => '' };
+    }
+    const f = {
+      summary: issue.summary || `${key} summary`,
+      issuetype: { name: issue.type, hierarchyLevel: issue.level, subtask: !!issue.subtask },
+    };
+    if (issue.parent) {
+      if (epicLinkId) f[epicLinkId] = issue.parent; else f.parent = { key: issue.parent };
+    }
+    if (m[3]) assert.ok(!epicLinkId || decodeURIComponent(m[3]).includes(epicLinkId) || /issuetype,summary$/.test(decodeURIComponent(m[3])));
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key, fields: f }) };
+  };
+  return { handler, puts };
+}
+
+const EPIC = (extra = {}) => ({ type: 'Epic', level: 1, ...extra });
+const STORY = (extra = {}) => ({ type: 'Story', level: 0, ...extra });
+
+test('setParentEpic: puts issues without a parent under the Epic in one call (#2895 AC1)', async () => {
+  const issues = { 'KAN-12': EPIC({ summary: 'Payments' }), 'KAN-30': STORY(), 'KAN-31': { type: 'Bug', level: 0 } };
+  const { handler, puts } = parentJira(issues);
+  await withFetch(handler, async () => {
+    const changed = [];
+    const r = await jc.setParentEpic(CRED, { epicKey: 'kan-12', issueKeys: ['KAN-30', 'kan-31'], env: CRED.env, onChanged: (k, d) => changed.push([k, d]) });
+    assert.deepEqual(r.epic, { key: 'KAN-12', url: 'https://acme.atlassian.net/browse/KAN-12', summary: 'Payments' });
+    assert.deepEqual(r.issues.map((i) => [i.issue, i.outcome, i.message]), [
+      ['KAN-30', 'added', 'added to KAN-12'],
+      ['KAN-31', 'added', 'added to KAN-12'],
+    ]);
+    assert.deepEqual([r.changed, r.unchanged, r.failed], [2, 0, 0]);
+    assert.deepEqual(puts.map((p) => p.fields), [{ parent: { key: 'KAN-12' } }, { parent: { key: 'KAN-12' } }]);
+    assert.deepEqual(changed, [['KAN-30', { from: null, to: 'KAN-12' }], ['KAN-31', { from: null, to: 'KAN-12' }]]);
+    assert.equal(issues['KAN-30'].parent, 'KAN-12');
+  });
+  // AC1 — `show` then reports the parent
+  await withFetch((url, opts) => {
+    if (isTransitionList(url)) return transitionsResponse();
+    return handler(url, opts);
+  }, async () => {
+    const shown = await jc.getIssue(CRED, 'KAN-30', { env: CRED.env });
+    assert.equal(shown.parent, 'KAN-12');
+  });
+});
+
+test('setParentEpic: moves an issue from another Epic; already-under is a success (#2895 AC2/AC4)', async () => {
+  const issues = { 'KAN-5': EPIC(), 'KAN-12': EPIC(), 'KAN-30': STORY({ parent: 'KAN-5' }), 'KAN-31': STORY({ parent: 'KAN-12' }) };
+  const { handler, puts } = parentJira(issues);
+  await withFetch(handler, async () => {
+    const changed = [];
+    const r = await jc.setParentEpic(CRED, { epicKey: 'KAN-12', issueKeys: ['KAN-30', 'KAN-31'], env: CRED.env, onChanged: (k, d) => changed.push([k, d]) });
+    assert.deepEqual(r.issues.map((i) => [i.issue, i.ok, i.outcome, i.message, i.from, i.to]), [
+      ['KAN-30', true, 'moved', 'moved from KAN-5 to KAN-12', 'KAN-5', 'KAN-12'],
+      ['KAN-31', true, 'unchanged', 'already under KAN-12', 'KAN-12', 'KAN-12'],
+    ]);
+    assert.deepEqual([r.changed, r.unchanged, r.failed], [1, 1, 0]);
+    assert.equal(puts.length, 1, 'no write for an issue already under the Epic');
+    assert.deepEqual(changed, [['KAN-30', { from: 'KAN-5', to: 'KAN-12' }]]);
+    assert.equal(issues['KAN-30'].parent, 'KAN-12');
+  });
+});
+
+test('setParentEpic: epicKey null takes issues out of their Epic; no parent is unchanged (#2895 AC3)', async () => {
+  const issues = { 'KAN-30': STORY({ parent: 'KAN-5' }), 'KAN-31': STORY() };
+  const { handler, puts } = parentJira(issues);
+  await withFetch(handler, async (calls) => {
+    const r = await jc.setParentEpic(CRED, { epicKey: null, issueKeys: ['KAN-30', 'KAN-31'], env: CRED.env });
+    assert.equal(r.epic, null);
+    assert.deepEqual(r.issues.map((i) => [i.issue, i.outcome, i.message]), [
+      ['KAN-30', 'removed', 'removed from KAN-5'],
+      ['KAN-31', 'unchanged', 'has no parent Epic'],
+    ]);
+    assert.deepEqual(puts.map((p) => p.fields), [{ parent: null }]);
+    assert.equal(issues['KAN-30'].parent, null);
+    assert.ok(!calls.some((c) => /\/issue\/null/.test(c.url)), 'no target lookup when removing');
+  });
+});
+
+test('setParentEpic: one bad key does not hide the others — per-issue reasons (#2895 AC5/AC7)', async () => {
+  const issues = {
+    'KAN-12': EPIC(), 'KAN-30': STORY(), 'KAN-13': EPIC(), 'KAN-40': { type: 'Sub-task', level: -1, subtask: true, parent: 'KAN-30' },
+    'KAN-41': STORY(), 'KAN-42': STORY(),
+  };
+  const { handler } = parentJira(issues, {
+    put: (key) => {
+      if (key === 'KAN-41') return { ok: false, status: 403, text: async () => '{"errorMessages":["You do not have permission to edit issues in this project."]}' };
+      if (key === 'KAN-42') return { ok: false, status: 400, text: async () => '{"errors":{"parent":"Issues from project OPS cannot be added to this Epic."}}' };
+      return null;
+    },
+  });
+  await withFetch(handler, async () => {
+    const r = await jc.setParentEpic(CRED, {
+      epicKey: 'KAN-12', issueKeys: ['NOPE-1', 'KAN-13', 'KAN-40', 'KAN-41', 'KAN-42', 'not a key', 'KAN-30'], env: CRED.env,
+    });
+    const by = Object.fromEntries(r.issues.map((i) => [i.issue, i]));
+    assert.equal(r.issues.length, 7, 'every key gets an outcome');
+    assert.match(by['NOPE-1'].error, /^NOPE-1 was not found, or it is outside this team's Jira scope/);
+    assert.match(by['KAN-13'].error, /KAN-13 is an Epic — an Epic cannot be put under/);
+    assert.match(by['KAN-40'].error, /KAN-40 is a Sub-task — a sub-task's parent is a standard issue/);
+    assert.match(by['KAN-41'].error, /the Jira account may not edit KAN-41 \(403\): You do not have permission to edit issues in this project/);
+    assert.match(by['KAN-42'].error, /Jira refused the change: parent: Issues from project OPS cannot be added to this Epic/);
+    assert.match(by['NOT A KEY'].error, /is not a Jira issue key/);
+    assert.equal(by['KAN-30'].outcome, 'added');
+    assert.deepEqual([r.changed, r.unchanged, r.failed], [1, 0, 6]);
+  });
+});
+
+test('setParentEpic: the target must be a visible Epic — refused before any change (#2895 AC6/AC8)', async () => {
+  const issues = { 'KAN-7': STORY(), 'KAN-30': STORY() };
+  const { handler, puts } = parentJira(issues);
+  await withFetch(handler, async () => {
+    await assert.rejects(() => jc.setParentEpic(CRED, { epicKey: 'KAN-7', issueKeys: ['KAN-30'], env: CRED.env }),
+      (e) => e.status === 400 && /KAN-7 is a Story, not an Epic .*Nothing was changed\./.test(e.message));
+    await assert.rejects(() => jc.setParentEpic(CRED, { epicKey: 'OTHER-1', issueKeys: ['KAN-30'], env: CRED.env }),
+      (e) => e.status === 404 && /Epic OTHER-1 was not found, or it is outside this team's Jira scope .*Nothing was changed\./.test(e.message));
+    await assert.rejects(() => jc.setParentEpic(CRED, { epicKey: 'KAN 12', issueKeys: ['KAN-30'], env: CRED.env }), (e) => e.status === 400);
+    await assert.rejects(() => jc.setParentEpic(CRED, { epicKey: 'KAN-12', issueKeys: [' '], env: CRED.env }),
+      (e) => e.status === 400 && /at least one issue key/.test(e.message));
+    assert.equal(puts.length, 0);
+  });
+});
+
+test('setParentEpic: company-managed — reads the Epic Link field, falls back to it when `parent` is refused (#2895 AC9)', async () => {
+  const issues = { 'KAN-5': EPIC(), 'KAN-12': EPIC(), 'KAN-30': STORY({ parent: 'KAN-5' }), 'KAN-31': STORY({ parent: 'KAN-12' }) };
+  const { handler, puts } = parentJira(issues, { epicLinkId: 'customfield_10014', rejectParent: true });
+  await withFetch(handler, async () => {
+    const r = await jc.setParentEpic(CRED, { epicKey: 'KAN-12', issueKeys: ['KAN-30', 'KAN-31'], env: CRED.env });
+    assert.deepEqual(r.issues.map((i) => i.outcome), ['moved', 'unchanged']); // KAN-31 read via the Epic Link field
+    assert.deepEqual(puts.map((p) => p.fields), [{ parent: { key: 'KAN-12' } }, { customfield_10014: 'KAN-12' }]);
+    assert.equal(issues['KAN-30'].parent, 'KAN-12');
+    const out = await jc.setParentEpic(CRED, { epicKey: null, issueKeys: ['KAN-30'], env: CRED.env });
+    assert.equal(out.issues[0].outcome, 'removed');
+    assert.deepEqual(puts.slice(-1)[0].fields, { customfield_10014: null });
+  });
+});
+
+test('setParentEpic: a key listed twice is handled once; a long list is never truncated (#2895 edge cases)', async () => {
+  const issues = { 'KAN-12': EPIC() };
+  const keys = [];
+  for (let i = 100; i < 150; i += 1) { issues[`KAN-${i}`] = STORY(); keys.push(`KAN-${i}`); }
+  const { handler, puts } = parentJira(issues);
+  await withFetch(handler, async () => {
+    const r = await jc.setParentEpic(CRED, { epicKey: 'KAN-12', issueKeys: [...keys, 'kan-100', 'KAN-101'], env: CRED.env });
+    assert.equal(r.issues.length, 50);
+    assert.equal(r.changed, 50);
+    assert.equal(puts.length, 50);
+  });
+});
+
+test('parentWriteRefusal: Jira\'s reason, readable; a 404 reads as outside the team scope', () => {
+  const err = (status, body) => Object.assign(new Error('mapped'), { status, body });
+  assert.match(jc.parentWriteRefusal(err(404, ''), 'KAN-1'), /^KAN-1 was not found, or it is outside this team's Jira scope/);
+  assert.equal(jc.parentWriteRefusal(err(400, '{"errorMessages":["Nope."]}'), 'KAN-1'), 'Jira refused the change: Nope');
+  assert.equal(jc.parentWriteRefusal(err(500, 'oops'), 'KAN-1'), 'mapped');
+});

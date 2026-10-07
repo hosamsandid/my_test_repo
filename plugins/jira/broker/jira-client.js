@@ -808,6 +808,105 @@ async function listProjectStatuses(cred, { projectKey, env } = {}) {
   }));
 }
 
+// ── user lookup: name / e-mail → accountId (#2898) ─────────────────────────
+// Jira addresses people by an opaque accountId, which `create-epic`,
+// `add-stories`, `create-issue` and `edit` take as `assignee`. `users` finds it
+// by a name or e-mail fragment: GET /rest/api/3/user/search, or — narrowed to
+// people who may be assigned in a project / to an issue —
+// GET /rest/api/3/user/assignable/search. Nothing is cached: every call asks
+// Jira, so no user list outlives the request.
+const USER_SEARCH_LIMIT = 50;
+
+const userErr = (status, message) => { const e = new Error(message); e.status = status; return e; };
+
+// One Jira user as an agent sees it. `email` only when Jira hands it to the
+// calling credential (privacy settings hide it → null; never derived).
+// `accountType` is Jira's own: atlassian (a person), app (a bot / integration)
+// or customer (a JSM portal customer).
+function shapeUser(raw) {
+  const r = raw || {};
+  const email = typeof r.emailAddress === 'string' && r.emailAddress.trim() ? r.emailAddress.trim() : null;
+  return {
+    accountId: String(r.accountId || ''),
+    displayName: r.displayName == null ? '' : String(r.displayName),
+    email,
+    active: r.active !== false,
+    accountType: r.accountType ? String(r.accountType) : null,
+  };
+}
+
+// The `users` result notes: no match, more matches than the cap, apps among the
+// matches, and several people sharing one name — the agent must tell them apart
+// (by e-mail / accountId), never guess.
+function userSearchNote({ query, users, truncated, limit, project, issue }) {
+  const where = project ? ` who can be assigned in project ${project}` : issue ? ` who can be assigned to ${issue}` : '';
+  if (!users.length) return `No user found matching "${query}"${where}.`;
+  const notes = [];
+  if (truncated) notes.push(`More than ${limit} users match — only the first ${limit} are listed; narrow the query (e.g. a full e-mail address).`);
+  const byName = new Map(); // lower-cased name → [display name, count]
+  for (const u of users) {
+    const k = u.displayName.trim().toLowerCase();
+    byName.set(k, [byName.has(k) ? byName.get(k)[0] : u.displayName, (byName.has(k) ? byName.get(k)[1] : 0) + 1]);
+  }
+  for (const [name, count] of byName.values()) {
+    if (count > 1) notes.push(`${count} users are named "${name}" — tell them apart by e-mail or accountId, do not guess.`);
+  }
+  if (users.some((u) => u.accountType === 'app')) notes.push('Entries with accountType "app" are apps / bots, not people.');
+  if (users.some((u) => !u.active)) notes.push('Entries with active: false are deactivated accounts and cannot be assigned.');
+  return notes.length ? notes.join(' ') : null;
+}
+
+// Search Jira users by a name or e-mail fragment (CLI `users`). With `project`
+// (or `issue`) only people assignable there are returned, and inactive accounts
+// are left out; without it every match is returned, inactive ones marked
+// `active: false`. Capped at `limit` (≤ 50): one extra row is requested so the
+// result can say `truncated` when there were more. A project / issue the
+// credential cannot see is the standard out-of-scope refusal.
+async function searchUsers(cred, { query, project, issue, limit, env } = {}) {
+  const q = String(query || '').trim();
+  if (!q) throw userErr(400, 'a search query is required (a name or e-mail address, or part of one)');
+  const projectKey = String(project || '').trim();
+  const issueKey = String(issue || '').trim();
+  if (projectKey && issueKey) throw userErr(400, 'pass --project OR --issue, not both');
+  const n = Number(limit);
+  const cap = limit === undefined || limit === null || limit === '' ? USER_SEARCH_LIMIT
+    : Number.isInteger(n) && n > 0 ? Math.min(n, USER_SEARCH_LIMIT) : null;
+  if (cap === null) throw userErr(400, `--limit must be a whole number from 1 to ${USER_SEARCH_LIMIT}`);
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const assignable = !!(projectKey || issueKey);
+  // Confirm the project / issue is visible first, so an out-of-scope key is the
+  // standard refusal and never an empty "no user found".
+  if (assignable) {
+    const lookup = projectKey
+      ? `/rest/api/3/project/${encodeURIComponent(projectKey)}`
+      : `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=project`;
+    try {
+      await requestJson({ base, path: lookup, authHeader: auth });
+    } catch (err) {
+      if (err.status === 404) throw userErr(404, `${outOfScope(projectKey ? 'Project ' : 'Issue ', projectKey || issueKey)}.`);
+      throw err;
+    }
+  }
+  const params = new URLSearchParams({ query: q, startAt: '0', maxResults: String(cap + 1) });
+  if (projectKey) params.set('project', projectKey);
+  if (issueKey) params.set('issueKey', issueKey);
+  const raw = await requestJson({
+    base,
+    path: `/rest/api/3/user/${assignable ? 'assignable/' : ''}search?${params.toString()}`,
+    authHeader: auth,
+  });
+  let users = (Array.isArray(raw) ? raw : []).map(shapeUser).filter((u) => u.accountId);
+  if (assignable) users = users.filter((u) => u.active);
+  const truncated = users.length > cap;
+  if (truncated) users = users.slice(0, cap);
+  const result = { query: q, assignableOnly: assignable, users, count: users.length, truncated };
+  if (projectKey) result.project = projectKey;
+  if (issueKey) result.issue = issueKey;
+  result.note = userSearchNote({ query: q, users, truncated, limit: cap, project: projectKey, issue: issueKey });
+  return result;
+}
+
 // The agent-facing field set both `list` and `search` request from Jira, and
 // the shaped shape they return — the columns an agent sees for a browsed issue.
 const AGENT_ISSUE_FIELDS = ['summary', 'status', 'assignee', 'updated', 'issuetype', 'parent'];
@@ -3062,6 +3161,10 @@ module.exports = {
   addAttachment,
   listProjects,
   listProjectStatuses,
+  // user lookup (#2898)
+  USER_SEARCH_LIMIT,
+  shapeUser,
+  searchUsers,
   ATTACHMENT_LIST_CAP,
   ATTACHMENT_MAX_BYTES,
   ATTACHMENT_UPLOAD_MAX_BYTES,

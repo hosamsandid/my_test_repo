@@ -967,6 +967,30 @@ async function handleCli(req, res, cliPath) {
     }
   }
 
+  // ── user lookup: name / e-mail → accountId (#2898) ──────────────────────
+  // A read: no write policy. The audit line records only where it looked and
+  // how many matched — never the query or the people found (personal data).
+  if (cliPath === '/users' && req.method === 'GET') {
+    const cred = credFor();
+    if (!cred) return noCredential('users');
+    const project = (params.get('project') || '').trim();
+    const issue = (params.get('issue') || '').trim();
+    const where = project || issue || 'site';
+    try {
+      const result = await jira.searchUsers(cred, {
+        query: params.get('query') || '',
+        project: project || undefined,
+        issue: issue || undefined,
+        limit: params.get('limit') || undefined,
+      });
+      auditCall('users', 'ok', `${where}:${result.count}${result.truncated ? '+' : ''}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      auditCall('users', failureOutcome(err), `${where}: ${err.status || 'error'}`);
+      return sendJiraError(err);
+    }
+  }
+
   // ── issue links (#2884) ──────────────────────────────────────────────────
   // `link-types` is a read (the site's types with both phrases). `link` /
   // `unlink` are writes, role-gated like the others (D3) with their own policy

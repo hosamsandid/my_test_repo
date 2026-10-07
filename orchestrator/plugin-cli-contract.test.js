@@ -753,6 +753,46 @@ test('aee-jira: link / unlink read as a sentence — first key, type words, last
   }
 });
 
+test('aee-jira users: listed in --help; --project/--issue exclusive; wired to GET /users (#2898)', async () => {
+  const ws = grantedJiraWorkspace();
+  const help = runJira(['--help'], ws);
+  const flat = help.stdout.replace(/\s+/g, ' ');
+  assert.match(flat, /users find Jira users by name or e-mail → their accountId/);
+  assert.match(runJira(['users', '--help'], ws).stdout.replace(/\s+/g, ' '), /Find people so you can assign them\. Jira identifies a person by an opaque accountId/);
+  assert.match(flat, /aee-jira users "Anna" --project KAN, then aee-jira edit KAN-10 --assignee <accountId>/);
+  // a query is required; --project and --issue are mutually exclusive — usage errors, no broker call
+  assert.equal(runJira(['users', '--json'], ws).status, 2);
+  assert.equal(runJira(['users', 'Anna', '--project', 'KAN', '--issue', 'KAN-1', '--json'], ws).status, 2);
+
+  const http = require('node:http');
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    seen.push({ method: req.method, url: req.url });
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ query: 'Anna', users: [], count: 0, truncated: false, note: 'No user found matching "Anna".' }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const live = grantedJiraWorkspace(`http://127.0.0.1:${port}/`);
+    for (const args of [
+      ['users', 'Anna Schmidt'],
+      ['users', 'anna@acme.com', '--project', 'KAN', '--limit', '5'],
+      ['users', 'Anna', '--issue', 'KAN-10'],
+    ]) {
+      const r = await runJiraAsync([...args, '--json'], live);
+      assert.equal(r.status, 0, args.join(' ') + r.stdout + r.stderr); // no match is not an error
+    }
+    assert.deepEqual(seen, [
+      { method: 'GET', url: '/cli/users?query=Anna+Schmidt' },
+      { method: 'GET', url: '/cli/users?query=anna%40acme.com&project=KAN&limit=5' },
+      { method: 'GET', url: '/cli/users?query=Anna&issue=KAN-10' },
+    ]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('aee-jira add-stories: listed in --help; bad payloads are usage errors; wired to /add-stories; exit 1 on a failed story (#2890)', async () => {
   const ws = grantedJiraWorkspace();
   const help = runJira(['--help'], ws);

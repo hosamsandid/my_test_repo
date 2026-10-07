@@ -34,6 +34,11 @@ test('resolveMemLimitBytes uses the toolchain\'s memoryLimit override when prese
   );
 });
 
+test('resolveMemLimitBytes keeps the limit disabled when the fleet limit is 0, even with an override', () => {
+  assert.equal(resolveMemLimitBytes({ toolchainId: 'jvm', resources: { memoryLimit: '4g' } }, 0), 0);
+  assert.equal(resolveMemLimitBytes(null, 0), 0);
+});
+
 test('resolveMemLimitBytes falls back to the fleet default on an override that fails to parse', () => {
   assert.equal(
     resolveMemLimitBytes({ toolchainId: 'jvm', resources: { memoryLimit: 'not-a-quantity' } }),

@@ -74,10 +74,14 @@ const AGENT_PIDS_LIMIT = Number(process.env.AEE_AGENT_PIDS_LIMIT || 512);
 // fleet-wide default for agents bound to it (e.g. a JVM/Gradle build that would
 // otherwise OOM at AEE_AGENT_MEM_LIMIT). No override, or one that fails to
 // parse -> AGENT_MEM_LIMIT_BYTES, byte-identical to before this field existed.
-function resolveMemLimitBytes(toolchain) {
+// An operator who disabled the fleet limit (AEE_AGENT_MEM_LIMIT=0, e.g. on a
+// WSL host whose cgroup delegation cannot write memory.max) stays disabled:
+// the override only raises a limit, it never re-imposes one.
+function resolveMemLimitBytes(toolchain, fleetBytes = AGENT_MEM_LIMIT_BYTES) {
+  if (!fleetBytes) return 0;
   const override = toolchain && toolchain.resources && toolchain.resources.memoryLimit;
-  if (!override) return AGENT_MEM_LIMIT_BYTES;
-  return parseBytes(override) || AGENT_MEM_LIMIT_BYTES;
+  if (!override) return fleetBytes;
+  return parseBytes(override) || fleetBytes;
 }
 // Label stamped on every agent container so the orchestrator can reconcile
 // live container state against its in-memory process map (source of truth).

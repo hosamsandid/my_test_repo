@@ -495,6 +495,13 @@ console's own version format (short hash + `-dirty`, commit timestamp):
   route reports them as `build` (`broker-sdk/build-info.js`).
 - **Installed files** — `make seed-plugins` writes `build-info.json` into each
   pool plugin; install copies it into the registry.
+- **Release version (#2893)** — every identity also records the nearest release
+  tag (`v<major>.<minor>.<patch>`) and the commit distance to it
+  (`scripts/git-release-tag.sh` → `AEE_BUILD_TAG` / `AEE_BUILD_TAG_DISTANCE`,
+  labels `aee.build.tag` / `aee.build.tag-distance`, `build-info.json`
+  `tag` / `tagDistance`). The card shows `v0.4.0` on the tag,
+  `v0.4.0+12 (5500e15)` after it and the bare hash without a tag; the
+  mismatch hints keep comparing commits only.
 - **Surface** — the orchestrator probes every live sidecar's `/healthz`
   (`orchestrator/plugin-build-info.js`) and returns `brokerBuild` from
   `GET /internal/plugins`, plus `imageBuild` — the OCI labels of

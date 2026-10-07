@@ -250,12 +250,33 @@ test('AC10 — reveal ticks in only the hidden target\'s entry and keeps the res
 
 // ── AC11: reorder gates ──────────────────────────────────────────────────
 
-test('AC11 — group/single reorder only with everything shown; member reorder also with exactly one team', () => {
+test('AC11 — group/single reorder only with everything shown; member reorder whenever a team is shown', () => {
   const { entries } = entriesFor();
   assert.deepEqual(reorderAllowed(entries, SHOW_ALL), { groups: true, members: true });
+  // Exactly one team shown (#1725) — unchanged.
   const onlyBeta = { hidden: keys(entries).filter(k => k !== 'team:beta') };
   assert.deepEqual(reorderAllowed(entries, onlyBeta), { groups: false, members: true });
+  // Only the Individual agents block shown — no team, so no member reorder.
   const onlySingles = { hidden: keys(entries).filter(k => k !== INDIVIDUAL_KEY) };
   assert.deepEqual(reorderAllowed(entries, onlySingles), { groups: false, members: false });
-  assert.deepEqual(reorderAllowed(entries, { hidden: ['team:beta'] }), { groups: false, members: false });
+  // Nothing shown — no rows, no member reorder, no error.
+  assert.deepEqual(reorderAllowed(entries, { hidden: keys(entries) }), { groups: false, members: false });
+});
+
+test('#2846 — member reorder stays on under a multi-team filter; group reorder stays off', () => {
+  const { entries } = entriesFor();
+  const teamKeys = keys(entries).filter(k => k.startsWith('team:'));
+  assert.ok(teamKeys.length >= 2, 'fixture needs two or more teams');
+  // Two or more teams shown, Individual agents hidden (AC1/AC2/AC4).
+  const teamsOnly = { hidden: [INDIVIDUAL_KEY] };
+  assert.deepEqual(reorderAllowed(entries, teamsOnly), { groups: false, members: true });
+  // One team hidden, the rest (incl. Individual agents) shown — mixed view.
+  assert.deepEqual(reorderAllowed(entries, { hidden: ['team:beta'] }), { groups: false, members: true });
+  // Exactly two teams shown.
+  const two = { hidden: keys(entries).filter(k => k !== teamKeys[0] && k !== teamKeys[1]) };
+  assert.deepEqual(reorderAllowed(entries, two), { groups: false, members: true });
+  // A team added after the selection was saved has no hidden key → shown,
+  // its members reorderable.
+  const later = [...entries, { key: 'team:new', teamId: 'new', label: 'New', subtitle: '', kind: 'team' }];
+  assert.deepEqual(reorderAllowed(later, { hidden: keys(entries) }), { groups: false, members: true });
 });

@@ -24,7 +24,12 @@ export function draftSubtitle(entry) {
   const e = entry || {};
   const roleCount = Number.isFinite(e.roleCount) ? e.roleCount : 0;
   const parts = [`${roleCount} agent${roleCount === 1 ? '' : 's'}`];
-  if (e.shared) {
+  // #2870 AC12 — a global draft says so INSTEAD of private/shared: for most
+  // viewers the explicit list is not what decides whether they can see it.
+  if (e.visibleToEveryone === true) {
+    parts.push(VISIBLE_TO_EVERYONE_LABEL);
+    if (e.canEdit === false) parts.push('read-only');
+  } else if (e.shared) {
     const n = Number.isFinite(e.accessCount) ? e.accessCount : 0;
     parts.push(`shared with ${n} people`);
   } else {
@@ -39,6 +44,11 @@ export function draftSubtitle(entry) {
 /** The `title` on the same row — the long form of the badge above. */
 export function draftAccessTitle(entry) {
   const e = entry || {};
+  if (e.visibleToEveryone === true) {
+    return e.canEdit === false
+      ? 'Visible to everyone: you can open, export, create a team from or duplicate this draft, but not change it.'
+      : 'Visible to everyone on the platform (read-only for them). Everyone it is shared with can still edit it.';
+  }
   if (!e.shared) return 'Private to you. Use Share… to give a colleague access.';
   const n = Number.isFinite(e.accessCount) ? e.accessCount : 0;
   return `Shared: ${n} people can open, edit and delete this draft.`;
@@ -61,14 +71,104 @@ export function shareCandidates(directory, accessUsers) {
   return (Array.isArray(directory) ? directory : []).filter(u => u && u.id && !held.has(u.id));
 }
 
-/** State of the Add control: what the empty option should say, and whether the
- *  button can fire. Mirrors ManageTeamPanel's add-member row. */
-export function addControlState({ candidates = [], selectedId = '', busy = false } = {}) {
-  const hasCandidates = candidates.length > 0;
+/** #2870 AC2 — the picker's text filter: case-insensitive substring on the
+ *  display name or the email, the only two fields the picker knows (D2/D11). */
+export function filterCandidates(candidates, query) {
+  const list = Array.isArray(candidates) ? candidates : [];
+  const q = typeof query === 'string' ? query.trim().toLowerCase() : '';
+  if (!q) return list;
+  return list.filter(u => String(u.displayName || '').toLowerCase().includes(q)
+    || String(u.email || '').toLowerCase().includes(q));
+}
+
+/** #2870 AC3 — "Select all" adds every colleague CURRENTLY LISTED (i.e. the
+ *  filtered result) to the selection, keeping what was already ticked. */
+export function selectAllIds(selected, visible) {
+  const next = new Set(selected instanceof Set ? selected : []);
+  for (const u of Array.isArray(visible) ? visible : []) if (u && u.id) next.add(u.id);
+  return next;
+}
+
+/** Edge case: a ticked colleague who is no longer a candidate — they were
+ *  shared with in the meantime, or their account was deleted — drops out of
+ *  the selection, so the count on the button never includes a ghost. */
+export function pruneSelection(selected, candidates) {
+  const ids = new Set((Array.isArray(candidates) ? candidates : []).map(u => u.id));
+  return new Set([...(selected instanceof Set ? selected : [])].filter(id => ids.has(id)));
+}
+
+/** #2870 AC1/AC3/AC4 — the picker's controls in one place: the Share button
+ *  names the count and is inert with nobody selected; Select all / Clear are
+ *  inert when they would do nothing; the empty state says why. */
+export function pickerState({ candidates = [], visible = [], selected = new Set(), busy = false, query = '' } = {}) {
+  const sel = selected instanceof Set ? selected : new Set();
+  const n = sel.size;
+  const allVisibleSelected = visible.length > 0 && visible.every(u => sel.has(u.id));
+  let emptyText = '';
+  if (candidates.length === 0) emptyText = 'Everyone already has access.';
+  else if (visible.length === 0) emptyText = `No colleague matches “${String(query).trim()}”.`;
   return {
-    placeholder: hasCandidates ? 'Select a colleague to share with…' : 'Everyone already has access',
-    disabled: busy || !hasCandidates || !selectedId,
+    shareLabel: n > 0 ? `Share with ${n}` : 'Share',
+    shareDisabled: busy || n === 0,
+    selectAllDisabled: busy || visible.length === 0 || allVisibleSelected,
+    clearDisabled: busy || n === 0,
+    filterDisabled: candidates.length === 0,
+    emptyText,
   };
+}
+
+/** #2870 AC5 — what to say after a successful bulk share. Already-present
+ *  colleagues are skipped by the server, so the sentence counts what actually
+ *  changed instead of echoing the selection. */
+export function shareResultNotice(res) {
+  const added = Number.isFinite(res?.added) ? res.added : 0;
+  const skipped = Number.isFinite(res?.skipped) ? res.skipped : 0;
+  const head = added === 1 ? 'Shared with 1 person.' : `Shared with ${added} people.`;
+  if (skipped === 0) return head;
+  return `${head} ${skipped} already had access.`;
+}
+
+/** #2870 AC6 — a refused bulk share. The server changes nothing on a refusal,
+ *  so the message must say so; an unknown-user refusal also asks the panel to
+ *  reload the directory, because someone in the selection is gone. */
+export function bulkShareError(err) {
+  if (err && err.code === 'unknown_user') {
+    return { message: `${err.message || 'Someone you selected no longer has an account.'} The list has been refreshed — check the selection and try again.`, reload: true };
+  }
+  return { message: draftWriteError(err, 'Could not share. Nothing was changed.'), reload: false };
+}
+
+// ── #2870 Part B — "Visible to everyone" ─────────────────────────────────────
+
+export const VISIBLE_TO_EVERYONE_LABEL = 'Visible to everyone';
+
+/** AC8 — the confirmation names the reach in full: current AND future users. */
+export const VISIBLE_TO_EVERYONE_CONFIRM =
+  'Every user of the platform — everyone who has an account today, and everyone who gets one later — '
+  + 'will see this draft and can open it, export it, create a team from it and duplicate it. '
+  + 'They cannot edit, rename, delete or share it; only the people listed under "Has access" can.';
+
+/** AC10 — the editor's hint for a global-only reader. */
+export const READ_ONLY_DRAFT_HINT =
+  'Read-only: this draft is visible to everyone, but only the people it is shared with can change it. '
+  + 'Duplicate it to make your own editable copy.';
+
+/** AC10 — the editor opens read-only only when the server said so explicitly;
+ *  an older server that never sends the flag keeps today's editable canvas. */
+export function isReadOnlyDraft(bundle) {
+  return !!bundle && bundle.viewerCanEdit === false;
+}
+
+/** AC10 — "Duplicate to my drafts": the body for `POST /api/process/drafts`.
+ *  The copy is an ordinary private draft of the caller — the server strips any
+ *  access fields anyway; the Copilot history is storage metadata of the
+ *  original and stays behind. */
+export function duplicateDraftBody(bundle) {
+  const src = bundle && typeof bundle === 'object' ? bundle : {};
+  const { copilot, createdBy, accessUserIds, visibleToEveryone, viewerCanEdit, id, createdAt, updatedAt, ...rest } = src;
+  const base = typeof src.name === 'string' && src.name.trim() ? src.name.trim() : 'Untitled flow';
+  const name = `${base} (copy)`;
+  return { name, processTemplate: { ...rest, name } };
 }
 
 /** AC9 — is removing THIS person going to be refused? The rule is on the set,

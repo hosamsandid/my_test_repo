@@ -43,6 +43,20 @@ const STALL_MS = 30 * 60 * 1000;
 // an hour later with nobody alive to finish it is orphaned (the claiming run
 // died, was disabled or reaped) — not healthy in-progress work.
 const NEEDS_HELP_MS = 60 * 60 * 1000;
+// How long a wake label may sit on an item with nothing running, queued or
+// held for it before the board says the wake was never delivered (#2872).
+// Long enough to absorb the poller's cadence and the Events API's usual lag;
+// a `history-horizon` drop is already final when it is logged, so its clock
+// starts at the label's own add, not at the (possibly hours-late) log entry.
+const PARKED_WAKE_MS = 30 * 60 * 1000;
+
+// Why a parked wake never reached its agent, from the GitHub Event Log (#2872).
+const WAKE_CAUSES = Object.freeze({
+  horizon: 'history-horizon',
+  armed: 'wake-already-armed',
+  notSeen: 'not-seen',
+  dropped: 'dropped',
+});
 
 const REASONS = Object.freeze({
   flagged: 'flagged for a human',
@@ -53,6 +67,8 @@ const REASONS = Object.freeze({
   stalled: 'no agent is scheduled to continue',
   needsHelp: 'stuck — no progress, needs help',
   noConsumer: 'nobody picks it up — its agent is switched off',
+  wakeLost: 'wake never delivered',
+  carriedOver: 'carried over — not started here',
 });
 
 function str(v) {
@@ -139,6 +155,10 @@ function buildRoleGraph(members, { labels = [], teamId = null } = {}) {
     const r = {
       id: m.id, displayName: str(m.displayName) || m.id, enabled: m.enabled !== false,
       consumes: new Set(), emits: new Set(), from: new Set(),
+      // Wake label -> when this role's trigger on it started listening
+      // (`activatedAt`, else `createdAt`; the poller's history horizon, #320),
+      // earliest of several. A label older than it was never this role's (#2877).
+      horizons: new Map(),
     };
     for (const e of Array.isArray(m.emits) ? m.emits : []) if (str(e)) r.emits.add(str(e));
     const opts = m.outcomes && Array.isArray(m.outcomes.options) ? m.outcomes.options : [];
@@ -158,7 +178,13 @@ function buildRoleGraph(members, { labels = [], teamId = null } = {}) {
       if (!t || t.type !== 'github-event' || t.enabled === false) continue;
       for (const e of Array.isArray(t.emits) ? t.emits : []) if (str(e)) r.emits.add(str(e));
       const l = str(t.labelFilter);
-      if (l && !isStateSuffix(l)) r.consumes.add(l);
+      if (l && !isStateSuffix(l)) {
+        r.consumes.add(l);
+        const h = toMs(t.activatedAt) ?? toMs(t.createdAt);
+        // Unknown for any trigger = unknown for the label: it may have listened all along.
+        if (h == null || r.horizons.get(l) === null) r.horizons.set(l, null);
+        else if (!r.horizons.has(l) || h < r.horizons.get(l)) r.horizons.set(l, h);
+      }
     }
     for (const c of Array.isArray(m.channels) ? m.channels : []) {
       const from = c && str(c.from);
@@ -385,6 +411,8 @@ function eventIdFromCorrelation(correlationId) {
  * @param {Array}  args.sessions  [{ agentId, session }] running sessions of the team's agents
  * @param {Array}  args.pools     [{ agentId, roleId, displayName, maxInstances, state, changedAt, held, instances:[{instanceId, busy, waiting?, prs?}] }]
  * @param {object} args.removed   rows a person took off the board (see normalizeRemoved)
+ * @param {Array}  args.queued    [{ repo, numbers:[…] }] dispatches waiting for a team agent
+ *                                (pending queues + the admission lane's held entries, #2872)
  * @param {number} args.now
  */
 function buildFlowBoard(args = {}) {
@@ -422,6 +450,7 @@ function buildFlowBoard(args = {}) {
   const links = new Map(); // pr key -> issue key
   const eventItem = new Map(); // eventId -> key
   const prCreated = new Map(); // pr key -> ms a team agent opened it
+  const itemEvents = new Map(); // key -> [log entry] — what `parkedWakes` reads
   const seen = (key, ms) => {
     if (ms == null) return;
     if (!firstSeen.has(key) || firstSeen.get(key) > ms) firstSeen.set(key, ms);
@@ -432,6 +461,8 @@ function buildFlowBoard(args = {}) {
     if (!wi || wi.number == null || !str(e.repo)) continue;
     const key = itemKey(e.repo, wi.number);
     if (e.eventId != null) eventItem.set(String(e.eventId), key);
+    if (!itemEvents.has(key)) itemEvents.set(key, []);
+    itemEvents.get(key).push(e);
     const ts = toMs(e.ts);
     for (const o of Array.isArray(e.outcomes) ? e.outcomes : []) {
       if (!o || o.status !== 'delivered') continue;
@@ -513,6 +544,13 @@ function buildFlowBoard(args = {}) {
       }
     }
   }
+  // Items a dispatch is already waiting for (#2872): delivered, just not run
+  // yet — never a lost wake.
+  const queued = new Set();
+  for (const q of Array.isArray(args.queued) ? args.queued : []) {
+    if (!q || !str(q.repo)) continue;
+    for (const n of Array.isArray(q.numbers) ? q.numbers : []) if (n != null) queued.add(itemKey(q.repo, n));
+  }
 
   // --- rows: an issue plus every PR the flow opened for it -----------------
   const rowOf = new Map(); // item key -> row key
@@ -582,8 +620,10 @@ function buildFlowBoard(args = {}) {
       }
     }
 
-    const needsHuman = isDone ? null : humanBlock({ keys, items, graph, position, live, now });
     const gateHold = isDone ? null : gateHoldOf(gateHolds, keys);
+    const needsHuman = isDone ? null : humanBlock({
+      keys, items, graph, position, live, now, queued, gateHold, itemEvents, roleOf,
+    });
     out.push({
       id: row.key,
       title: (issue && issue.title) || (prs[0] && prs[0].title) || row.key,
@@ -626,6 +666,7 @@ function buildFlowBoard(args = {}) {
     .map((r) => ({
       id: r.id, title: r.title, url: r.url, issue: r.issue, prs: r.prs, reason: r.needsHuman.reason, since: r.needsHuman.since,
       ...(r.needsHuman.release ? { release: r.needsHuman.release } : {}),
+      ...(r.needsHuman.wakes ? { wakes: r.needsHuman.wakes } : {}),
     }))
     .sort((a, b) => (toMs(a.since) || now) - (toMs(b.since) || now));
 
@@ -683,6 +724,9 @@ function buildFlowBoard(args = {}) {
     sessions,
     pools,
     doneRetentionHours: config.doneRetentionHours,
+    // #2877: rows carried over from another instance or an earlier flow, for
+    // the board's bulk "Adopt all".
+    carriedOver: out.filter((r) => r.needsHuman && r.needsHuman.reason === REASONS.carriedOver).map((r) => r.id),
     removed: removedRows.sort((a, b) => (toMs(b.removedAt) || 0) - (toMs(a.removedAt) || 0) || a.id.localeCompare(b.id)),
     // Stored removals that no longer hide anything: revived by flow activity,
     // or their row is gone from the snapshot (closed and aged out, deleted,
@@ -840,7 +884,15 @@ function lastWakeTs(wakes, key, roleId) {
 // A wake (or its claim) whose every consumer is switched off is reported as
 // `noConsumer` instead (#2754): releasing it would wake nobody, so it is not
 // "stuck" but dead-ended until someone switches the agent back on.
-function humanBlock({ keys, items, graph, position, live = new Set(), now }) {
+//
+// A row that reads "up next" with nothing running, queued or gate-held for it
+// past PARKED_WAKE_MS, whose wake label never reached its agent, is reported
+// as `wakeLost` (#2872) with the per-label cause from the Event Log (`wakes`).
+// Report-only, like the rest.
+function humanBlock({
+  keys, items, graph, position, live = new Set(), now,
+  queued = new Set(), gateHold = null, itemEvents = new Map(), roleOf = () => null,
+}) {
   const open = keys.map((k) => items.get(k)).filter((it) => it && it.state !== 'closed');
   const since = (it) => toMs(it.updatedAt) || position.since || now;
   const flagged = open.find((it) => it.labels.includes('needs-human'));
@@ -877,6 +929,16 @@ function humanBlock({ keys, items, graph, position, live = new Set(), now }) {
       ...(release.length ? { release } : {}),
     };
   }
+  if (position.status === 'queued' && !isLive && !gateHold && !keys.some((k) => queued.has(k))) {
+    const wakes = parkedWakes({ open, graph, itemEvents, roleOf, now });
+    if (wakes.length) {
+      const at = Math.min(...wakes.map((w) => toMs(w.since)));
+      // #2877: a row whose every parked wake predates its trigger was carried
+      // over from another instance or an earlier flow — "Adopt" starts it here.
+      const reason = wakes.every((w) => w.carriedOver) ? REASONS.carriedOver : REASONS.wakeLost;
+      return { reason, since: new Date(at).toISOString(), wakes };
+    }
+  }
   if (position.status === 'working' || position.status === 'queued') return null;
   const prs = open.filter((it) => it.kind === 'pr');
   const conflict = prs.find((p) => p.mergeable === 'CONFLICTING');
@@ -911,6 +973,92 @@ function wakeHasNoLiveConsumer(graph, wake) {
   return active.every((id) => graph.roles.get(id) && graph.roles.get(id).enabled === false);
 }
 
+// ---------------------------------------------------------------------------
+// Parked on an undelivered wake (#2872).
+// ---------------------------------------------------------------------------
+
+// When an event happened on GitHub — its own `createdAt` — not when the poller
+// logged it, which for a late Events API delivery can be hours later.
+function eventAt(e) {
+  return toMs(e.createdAt) ?? toMs(e.ts);
+}
+
+/**
+ * Every wake label on the row's open items that never reached a consumer:
+ * `[{ repo, number, kind, label, roles, cause, dropReason?, eventId?, since }]`,
+ * `roles` being the switched-on consumer roles a "Wake again" would wake (#2873).
+ * The caller has already ruled out live, queued and gate-held work.
+ *
+ * A wake label's Event Log trail is every entry on the item about that label
+ * — its own add/remove, its claim and completion swaps, or an outcome stamped
+ * with it as the wake label. The latest of them decides:
+ *   - the label's add with a consumer outcome that got through (delivered,
+ *     held, digest…) → delivered, not parked;
+ *   - the label's add with only drops → `history-horizon`, `wake-already-armed`
+ *     or `dropped` with the poller's reason; no consumer outcome at all →
+ *     `dropped` (`no-subscriber`);
+ *   - nothing, or a later claim/completion swap → the add that put the label
+ *     back was never seen (`not-seen`): the Events API lost it.
+ * A delivered outcome naming no label at all (entries from before #1846) on a
+ * label event counts as a delivery of the wake, so an old log never flags.
+ */
+function parkedWakes({ open, graph, itemEvents, roleOf, now }) {
+  const out = [];
+  for (const it of open) {
+    const key = itemKey(it.repo, it.number);
+    const log = itemEvents.get(key) || [];
+    for (const l of it.labels) {
+      if (!graph.consumersOf.has(l) || it.labels.includes(`${l}${CLAIM_SUFFIX}`)) continue;
+      if (wakeHasNoLiveConsumer(graph, l)) continue;
+      const consumers = new Set(graph.consumersOf.get(l));
+      const consumerOutcomes = (e) => (Array.isArray(e.outcomes) ? e.outcomes : [])
+        .filter((o) => o && consumers.has(roleOf(o.agentId)));
+      const isLabelEvent = (e) => !str(e.event) || /\.(un)?labeled$/.test(e.event);
+      const family = new Set([l, `${l}${CLAIM_SUFFIX}`, `${l}${COMPLETED_SUFFIX}`]);
+      const trail = log.filter((e) => {
+        if (family.has(str(e.label))) return true;
+        return consumerOutcomes(e).some((o) => o.wakeLabel === l ||
+          (o.status === 'delivered' && o.wakeLabel == null && !str(e.label) && isLabelEvent(e)));
+      });
+      const last = trail.reduce((a, b) => (a && (eventAt(a) || 0) > (eventAt(b) || 0) ? a : b), null);
+      const isAdd = last && (!str(last.event) || last.event.endsWith('.labeled')) &&
+        (str(last.label) === l || !family.has(str(last.label)));
+      let wake;
+      if (isAdd) {
+        const mine = consumerOutcomes(last);
+        if (mine.some((o) => o.status !== 'dropped')) continue;
+        const drop = mine.find((o) => o.status === 'dropped');
+        const dropReason = drop ? str(drop.reason) || 'unknown' : 'no-subscriber';
+        const cause = dropReason === WAKE_CAUSES.horizon ? WAKE_CAUSES.horizon
+          : dropReason === WAKE_CAUSES.armed ? WAKE_CAUSES.armed : WAKE_CAUSES.dropped;
+        wake = { cause, ...(cause === WAKE_CAUSES.dropped ? { dropReason } : {}), eventId: last.eventId != null ? String(last.eventId) : null, since: eventAt(last) };
+      } else {
+        // The unseen add happened after the trail's last entry and no later
+        // than the item's last update — the later, so a lag is not flagged early.
+        const since = Math.max(toMs(it.updatedAt) || 0, last ? eventAt(last) || 0 : 0) || null;
+        wake = { cause: WAKE_CAUSES.notSeen, eventId: null, since };
+      }
+      if (wake.since == null) continue;
+      const live = [...consumers].filter((id) => graph.roles.get(id) && graph.roles.get(id).enabled !== false);
+      // #2877: the label is older than every live consumer's trigger — it was
+      // applied before this instance or flow existed (a team move, a flow
+      // re-apply). No delivery will ever come, so no waiting window either.
+      const carriedOver = wake.cause === WAKE_CAUSES.horizon || (wake.cause === WAKE_CAUSES.notSeen && (() => {
+        const hs = live.map((id) => graph.roles.get(id).horizons.get(l));
+        return hs.length > 0 && hs.every((h) => h != null) && wake.since < Math.min(...hs);
+      })());
+      if (!carriedOver && now - wake.since <= PARKED_WAKE_MS) continue;
+      const roles = live.map((id) => ({ id, label: graph.roles.get(id).displayName }));
+      out.push({
+        repo: it.repo, number: it.number, kind: it.kind, label: l, roles,
+        ...wake, since: new Date(wake.since).toISOString(),
+        ...(carriedOver ? { carriedOver: true } : {}),
+      });
+    }
+  }
+  return out;
+}
+
 // Map a GraphQL PR node's statusCheckRollup state onto the board's three
 // check states. Pending wins over failing so "checks failing" is only said
 // once nothing is still running.
@@ -929,6 +1077,8 @@ module.exports = {
   DEFAULT_DONE_RETENTION_HOURS,
   STALL_MS,
   NEEDS_HELP_MS,
+  PARKED_WAKE_MS,
+  WAKE_CAUSES,
   REASONS,
   buildRoleGraph,
   orderRoles,

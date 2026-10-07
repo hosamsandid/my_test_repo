@@ -219,6 +219,8 @@ const poolSpawns = poolSpawnSlots.createSpawnSlots();
 const flowSupervisor = require("./flow-supervisor");
 const flowBoard = require("./flow-board");
 const flowClaimRelease = require("./flow-claim-release");
+const flowWakeAgain = require("./flow-wake-again");
+const poolWakeTarget = require("./pool-wake-target");
 const recurringPoolSource = require("./recurring-pool-source");
 const predictedPaths = require("./predicted-paths");
 const poolInstanceLanes = require("./pool-instance-lanes");
@@ -1790,6 +1792,29 @@ function loadEnvironment(envId) {
   }
 }
 
+// The GitHub repo + PAT the team label routes (#902 provisioning, #2858 rename)
+// act on: the environment's primary repository and its githubTokenId. Returns
+// `{ notFound: true }`, `{ warning }` when labels cannot be managed (no token,
+// unreadable token, non-GitHub URL), or `{ owner, repo, ghToken }`.
+function resolveEnvGithubRepo(envId) {
+  const env = loadEnvironment(envId);
+  if (!env) return { notFound: true };
+  if (!env.githubTokenId) return { warning: 'No GitHub token on environment — skipping label provisioning' };
+  let ghToken;
+  try {
+    ghToken = fs.readFileSync(path.join(GH_TOKENS_DIR, env.githubTokenId), 'utf8').trim();
+  } catch (err) {
+    return { warning: `Cannot read GitHub token: ${err.message}` };
+  }
+  // Derive owner/repo from the environment's primary repo URL.
+  const repos = Array.isArray(env.repositories) ? env.repositories : (env.repository ? [env.repository] : []);
+  const primaryUrl = repos[0]?.url || '';
+  const repoMatch = primaryUrl.match(/github\.com[/:]([^/]+)\/([^/ .]+?)(?:\.git)?\s*$/);
+  if (!repoMatch) return { warning: 'Cannot parse GitHub owner/repo from environment URL — skipping label provisioning' };
+  const [, owner, repo] = repoMatch;
+  return { owner, repo, ghToken };
+}
+
 // ============================================================
 // Toolchain registry (#1940)
 // ============================================================
@@ -1964,14 +1989,19 @@ async function fetchWorkItemTitle(repoFullName, kind, number) {
 // needs to run again). Does NOT write the label to GitHub — same discipline
 // as the endpoint it was extracted from, "the label itself is unchanged; this
 // path does not stamp any label".
-async function wakeGithubLabelListeners({ repo, number, kind, label, actor, source = 'internal-plugin' }) {
+//
+// A third caller, the board's "Wake again" (#2873), passes `onlyAgentIds`:
+// the wake then goes to those agents' listeners only — the consumer role
+// templates, so a pooled role is routed onto the item's own instance.
+async function wakeGithubLabelListeners({ repo, number, kind, label, actor, source = 'internal-plugin', onlyAgentIds = null }) {
   const key = labelFastPath.eventKeyForKind(kind);
-  const agents = listAgentIds().map((aid) => ({
-    agentId: aid,
-    enabled: loadAgentConfig(aid)?.enabled !== false,
-    triggers: loadTriggers(aid),
-  }));
-  const listeners = labelFastPath.matchPollerListeners({ repo, label, kind }, agents);
+  const agents = listAgentIds().map((aid) => {
+    const config = loadAgentConfig(aid) || null;
+    // `config` lets the matcher skip pool instances (#2875).
+    return { agentId: aid, enabled: config?.enabled !== false, config, triggers: loadTriggers(aid) };
+  });
+  const matched = labelFastPath.matchPollerListeners({ repo, label, kind }, agents);
+  const listeners = onlyAgentIds ? flowWakeAgain.templateListeners(matched, [...onlyAgentIds]) : matched;
   const now = new Date().toISOString();
   // #1897 AC8: resolve the title best-effort so the notice isn't blank.
   // #2114: also carry the PR's closesIssues (from the same fetch) so the
@@ -2044,7 +2074,7 @@ async function wakeGithubLabelListeners({ repo, number, kind, label, actor, sour
     console.log(
       `[Orchestrator] label-fastpath: ${repo}#${number} +${label} matched no poller listener`);
   }
-  return { listeners };
+  return { listeners, delivered: decisions.size, held: held.size };
 }
 
 // ── Manual "Fire again" for a dropped GitHub wake (#2525) ─────────────────
@@ -2055,6 +2085,12 @@ let githubPollerRef = null;
 // at-most-once guarantee (AC9): a double-click or two users clicking at once
 // hit this before any await. The persisted half is the logged re-fire row.
 const githubRefireInFlight = new Set();
+// In-flight "Wake again" clicks (#2873), keyed `<team>::<row>` — the same
+// concurrent at-most-once guard as the re-fire above.
+const flowBoardWakeInFlight = new Set();
+// Repository label names for the #2878 lint, per repo, for a minute.
+const REPO_LABEL_TTL_MS = 60_000;
+const _repoLabelCache = new Map(); // repo -> { at, names }
 
 // The raw issue/PR object (state, merged, labels, title, body) for the re-fire's
 // state check (AC8). Null on any failure — the caller refuses rather than
@@ -2149,7 +2185,11 @@ async function refireGithubEvent({ agentId, eventId, triggerId, actor }) {
     });
     const logFields = githubRefire.buildRefireLogFields({ entry, outcome, actor });
     const decision = {};
-    const ok = enqueuePending(agentId, githubRefire.buildRefirePendingEntry({
+    // #2875: a drop logged on a pool instance re-fires through its role
+    // template, so the wake lands on the item's own instance — never on an
+    // instance working another ticket.
+    const target = poolWakeTarget.wakeTargetAgentId(agentId, loadAgentConfig(agentId));
+    const ok = enqueuePending(target, githubRefire.buildRefirePendingEntry({
       triggerId, key, ghEvent, wakeLabel, refireOf: logFields.refireOf,
     }), { decision });
     if (!ok) {
@@ -2165,14 +2205,14 @@ async function refireGithubEvent({ agentId, eventId, triggerId, actor }) {
       ...githubEventLog.buildEventEntry({
         ghEvent, repoFullName: entry.repo, key,
         outcomes: [githubEventLog.applyPoolDecision(
-          { agentId, triggerId, status: "delivered", reason: null, digest: false, wakeLabel }, decision)],
+          { agentId: target, triggerId, status: "delivered", reason: null, digest: false, wakeLabel }, decision)],
       }),
       ...logFields,
     };
     githubEventLog.record(logEntry);
     console.log(
       `[Orchestrator] refire: ${entry.repo}#${workItem.number} ${key} (${eventId}, was ${outcome.reason}) ` +
-      `→ agent=${agentId} trigger=${triggerId} by ${actor || "console"} as ${ghEvent.id}`);
+      `→ agent=${target}${target !== agentId ? ` (for ${agentId})` : ""} trigger=${triggerId} by ${actor || "console"} as ${ghEvent.id}`);
     return {
       status: 200,
       body: {
@@ -2184,6 +2224,40 @@ async function refireGithubEvent({ agentId, eventId, triggerId, actor }) {
   } finally {
     githubRefireInFlight.delete(lockKey);
   }
+}
+
+// The delivery half of the board's "Wake again" (#2873) and "Adopt" (#2877):
+// for each planned wake, re-check on GitHub that the label is still on the
+// open item, clear the poller's armed key, and deliver through the label
+// fast-path to the consumer role templates only — a gated hand-off opens a
+// readiness hold. No label is changed. Returns `{ results, warnings }`.
+async function deliverBoardWakes(plan, actor) {
+  const results = [];
+  const warnings = [];
+  for (const w of plan.wakes) {
+    const ref = `${w.repo}#${w.number}`;
+    const check = flowWakeAgain.checkWakeStillPresent(await fetchWorkItemRaw(w.repo, w.kind, w.number), { label: w.label });
+    if (!check.ok) {
+      warnings.push(`${ref}: ${check.warning} — not woken`);
+      results.push({ repo: w.repo, number: w.number, label: w.label, ok: false });
+      continue;
+    }
+    // The wake must read as a rising edge to the poller's dedup, so a
+    // later genuine re-add is not dropped as already armed.
+    if (githubPollerRef) githubPollerRef.disarmWake({ repo: w.repo, number: w.number, label: w.label });
+    const r = await wakeGithubLabelListeners({
+      repo: w.repo, number: w.number, kind: w.kind, label: w.label, actor,
+      source: flowWakeAgain.WAKE_AGAIN_SOURCE,
+      onlyAgentIds: new Set(w.roles.map((role) => role.id)),
+    });
+    const ok = r.delivered + r.held > 0;
+    if (!ok) warnings.push(`${ref}: no switched-on trigger of ${w.roles.map((role) => role.label).join(', ')} listens for ${w.label} on this repository — not woken`);
+    console.log(
+      `[Orchestrator] flow-board-wake: ${ref} ${w.label} (was ${w.cause}${w.carriedOver ? ', carried over' : ''}) by ${actor || 'console'} → ` +
+      `${r.delivered} delivered, ${r.held} held`);
+    results.push({ repo: w.repo, number: w.number, label: w.label, ok, delivered: r.delivered, held: r.held });
+  }
+  return { results, warnings };
 }
 
 function _flowLiftEmits(cfgEmits, triggers) {
@@ -2957,9 +3031,20 @@ async function computeTeamFlowBoard(teamId, { now = Date.now() } = {}) {
   });
 
   const removed = loadFlowBoardRemoved(teamId);
+  const lane = loadAdmissionLane(teamId);
+  // #2872: a dispatch already waiting in a member's queue or held in the lane
+  // means the wake was delivered, so its row is never "wake never delivered".
+  const queued = [];
+  for (const entry of [
+    ...members.flatMap((m) => readPendingEntries(m.id)),
+    ...lane.held.map((h) => h.entry),
+  ]) {
+    const ref = admissionControl.entryTicketRef(entry);
+    if (ref) queued.push({ repo: ref.repo, numbers: ref.refs });
+  }
   const { removalsToPrune, ...board } = flowBoard.buildFlowBoard({
     members, labels, teamId, config, github, events, prRecords,
-    sessions: _flowBoardSessions(members), pools, removed, now,
+    sessions: _flowBoardSessions(members), pools, queued, removed, now,
     // #2795: PR hand-offs the poller holds behind their CI / conflict gate.
     gateHolds: githubPollerRef ? githubPollerRef.gateHolds().filter((h) => ours(h.agentId)) : [],
   });
@@ -2975,7 +3060,6 @@ async function computeTeamFlowBoard(teamId, { now = Date.now() } = {}) {
       console.warn(`[Orchestrator] flow-board: could not prune removals for ${teamId}: ${err.message}`);
     }
   }
-  const lane = loadAdmissionLane(teamId);
   const held = lane.held.map((h) => ({
     id: admissionControl.heldIdentity(h.agentId, h.entry),
     agentId: h.agentId,
@@ -5286,7 +5370,10 @@ function seedAgentWorkspace(id, env, opts = {}) {
       // throws. Skip the self-copy (but still record it in the manifest).
       if (path.resolve(src) !== path.resolve(dst)) {
         try {
-          fs.cpSync(src, dst, { recursive: true });
+          // #2839: version snapshots belong to ONE copy — never seed them along;
+          // the agent copy keeps its own snapshot of what it received.
+          fs.cpSync(src, dst, { recursive: true, filter: skillManifest.snapshotCopyFilter });
+          skillManifest.snapshotSkillDir(dst);
         } catch (err) {
           warnings.push(`skill ${skillName}: ${err.message}`);
           continue;
@@ -6033,7 +6120,10 @@ function seedAgentWorkspaceForInstance(id, env, blueprintId, skills = []) {
       const skillSrc = path.join(skillsSrc, skillName);
       const skillDst = path.join(skillsDst, skillName);
       if (!fs.existsSync(skillSrc)) { warnings.push(`skill not found: ${skillName}`); continue; }
-      try { fs.cpSync(skillSrc, skillDst, { recursive: true }); }
+      try {
+        fs.cpSync(skillSrc, skillDst, { recursive: true, filter: skillManifest.snapshotCopyFilter });
+        skillManifest.snapshotSkillDir(skillDst);
+      }
       catch (err) { warnings.push(`skill ${skillName}: ${err.message}`); continue; }
       seededManifest[skillName] = { tier: "global", seededAt, ...skillSourceIdentity(skillSrc) };
       try { projectSkillCommands(id, skillName, skillSrc, commandManifest, { seededAt }); }
@@ -12193,6 +12283,10 @@ class Orchestrator {
         // Flow-Editor dialog pre-fill. Not used at runtime — labels are already
         // stamped in the member configs.
         ...(typeof extra.labelSuffix === 'string' && extra.labelSuffix ? { labelSuffix: extra.labelSuffix } : {}),
+        // Labels that already ended in the suffix and were left unstamped
+        // (#2858) — the console shows them as foreign, never as base + suffix.
+        ...(extra.labelSuffix && Array.isArray(extra.labelSuffixExempt) && extra.labelSuffixExempt.length
+          ? { labelSuffixExempt: extra.labelSuffixExempt.filter(l => typeof l === 'string' && l) } : {}),
         enabled: true,
       };
       saveAgentConfig(id, teamConfig);
@@ -12735,7 +12829,10 @@ class Orchestrator {
       if (!src) return { agentId: id, status: "error", error: `skill not found in pool: ${skillName}`, reason: "source-missing" };
       commandSrc = src;
       if (path.resolve(src) !== path.resolve(dst)) {
-        try { fs.cpSync(src, dst, { recursive: true, force: true }); }
+        try {
+          fs.cpSync(src, dst, { recursive: true, force: true, filter: skillManifest.snapshotCopyFilter });
+          skillManifest.snapshotSkillDir(dst);
+        }
         catch (err) { return { agentId: id, status: "error", error: err.message, reason: "copy-failed" }; }
       }
       manifest[skillName] = { tier: skillTierForSource(src), seededAt: new Date().toISOString(), ...skillSourceIdentity(src) };
@@ -18790,6 +18887,89 @@ async function main() {
       return;
     }
 
+    // GET /internal/repo-labels?repos=<a,b> — the label names of each repo
+    // (#2878: the "wake label does not exist" lint), read with the repo's
+    // environment token and cached for a minute. A repo that cannot be read is
+    // listed under `unreadable`, never reported as having no labels.
+    // POST /internal/repo-labels `{ repo, label, actor }` — create one label
+    // (the lint's "Create label"), the same create-on-demand stampMirrorLabel
+    // uses; 422 (already exists) counts as done.
+    const repoLabelsMatch = req.url.match(/^\/internal\/repo-labels(?:\?.*)?$/);
+    if (repoLabelsMatch && (req.method === 'GET' || req.method === 'POST')) {
+      const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+      const tokenFor = (repo) => {
+        const tokenId = resolveRepoGithubTokenId(repo);
+        if (!tokenId) return null;
+        try { return fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), "utf8").trim(); } catch { return null; }
+      };
+      const { githubApiBase } = require("./github-api-base");
+      const headersFor = (token) => ({
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      });
+      if (req.method === 'GET') {
+        (async () => {
+          const q = new URL(req.url, 'http://x').searchParams.get('repos') || '';
+          const repos = [...new Set(q.split(',').map((r) => r.trim()).filter((r) => REPO_RE.test(r)))].slice(0, 20);
+          const labels = {};
+          const unreadable = [];
+          await Promise.all(repos.map(async (repo) => {
+            const hit = _repoLabelCache.get(repo);
+            if (hit && Date.now() - hit.at < REPO_LABEL_TTL_MS) { labels[repo] = hit.names; return; }
+            const token = tokenFor(repo);
+            if (!token) { unreadable.push({ repo, error: 'no readable GitHub token covers this repository' }); return; }
+            try {
+              const names = [];
+              for (let page = 1; page <= 10; page++) {
+                const r = await fetch(`${githubApiBase()}/repos/${repo}/labels?per_page=100&page=${page}`, { headers: headersFor(token) });
+                if (!r.ok) throw new Error(`GitHub returned ${r.status}`);
+                const batch = await r.json();
+                for (const l of Array.isArray(batch) ? batch : []) if (l && typeof l.name === 'string') names.push(l.name);
+                if (!Array.isArray(batch) || batch.length < 100) break;
+              }
+              _repoLabelCache.set(repo, { at: Date.now(), names });
+              labels[repo] = names;
+            } catch (err) {
+              unreadable.push({ repo, error: err.message });
+            }
+          }));
+          sendJson(res, 200, { labels, unreadable });
+        })().catch((err) => sendJson(res, 500, { error: err.message }));
+        return;
+      }
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 10_000) req.destroy(); });
+      req.on('end', async () => {
+        try {
+          const parsed = JSON.parse(body || '{}');
+          const repo = typeof parsed.repo === 'string' ? parsed.repo.trim() : '';
+          const label = typeof parsed.label === 'string' ? parsed.label.trim() : '';
+          const actor = typeof parsed.actor === 'string' && parsed.actor.trim() ? parsed.actor.trim().slice(0, 200) : null;
+          if (!REPO_RE.test(repo) || !label || label.length > 50) {
+            return sendJson(res, 400, { error: 'repo (owner/name) and label (at most 50 characters) are required' });
+          }
+          const token = tokenFor(repo);
+          if (!token) return sendJson(res, 424, { error: `No readable GitHub token covers ${repo}` });
+          const r = await fetch(`${githubApiBase()}/repos/${repo}/labels`, {
+            method: 'POST', headers: headersFor(token),
+            body: JSON.stringify({ name: label, color: 'ededed', description: 'wake label of an Agent Studio flow' }),
+          });
+          _repoLabelCache.delete(repo);
+          if (r.status === 201 || r.status === 422) {
+            console.log(`[Orchestrator] repo-labels: ${repo} +${label} ${r.status === 201 ? 'created' : 'already existed'} by ${actor || 'console'}`);
+            return sendJson(res, 200, { ok: true, repo, label, created: r.status === 201 });
+          }
+          const text = await r.text().catch(() => '');
+          return sendJson(res, 502, { error: `GitHub returned ${r.status} creating '${label}' on ${repo}: ${text.slice(0, 200)}` });
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
+      });
+      return;
+    }
+
     // ── Create GitHub labels for a team (label-suffix provisioning, #902) ─────
     // Called best-effort after materialisation: creates any missing labels in the
     // target repo via the env's PAT. 422 (already-exists) is silently ignored.
@@ -18811,35 +18991,18 @@ async function main() {
           return;
         }
         try {
-          const env = loadEnvironment(envId);
-          if (!env) {
+          const target = resolveEnvGithubRepo(envId);
+          if (target.notFound) {
             res.writeHead(404, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: `Environment '${envId}' not found` }));
             return;
           }
-          if (!env.githubTokenId) {
+          if (target.warning) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true, created: [], skipped: labels, warnings: ['No GitHub token on environment — skipping label provisioning'] }));
+            res.end(JSON.stringify({ ok: true, created: [], skipped: labels, warnings: [target.warning] }));
             return;
           }
-          let ghToken;
-          try {
-            ghToken = fs.readFileSync(path.join(GH_TOKENS_DIR, env.githubTokenId), 'utf8').trim();
-          } catch (err) {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true, created: [], skipped: labels, warnings: [`Cannot read GitHub token: ${err.message}`] }));
-            return;
-          }
-          // Derive owner/repo from the environment's primary repo URL.
-          const repos = Array.isArray(env.repositories) ? env.repositories : (env.repository ? [env.repository] : []);
-          const primaryUrl = repos[0]?.url || '';
-          const repoMatch = primaryUrl.match(/github\.com[/:]([^/]+)\/([^/ .]+?)(?:\.git)?\s*$/);
-          if (!repoMatch) {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true, created: [], skipped: labels, warnings: ['Cannot parse GitHub owner/repo from environment URL — skipping label provisioning'] }));
-            return;
-          }
-          const [, owner, repo] = repoMatch;
+          const { owner, repo, ghToken } = target;
           const created = [];
           const skipped = [];
           const warnings = [];
@@ -18873,6 +19036,91 @@ async function main() {
           res.end(JSON.stringify({ ok: true, created, skipped, warnings }));
         } catch (err) {
           console.error(`[Orchestrator] github-labels error for env ${envId}: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Rename GitHub labels for a team's suffix change (#2858) ──────────────
+    // PATCHes each label to its new name in place, so open issues and PRs keep
+    // it under the new name (never delete + recreate). A label missing from the
+    // repo is created under the new name — except an `optional` rename (a
+    // derived claim label `<wake>:wip` / `<wake>:completed`, created on demand):
+    // a missing one is nothing to rename and is reported as `skipped`. Per-label
+    // failures are reported, never thrown — the caller records them for a retry.
+    const githubLabelsRenameMatch = req.method === 'POST' && req.url.match(/^\/internal\/environments\/([^/]+)\/github-labels\/rename$/);
+    if (githubLabelsRenameMatch) {
+      const envId = decodeURIComponent(githubLabelsRenameMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* ignore */ }
+        const renames = (Array.isArray(parsed.renames) ? parsed.renames : [])
+          .filter(r => r && typeof r.from === 'string' && r.from && typeof r.to === 'string' && r.to && r.from !== r.to);
+        const color = typeof parsed.color === 'string' && /^[0-9a-fA-F]{6}$/.test(parsed.color)
+          ? parsed.color : null;
+        if (!renames.length) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'renames ({from, to}[]) required' }));
+          return;
+        }
+        try {
+          const target = resolveEnvGithubRepo(envId);
+          if (target.notFound) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Environment '${envId}' not found` }));
+            return;
+          }
+          if (target.warning) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, renamed: [], created: [], failed: renames.map(r => ({ ...r, error: target.warning })) }));
+            return;
+          }
+          const { owner, repo, ghToken } = target;
+          const headers = {
+            'Authorization': `Bearer ${ghToken}`,
+            'Accept': 'application/vnd.github+json',
+            'Content-Type': 'application/json',
+            'X-GitHub-Api-Version': '2022-11-28',
+          };
+          const base = `https://api.github.com/repos/${owner}/${repo}/labels`;
+          const renamed = [];
+          const created = [];
+          const failed = [];
+          const skipped = [];
+          for (const r of renames) {
+            try {
+              const resp = await fetch(`${base}/${encodeURIComponent(r.from)}`, {
+                method: 'PATCH', headers, body: JSON.stringify({ new_name: r.to }),
+              });
+              if (resp.ok) { renamed.push(r); continue; }
+              if (resp.status === 404 && r.optional === true) { skipped.push(r); continue; }
+              if (resp.status === 404) {
+                // Never existed on GitHub (or already renamed by an earlier
+                // attempt): make sure the new name exists.
+                const cr = await fetch(base, {
+                  method: 'POST', headers, body: JSON.stringify({ name: r.to, ...(color ? { color } : {}) }),
+                });
+                if (cr.status === 201 || cr.status === 422) { created.push(r); continue; }
+                const errBody = await cr.text().catch(() => '');
+                failed.push({ ...r, error: `GitHub returned ${cr.status} — ${errBody.slice(0, 200)}` });
+                continue;
+              }
+              const errBody = await resp.text().catch(() => '');
+              failed.push({ ...r, error: resp.status === 422
+                ? `a label named '${r.to}' already exists in ${owner}/${repo}`
+                : `GitHub returned ${resp.status} — ${errBody.slice(0, 200)}` });
+            } catch (err) {
+              failed.push({ ...r, error: err.message });
+            }
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: failed.length === 0, renamed, created, skipped, failed }));
+        } catch (err) {
+          console.error(`[Orchestrator] github-labels rename error for env ${envId}: ${err.message}`);
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
         }
@@ -20538,6 +20786,107 @@ async function main() {
       return;
     }
 
+    // POST /internal/teams/:teamId/flow-board-wake — "Wake again" on a row
+    // flagged "wake never delivered" (#2873). Body `{ rowId, actor }`. Re-reads
+    // a FRESH board and refuses unless the row is still parked; re-checks on
+    // GitHub that each wake label is still on an open item; then delivers the
+    // wake in-process to the consumer role templates only (no label change, no
+    // Events API), opening a readiness hold for a gated hand-off. One Event Log
+    // line per wake (`source: 'flow-control'`, the actor as the event's actor).
+    const flowBoardWakeMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/?]+)\/flow-board-wake(?:\?.*)?$/);
+    if (flowBoardWakeMatch) {
+      const teamId = decodeURIComponent(flowBoardWakeMatch[1]);
+      const cfg = loadAgentConfig(teamId);
+      if (!cfg || cfg.role !== 'team') {
+        return sendJson(res, 404, { error: 'agent team not found' });
+      }
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 10_000) req.destroy(); });
+      req.on('end', async () => {
+        let lockKey = null;
+        try {
+          const parsed = JSON.parse(body || '{}');
+          const rowId = typeof parsed.rowId === 'string' ? parsed.rowId.trim() : '';
+          if (!rowId) return sendJson(res, 400, { error: 'rowId is required' });
+          const actor = typeof parsed.actor === 'string' && parsed.actor.trim() ? parsed.actor.trim().slice(0, 200) : null;
+          const key = flowWakeAgain.wakeAgainKey(teamId, rowId);
+          if (flowBoardWakeInFlight.has(key)) {
+            return sendJson(res, 409, { code: 'in-progress', error: 'This item is already being woken again.' });
+          }
+          flowBoardWakeInFlight.add(key);
+          lockKey = key;
+          const plan = flowWakeAgain.planWakeAgain(await getTeamFlowBoard(teamId, { refresh: true }), rowId);
+          if (!plan.ok) return sendJson(res, plan.status, { error: plan.error });
+          const { results, warnings } = await deliverBoardWakes(plan, actor);
+          _flowBoardCache.delete(teamId);
+          const woken = results.filter((r) => r.ok).length;
+          return sendJson(res, woken ? 200 : 409, {
+            teamId, rowId, woken, results, warnings,
+            ...(woken ? {} : { error: warnings[0] || 'Nothing could be woken' }),
+          });
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        } finally {
+          if (lockKey) flowBoardWakeInFlight.delete(lockKey);
+        }
+      });
+      return;
+    }
+
+    // POST /internal/teams/:teamId/flow-board-adopt — "Adopt" (#2877): start
+    // in-flight items carried over from another instance or an earlier flow.
+    // Body `{ rowIds?, actor }`; no `rowIds` = every row the FRESH board
+    // reads as carried over. Each row goes through the same checks and
+    // delivery as "Wake again" (planWakeAgain + deliverBoardWakes), under the
+    // same per-row in-flight guard. Never runs on its own — only on a click.
+    const flowBoardAdoptMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/?]+)\/flow-board-adopt(?:\?.*)?$/);
+    if (flowBoardAdoptMatch) {
+      const teamId = decodeURIComponent(flowBoardAdoptMatch[1]);
+      const cfg = loadAgentConfig(teamId);
+      if (!cfg || cfg.role !== 'team') {
+        return sendJson(res, 404, { error: 'agent team not found' });
+      }
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 100_000) req.destroy(); });
+      req.on('end', async () => {
+        const locks = [];
+        try {
+          const parsed = JSON.parse(body || '{}');
+          const actor = typeof parsed.actor === 'string' && parsed.actor.trim() ? parsed.actor.trim().slice(0, 200) : null;
+          const board = await getTeamFlowBoard(teamId, { refresh: true });
+          const plan = flowWakeAgain.planAdopt(board, parsed.rowIds);
+          if (!plan.ok) return sendJson(res, plan.status, { error: plan.error });
+          const rows = [];
+          const warnings = [...plan.skipped.map((s) => `${s.rowId}: ${s.error}`)];
+          for (const { rowId, plan: rowPlan } of plan.rows) {
+            const key = flowWakeAgain.wakeAgainKey(teamId, rowId);
+            if (flowBoardWakeInFlight.has(key)) {
+              warnings.push(`${rowId}: already being woken`);
+              continue;
+            }
+            flowBoardWakeInFlight.add(key);
+            locks.push(key);
+            const r = await deliverBoardWakes(rowPlan, actor);
+            warnings.push(...r.warnings);
+            rows.push({ rowId, woken: r.results.filter((x) => x.ok).length, results: r.results });
+          }
+          _flowBoardCache.delete(teamId);
+          const adopted = rows.filter((r) => r.woken > 0).length;
+          return sendJson(res, adopted ? 200 : 409, {
+            teamId, adopted, rows, warnings,
+            ...(adopted ? {} : { error: warnings[0] || 'Nothing could be adopted' }),
+          });
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        } finally {
+          for (const k of locks) flowBoardWakeInFlight.delete(k);
+        }
+      });
+      return;
+    }
+
     // GET /internal/teams/:teamId/pool-control — board data for #2250 Phase 5:
     // every pooled role's live pause/drain state + instance count, plus the
     // team's admission-lane `held` entries (each carrying an `id` — the same
@@ -21341,6 +21690,7 @@ async function main() {
           // For role: 'team' — label suffix (#902): stored for extend-mode
           // consistency and Flow-Editor dialog pre-fill.
           labelSuffix,
+          labelSuffixExempt,
           // For role: 'team' — hill-climb collector config (#1222): the run-metrics
           // window/floor/cron/excludeAgents, round-tripped with the bundle.
           hillClimb,
@@ -21422,6 +21772,7 @@ async function main() {
         if (Array.isArray(humans)) extra.humans = humans;
         if (Array.isArray(skills)) extra.skills = skills;
         if (typeof labelSuffix === 'string' && labelSuffix) extra.labelSuffix = labelSuffix;
+        if (Array.isArray(labelSuffixExempt)) extra.labelSuffixExempt = labelSuffixExempt;
         if (hillClimb && typeof hillClimb === 'object' && !Array.isArray(hillClimb)) extra.hillClimb = hillClimb;
         if (Number.isInteger(wipLimit) && wipLimit >= 1) extra.wipLimit = wipLimit;
         const result = (role === 'agent' && mintTeamOfOne === true)

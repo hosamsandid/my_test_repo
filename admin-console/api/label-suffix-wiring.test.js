@@ -8,6 +8,7 @@
 // label-suffix-gaps.test.js.
 
 const test = require('node:test');
+const { describe, it } = test;
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -38,7 +39,7 @@ test('both team-create handlers stamp the humans registry with the bundle', () =
 
 test('PUT /api/agents/:id stamps the body before it is destructured and validated', () => {
   const r = route("app.put('/api/agents/:id'");
-  const stamp = r.search(/if \(liveSuffix\) req\.body = stampLiveLabels\(req\.body \|\| \{\}, liveSuffix\);/);
+  const stamp = r.search(/if \(liveSuffix\) req\.body = stampLiveLabels\(req\.body \|\| \{\}, liveSuffix, \{ keep: teamForeignLabelsFor\(id, cfg\) \}\);/);
   const destructure = r.indexOf('} = req.body;');
   const validate = r.indexOf('validateOutcomes(outcomes');
   assert.ok(stamp > 0, 'the agent PUT must stamp its body with the team suffix');
@@ -49,8 +50,8 @@ test('PUT /api/agents/:id stamps the body before it is destructured and validate
 test('trigger POST and PUT stamp the request trigger', () => {
   for (const sig of ["app.post('/api/agents/:id/triggers'", "app.put('/api/agents/:id/triggers/:triggerId'"]) {
     const r = route(sig);
-    assert.match(r, /const liveSuffix = teamLabelSuffixFor\(readJsonFile\(path\.join\(agentDir, 'config\.json'\), null\)\);/, sig);
-    assert.match(r, /const reqTrigger = liveSuffix \? stampLiveLabels\(req\.body \|\| \{\}, liveSuffix, \{ trigger: true \}\) : req\.body;/, sig);
+    assert.match(r, /const agentCfg = readJsonFile\(path\.join\(agentDir, 'config\.json'\), null\);\s+const liveSuffix = teamLabelSuffixFor\(agentCfg\);/, sig);
+    assert.match(r, /const reqTrigger = liveSuffix\s+\? stampLiveLabels\(req\.body \|\| \{\}, liveSuffix, \{ trigger: true, keep: teamForeignLabelsFor\(id, agentCfg\) \}\)\s+: req\.body;/, sig);
     assert.match(r, /stripTriggerAnnotations\(\{.*\.\.\.reqTrigger\b/, `${sig} must build the trigger from the stamped body`);
     assert.doesNotMatch(r, /stripTriggerAnnotations\(\{.*\.\.\.req\.body/, `${sig} must not use the raw body`);
   }
@@ -58,7 +59,7 @@ test('trigger POST and PUT stamp the request trigger', () => {
 
 test('adding a member to a team stamps the member body before it is forwarded', () => {
   const r = route("app.post('/api/agents/:teamId/members'");
-  const stamp = r.search(/if \(liveSuffix\) outBody = stampLiveLabels\(outBody, liveSuffix\);/);
+  const stamp = r.search(/if \(liveSuffix\) outBody = stampLiveLabels\(outBody, liveSuffix, \{ keep: teamForeignLabelsFor\(teamId, teamCfg\) \}\);/);
   const forward = r.indexOf('body: JSON.stringify(outBody)');
   assert.match(r, /const liveSuffix = teamLabelSuffixFor\(teamCfg\);/);
   assert.ok(stamp > 0 && stamp < forward, 'the member body must be stamped before the orchestrator call');
@@ -71,4 +72,79 @@ test('teamLabelSuffixFor reads a team\'s own suffix or a member\'s parent team\'
   assert.match(body, /cfg\.role === 'team'\) teamCfg = cfg/);
   assert.match(body, /cfg\.parentTeamId/);
   assert.match(body, /validateSuffix\(suffix\)\.ok/);
+});
+
+// #2858: the team's foreign labels (never stamped) travel with every live write.
+test('teamForeignLabelsFor resolves the agent\'s team and lists its foreign labels', () => {
+  const start = API_SRC.indexOf('function teamForeignLabelsFor(agentId, cfg)');
+  assert.ok(start > 0);
+  const body = code(API_SRC.slice(start, API_SRC.indexOf('\n}\n', start)));
+  assert.match(body, /cfg\.role === 'team' \? agentId : cfg\.parentTeamId/);
+  assert.match(body, /teamForeignLabels\(loadSuffixTeamAgents\(teamId\), teamId\)/);
+});
+
+test('team creation records the labels that already ended in the suffix', () => {
+  const src = code(API_SRC);
+  assert.equal((src.match(/suffixExempt = stamped\.skipped\.filter\(t => !stamped\.tokenSet\.has\(t\)\);/g) || []).length, 2);
+  assert.equal((src.match(/\.\.\.\(suffixExempt\.length \? \{ labelSuffixExempt: suffixExempt \} : \{\}\)/g) || []).length, 2);
+});
+
+describe('POST /api/agents/:teamId/label-suffix (#2858)', () => {
+  const r = route("app.post('/api/agents/:teamId/label-suffix'");
+
+  it('is gated on team management rights and validates like creation', () => {
+    assert.match(r, /if \(denyUnlessCanManageAgent\(req, res, teamCfg\)\) return;/);
+    assert.match(r, /const sv = validateSuffix\(suffix\);/);
+    assert.match(r, /teamCfg\.role !== 'team'/);
+  });
+
+  it('rejects collisions with a 409 before anything is written (AC10)', () => {
+    const collide = r.indexOf('if (plan.collisions.length)');
+    const write = r.indexOf('writeJsonAtomic(path.join(AGENTS_DIR, a.id');
+    assert.ok(collide > 0 && collide < write);
+    assert.match(r, /res\.status\(409\)/);
+    assert.match(r, /otherTeamLabels: otherTeamLabelsOnRepo\(teamId, memberRepoFullName\(teamCfg\)\)/);
+  });
+
+  it('answers a dry run with the preview and writes nothing (AC9)', () => {
+    const dry = r.indexOf('if (body.dryRun === true) return res.json(preview);');
+    assert.ok(dry > 0 && dry < r.indexOf('putTriggers('));
+  });
+
+  it('writes the team, re-derives prompts and wiring, then renames on GitHub (AC7/AC8)', () => {
+    const write = r.indexOf('writeJsonAtomic(path.join(AGENTS_DIR, a.id');
+    const outcomes = r.indexOf('await reconcileTeamOutcomes(teamId);');
+    const channels = r.indexOf('await reconcileTeamGithubChannels(teamId);');
+    const rename = r.lastIndexOf('await renameGithubLabels(');
+    assert.ok(write > 0 && write < channels && channels < outcomes && outcomes < rename);
+    assert.match(r, /putTriggers\(a\.id, a\.triggers\)/);
+  });
+
+  it('records failed GitHub renames for a retry', () => {
+    assert.match(r, /fresh\.labelSuffixPendingRenames = github\.failed;/);
+    assert.match(r, /if \(body\.retry === true\)/);
+  });
+
+  it('renames the claim labels on GitHub too and keeps them optional on retry (AC8)', () => {
+    assert.match(r, /const planRenames = githubRenamesForPlan\(plan, agents\);/);
+    assert.match(r, /\.\.\.planRenames\.filter\(r => !pendingTo\.has\(r\.from\)\)/);
+    assert.equal((r.match(/\.\.\.\((p\.)?optional \? \{ optional: true \} : \{\}\)/g) || []).length, 2);
+  });
+});
+
+test('the console renames GitHub labels via the orchestrator rename route', () => {
+  const start = API_SRC.indexOf('async function renameGithubLabels(');
+  assert.ok(start > 0);
+  const body = code(API_SRC.slice(start, API_SRC.indexOf('\n}\n', start)));
+  assert.match(body, /\/github-labels\/rename`/);
+});
+
+test('the orchestrator rename route skips a missing optional (claim) label instead of creating it', () => {
+  const src = code(fs.readFileSync(path.join(__dirname, '..', '..', 'orchestrator', 'orchestrator.js'), 'utf8'));
+  const start = src.indexOf('/github-labels\\/rename$/');
+  assert.ok(start > 0, 'rename route not found');
+  const body = src.slice(start, src.indexOf('github-labels rename error', start));
+  const skip = body.indexOf("if (resp.status === 404 && r.optional === true) { skipped.push(r); continue; }");
+  assert.ok(skip > 0 && skip < body.indexOf('method: \'POST\''));
+  assert.match(body, /renamed, created, skipped, failed/);
 });

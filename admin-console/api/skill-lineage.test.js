@@ -53,7 +53,7 @@ test('normalizeVersionHistory: drops non-object history entries + coerces bad fi
   const v = lineage.normalizeVersionHistory(manifest);
   assert.equal(v.history.length, 1);
   assert.deepEqual(v.history[0], {
-    version: null, hash: null, at: null, by: null, action: null, note: undefined, current: false,
+    version: null, hash: null, at: null, by: null, action: null, note: undefined, restoredFrom: undefined, current: false, available: false,
   });
 });
 
@@ -206,4 +206,41 @@ test('summarizeDownstreamDrift: unknown drift is surfaced, not silently dropped 
 test('summarizeDownstreamDrift: worst state wins regardless of input order (conflict > diverged > orphaned > outdated > unknown)', () => {
   const out = lineage.summarizeDownstreamDrift(['outdated', 'conflict', 'unknown']);
   assert.equal(out.worst, 'conflict');
+});
+
+test('normalizeVersionHistory (#2839): exactly one current — the newest entry matching the working content', () => {
+  // A forceHistory import re-records v4 with the same hash: the old rule flagged both.
+  const manifest = {
+    version: 4, contentHash: 'h4',
+    history: [
+      { version: 4, hash: 'h4', action: 'imported' },
+      { version: 4, hash: 'h4', action: 'edited' },
+      { version: 3, hash: 'h3', action: 'edited' },
+    ],
+  };
+  const v = lineage.normalizeVersionHistory(manifest, { workingHash: 'h4', availableHashes: ['h3'] });
+  assert.deepEqual(v.history.map(h => h.current), [true, false, false]);
+  assert.deepEqual(v.history.map(h => h.available), [true, true, true]);
+  assert.equal(v.workingCopy, null);
+});
+
+test('normalizeVersionHistory (#2839): a drifted copy gets a working-copy row and no current history entry', () => {
+  const manifest = { version: 2, contentHash: 'h2', history: [{ version: 2, hash: 'h2' }, { version: 1, hash: 'h1' }] };
+  const v = lineage.normalizeVersionHistory(manifest, { workingHash: 'hX', availableHashes: ['h2'] });
+  assert.deepEqual(v.workingCopy, { hash: 'hX', current: true, available: true });
+  assert.deepEqual(v.history.map(h => h.current), [false, false]);
+  assert.deepEqual(v.history.map(h => h.available), [true, false], 'an entry without a snapshot is not available');
+});
+
+test('normalizeVersionHistory (#2839): working content equal to an older version marks that version current', () => {
+  const manifest = { version: 2, contentHash: 'h2', history: [{ version: 2, hash: 'h2' }, { version: 1, hash: 'h1' }] };
+  const v = lineage.normalizeVersionHistory(manifest, { workingHash: 'h1' });
+  assert.deepEqual(v.history.map(h => h.current), [false, true]);
+  assert.equal(v.workingCopy, null);
+});
+
+test('normalizeVersionHistory (#2839): restoredFrom is carried through', () => {
+  const v = lineage.normalizeVersionHistory({ version: 3, contentHash: 'h1', history: [{ version: 3, hash: 'h1', action: 'restored', restoredFrom: 1 }] });
+  assert.equal(v.history[0].restoredFrom, 1);
+  assert.equal(v.history[0].current, true);
 });

@@ -84,7 +84,7 @@ sandbox.
 
 ### Platform plugin vs Claude Code agent plugin
 
-Throughout the Admin Console, "plugin" means a **platform plugin** — this
+Throughout Agent Studio, "plugin" means a **platform plugin** — this
 broker-plus-CLI extension of Agent Studio itself. It is *not* a Claude Code
 **agent plugin** (the CLI's own marketplace format that bundles skills, commands
 and hooks for one agent). Unqualified, it is always the platform one.
@@ -209,6 +209,24 @@ in the same format as Agent Studio's own version (About page and sidebar footer)
 A build made from a working tree with uncommitted changes carries a `-dirty`
 suffix, just like the console's own version.
 
+When the build can be placed against a release, the card leads with a readable
+**version** built from the nearest release tag (such as `v0.4.0`) instead of the
+bare hash:
+
+| The build… | Shows |
+|---|---|
+| sits exactly on a release tag | `v0.4.0` |
+| is 12 commits past the nearest release tag | `v0.4.0+12 (5500e15)` |
+| comes from a working tree with uncommitted changes | `v0.4.0+12 (5500e15-dirty)` — on the tag itself `v0.4.0 (5500e15-dirty)` |
+| has no release tag before it, or was built before versions were recorded | `5500e15`, the hash alone |
+
+Read `v0.4.0+12 (5500e15)` as "release v0.4.0, plus 12 commits, exactly commit
+5500e15": the number counts the commits since that release, and the hash keeps
+the version unique. Only release tags of the form `v<major>.<minor>.<patch>`
+count; when several sit on the same commit, the highest version is used. A
+build from a copy of the source without its tags (for example a shallow clone)
+shows just the hash. The commit date and time follow the version as before.
+
 An installed plugin can show up to three identities, because they can differ:
 
 - **Installed files** — the manifest and command-line tool in the registry, i.e.
@@ -238,6 +256,8 @@ Two hints flag a difference:
   plugin brings them back in step.
 
 A hint only appears when both sides are known; a `-dirty` difference counts.
+The hints compare commits only: two lines with the same commit never differ just
+because one of them shows a release version and the other a bare hash.
 
 Whatever cannot be determined is labelled **unknown** instead of left blank:
 a plugin seeded or an image built before build identities existed, a stack built

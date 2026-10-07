@@ -250,15 +250,36 @@ export const BROKER_IMAGE_MISMATCH_DETAIL =
   'The broker image was rebuilt, but the running sidecar container still runs the old build. It keeps doing so until the sidecar is recreated — rebuilding the image alone does not replace it.';
 export const UNKNOWN_BUILD = 'unknown';
 
-// One `{ commit, dirty, commitTime }` → `{ known, hash, time, text }`, formatted
-// with the console's own version-info.js (hash with the -dirty suffix, time as
-// "2026-08-13 17:52 +0200").
+const RELEASE_TAG_RE = /^v\d{1,9}\.\d{1,9}\.\d{1,9}$/;
+
+// The readable version of a build (#2893), from the nearest release tag the
+// build recorded (`tag`, `tagDistance`) and its formatted hash:
+//   exactly on the tag        → "v0.4.0"
+//   N commits after the tag   → "v0.4.0+12 (5500e15)"
+//   dirty working tree        → the hash keeps its -dirty suffix and is always
+//                               shown, even on the tag: "v0.4.0 (5500e15-dirty)"
+//   no tag (none reachable, or a build recorded before #2893) → the hash alone.
+export function formatBuildVersion(build, hash) {
+  const b = build && typeof build === 'object' ? build : {};
+  const n = b.tagDistance;
+  if (typeof b.tag !== 'string' || !RELEASE_TAG_RE.test(b.tag) || !Number.isSafeInteger(n) || n < 0) return hash;
+  if (n === 0 && b.dirty !== 'dirty') return b.tag;
+  return `${b.tag}${n > 0 ? `+${n}` : ''} (${hash})`;
+}
+
+// One `{ commit, dirty, commitTime[, tag, tagDistance] }` →
+// `{ known, hash, version, time, text }`, formatted with the console's own
+// version-info.js (hash with the -dirty suffix, time as "2026-08-13 17:52
+// +0200"). `version` is what the card shows (formatBuildVersion); `hash` stays
+// the identity the mismatch hints compare, so tag info never causes or hides a
+// mismatch.
 export function describeBuild(build) {
   const b = build && typeof build === 'object' ? build : null;
   const hash = b ? formatVersionLabel(b.commit, b.dirty) : UNKNOWN_BUILD;
-  if (hash === UNKNOWN_BUILD) return { known: false, hash, time: UNKNOWN_BUILD, text: UNKNOWN_BUILD };
+  if (hash === UNKNOWN_BUILD) return { known: false, hash, version: UNKNOWN_BUILD, time: UNKNOWN_BUILD, text: UNKNOWN_BUILD };
+  const version = formatBuildVersion(b, hash);
   const time = formatCommitTimestamp(b.commitTime);
-  return { known: true, hash, time, text: `${hash} · ${time === UNKNOWN_BUILD ? 'time unknown' : time}` };
+  return { known: true, hash, version, time, text: `${version} · ${time === UNKNOWN_BUILD ? 'time unknown' : time}` };
 }
 
 // A reference broker image is `[localhost/]aee-plugin-<id>:<tag>` and built by
@@ -280,7 +301,7 @@ export function fetchedVersionText(installedVersion) {
   return when ? `${where}, fetched ${when}` : where;
 }
 
-const unknownLine = (state, text) => ({ state, known: false, hash: UNKNOWN_BUILD, time: UNKNOWN_BUILD, text });
+const unknownLine = (state, text) => ({ state, known: false, hash: UNKNOWN_BUILD, version: UNKNOWN_BUILD, time: UNKNOWN_BUILD, text });
 
 // An installed plugin that has a broker at all (command-only plugins and pool
 // entries get no broker / image line).
@@ -326,7 +347,9 @@ export function buildIdentity(entry) {
   const image = imageBuildLine(entry);
   // Compare the formatted labels, so "abc1234" vs "abc1234-dirty" counts as a
   // difference too — a dirty build can hold anything. A side that is unknown is
-  // not evidence of a difference: no hint then.
+  // not evidence of a difference: no hint then. Only the hash counts, never the
+  // release tag (#2893 AC6): the same commit recorded with and without tag
+  // info is the same build.
   const differs = (a, b) => !!(a && a.known && b && b.known && a.hash !== b.hash);
   const hints = [];
   // AC8: the image was rebuilt under a still-running old sidecar.

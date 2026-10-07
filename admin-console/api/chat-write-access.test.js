@@ -217,7 +217,11 @@ test('the gates are built on canChatAgent with the work-plane lookups', () => {
 });
 
 test('GET /api/matrix/agents ships canChat from the same predicate (AC12)', () => {
+  // Since #566 the row is shaped in the pure matrix-agent-roster.js; the route
+  // hands it the real scope.js predicate.
+  const rosterSrc = fs.readFileSync(path.join(__dirname, 'matrix-agent-roster.js'), 'utf8');
+  assert.match(rosterSrc, /canChat: access\.canChatAgent\(scope, meta\),/);
+  assert.match(API_SRC, /const ROSTER_ACCESS = \{[^}]*\bcanChatAgent\b[^}]*\};/);
   const at = API_SRC.indexOf("app.get('/api/matrix/agents',");
-  const region = API_SRC.slice(at, at + 4000);
-  assert.match(region, /canChat: canChatAgent\(scope, agentMetaForScope\(cfg\)\),/);
+  assert.match(API_SRC.slice(at, at + 1200), /projectRoster\(entries, scope, \{ includeDisabled, includeStubs \}, ROSTER_ACCESS\)/);
 });

@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { AlertTriangle, Download, Boxes, X, Plus, Layers, Sparkles, Pencil, Loader2, Tag, User, Activity, TrendingUp, Gauge } from 'lucide-react';
+import { AlertTriangle, Download, Boxes, X, Plus, Layers, Sparkles, Pencil, Loader2, Tag, User, Activity, TrendingUp, Gauge, Users } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { initFlowGraph } from './process/flow-graph-render';
 import NodeInspector from './process/NodeInspector';
@@ -15,12 +15,14 @@ import { useFlowCopilot } from '../context/FlowCopilotContext.jsx';
 import { proposalNodeDiff } from './process/flow-copilot-view';
 import { anomalyCountByNode } from './process/flow-anomalies-view';
 import { poolInstanceHintsByNode, poolInstanceRoleMap, isPoolInstanceRow } from './process/pool-instance-hint.js';
-import { lintView } from './process/lint-view';
+import { lintView, lintAction } from './process/lint-view';
 import HumanNodeInspector from './process/HumanNodeInspector';
 import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog, CreateChannelDialog, AgentToPersonDialog } from './process/EdgeDialogs';
 import { outcomeDropDialog, edgeOpensProducerOutcome, nodeLabelTarget, labelTargetKind } from './process/outcome-routing';
 import MaterializeDialog from './process/MaterializeDialog';
 import SidePanel from '../components/SidePanel';
+import { LabelSuffixContext } from '../components/SuffixedLabelInput';
+import { labelSuffixContextFor } from './process/label-suffix-view.js';
 import { roleIcon } from '../components/role-icons';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
 import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './process/connection-capabilities';
@@ -32,7 +34,7 @@ import {
 } from './process/add-role-materialize.js';
 import { FLOW_INTENTS } from './process/flows-rail-menu.js';
 import { downloadBundle } from './process/bundle-download.js';
-import { draftWriteError } from './process/draft-share-view.js';
+import { draftWriteError, isReadOnlyDraft, duplicateDraftBody, READ_ONLY_DRAFT_HINT } from './process/draft-share-view.js';
 import PageHelpButton from '../components/PageHelpButton';
 import { FLOWS_HELP_SECTIONS } from './process/flows-help-sections';
 import Tooltip from '../components/Tooltip';
@@ -303,6 +305,11 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   const [draftBundle, setDraftBundle] = useState(null);
   const [draftGraph, setDraftGraph] = useState(null);
   const draftBundleRef = useRef(null);
+  // #2870 AC10 — a draft reached only through "Visible to everyone" opens
+  // read-only: the canvas behaves like a blueprint preview, the edit toolbar
+  // and Copilot are hidden, and the banner offers "Duplicate to my drafts".
+  // The server refuses the writes regardless (AC11); this keeps the UI honest.
+  const draftReadOnly = !!draftId && isReadOnlyDraft(draftBundle);
 
   // `draftReloadToken` (#2053) re-runs this when the draft changed underneath us
   // without its id changing — a case- or punctuation-only rename from the Flows
@@ -333,6 +340,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   }, [draftBundle]);
 
   const persistDraft = useCallback(async (next) => {
+    if (isReadOnlyDraft(draftBundleRef.current)) throw new Error(READ_ONLY_DRAFT_HINT);
     let saved;
     try {
       saved = await apiCall('PUT', `/api/process/drafts/${draftId}`, next);
@@ -396,6 +404,12 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     removeHumanEmit: (id, label) => liveOps.removeHumanEmit(scope, id, label),
   }), [scope]);
 
+  // #2858: a live team's label editors show the base + the suffix as a chip.
+  // Drafts, imports and Copilot proposals are templates — no suffix there.
+  const labelSuffixCtx = useMemo(
+    () => (parallelismTeamCfg && !imported && !proposal ? labelSuffixContextFor(parallelismTeamCfg) : null),
+    [parallelismTeamCfg, imported, proposal],
+  );
   // A Copilot proposal wins the display like an imported bundle does — the
   // canvas is the read-only preview of what the chat produced (#1069).
   const displayGraph = proposal ? proposal.graph : imported ? imported.graph : isDraft ? draftGraph : graph;
@@ -448,8 +462,12 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // so the mode is driven off the scope, not the level. A pending Copilot
   // proposal turns the view read-only exactly like an imported blueprint.
   const caps = useMemo(
-    () => capabilitiesFor(processMode({ isDraft: isDraft && !proposal, imported: imported || proposal, level: displayGraph?.level })),
-    [isDraft, imported, proposal, displayGraph],
+    () => capabilitiesFor(processMode({
+      isDraft: isDraft && !proposal && !draftReadOnly,
+      imported: imported || proposal || draftReadOnly,
+      level: displayGraph?.level,
+    })),
+    [isDraft, imported, proposal, draftReadOnly, displayGraph],
   );
 
   useEffect(() => {
@@ -580,7 +598,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     () => (displayGraph?.nodes || []).find(n => n.id === selectedId) || null,
     [displayGraph, selectedId],
   );
-  const selectedRole = isDraft && draftBundle
+  const selectedRole = isDraft && draftBundle && !draftReadOnly
     ? (draftBundle.roles || []).find(r => r.id === selectedId) || null
     : null;
   // A selected first-class human role (#987). Draft humans live on the bundle's
@@ -588,6 +606,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // to the { id, name, description, stage, emits, consumes } editor shape.
   const selectedHuman = useMemo(() => {
     if (!selectedId) return null;
+    // A read-only draft opens its nodes in the template inspector instead.
+    if (draftReadOnly) return null;
     if (isDraft && !proposal) return (draftBundle?.humans || []).find(h => h.id === selectedId) || null;
     const n = (displayGraph?.nodes || []).find(x => x.id === selectedId && x.kind === 'human');
     if (!n) return null;
@@ -595,7 +615,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
       id: n.id, name: n.displayName || n.id, description: n.description || '',
       stage: n.stage || '', emits: n.emits || [], consumes: n.consumes || [],
     };
-  }, [selectedId, isDraft, proposal, draftBundle, displayGraph]);
+  }, [selectedId, isDraft, proposal, draftReadOnly, draftBundle, displayGraph]);
 
   function afterEdit() { if (!isDraft) refetch(); /* draft re-derives via persist */ }
 
@@ -847,6 +867,18 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     return rest;
   }, [imported, isDraft, draftBundle]);
 
+  // #2870 AC10 — a read-only reader's way to an editable copy: an ordinary
+  // private draft created through the same route as "Continue as draft".
+  async function duplicateToMyDrafts() {
+    try {
+      const d = await apiCall('POST', '/api/process/drafts', duplicateDraftBody(draftBundleRef.current));
+      if (onDraftsChanged) onDraftsChanged();
+      if (navigate) navigate(`draft:${d.id}`);
+    } catch (e) {
+      setImportError(`Duplicate failed: ${draftWriteError(e, e.message)}`);
+    }
+  }
+
   async function exportBundle() {
     let bundle;
     if (isDraft) {
@@ -867,6 +899,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     // Outer row: the canvas column + the docked Copilot rail (#1069). The rail
     // is a flex CHILD, not an overlay — the canvas stays visible and
     // interactive while chatting (it is the live preview of the chat's output).
+    <LabelSuffixContext.Provider value={labelSuffixCtx}>
     <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
     <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {/* Toolbar — the scope picker lives in the Flows left list, not here. */}
@@ -881,11 +914,22 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         {!imported && !proposal && isDraft && (
           <ModePill tone="draft" icon={Pencil} title={STATUS_TITLES.modeDraft}>Draft</ModePill>
         )}
-        {isDraft && draftBundle && (
+        {isDraft && draftBundle && !draftReadOnly && (
           <EditableDraftTitle name={draftBundle.name} onRename={(n) => draftOps.renameDraft(n)} />
         )}
+        {isDraft && draftBundle && draftReadOnly && (
+          <span title={READ_ONLY_DRAFT_HINT} style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
+            {draftBundle.name}
+          </span>
+        )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flex: '1 1 auto', flexWrap: 'wrap' }}>
-        {isDraft && (
+        {isDraft && draftReadOnly && (
+          <CreateTeamButton
+            onClick={() => setMaterializeOpen(true)}
+            roleCount={draftBundle?.roles?.length || 0}
+          />
+        )}
+        {isDraft && !draftReadOnly && (
           <>
             {/* Structural editing pauses while a Copilot proposal is on screen —
                 the draft underneath is not what the canvas shows. */}
@@ -1075,7 +1119,24 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         </div>
       )}
 
-      {isDraft && draftBundle && !imported && !proposal && (
+      {isDraft && draftBundle && draftReadOnly && !imported && !proposal && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', marginBottom: 'var(--eb-space-3)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)', flexShrink: 0,
+          background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-md)',
+        }}>
+          <Users size={16} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+          <span style={{ flex: 1, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+            {READ_ONLY_DRAFT_HINT}
+          </span>
+          <button onClick={duplicateToMyDrafts} style={{
+            background: 'none', color: 'var(--eb-accent-primary)', border: '1px solid var(--eb-accent-primary)',
+            borderRadius: 'var(--eb-radius-md)', padding: '4px 12px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
+          }}>Duplicate to my drafts</button>
+        </div>
+      )}
+      {isDraft && draftBundle && !draftReadOnly && !imported && !proposal && (
         <div style={{
           display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-3)',
           padding: 'var(--eb-space-2) var(--eb-space-3)', flexShrink: 0,
@@ -1145,7 +1206,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
             zero agent roles, surface a centered prompt with a primary CTA that
             shares the toolbar's Add-agent handler; it disappears once the first
             node exists. Suppressed while a Copilot proposal previews the graph. */}
-        {isDraft && !proposal && displayGraph && !(draftBundle?.roles?.length) && (
+        {isDraft && !proposal && !draftReadOnly && displayGraph && !(draftBundle?.roles?.length) && (
           <EmptyCanvasState onAddAgent={() => setAddRoleOpen(true)} />
         )}
 
@@ -1153,6 +1214,11 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           <LintsPanel
             lints={displayGraph?.lints || []}
             onFocus={(nodeId) => { if (nodeId) { setSelectedId(nodeId); graphRef.current?.setSelected(nodeId); } }}
+            // #2878: "Create label" for a wake label missing on GitHub — live team only.
+            onAction={isTeamScope && !isDraft ? async (a) => {
+              await apiCall('POST', `/api/teams/${encodeURIComponent(scope)}/repo-labels`, { repo: a.repo, label: a.label });
+              refetch();
+            } : null}
           />
           <HumanTouchpointsPanel
             touchpoints={displayGraph?.humanTouchpoints || []}
@@ -1202,7 +1268,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           onChanged={() => {}}
         />
       )}
-      {(!isDraft || proposal) && !selectedHuman && selectedNode && (
+      {(!isDraft || proposal || draftReadOnly) && !selectedHuman && selectedNode && (
         <NodeInspector
           key={`${selectedNode.id}:${routingFocus?.outcome || ''}`}
           mode="live"
@@ -1217,7 +1283,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           focus={routingFocus}
           ops={liveOps}
           teamId={isTeamScope && !imported ? scope : undefined}
-          level={imported || proposal ? 'template' : displayGraph?.level}
+          level={imported || proposal || draftReadOnly ? 'template' : displayGraph?.level}
           onClose={() => { setSelectedId(null); setRoutingFocus(null); graphRef.current?.setSelected(null); }}
           onChanged={() => refetch()}
         />
@@ -1437,7 +1503,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         live writes. Closing drops the canvas PREVIEW only — since
         #2087 the turn and its unapplied proposal live in the app-level
         FlowCopilotProvider, so reopening the panel finds them again. */}
-    {copilotOpen && (isDraft || (isTeamScope && !imported)) && (
+    {copilotOpen && ((isDraft && !draftReadOnly) || (isTeamScope && !imported)) && (
       <FlowCopilotPanel
         mode={isDraft ? 'draft' : 'team'}
         scope={scope}
@@ -1455,6 +1521,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
       />
     )}
     </div>
+    </LabelSuffixContext.Provider>
   );
 }
 
@@ -1808,8 +1875,16 @@ function ToolbarButton({ onClick, icon: Icon, disabled, children, badge, title, 
   );
 }
 
-function LintsPanel({ lints, onFocus }) {
+function LintsPanel({ lints, onFocus, onAction = null }) {
   const [open, setOpen] = useState(false);
+  const [actionBusy, setActionBusy] = useState(null);
+  const [actionError, setActionError] = useState('');
+  const runAction = async (a, key) => {
+    setActionBusy(key);
+    setActionError('');
+    try { await onAction(a); } catch (err) { setActionError(err.message || 'The action failed'); }
+    setActionBusy(null);
+  };
   if (!lints || lints.length === 0) return null;
   const errors = lints.filter(l => l.severity === 'error').length;
   const accent = errors > 0 ? 'var(--eb-status-error)' : 'var(--eb-status-warning)';
@@ -1834,14 +1909,19 @@ function LintsPanel({ lints, onFocus }) {
           marginTop: 6, background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
           borderRadius: 'var(--eb-radius-md)', boxShadow: 'var(--eb-shadow-lg)', maxHeight: '50vh', overflowY: 'auto',
         }}>
-          {lints.map((l, i) => (
+          {actionError && (
+            <div style={{ padding: 'var(--eb-space-2) var(--eb-space-3)', color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-xs)' }}>{actionError}</div>
+          )}
+          {lints.map((l, i) => {
+            const action = onAction ? lintAction(l) : null;
+            return (
+            <div key={i} style={{ borderTop: i ? '1px solid var(--eb-border-default)' : 'none' }}>
             <button
-              key={i}
               onClick={() => onFocus(l.nodeId)}
               title={l.nodeId ? 'Focus node' : undefined}
               style={{
                 display: 'block', width: '100%', textAlign: 'left',
-                background: 'none', border: 'none', borderTop: i ? '1px solid var(--eb-border-default)' : 'none',
+                background: 'none', border: 'none',
                 padding: 'var(--eb-space-2) var(--eb-space-3)', cursor: l.nodeId ? 'pointer' : 'default',
                 fontFamily: 'inherit', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)',
               }}
@@ -1873,7 +1953,23 @@ function LintsPanel({ lints, onFocus }) {
                 );
               })()}
             </button>
-          ))}
+            {action && (
+              <div style={{ padding: '0 var(--eb-space-3) var(--eb-space-2)' }}>
+                <button
+                  onClick={() => runAction(action, i)}
+                  disabled={actionBusy != null}
+                  title={action.title}
+                  style={{
+                    background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
+                    padding: '2px 8px', fontFamily: 'inherit', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)',
+                    cursor: actionBusy != null ? 'wait' : 'pointer',
+                  }}
+                >{actionBusy === i ? 'Creating…' : action.text}</button>
+              </div>
+            )}
+            </div>
+            );
+          })}
         </div>
       )}
     </div>

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Loader2, ArrowUpRight } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
+import SuffixedLabelInput from '../../components/SuffixedLabelInput';
 import PageHelpButton from '../../components/PageHelpButton';
 import { useHelpSubject } from '../../context/HelperChatContext';
 import { OVERLAY_FLOW_EDGE } from '../../context/page-help-view.js';
@@ -216,7 +217,7 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
           </Field>
 
           <Field label="Label name">
-            <input list="pc-label-list" value={label} onChange={e => setLabel(e.target.value)}
+            <SuffixedLabelInput list="pc-label-list" value={label} onChange={setLabel}
               placeholder="e.g. dispatch, stage:td, ready-for-review" style={input} />
             <datalist id="pc-label-list">
               {(labels || []).map(l => <option key={l.name} value={l.name} />)}
@@ -623,7 +624,7 @@ export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifac
           </Field>
         )}
         <Field label="Routing label (optional)">
-          <input value={label} onChange={e => setLabel(e.target.value)}
+          <SuffixedLabelInput value={label} onChange={setLabel}
             placeholder="e.g. approved — only wake on this label" style={input} />
           <small style={small}>
             Leave empty to wake on every {noun} {fromName || from} opens. With a label, {toName || to}
@@ -764,7 +765,7 @@ export function AgentToPersonDialog({ from, to, fromName, toName, ops = liveOps,
                 <option value="">— nobody yet (wire later) —</option>
                 {agentPeers.map(p => <option key={p.id} value={p.id}>{p.displayName || p.id}</option>)}
               </select>
-              <input value={gateLabel} onChange={e => setGateLabel(e.target.value)}
+              <SuffixedLabelInput value={gateLabel} onChange={setGateLabel}
                 placeholder="gate label" style={{ ...input, width: 130 }} disabled={!wakeTo} />
             </div>
             <small style={small}>
@@ -849,7 +850,7 @@ export function PersonToAgentDialog({ from, to, fromName, toName, ops = liveOps,
           </small>
         </Field>
         <Field label="Gate label the person applies">
-          <input value={label} onChange={e => setLabel(e.target.value)} placeholder="e.g. approved-for-dispatch" style={input} />
+          <SuffixedLabelInput value={label} onChange={setLabel} placeholder="e.g. approved-for-dispatch" style={input} />
           <small style={small}>Only this person may set it (an agent setting it is a gate-violation). {toName || to} wakes when it is applied to {kind === 'pull_request' ? 'a pull request' : 'an issue'}.</small>
         </Field>
         {producerId && producerId !== to && (
@@ -860,7 +861,7 @@ export function PersonToAgentDialog({ from, to, fromName, toName, ops = liveOps,
         )}
         {rejectOn && producerId && (
           <Field label="Rejection label">
-            <input value={rejectLabel} onChange={e => setRejectLabel(e.target.value)} placeholder="e.g. rework" style={input} />
+            <SuffixedLabelInput value={rejectLabel} onChange={setRejectLabel} placeholder="e.g. rework" style={input} />
             <small style={small}>{producerName} wakes when the person applies this label instead.</small>
           </Field>
         )}
@@ -1305,7 +1306,7 @@ function ReviewGateEditor({ gate, ops = liveOps, humanOps, onClose, onDone }) {
 
         {gate.consumer && (
           <Field label="Gate label the person applies">
-            <input value={labelName} onChange={e => setLabelName(e.target.value)} style={input} />
+            <SuffixedLabelInput value={labelName} onChange={setLabelName} style={input} />
             {canRename && (
               <button onClick={() => run(() => renameGateLabel(ctx, {
                 human: gate.human.id, to: gate.consumer.id,
@@ -1339,7 +1340,7 @@ function ReviewGateEditor({ gate, ops = liveOps, humanOps, onClose, onDone }) {
         ) : (
           <Field label="Add rejection path (optional)">
             <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-              <input value={rejectLabel} onChange={e => setRejectLabel(e.target.value)} placeholder="e.g. rework" style={{ ...input, flex: 1 }} />
+              <SuffixedLabelInput value={rejectLabel} onChange={setRejectLabel} placeholder="e.g. rework" style={{ ...input, flex: 1 }} />
               <button onClick={() => rejectLabel.trim() && run(() => addRejectionPath(ctx, {
                 human: gate.human.id, producerId: gate.producer.id, label: rejectLabel.trim(), kind,
               }))} disabled={saving || !rejectLabel.trim()} style={ghost}>Add</button>
@@ -1438,7 +1439,7 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onD
       <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section="inputs" />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)', marginTop: 'var(--eb-space-3)' }}>
         <Field label="Routing label (optional)">
-          <input value={label} onChange={e => setLabel(e.target.value)}
+          <SuffixedLabelInput value={label} onChange={setLabel}
             placeholder="e.g. approved" style={input} />
         </Field>
         <label style={check}>
@@ -1646,7 +1647,7 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
           </Field>
           <LegacyMultiEventNote events={initialEvents} selected={event} />
           <Field label="Label name">
-            <input value={labelName} onChange={e => setLabelName(e.target.value)} style={input} />
+            <SuffixedLabelInput value={labelName} onChange={setLabelName} style={input} />
             {labelErr && <small style={errStyle}>{labelErr}</small>}
             {labelName.trim() && labelName.trim() !== label && !humanSource && (
               <small style={small}>
@@ -1995,7 +1996,7 @@ function EditEventDialog({ edge, toName, ops = liveOps, onClose, onDone, onOpenR
           <LegacyMultiEventNote events={initialEvents} selected={event} />
           {showLabelFilter && (
             <Field label="Label name filter (optional)">
-              <input value={label} onChange={e => setLabel(e.target.value)}
+              <SuffixedLabelInput value={label} onChange={setLabel}
                 placeholder="e.g. priorisiert, ready-for-review — empty = any label" style={input} />
             </Field>
           )}
@@ -2162,7 +2163,7 @@ export function GithubTriggerForm({ to, toName, labels, ops = liveOps, onBack, o
         </Field>
         {showLabelFilter && (
           <Field label="Label name filter (optional)">
-            <input list="pc-gh-label-list" value={label} onChange={e => setLabel(e.target.value)}
+            <SuffixedLabelInput list="pc-gh-label-list" value={label} onChange={setLabel}
               placeholder="e.g. priorisiert, stage:td, ready-for-review" style={input} />
             <datalist id="pc-gh-label-list">
               {(labels || []).map(l => <option key={l.name} value={l.name} />)}
@@ -2308,7 +2309,7 @@ function ReadinessGateFields({ value, onChange, toLabel, error }) {
       {on && (
         <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
           <Field label="On failure, set label">
-            <input value={value.failureLabel} onChange={e => set({ failureLabel: e.target.value })}
+            <SuffixedLabelInput value={value.failureLabel} onChange={v => set({ failureLabel: v })}
               placeholder={DEFAULT_FAILURE_LABEL} style={input} />
           </Field>
           <Field label="Timeout (minutes)">

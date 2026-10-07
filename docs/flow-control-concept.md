@@ -736,3 +736,122 @@ because releasing would wake nobody. The flow lint
 the same on the Flows page; the graph endpoints now carry `enabled: false` on
 switched-off nodes. A label with no consumer at all stays with
 `dead-end-emitter` / `outcome-without-consumer`.
+
+## Amendment 6 — wakes that were never delivered (#2872, epic #2880)
+
+**A6.1 — the problem.** Label wakes are edge-triggered on the GitHub Events
+API: the poller wakes a consumer on the one `labeled` event. If that event is
+dropped or never arrives, the wake label stays on the item, the row reads
+*<stage> / up next* for good, and nothing re-checks it. On 2026-10-06 five PRs
+of `agent-studio-3-0` sat like this for ~18 h, for three different causes.
+
+**A6.2 — detection (report-only).** `buildFlowBoard` flags a row with the new
+reason *wake never delivered* (`REASONS.wakeLost`) when its position is
+`queued` and:
+- no session or live pool instance is behind any of its items;
+- no dispatch for any of its items waits in a member's pending queue or the
+  team's admission lane (`queued` input, from `entryTicketRef` over both);
+- no readiness gate holds its PR hand-off (#2795);
+- one of its open items carries a wake label (`consumersOf`) without that
+  label's `:wip` claim, with at least one live consumer (otherwise A5.3's
+  *nobody picks it up* applies), whose Event Log trail shows it never reached a
+  consumer role — for longer than `PARKED_WAKE_MS` (30 min).
+
+The trail is every log entry on the item about that label: its own add/remove,
+its `:wip`/`:completed` swaps, or an outcome stamped with it as `wakeLabel`.
+The latest entry decides (`parkedWakes`):
+
+| Latest entry | Cause | Clock starts |
+|---|---|---|
+| the label's add; a consumer outcome got through (delivered, held, digest) | — not parked | — |
+| the label's add; the consumer was dropped as `history-horizon` | `history-horizon` | the event's `createdAt` |
+| the label's add; dropped as `wake-already-armed` | `wake-already-armed` | the event's `createdAt` |
+| the label's add; dropped for another reason / no consumer outcome | `dropped` + `dropReason` (`no-subscriber`) | the event's `createdAt` |
+| none, or a later swap / removal | `not-seen` — the add that put the label back never surfaced | the item's `updatedAt` (or the trail's last entry, the later) |
+
+The clock uses GitHub's own `createdAt`, so a `history-horizon` drop logged
+hours late flags at once. A delivered outcome with no label stamp at all
+(entries from before #1846) on a label event counts as delivered, so an old
+log never raises the flag. Each flagged wake is listed on the row's
+`needsHuman.wakes` (`{repo, number, kind, label, cause, dropReason?, eventId,
+since}`), and the board's **Needs you** area shows `label — cause`, linked to
+the GitHub Event Log row (`/github-events?event=<id>`, which shows that one
+event over the 7-day retention). Each wake also names its switched-on consumer
+`roles` (`{id, label}`) for the action below.
+
+## Amendment 7 — Wake again (#2873, epic #2880)
+
+**A7.1 — the action.** A Team Admin (`canManageTeam`) gets a **Wake again**
+button on a *wake never delivered* row. The confirmation names each wake's
+role, item and label (*Wake Code Reviewer for PR #2844 (ready-for-review)*).
+The console route `POST /api/teams/:teamId/flow-board-wake` (`{ rowId }`; the
+actor is the session user, never the body) proxies to the orchestrator's
+`POST /internal/teams/:teamId/flow-board-wake`.
+
+**A7.2 — the checks.** An in-flight guard per `<team>::<row>`, taken before
+any await, turns concurrent clicks away with 409 `in-progress`. The route then
+re-reads a **fresh** board and refuses a stale board (503), an unknown row
+(404), or a row that is no longer parked or has no switched-on consumer (409)
+— `planWakeAgain` in the pure `orchestrator/flow-wake-again.js`. For each wake
+it re-reads the item on GitHub (`checkWakeStillPresent`): an item that is
+closed, has lost the label or cannot be read is skipped with a warning.
+
+**A7.3 — the delivery.** Labels are left alone and the Events API is not
+involved. The route clears the poller's armed wake-edge key (`disarmWake`),
+then calls the label fast-path (`wakeGithubLabelListeners`) with `onlyAgentIds`
+set to the wake's consumer **role templates** (`templateListeners`). Pool
+instances inherit their role's trigger, so the raw listener list holds every
+live instance, another item's included (#2875); only the template is woken,
+and `enqueuePending` → `planPoolDispatch` routes it onto the item's own
+instance exactly as a poller delivery does. A listener with a readiness gate
+(#2795) gets a poller hold (`holdWake`), never a bypass. The fast-path writes
+the Event Log line (`source: 'flow-control'`, the actor as the event's actor)
+and its dedup marker, so the Events API's late copy of the same label is
+dropped as `internal-dedup`. Afterwards the board shows the dispatch as queued,
+held or delivered, so a second click is refused as no longer parked — the
+persisted half of "at most once".
+
+## Amendment 8 — Adopting in-flight items after a move or flow re-apply (#2877, epic #2880)
+
+**A8.1 — the problem.** Moving a team to another instance, or re-applying /
+re-materialising its flow, stamps every trigger with a fresh `activatedAt`.
+Wake labels already on open items predate that stamp, so the history horizon
+(#320/#525) drops their events by design — and on a new instance the Event Log
+may hold nothing about them at all. The items sit at *up next* forever
+(`agent-studio-3-0`, 2026-10-05: #2820/#2842/#2844, ~18 h).
+
+**A8.2 — no implicit replay.** #320 stays the default: nothing is woken on
+import, materialise or re-apply. Adoption is an explicit click.
+
+**A8.3 — detection.** The scan is the board itself: every board computation
+looks at the team's open items (A6). `buildRoleGraph` records, per role and
+wake label, the earliest `activatedAt` (else `createdAt`) of its triggers on
+that label (`horizons`; unknown for any trigger = unknown). A parked wake
+(A6.2) is **carried over** (`carriedOver: true`) when its cause is
+`history-horizon`, or `not-seen` with the label's latest possible add time
+(`since`) before every live consumer's horizon. A carried-over wake needs no
+`PARKED_WAKE_MS` window — no delivery will ever come. A row whose every parked
+wake is carried over reads *carried over — not started here*
+(`REASONS.carriedOver`); the board lists those rows in `carriedOver`. Without a
+known horizon the row falls back to A6's *wake never delivered*. Orphaned
+`:wip` claims from the old instance are A5's *stuck — needs help* + Release
+claim; they are not adopted.
+
+**A8.4 — the action.** **Adopt** (row) is the A7 delivery under another label.
+**Adopt all (n)** posts `POST /api/teams/:teamId/flow-board-adopt` (`{ rowIds? }`,
+session actor) → `POST /internal/teams/:teamId/flow-board-adopt`: one fresh
+board, `planAdopt` (named rows, or every `carriedOver` row; a row no longer
+adoptable is skipped with its reason), then per row the same in-flight guard
+and `deliverBoardWakes` as Wake again — GitHub re-check, `disarmWake`,
+template-only fast-path delivery, readiness holds kept, one Event Log line per
+wake.
+
+**A8.5 — pools, sessions, knowledge (the open question).** Adoption does not
+re-key pool instances. It wakes the role template, and `planPoolDispatch`
+spawns a fresh item-keyed instance on the new instance. Old instances, their
+session pointers and chat history stay on the old instance; nothing migrates
+them. The adopted run starts a fresh session and resumes from what GitHub
+holds (labels, branch, PR, review comments). The team's knowledge base lives
+in git and carries over unchanged. Migrating instance sessions is out of
+scope. A session pointer is bound to the old instance's `claude-home`, and
+replaying it on another instance is not safe.

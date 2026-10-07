@@ -38,7 +38,16 @@ const {
 } = require('./html-preview');
 const { discoverBoundAgents, hiddenBlastRadius, projectRespawnOutcome, respawnWithConcurrency } = require('./respawn-agents');
 const { githubApiBase } = require('./github-api-base');
-const { createTtlCache } = require('./ttl-cache');
+const { createTtlCache, ttlMsFromEnv } = require('./ttl-cache');
+const { createSwrCache } = require('./swr-cache');
+const { createProcessesSource } = require('./agent-processes-view');
+const { indexAgentsByEnvironment, environmentAgentRows, firstAgentIdUsingEnvironment } = require('./environment-agents');
+const { invalidateOnSuccessfulWrite } = require('./invalidate-on-write');
+const knowledgeFleetLib = require('./knowledge-fleet');
+const {
+  knowledgeGraphCacheKey, mutationInvalidatesKnowledgeGraph, knowledgeGraphTtlMsFromEnv, knowledgeAugmentTimeoutMsFromEnv,
+  knowledgeGraphKeyStaleForEvent, claimKnowledgeEventOffset, knowledgeEventMarkForFileSize,
+} = require('./knowledge-graph-cache');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, isTeamAdminOfAny, canManageAgent,
         visibleEnvironment, canManageEnvironment, canCreateEnvironment, canRetierEnvironment,
         visibleUser, describeAuthz,
@@ -128,6 +137,7 @@ const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { applyPushedBy } = require('./push-producer-filter');
 const { isLiveGraphMember } = require('./live-graph-members');
+const { missingWakeLabels, wakeLabelRepos, missingWakeLabelLints, missingWakeLabelWarnings } = require('./missing-wake-labels');
 const { normalizeBranchFilter } = require('./branch-filter');
 const { normalizeCommentFilter } = require('./comment-filter');
 const { newTriggerIdError, annotateTriggerList, stripTriggerAnnotations, resolveTriggerIndex } = require('./trigger-validate');
@@ -171,22 +181,26 @@ const { resolveAgentStateDir } = require('./agent-state-dir');
 const skillDrift = require('./skill-drift');
 const skillLineage = require('./skill-lineage');
 const skillTransfer = require('./skill-transfer');
+const skillVersionDiff = require('./skill-version-diff');
 const skillInjectionScan = require('./skill-injection-scan');
 const skillDeletion = require('./skill-deletion');
 const skillMerge = require('./skill-merge');
 const skillImport = require('./skill-import');
 const skillGrantValidate = require('./skill-grant-validate');
 const skillPoolTeam = require('./skill-pool-team');
+const skillFileBatch = require('./skill-file-batch');
 const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archives');
 const { createTranscribeRoute } = require('./transcribe.js');
-const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix, stampLiveLabels } = require('./label-suffix');
+const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix, stampLiveLabels, collectLabelTokens, teamForeignLabels, planSuffixChange, githubRenamesForPlan } = require('./label-suffix');
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
 const { reposFromEnv, repoVars } = require('./team-repo-resolve');
 const { planCreatorMembership, creatorEnvironmentOwnership } = require('./creator-membership');
 const { validateTeamProviderAvailability } = require('./team-provider-check');
 const { pruneTeamFromProviders } = require('./provider-team-prune');
-const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
-const { admitsToChatList } = require('./matrix-agent-list');
+const { buildAgentStatus } = require('./agent-statuses');
+const {
+  buildRosterEntries, projectRoster, mutationInvalidatesRoster, rosterTtlMsFromEnv,
+} = require('./matrix-agent-roster');
 const { parseMemberMaterialize } = require('./member-materialize');
 const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentBaseId } = require('./quickstart-llm');
 const { validatePluginManifest } = require('./plugin-manifest');
@@ -467,6 +481,17 @@ auth.registerAuthRoutes(app, {
   usersSeeded: () => readJsonFile(USERS_INDEX, []).length > 0,
 });
 app.use('/api', auth.gate);
+
+// The chat roster's shared cache (#566) is cleared when a roster-affecting
+// console mutation succeeds, so a create/rename/enable done here shows on the
+// next roster fetch instead of one TTL later; the knowledge-graph cache (#571)
+// likewise, so the page's post-mutation reload never reads the pre-mutation
+// graph. Behind the auth gate (an unauthenticated request never reaches them),
+// decided on the handler's own `res.end` and its real final status
+// (invalidate-on-write.js). The allowlists are `mutationInvalidatesRoster` and
+// `mutationInvalidatesKnowledgeGraph`.
+app.use('/api', invalidateOnSuccessfulWrite(mutationInvalidatesRoster, invalidateRosterCache));
+app.use('/api', invalidateOnSuccessfulWrite(mutationInvalidatesKnowledgeGraph, invalidateKnowledgeGraphCache));
 
 // Team-share room sync (#2174, epic #2166 B2). Mirrors the `auditMutations`
 // pattern above: mounted before the two routes it watches and listening for
@@ -1068,7 +1093,9 @@ function podmanRequest(method, urlPath) {
   });
 }
 
-function readJsonFile(filePath, fallback = null) {
+// `onError(err)`, when given, hears the real cause of a failed read/parse
+// (the return value is still `fallback`).
+function readJsonFile(filePath, fallback = null, onError = null) {
   if (typeof filePath !== 'string') return fallback;
   // Confine reads under an allowed root before the value reaches readFileSync.
   // Same containPathUnderRoot() return-value barrier as writeJsonAtomic; reads
@@ -1081,7 +1108,8 @@ function readJsonFile(filePath, fallback = null) {
   if (safe === null) return fallback;
   try {
     return JSON.parse(fs.readFileSync(safe, 'utf8'));
-  } catch {
+  } catch (err) {
+    if (onError) onError(err);
     return fallback;
   }
 }
@@ -1592,25 +1620,25 @@ function generateOpensshEd25519Keypair(comment) {
   return { privateKey: privatePem, publicKey: publicSsh, pubBlob };
 }
 
+// Every agent config, read once and indexed by environmentId (#570). A caller
+// answering several environments builds this once and passes it to
+// `agentsUsingEnvironment` instead of letting each call re-read the fleet.
+function agentsByEnvironment() {
+  return indexAgentsByEnvironment(listAgentDirs().map(id => ({
+    id, cfg: readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {}),
+  })));
+}
+
+// The first agent (disk order) bound to this environment, regardless of the
+// caller's scope — the delete guard must see every binding — or null.
 function environmentInUse(envId) {
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (cfg.environmentId === envId) return id;
-  }
-  return null;
+  return firstAgentIdUsingEnvironment(agentsByEnvironment(), envId);
 }
 
 // All agents referencing this environment, scoped to what the caller may see
 // (same team/visibility rules as GET /api/agents — #302, #439).
-function agentsUsingEnvironment(envId, scope) {
-  const agents = [];
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (cfg.environmentId === envId && visibleAgent(scope, agentMetaForScope(cfg))) {
-      agents.push({ id, displayName: cfg.displayName || id });
-    }
-  }
-  return agents;
+function agentsUsingEnvironment(envId, scope, byEnv = agentsByEnvironment()) {
+  return environmentAgentRows(byEnv, envId, cfg => visibleAgent(scope, agentMetaForScope(cfg)));
 }
 
 function sshKeyInUse(keyId) {
@@ -2335,16 +2363,16 @@ app.get('/api/agents', (req, res) => {
 // buildAgentStatus (agent-statuses.js, #1677).
 async function buildAllAgentStatuses() {
   let runningIds = new Set();
-  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
-  try {
-    const resp = await fetch(`${orchestratorUrl}/internal/agents/processes`);
-    if (resp.ok) {
-      const processes = await resp.json();
-      for (const p of processes) {
-        if (p.running) runningIds.add(p.id);
-      }
-    }
-  } catch { /* orchestrator unreachable — all agents appear offline */ }
+  // Bounded (#570, agent-processes-view.js): the build waits at most
+  // AGENT_PROCESSES_WAIT_MS on the one outstanding orchestrator request, then
+  // uses the last good runtime view while that request is still running (slow,
+  // not down) or for AGENT_PROCESSES_LAST_VIEW_MAX_MS after a failed one. With
+  // no view, all agents read offline and the build rejects with that set as
+  // `err.entries` (see agentStatusEntries).
+  const view = await agentProcesses.read();
+  for (const p of view.processes || []) {
+    if (p && p.id && p.running) runningIds.add(p.id);
+  }
 
   const entries = [];
   for (const id of listAgentDirs()) {
@@ -2360,30 +2388,77 @@ async function buildAllAgentStatuses() {
     }
     entries.push({ cfg, status: buildAgentStatus({ id, cfg, running, status, dmRoom, sessionFileExists }) });
   }
+  if (view.source === 'none') {
+    const err = new Error('orchestrator processes unavailable — no runtime view');
+    err.entries = entries;
+    throw err;
+  }
   return entries;
 }
 
-// Short-TTL single-flight cache over the full status set. Several console
-// surfaces poll this endpoint on a 5s beat (Shell nav badge, Agent-Chat list,
-// Maintenance Mode); the front end now shares one poll (#1677), but multiple
-// tabs/users and scope-varying callers can still land close together — a ~2s
-// TTL collapses those onto one filesystem + orchestrator sweep. Caching the
-// in-flight promise also dedups concurrent rebuilds.
-let _statusCache = null; // { builtAt, promise }
-const STATUS_CACHE_TTL_MS = Number(process.env.AGENT_STATUSES_TTL_MS) || 2000;
+// Stale-while-revalidate, single-flight cache over the full status set (#570).
+// Several console surfaces poll this endpoint on a 5s beat (Shell nav badge,
+// Agent-Chat list, Maintenance Mode); the front end shares one poll (#1677),
+// but every tab and user still lands here. Within AGENT_STATUSES_TTL_MS a poll
+// gets the cached set; after that, up to AGENT_STATUSES_MAX_STALE_MS, it gets
+// the cached set at once while one rebuild runs in the background — so a poll
+// no longer waits on the orchestrator hop (observed p90 5–15 s under load). A
+// roster-affecting console mutation invalidates it (`invalidateRosterCache`):
+// the next poll still gets the cached set and starts the rebuild, so a
+// create/enable/disable shows one rebuild later instead of costing a cold wait.
+// `0` turns the cache off, like AGENT_ROSTER_TTL_MS (#566).
+const STATUS_CACHE_TTL_MS = ttlMsFromEnv(process.env.AGENT_STATUSES_TTL_MS, 5000);
+const STATUS_CACHE_MAX_STALE_MS = ttlMsFromEnv(process.env.AGENT_STATUSES_MAX_STALE_MS, 30_000);
+// The orchestrator processes hop (#570, agent-processes-view.js). Observed under
+// load: p90 5–15 s, and up to ~60 s while the orchestrator's event loop stalls.
+//   WAIT 3 s   — how long one build waits on the request before the last view
+//                stands in; short, because a cold poll waits on it.
+//   TIMEOUT 60 s — the request's hard deadline, at or above the observed stall,
+//                so a stall that clears is answered, not abandoned; only one
+//                request is ever outstanding, so nothing piles up behind it.
+//   LAST_VIEW 15 s — how long the last view outlives a FAILED answer. While a
+//                request is still outstanding it vouches for the view up to its
+//                deadline instead. Worst cases: down (fast failures) 15 s +
+//                max-stale 30 s; hung (no answer at all) 15 + 60 + 30 s.
+const AGENT_PROCESSES_WAIT_MS = ttlMsFromEnv(process.env.AGENT_PROCESSES_WAIT_MS, 3000) || 3000;
+const AGENT_PROCESSES_TIMEOUT_MS = ttlMsFromEnv(process.env.AGENT_PROCESSES_TIMEOUT_MS, 60_000) || 60_000;
+const AGENT_PROCESSES_LAST_VIEW_MAX_MS = ttlMsFromEnv(process.env.AGENT_PROCESSES_LAST_VIEW_MAX_MS, 15_000);
+const agentProcesses = createProcessesSource({
+  fetchProcesses: async () => {
+    const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+    const resp = await fetch(`${orchestratorUrl}/internal/agents/processes`, {
+      signal: AbortSignal.timeout(AGENT_PROCESSES_TIMEOUT_MS),
+    });
+    return resp.ok ? resp.json() : null;
+  },
+  waitMs: AGENT_PROCESSES_WAIT_MS,
+  timeoutMs: AGENT_PROCESSES_TIMEOUT_MS,
+  viewMaxMs: AGENT_PROCESSES_LAST_VIEW_MAX_MS,
+});
+// A failed build is held for one fresh window (`failureBackoffMs`): during an
+// outage every poll would otherwise run its own config sweep + orchestrator
+// wait. A failure streak logs once when it starts and once when it ends.
+const agentStatusCache = createSwrCache({
+  freshMs: STATUS_CACHE_TTL_MS,
+  maxStaleMs: STATUS_CACHE_MAX_STALE_MS,
+  failureBackoffMs: STATUS_CACHE_TTL_MS,
+  onError: (err) => console.warn(`[statuses] rebuild failing: ${err.message} — serving the last good set while it lasts`),
+  onRecover: ({ failures }) => console.warn(`[statuses] rebuild recovered after ${failures} failed attempt(s)`),
+});
 
-function agentStatusEntries() {
-  const now = Date.now();
-  if (_statusCache && statusCacheFresh(_statusCache.builtAt, now, STATUS_CACHE_TTL_MS)) {
-    return _statusCache.promise;
-  }
-  const promise = buildAllAgentStatuses().catch(err => {
-    // Don't cache a failed build — let the next request retry.
-    if (_statusCache && _statusCache.promise === promise) _statusCache = null;
+// A build with no runtime view (orchestrator down past the last-view window)
+// rejects instead of resolving, so the cache never stores an all-offline set
+// and keeps serving the previous good one up to its max-stale (review on PR
+// #573). A caller that has to wait — cold cache, or past max-stale — still gets
+// the all-offline set; it is held only as the failure backoff, never as the
+// cached value, so the poll after the backoff retries the orchestrator.
+async function agentStatusEntries() {
+  try {
+    return await agentStatusCache.get(buildAllAgentStatuses);
+  } catch (err) {
+    if (Array.isArray(err.entries)) return err.entries;
     throw err;
-  });
-  _statusCache = { builtAt: now, promise };
-  return promise;
+  }
 }
 
 app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
@@ -2978,7 +3053,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // channel label, legacy emits) gets the team's stored suffix — before any
   // validation below, so the gate check sees the name that is persisted.
   const liveSuffix = teamLabelSuffixFor(cfg);
-  if (liveSuffix) req.body = stampLiveLabels(req.body || {}, liveSuffix);
+  if (liveSuffix) req.body = stampLiveLabels(req.body || {}, liveSuffix, { keep: teamForeignLabelsFor(id, cfg) });
   const { displayName, role, enabled, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, wipLimit, autoDispatch, pool, github, channels, assistLlmEndpointId, memoryLimit } = req.body;
 
   // ── Label registry (#928/#981) ────────────────────────────────────────────
@@ -4542,7 +4617,7 @@ app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
   // team's suffix on its triggers and label ports, like a role created with
   // the team.
   const liveSuffix = teamLabelSuffixFor(teamCfg);
-  if (liveSuffix) outBody = stampLiveLabels(outBody, liveSuffix);
+  if (liveSuffix) outBody = stampLiveLabels(outBody, liveSuffix, { keep: teamForeignLabelsFor(teamId, teamCfg) });
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamId)}/members`, {
@@ -6607,6 +6682,186 @@ function readAgentConfigForFilter(agentId) {
   return readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
 }
 
+// ── Team label suffix change (#2858) ──────────────────────────────────────
+// The one central place a live team's suffix is changed: every stamped label
+// occurrence in the team (triggers, channels, outcomes, emits, the label and
+// humans registries, prompt text) is rewritten in one operation via the pure
+// planSuffixChange, then the labels are renamed on GitHub in place so open
+// issues and PRs keep them. Body: { suffix, dryRun?, retry? }.
+//  - dryRun: the preview the confirmation dialog shows (renames, affected
+//    agents, collisions) — nothing is written.
+//  - retry: re-run only the GitHub renames a previous change could not apply
+//    (recorded on the team as `labelSuffixPendingRenames`).
+// The team config is written FIRST and the GitHub renames second: a failed
+// rename is recorded and reported (with a retry), never left silent.
+function loadSuffixTeamAgents(teamId) {
+  const agents = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg || (id !== teamId && cfg.parentTeamId !== teamId)) continue;
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    agents.push({ id, config: cfg, triggers: Array.isArray(triggers) ? triggers : [] });
+  }
+  return agents;
+}
+
+// Label names the OTHER teams on the same repository use (#2858 AC10) — a
+// suffix change must not rename onto one of them.
+function otherTeamLabelsOnRepo(teamId, repo) {
+  const out = new Set();
+  if (!repo) return out;
+  const teamIds = listAgentDirs().filter((id) => {
+    if (id === teamId) return false;
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    return !!(cfg && cfg.role === 'team' && memberRepoFullName(cfg) === repo);
+  });
+  for (const otherId of teamIds) {
+    const agents = loadSuffixTeamAgents(otherId);
+    const team = agents.find(a => a.id === otherId);
+    const tokens = collectLabelTokens(
+      agents.map(a => ({ ...a.config, triggers: a.triggers })),
+      Array.isArray(team?.config.labels) ? team.config.labels : [],
+      Array.isArray(team?.config.humans) ? team.config.humans : [],
+    );
+    for (const t of tokens) out.add(t);
+  }
+  return out;
+}
+
+async function renameGithubLabels(envId, renames, suffix) {
+  if (!renames.length) return { renamed: [], created: [], failed: [] };
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(
+      `${orchestratorUrl}/internal/environments/${encodeURIComponent(envId)}/github-labels/rename`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ renames, ...(suffix ? { color: suffixLabelColor(suffix) } : {}) }),
+      },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return { renamed: [], created: [], failed: renames.map(r => ({ ...r, error: data.error || `orchestrator HTTP ${resp.status}` })) };
+    return {
+      renamed: Array.isArray(data.renamed) ? data.renamed : [],
+      created: Array.isArray(data.created) ? data.created : [],
+      failed: Array.isArray(data.failed) ? data.failed : [],
+    };
+  } catch (err) {
+    return { renamed: [], created: [], failed: renames.map(r => ({ ...r, error: `Orchestrator unreachable: ${err.message}` })) };
+  }
+}
+
+app.post('/api/agents/:teamId/label-suffix', heavyLimiter, async (req, res) => {
+  const { teamId } = req.params;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const teamDir = path.resolve(agentsBaseDir, teamId);
+  const rel = path.relative(agentsBaseDir, teamDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
+  const teamCfgPath = path.join(teamDir, 'config.json');
+  const teamCfg = readJsonFile(teamCfgPath, null);
+  if (!teamCfg) return res.status(404).json({ error: 'Team not found' });
+  if (teamCfg.role !== 'team') return res.status(400).json({ error: 'The label suffix is a setting of an Agent Team' });
+  if (denyUnlessCanManageAgent(req, res, teamCfg)) return;
+  const body = req.body || {};
+
+  if (body.retry === true) {
+    const pending = Array.isArray(teamCfg.labelSuffixPendingRenames) ? teamCfg.labelSuffixPendingRenames : [];
+    if (!pending.length) return res.json({ ok: true, github: { renamed: [], created: [], failed: [] } });
+    const github = await renameGithubLabels(teamCfg.environmentId,
+      pending.map(({ from, to, optional }) => ({ from, to, ...(optional ? { optional: true } : {}) })), teamCfg.labelSuffix || '');
+    const fresh = readJsonFile(teamCfgPath, teamCfg);
+    if (github.failed.length) fresh.labelSuffixPendingRenames = github.failed;
+    else delete fresh.labelSuffixPendingRenames;
+    writeJsonAtomic(teamCfgPath, fresh);
+    return res.json({ ok: github.failed.length === 0, github });
+  }
+
+  const suffix = typeof body.suffix === 'string' ? body.suffix.trim() : '';
+  const sv = validateSuffix(suffix);
+  if (!sv.ok) return res.status(400).json({ error: sv.error });
+  const oldSuffix = typeof teamCfg.labelSuffix === 'string' ? teamCfg.labelSuffix.trim() : '';
+  if (suffix === oldSuffix) return res.status(400).json({ error: `The team already uses the label suffix '${suffix || '(none)'}'` });
+
+  const agents = loadSuffixTeamAgents(teamId);
+  const plan = planSuffixChange(agents, teamId, suffix, {
+    otherTeamLabels: otherTeamLabelsOnRepo(teamId, memberRepoFullName(teamCfg)),
+  });
+  const changedAgents = plan.agents.filter(a => a.configChanged || a.triggersChanged).map(a => a.id);
+  const preview = {
+    oldSuffix: plan.oldSuffix,
+    newSuffix: plan.newSuffix,
+    renames: plan.renames,
+    agents: changedAgents,
+    collisions: plan.collisions,
+  };
+  if (plan.collisions.length) {
+    const c = plan.collisions[0];
+    return res.status(409).json({
+      ...preview,
+      error: c.owner === 'other-team'
+        ? `Label '${c.label}' is already used by another team on this repository — choose a different suffix.`
+        : `Label '${c.label}' already exists in this team as a label without the suffix — choose a different suffix.`,
+    });
+  }
+  if (body.dryRun === true) return res.json(preview);
+
+  // 1. The team: every changed config + trigger list, the team agent last so
+  //    its new suffix is only stored once its members carry it.
+  const ordered = [...plan.agents.filter(a => a.id !== teamId), ...plan.agents.filter(a => a.id === teamId)];
+  const teamPlan = plan.agents.find(a => a.id === teamId);
+  const templateChanged = teamPlan
+    && (teamPlan.config.systemPromptTemplate || '') !== (teamCfg.systemPromptTemplate || '');
+  try {
+    for (const a of ordered) {
+      if (a.triggersChanged) await putTriggers(a.id, a.triggers);
+      if (a.configChanged) writeJsonAtomic(path.join(AGENTS_DIR, a.id, 'config.json'), a.config);
+    }
+  } catch (err) {
+    return res.status(502).json({ ...preview, error: `Could not save the team: ${err.message}` });
+  }
+  // 2. Prompts and derived wiring: push the team template to inheriting
+  //    members, then re-derive channel listeners, hand-offs and every member's
+  //    AGENT-PROMPT.md from the rewritten ports. A running session picks the
+  //    new prompt up on its next run.
+  if (templateChanged) {
+    const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+    try {
+      await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamId)}/prompt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ systemPromptTemplate: teamPlan.config.systemPromptTemplate || '' }),
+      });
+    } catch { /* best-effort — reconcileTeamOutcomes below rewrites AGENT-PROMPT.md */ }
+  }
+  await reconcileTeamGithubChannels(teamId);
+  await reconcileTeamOutcomes(teamId);
+  await reconcileTeamWakeHandoffs(teamId);
+  for (const id of changedAgents) notifyAgentReload(id);
+
+  // 3. GitHub: rename in place — the team labels plus the claim lifecycle
+  //    labels (`<wake>:wip` / `<wake>:completed`) items in flight carry.
+  //    Failures are recorded for a retry. A rename a previous change could not
+  //    apply still sits on GitHub under its old name, so it is chained (`a-x` →
+  //    `a-y` pending, now `a-y` → `a-z`: `a-x` → `a-z`).
+  const pending = Array.isArray(teamCfg.labelSuffixPendingRenames) ? teamCfg.labelSuffixPendingRenames : [];
+  const planRenames = githubRenamesForPlan(plan, agents);
+  const nextName = new Map(planRenames.map(r => [r.from, r.to]));
+  const pendingTo = new Set(pending.map(p => p.to));
+  const githubRenames = [
+    ...pending.map(p => ({ from: p.from, to: nextName.get(p.to) || p.to, ...(p.optional ? { optional: true } : {}) }))
+      .filter(r => r.from !== r.to),
+    ...planRenames.filter(r => !pendingTo.has(r.from)),
+  ];
+  const github = await renameGithubLabels(teamCfg.environmentId, githubRenames, suffix);
+  const fresh = readJsonFile(teamCfgPath, teamPlan ? teamPlan.config : teamCfg);
+  if (github.failed.length) fresh.labelSuffixPendingRenames = github.failed;
+  else delete fresh.labelSuffixPendingRenames;
+  writeJsonAtomic(teamCfgPath, fresh);
+  res.json({ ...preview, ok: github.failed.length === 0, github });
+});
+
 async function putTriggers(agentId, triggers) {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   const r = await fetch(
@@ -6638,8 +6893,11 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   const triggers = Array.isArray(cur) ? cur : [];
   // Label suffix on live edits (#2718): labelFilter, claim and the label
   // mentions in the trigger's prompt get the team's stored suffix.
-  const liveSuffix = teamLabelSuffixFor(readJsonFile(path.join(agentDir, 'config.json'), null));
-  const reqTrigger = liveSuffix ? stampLiveLabels(req.body || {}, liveSuffix, { trigger: true }) : req.body;
+  const agentCfg = readJsonFile(path.join(agentDir, 'config.json'), null);
+  const liveSuffix = teamLabelSuffixFor(agentCfg);
+  const reqTrigger = liveSuffix
+    ? stampLiveLabels(req.body || {}, liveSuffix, { trigger: true, keep: teamForeignLabelsFor(id, agentCfg) })
+    : req.body;
   const newTrigger = stripTriggerAnnotations({ id: `t${Date.now()}`, ...reqTrigger });
   // Trigger ids (#2626): URL-safe shape (400), unique per agent (409) — a
   // shared id makes DELETE/PUT ambiguous and the agent runs only one of them.
@@ -6717,8 +6975,11 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   const prev = triggers[idx];
   // Label suffix on live edits (#2718) — see the POST handler. Only the edit's
   // own fields are stamped; the stored trigger is merged in as it is.
-  const liveSuffix = teamLabelSuffixFor(readJsonFile(path.join(agentDir, 'config.json'), null));
-  const reqTrigger = liveSuffix ? stampLiveLabels(req.body || {}, liveSuffix, { trigger: true }) : req.body;
+  const agentCfg = readJsonFile(path.join(agentDir, 'config.json'), null);
+  const liveSuffix = teamLabelSuffixFor(agentCfg);
+  const reqTrigger = liveSuffix
+    ? stampLiveLabels(req.body || {}, liveSuffix, { trigger: true, keep: teamForeignLabelsFor(id, agentCfg) })
+    : req.body;
   const merged = stripTriggerAnnotations({ ...prev, ...reqTrigger, id: triggerId });
   // Trigger-level `emits` was removed (#783): the agent/role level is canonical.
   // Ignore any supplied `emits` and drop a legacy field so an edit never
@@ -6910,6 +7171,16 @@ function teamLabelSuffixFor(cfg) {
   return suffix && validateSuffix(suffix).ok ? suffix : '';
 }
 
+// The labels a live write to this agent's suffixed team must leave unstamped
+// (#2858 AC4): the foreign names the team already carries. Only consulted when
+// teamLabelSuffixFor returned a suffix.
+function teamForeignLabelsFor(agentId, cfg) {
+  if (!cfg || typeof cfg !== 'object') return new Set();
+  const teamId = cfg.role === 'team' ? agentId : cfg.parentTeamId;
+  if (typeof teamId !== 'string' || !AGENT_ID_RE.test(teamId)) return new Set();
+  return teamForeignLabels(loadSuffixTeamAgents(teamId), teamId);
+}
+
 function teamLabelRegistry(teamId) {
   if (!teamId || !AGENT_ID_RE.test(teamId)) return [];
   const cfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), {});
@@ -6949,7 +7220,7 @@ function teamHumansRegistry(teamId) {
   return Array.isArray(cfg.humans) ? cfg.humans : [];
 }
 
-app.get('/api/process/graph', (req, res) => {
+app.get('/api/process/graph', async (req, res) => {
   const templatesParam = req.query.templates;
 
   // Template-level blueprint graph. Label hand-off edges come from each
@@ -7006,7 +7277,15 @@ app.get('/api/process/graph', (req, res) => {
     });
   }
   const teamHumans = teamHumansRegistry(team);
-  res.json({ level: 'live', team, humans: teamHumans, ...buildProcessGraph(agents, { labels: teamLabelRegistry(team), humans: teamHumans }) });
+  const graph = buildProcessGraph(agents, { labels: teamLabelRegistry(team), humans: teamHumans });
+  // #2878: a wake label missing on its repository — only for one team's
+  // graph (one bounded GitHub read, cached by the orchestrator). Unreadable
+  // repos are simply not linted.
+  if (team) {
+    const labels = await fetchRepoLabels(wakeLabelRepos(agents));
+    if (labels) graph.lints = [...(graph.lints || []), ...missingWakeLabelLints(missingWakeLabels(agents, labels.labels))];
+  }
+  res.json({ level: 'live', team, humans: teamHumans, ...graph });
 });
 
 // Build a graph from an imported bundle (no persistence) so the canvas can
@@ -7085,53 +7364,62 @@ function agentKnowledgeTeam(cfg) {
 // caller can see the HUMAN team any of its agents belongs to. Admin scopes
 // (all:true) short-circuit. Falls back to a direct id match so a membership that
 // (unusually) names the squad id keeps working.
-function knowledgeTeamVisible(scope, knowledgeTeamId) {
-  if (!scope) return false;
-  if (scope.all) return true;
-  if (visibleTeam(scope, knowledgeTeamId)) return true;
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (agentKnowledgeTeam(cfg) !== knowledgeTeamId) continue;
-    if (visibleTeam(scope, cfg.teamId)) return true;
-  }
-  return false;
+//
+// #571: every helper below takes an optional `fleet` (knowledge-fleet.js) — one
+// read of every agent config, built once per request by the knowledge routes
+// that call several helpers and threaded through. Without one a helper builds
+// its own. The cheap checks run before any fleet is built.
+// An unreadable config is warned about with its real cause, once per broken
+// streak (knowledge-fleet.js `createEntryWarnings`).
+const _knowledgeFleetWarnings = knowledgeFleetLib.createEntryWarnings();
+
+function buildKnowledgeFleetNow() {
+  return knowledgeFleetLib.buildKnowledgeFleet(listAgentDirs(), {
+    readConfig: (id) => {
+      let cause = null;
+      const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null, (err) => { cause = err; });
+      if (cause) throw cause;
+      return cfg;
+    },
+    onEntryError: (id, err) => {
+      if (_knowledgeFleetWarnings.shouldWarn(id, err)) console.warn(`[knowledge] config of ${id} unreadable, read as empty: ${err.message}`);
+    },
+    onEntryOk: (id) => _knowledgeFleetWarnings.ok(id),
+    agentKnowledgeTeam,
+    agentMetaForScope,
+  });
+}
+
+// `fleet` may be a fleet or a thunk returning one; without either the lib
+// builds one lazily, only past its cheap checks.
+function knowledgeTeamVisible(scope, knowledgeTeamId, fleet = null) {
+  return knowledgeFleetLib.knowledgeTeamVisible(fleet || buildKnowledgeFleetNow, scope, knowledgeTeamId, { visibleTeam });
 }
 
 // Resolve a team's KB store-relative path (e.g. docs/agent-knowledge/) from any
 // of its agents' environments — a team shares one env → one KB config.
-function resolveTeamStorePath(teamId) {
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (agentKnowledgeTeam(cfg) !== teamId || !cfg.environmentId) continue;
-    // #570: the KB store path is keyed per team — overlay the team's overrides.
-    const env = knowledgeSuggestions.mergeTeamKnowledgeConfig(loadEnvironment(cfg.environmentId), loadTeamKnowledgeOverrides(teamId));
-    const p = env && env.knowledgeStore && typeof env.knowledgeStore.path === 'string'
-      ? env.knowledgeStore.path : null;
-    if (p) return p.replace(/^\/+|\/+$/g, '') + '/';
-  }
-  return KB_DEFAULT_STORE_PATH;
+// #570: the KB store path is keyed per team — the team's overrides are overlaid.
+function resolveTeamStorePath(teamId, fleet = null) {
+  return knowledgeFleetLib.resolveTeamStorePath(fleet || buildKnowledgeFleetNow(), teamId, {
+    loadEnvironment,
+    loadTeamKnowledgeOverrides,
+    mergeTeamKnowledgeConfig: knowledgeSuggestions.mergeTeamKnowledgeConfig,
+    defaultStorePath: KB_DEFAULT_STORE_PATH,
+  });
 }
 
 // Resolve a team's KB repo web URL for provenance links (sourceRefs → PR/issue).
-function resolveTeamRepoUrl(teamId) {
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (agentKnowledgeTeam(cfg) !== teamId || !cfg.environmentId) continue;
-    // #570: the KB repoRef is keyed per team — overlay the team's overrides.
-    const env = knowledgeSuggestions.mergeTeamKnowledgeConfig(loadEnvironment(cfg.environmentId), loadTeamKnowledgeOverrides(teamId));
-    const ref = env && env.knowledgeStore && env.knowledgeStore.repoRef;
-    if (ref && ref.url) return ref.url;
-    const repos = (env && env.repositories) || [];
-    if (repos[0] && repos[0].url) return repos[0].url;
-  }
-  return null;
+// #570: the KB repoRef is keyed per team — the team's overrides are overlaid.
+function resolveTeamRepoUrl(teamId, fleet = null) {
+  return knowledgeFleetLib.resolveTeamRepoUrl(fleet || buildKnowledgeFleetNow(), teamId, {
+    loadEnvironment,
+    loadTeamKnowledgeOverrides,
+    mergeTeamKnowledgeConfig: knowledgeSuggestions.mergeTeamKnowledgeConfig,
+  });
 }
 
-function teamAgentIds(teamId) {
-  return listAgentDirs().filter(id => {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    return agentKnowledgeTeam(cfg) === teamId;
-  });
+function teamAgentIds(teamId, fleet = null) {
+  return knowledgeFleetLib.teamAgentIds(fleet || buildKnowledgeFleetNow(), teamId);
 }
 
 // Kind → { dir, file }, honouring a store's manifest if present, else defaults.
@@ -7176,13 +7464,8 @@ function kbReadStore(entries, storeRoot) {
 // the human tenant team ('default' for everyone) — and two squads can share one
 // env, i.e. one KB store, so the store location alone can't separate them
 // either. The recording agent's squad is authoritative.
-function knowledgeTeamByAgent() {
-  const map = new Map();
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    map.set(id, agentKnowledgeTeam({ ...cfg, id: cfg.id || id }));
-  }
-  return map;
+function knowledgeTeamByAgent(fleet = null) {
+  return knowledgeFleetLib.knowledgeTeamByAgent(fleet || buildKnowledgeFleetNow());
 }
 
 const KNOWLEDGE_ARCHIVED_DIR = path.join(WORKSPACE, 'knowledge-archived');
@@ -7221,17 +7504,18 @@ function readTriggersFor(teamId) {
 // Entries are re-homed to their origin agent's squad, and the operator-decision
 // overlays (archive, supervised review) are re-applied at read time so they hold
 // even when the git-sync side lags (see overlayStatuses).
-function gatherTeamEntries(teamId) {
+function gatherTeamEntries(teamId, { fleet = null } = {}) {
   let entries = [];
   const warnings = [];
   if (!AGENT_ID_RE.test(teamId)) return { entries, warnings };
-  const storeRel = resolveTeamStorePath(teamId);
+  const kfleet = fleet || buildKnowledgeFleetNow();
+  const storeRel = resolveTeamStorePath(teamId, kfleet);
   const cloneRoot = path.join(KNOWLEDGE_CLONE_ROOT, path.basename(teamId));
   const cloneStore = path.join(cloneRoot, storeRel);
   if (fs.existsSync(path.join(cloneRoot, '.git')) && fs.existsSync(cloneStore)) {
     kbReadStore(entries, cloneStore);
   } else {
-    for (const agentId of teamAgentIds(teamId)) {
+    for (const agentId of teamAgentIds(teamId, kfleet)) {
       const store = path.join(AGENTS_DIR, agentId, 'knowledge', storeRel);
       if (fs.existsSync(store)) kbReadStore(entries, store);
     }
@@ -7242,7 +7526,7 @@ function gatherTeamEntries(teamId) {
   // entry in the team whose store we are reading. Then drop sibling squads'
   // entries (a shared env means a shared store — the canonical clone can carry
   // both squads' shards).
-  const originTeams = knowledgeTeamByAgent();
+  const originTeams = knowledgeTeamByAgent(kfleet);
   entries = entries
     .map((e) => {
       if (!e || typeof e !== 'object') return e;
@@ -7261,7 +7545,7 @@ function gatherTeamEntries(teamId) {
       if (!(k in decisions)) decisions[k] = v;
     }
   }
-  const reviewOn = knowledgeReviewOn(teamKnowledgeEnv(teamId)); // #570: per-team config
+  const reviewOn = knowledgeReviewOn(teamKnowledgeEnv(teamId, kfleet)); // #570: per-team config
   entries = overlayStatuses(entries, { archivedIds: archived, decisions, reviewOn });
   // #916: validity is a field overlay (never a status) — same legacy-'default'
   // merge as the archive store so pre-re-homing decisions still hold.
@@ -7284,19 +7568,14 @@ function gatherTeamEntries(teamId) {
 }
 
 // Which teams does this scope + membership resolve to?
-function knowledgeScopeTeams(parsed, scope) {
+// global: every team that has agents, narrowed by membership scope.
+function knowledgeScopeTeams(parsed, scope, fleet = null) {
   if (parsed.kind === 'team') return [parsed.id];
-  if (parsed.kind === 'agent') {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, parsed.id, 'config.json'), {});
-    return [agentKnowledgeTeam({ ...cfg, id: cfg.id || parsed.id })];
-  }
-  // global: every team that has agents, narrowed by membership scope.
-  const teams = new Set();
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    teams.add(agentKnowledgeTeam({ ...cfg, id: cfg.id || id }));
-  }
-  return [...teams].filter(t => knowledgeTeamVisible(scope, t));
+  const kfleet = fleet || buildKnowledgeFleetNow();
+  return knowledgeFleetLib.knowledgeScopeTeams(kfleet, parsed, {
+    agentKnowledgeTeam,
+    isVisible: (t) => knowledgeTeamVisible(scope, t, kfleet),
+  });
 }
 
 // Fire-and-forget refresh of a team's canonical clone before we read it, so the
@@ -7313,18 +7592,9 @@ function refreshTeamCloneBestEffort(teamId) {
   }).catch(() => {}).finally(() => clearTimeout(timer));
 }
 
-function gatherKnowledgeAgents(scope, teamIds) {
-  const set = new Set(teamIds);
-  const agents = [];
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (cfg.role === 'team') continue; // template holder, not a contributor
-    const teamId = agentKnowledgeTeam({ ...cfg, id: cfg.id || id });
-    if (!set.has(teamId)) continue;
-    if (!visibleAgent(scope, agentMetaForScope(cfg))) continue;
-    agents.push({ id, parentTeamId: teamId, environmentId: cfg.environmentId || null, displayName: cfg.displayName || id });
-  }
-  return agents;
+// A team template holder is not a contributor and is left out.
+function gatherKnowledgeAgents(scope, teamIds, fleet = null) {
+  return knowledgeFleetLib.gatherKnowledgeAgents(fleet || buildKnowledgeFleetNow(), scope, teamIds, { visibleAgent });
 }
 
 // The provenance.json a Phase-3 promotion writes beside SKILL.md — carries the
@@ -7335,7 +7605,7 @@ function readSkillProvenance(dir) {
   return p && typeof p === 'object' ? p : null;
 }
 
-function gatherKnowledgeSkills(scope) {
+function gatherKnowledgeSkills(scope, fleet = null) {
   const skills = [];
   const poolSkillsDir = path.join(POOL_DIR, 'skills');
   try {
@@ -7351,8 +7621,11 @@ function gatherKnowledgeSkills(scope) {
       skills.push(s);
     });
   } catch { /* no pool skills */ }
+  // Built at most once, and only if some team's visibility needs it.
+  let kfleet = fleet;
+  const lazyFleet = () => (kfleet = kfleet || buildKnowledgeFleetNow());
   for (const ts of listTeamSkills(null)) {
-    if (!knowledgeTeamVisible(scope, ts.teamId)) continue;
+    if (!knowledgeTeamVisible(scope, ts.teamId, lazyFleet)) continue;
     const s = { name: ts.name, tier: 'team', teamId: ts.teamId };
     const dir = safeTeamSkillDir(ts.teamId, ts.name);
     const prov = dir ? readSkillProvenance(dir) : null;
@@ -7372,31 +7645,80 @@ function knowledgeScopeParam(req) {
   return parsed;
 }
 
-app.get('/api/knowledge/graph', async (req, res) => {
-  const scope = getScope(req);
-  const parsed = knowledgeScopeParam(req);
-  const teamIds = knowledgeScopeTeams(parsed, scope);
+// #571: one graph build per (scope, includeArchived, viewer) per TTL, shared by
+// concurrent callers (single-flight). The cached value is the finished graph —
+// knowledge entries + display data, no configs or tokens — and is never
+// mutated once cached. Cleared by a successful knowledge/skill/agent/team/env/
+// membership mutation (`mutationInvalidatesKnowledgeGraph`, wired behind
+// the auth gate), and by every event the knowledge stream tails (the
+// orchestrator's own writes — harvest, consolidation — before the client's
+// feed-driven reload): only the graphs that event can change, once per event
+// however many streams are open (`invalidateKnowledgeGraphCacheForEvent`).
+// Writes no open stream reports (sidecars, seeded skills) show up within one
+// TTL. `KNOWLEDGE_GRAPH_TTL_MS=0` turns the cache off entirely.
+const KNOWLEDGE_GRAPH_TTL_MS = knowledgeGraphTtlMsFromEnv(process.env);
+const knowledgeGraphCache = createTtlCache({ ttlMs: KNOWLEDGE_GRAPH_TTL_MS, maxEntries: 50 });
+function invalidateKnowledgeGraphCache() { knowledgeGraphCache.clear(); }
+
+// Byte offset in KNOWLEDGE_EVENTS_FILE through which tailed events have already
+// invalidated (shared by every open stream; knowledge-graph-cache.js).
+let knowledgeEventsInvalidatedThrough = 0;
+function noteKnowledgeEventsFileSize(size) {
+  knowledgeEventsInvalidatedThrough = knowledgeEventMarkForFileSize(knowledgeEventsInvalidatedThrough, size);
+}
+function invalidateKnowledgeGraphCacheForEvent(ev, endOffset) {
+  const claim = claimKnowledgeEventOffset(knowledgeEventsInvalidatedThrough, endOffset);
+  knowledgeEventsInvalidatedThrough = claim.mark;
+  if (claim.invalidate) knowledgeGraphCache.deleteWhere((key) => knowledgeGraphKeyStaleForEvent(key, ev));
+}
+
+async function buildKnowledgeGraphResponse(scope, parsed, includeArchived) {
+  // One read of every agent config for the whole build (#571).
+  const fleet = buildKnowledgeFleetNow();
+  const teamIds = knowledgeScopeTeams(parsed, scope, fleet);
 
   await Promise.all(teamIds.map(refreshTeamCloneBestEffort));
 
   const entries = [];
   const warnings = [];
   for (const teamId of teamIds) {
-    const g = gatherTeamEntries(teamId);
+    const g = gatherTeamEntries(teamId, { fleet });
     entries.push(...g.entries);
     warnings.push(...g.warnings);
   }
-  const agents = gatherKnowledgeAgents(scope, teamIds);
-  const skills = gatherKnowledgeSkills(scope);
-  const includeArchived = req.query.includeArchived === '1' || req.query.includeArchived === 'true';
+  const agents = gatherKnowledgeAgents(scope, teamIds, fleet);
+  const skills = gatherKnowledgeSkills(scope, fleet);
   const graph = buildKnowledgeGraph({ scope: parsed.scope, entries, skills, agents, now: Date.now(), warnings, includeArchived });
   augmentPendingPromotions(graph, teamIds);
-  augmentSkillActivation(graph, parsed);
-  await augmentDigestInclusion(graph, teamIds);
-  await augmentSkillRoles(graph, teamIds);
+  augmentSkillActivation(graph, parsed, fleet);
   augmentDisplaySummary(graph, entries);
-  await augmentRetrievalStats(graph, teamIds);
-  res.json(graph);
+  // The three orchestrator overlays write disjoint node fields (inDigest /
+  // roles / lastUsedAt+usage), so they run side by side, each fetch bounded
+  // by KNOWLEDGE_AUGMENT_TIMEOUT_MS: a stalled orchestrator costs one timeout
+  // and degrades to "no badges" instead of three serial hangs.
+  await Promise.all([
+    augmentDigestInclusion(graph, teamIds),
+    augmentSkillRoles(graph, teamIds),
+    augmentRetrievalStats(graph, teamIds),
+  ]);
+  return graph;
+}
+
+app.get('/api/knowledge/graph', async (req, res) => {
+  const scope = getScope(req);
+  const parsed = knowledgeScopeParam(req);
+  const includeArchived = req.query.includeArchived === '1' || req.query.includeArchived === 'true';
+  try {
+    const build = () => buildKnowledgeGraphResponse(scope, parsed, includeArchived);
+    const graph = KNOWLEDGE_GRAPH_TTL_MS > 0
+      ? await knowledgeGraphCache.getOrCompute(
+        knowledgeGraphCacheKey({ scope: parsed.scope, includeArchived, viewerScope: scope }), build)
+      : await build();
+    res.json(graph);
+  } catch (err) {
+    console.error(`[knowledge] graph build failed: ${err.message}`);
+    res.status(500).json({ error: 'knowledge graph build failed' });
+  }
 });
 
 // Overlay the human-readable summary (#635) on every item node: `summary` is the
@@ -7427,12 +7749,17 @@ function augmentDisplaySummary(graph, entries) {
 // with the same pure builder that writes knowledge-digest.md, so the badge can
 // never disagree with the file the agents import. Best-effort: an unreachable
 // orchestrator just means no badges.
+// #571: the per-call bound on the three orchestrator augment fetches below.
+const KNOWLEDGE_AUGMENT_TIMEOUT_MS = knowledgeAugmentTimeoutMsFromEnv(process.env);
+
 async function augmentDigestInclusion(graph, teamIds) {
   if (!graph || !Array.isArray(graph.nodes)) return;
   const included = new Set();
   await Promise.all((teamIds || []).map(async (teamId) => {
     try {
-      const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/digest-status`);
+      const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/digest-status`, {
+        signal: AbortSignal.timeout(KNOWLEDGE_AUGMENT_TIMEOUT_MS),
+      });
       if (!resp.ok) return;
       const data = await resp.json();
       for (const id of (Array.isArray(data.includedIds) ? data.includedIds : [])) included.add(id);
@@ -7456,7 +7783,9 @@ async function augmentRetrievalStats(graph, teamIds) {
   let anyStats = false;
   await Promise.all((teamIds || []).map(async (teamId) => {
     try {
-      const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/retrieval-stats`);
+      const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/retrieval-stats`, {
+        signal: AbortSignal.timeout(KNOWLEDGE_AUGMENT_TIMEOUT_MS),
+      });
       if (!resp.ok) return;
       const data = await resp.json();
       anyStats = true;
@@ -7497,6 +7826,7 @@ async function augmentSkillRoles(graph, teamIds) {
       const resp = await fetch(`${ORCH_URL()}/internal/knowledge/domains`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ teamId, op: 'read' }),
+        signal: AbortSignal.timeout(KNOWLEDGE_AUGMENT_TIMEOUT_MS),
       });
       if (!resp.ok) return;
       const data = await resp.json().catch(() => ({}));
@@ -7522,19 +7852,17 @@ async function augmentSkillRoles(graph, teamIds) {
 // added. Also adds ghost nodes for adopted global skills that the lane filter
 // wouldn't render (active list ∌ origin team). Mutates `graph` in place; no-op
 // outside team scope or when the squad has no team agent.
-function augmentSkillActivation(graph, parsed) {
+function augmentSkillActivation(graph, parsed, fleet = null) {
   if (!graph || !Array.isArray(graph.nodes) || parsed.kind !== 'team') return;
   const teamId = parsed.id;
-  const teamCfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
-  if (!teamCfg || teamCfg.role !== 'team') return;
-  const teamSkills = Array.isArray(teamCfg.skills) ? teamCfg.skills : [];
+  const kfleet = fleet || buildKnowledgeFleetNow();
+  const grant = knowledgeFleetLib.teamSkillGrant(kfleet, teamId);
+  if (!grant) return;
+  const teamSkills = grant.skills;
 
-  let members = [];
-  try {
-    members = fs.readdirSync(AGENTS_DIR)
-      .map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null))
-      .filter(c => c && c.role === 'team-member' && c.parentTeamId === teamId);
-  } catch { /* no agents dir */ }
+  // Slim member rows (knowledge-fleet.js `teamMembers`): `provisioned` stands
+  // in for the Matrix token, which the fleet never carries.
+  const members = knowledgeFleetLib.teamMembers(kfleet, teamId);
   const manifests = new Map(members.map(m => [
     m.id,
     readJsonFile(path.join(resolveAgentStateDir(path.join(AGENTS_DIR, m.id)), 'seeded-skills.json'), {}) || {},
@@ -7582,7 +7910,7 @@ function augmentSkillActivation(graph, parsed) {
         const granted = hasOverride ? m.skillsOverride.includes(name) : inList;
         const seededEntry = (manifests.get(m.id) || {})[name];
         const seeded = !!seededEntry;
-        const state = !m.token ? 'stub'
+        const state = !m.provisioned ? 'stub'
           : (hasOverride && !granted) ? 'excluded-override'
           : seeded ? 'active'
           : granted ? 'pending'
@@ -7669,9 +7997,10 @@ function augmentPendingPromotions(graph, teamIds) {
 app.get('/api/knowledge/summary', async (req, res) => {
   const scope = getScope(req);
   const parsed = knowledgeScopeParam(req);
-  const teamIds = knowledgeScopeTeams(parsed, scope);
+  const fleet = buildKnowledgeFleetNow(); // #571: one config read for every team
+  const teamIds = knowledgeScopeTeams(parsed, scope, fleet);
   const entries = [];
-  for (const teamId of teamIds) entries.push(...gatherTeamEntries(teamId).entries);
+  for (const teamId of teamIds) entries.push(...gatherTeamEntries(teamId, { fleet }).entries);
   res.json(summarizeKnowledge({ scope: parsed.scope, entries, now: Date.now() }));
 });
 
@@ -7698,9 +8027,10 @@ app.get('/api/knowledge/item/:id', (req, res) => {
   const teamId = typeof req.query.teamId === 'string' ? req.query.teamId : '';
   if (!/^[0-9a-f]{12}$/.test(id)) return res.status(400).json({ error: 'invalid id' });
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'invalid teamId' });
-  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const fleet = buildKnowledgeFleetNow(); // #571: one config read for the whole request
+  if (!knowledgeTeamVisible(scope, teamId, fleet)) return res.status(404).json({ error: 'not found' });
 
-  const { entries } = gatherTeamEntries(teamId);
+  const { entries } = gatherTeamEntries(teamId, { fleet });
   // Prefer a live entry over a merge tombstone of the same id (Phase 3).
   const entry = entries.find(e => e && e.id === id && e.status !== 'merged')
     || entries.find(e => e && e.id === id) || null;
@@ -7709,7 +8039,7 @@ app.get('/api/knowledge/item/:id', (req, res) => {
   const originAgent = typeof entry.originAgent === 'string' ? entry.originAgent : null;
   const correlationId = typeof entry.correlationId === 'string' ? entry.correlationId : null;
   const roomId = originAgent && correlationId ? findRoomForCorrelation(originAgent, correlationId) : null;
-  const repoUrl = resolveTeamRepoUrl(teamId);
+  const repoUrl = resolveTeamRepoUrl(teamId, fleet);
   const sourceRefs = Array.isArray(entry.sourceRefs) ? entry.sourceRefs : [];
 
   const links = {
@@ -7868,6 +8198,7 @@ app.get('/api/knowledge/stream', (req, res) => {
   }
 
   let lineBuf = '';
+  let lineStart = cursor; // byte offset of lineBuf's first byte
   let fileWatcher = null;
   let dirWatcher = null;
   let draining = false;
@@ -7881,9 +8212,17 @@ app.get('/api/knowledge/stream', (req, res) => {
   writeCursor();
   const heartbeat = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* noop */ } }, 15000);
 
-  const emitLine = (line) => {
+  const emitLine = (line, endOffset) => {
     const ev = kbParseLine(line);
-    if (ev && knowledgeLinks.matchesScope(ev, scope)) writeEvent(ev);
+    if (!ev) return;
+    // #571: a feed event is a knowledge write (often the orchestrator's own —
+    // harvest, consolidation, promotion — which never passes the console's
+    // mutation middleware). Clear the graphs it touches BEFORE the client
+    // hears of it, so the reload the event triggers rebuilds instead of being
+    // served the pre-event graph — and staying on it if no further event
+    // follows. Keyed by the line's end offset, so N open streams clear once.
+    invalidateKnowledgeGraphCacheForEvent(ev, endOffset);
+    if (knowledgeLinks.matchesScope(ev, scope)) writeEvent(ev);
   };
 
   const drain = () => {
@@ -7895,7 +8234,8 @@ app.get('/api/knowledge/stream', (req, res) => {
       if (!fs.existsSync(filepath)) { draining = false; if (pending) { pending = false; setImmediate(drain); } return; }
       size = fs.statSync(filepath).size;
     } catch { draining = false; return; }
-    if (size < cursor) { cursor = 0; lineBuf = ''; writeEvent({ type: '_truncated' }); }
+    noteKnowledgeEventsFileSize(size);
+    if (size < cursor) { cursor = 0; lineBuf = ''; lineStart = 0; writeEvent({ type: '_truncated' }); }
     if (size === cursor) { draining = false; if (pending) { pending = false; setImmediate(drain); } return; }
     const stream = fs.createReadStream(filepath, { start: cursor, end: size - 1, encoding: 'utf8' });
     stream.on('data', (chunk) => {
@@ -7904,7 +8244,8 @@ app.get('/api/knowledge/stream', (req, res) => {
       while ((idx = lineBuf.indexOf('\n')) >= 0) {
         const line = lineBuf.slice(0, idx);
         lineBuf = lineBuf.slice(idx + 1);
-        if (line.trim()) emitLine(line);
+        lineStart += Buffer.byteLength(line, 'utf8') + 1;
+        if (line.trim()) emitLine(line, lineStart);
       }
     });
     stream.on('error', () => { draining = false; if (pending) { pending = false; setImmediate(drain); } });
@@ -8116,10 +8457,11 @@ app.post('/api/knowledge/summaries/backfill', heavyLimiter, async (req, res) => 
   const teamId = typeof req.body?.team === 'string' ? req.body.team
     : (typeof req.body?.teamId === 'string' ? req.body.teamId : '');
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
-  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const fleet = buildKnowledgeFleetNow(); // #571: one config read for the whole request
+  if (!knowledgeTeamVisible(scope, teamId, fleet)) return res.status(404).json({ error: 'not found' });
 
   const MAX_PER_REQUEST = 40;
-  const { entries } = gatherTeamEntries(teamId);
+  const { entries } = gatherTeamEntries(teamId, { fleet });
   const missing = (Array.isArray(entries) ? entries : []).filter(
     (e) => e && typeof e.id === 'string' && /^[0-9a-f]{12}$/.test(e.id)
       && e.status !== 'merged'
@@ -8699,18 +9041,8 @@ app.post('/api/skills/resync', apiLimiter, async (req, res) => {
 
 // The environment a team shares (from any of its agents' configs). Mirrors the
 // orchestrator's resolveTeamEnvId; used only to read/display config here.
-function teamEnvironment(teamId) {
-  let ids;
-  try { ids = fs.readdirSync(AGENTS_DIR); } catch { return null; }
-  for (const id of ids) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
-    if (!cfg) continue;
-    if (agentKnowledgeTeam({ ...cfg, id: cfg.id || id }) === teamId && cfg.environmentId) {
-      const env = loadEnvironment(cfg.environmentId);
-      if (env) return env;
-    }
-  }
-  return null;
+function teamEnvironment(teamId, fleet = null) {
+  return knowledgeFleetLib.teamEnvironment(fleet || buildKnowledgeFleetNow(), teamId, { loadEnvironment });
 }
 
 // Per-team knowledge-config overrides (#570). The orchestrator persists the four
@@ -8725,8 +9057,8 @@ function loadTeamKnowledgeOverrides(teamId) {
 // The team's effective knowledge env: the shared environment overlaid with the
 // team's per-team overrides (#570). Every knowledge read path resolves config
 // through this so two teams sharing one env report independent settings.
-function teamKnowledgeEnv(teamId) {
-  return knowledgeSuggestions.mergeTeamKnowledgeConfig(teamEnvironment(teamId), loadTeamKnowledgeOverrides(teamId));
+function teamKnowledgeEnv(teamId, fleet = null) {
+  return knowledgeSuggestions.mergeTeamKnowledgeConfig(teamEnvironment(teamId, fleet), loadTeamKnowledgeOverrides(teamId));
 }
 
 // Auto-resync gate (#629 AC5): after a source skill is EDITED, fan the drift-
@@ -8754,9 +9086,10 @@ function autoResyncOnEdit(skillName, { tier, teamId } = {}) {
       }
     }
   }
+  const fleet = targetTeams.length ? buildKnowledgeFleetNow() : null; // #571: one read for every team
   for (const tid of targetTeams) {
     let mode;
-    try { mode = knowledgeSuggestions.resolveSkillResyncMode(teamKnowledgeEnv(tid)); } catch { mode = null; }
+    try { mode = knowledgeSuggestions.resolveSkillResyncMode(teamKnowledgeEnv(tid, fleet)); } catch { mode = null; }
     if (mode !== 'auto') continue; // default `review`: leave copies outdated
     fetch(`${orchestratorUrl}/internal/skills/resync`, {
       method: 'POST',
@@ -8832,12 +9165,13 @@ app.get('/api/knowledge/gates', (req, res) => {
   const scope = getScope(req);
   const teamId = typeof req.query.team === 'string' ? req.query.team : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
-  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const fleet = buildKnowledgeFleetNow(); // #571: one config read for the whole request
+  if (!knowledgeTeamVisible(scope, teamId, fleet)) return res.status(404).json({ error: 'not found' });
   // #570: knowledge config (autonomy / review / gates / storage) is keyed PER
   // TEAM, so overlay the team's own overrides onto its shared environment. Two
   // teams reusing one environment therefore report independent settings, and the
   // config is no longer "shared with" sibling teams (sharedWith is always empty).
-  const env = teamKnowledgeEnv(teamId);
+  const env = teamKnowledgeEnv(teamId, fleet);
   res.json({
     team: teamId,
     autonomy: teamAutonomyLevel(env),
@@ -9187,12 +9521,13 @@ app.get('/api/knowledge/review-queue', async (req, res) => {
   const scope = getScope(req);
   const teamId = typeof req.query.team === 'string' ? req.query.team : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
-  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const fleet = buildKnowledgeFleetNow(); // #571: one config read for the whole request
+  if (!knowledgeTeamVisible(scope, teamId, fleet)) return res.status(404).json({ error: 'not found' });
   await refreshTeamCloneBestEffort(teamId);
-  const { entries, warnings } = gatherTeamEntries(teamId);
+  const { entries, warnings } = gatherTeamEntries(teamId, { fleet });
   const only = req.query.include === 'rejected' ? null : 'pending';
   const items = selectReviewQueue(entries, { only });
-  res.json({ team: teamId, review: knowledgeReviewOn(teamKnowledgeEnv(teamId)), items, warnings }); // #570: per-team config
+  res.json({ team: teamId, review: knowledgeReviewOn(teamKnowledgeEnv(teamId, fleet)), items, warnings }); // #570: per-team config
 });
 
 // ── Approve / reject / reset a held KB entry ────────────────────────────────
@@ -9331,9 +9666,15 @@ app.get('/api/flows/graph', async (req, res) => {
     if (Array.isArray(teamCfg.stages)) stages = teamCfg.stages.filter(s => typeof s === 'string');
   }
   const teamHumans = teamHumansRegistry(team);
+  const graph = buildUnifiedGraph(nodes, undefined, { labels: teamLabelRegistry(team), humans: teamHumans });
+  // #2878: a wake label missing on its repository (one team's graph only).
+  if (team) {
+    const labels = await fetchRepoLabels(wakeLabelRepos(nodes));
+    if (labels) graph.lints = [...(graph.lints || []), ...missingWakeLabelLints(missingWakeLabels(nodes, labels.labels))];
+  }
   res.json({
     unifiedFlowVersion: 1, source: 'live', team, stages, humans: teamHumans,
-    ...buildUnifiedGraph(nodes, undefined, { labels: teamLabelRegistry(team), humans: teamHumans }),
+    ...graph,
   });
 });
 
@@ -9442,6 +9783,49 @@ app.post('/api/teams/:teamId/flow-board-removed', apiLimiter, async (req, res) =
   }
 });
 
+// GET /api/teams/:teamId/missing-labels — the team's wake labels that do not
+// exist on their repository (#2878), for Team Settings. Visibility-gated like
+// the board; `unreadable` lists repos whose labels could not be read.
+app.get('/api/teams/:teamId/missing-labels', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  const members = teamWakeMembers(teamId);
+  const labels = await fetchRepoLabels(wakeLabelRepos(members));
+  if (!labels) return res.status(502).json({ error: 'Could not read the repository labels just now' });
+  return res.json({ teamId, missing: missingWakeLabels(members, labels.labels), unreadable: labels.unreadable });
+});
+
+// POST /api/teams/:teamId/repo-labels — "Create label" (#2878). Body
+// `{ repo, label }`; only a wake label one of the team's triggers listens on,
+// on that trigger's repository. Gated like every other team write; the actor is
+// the session user.
+app.post('/api/teams/:teamId/repo-labels', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!canManageTeam(scope, teamId)) return denyAdmin(res, 'You may not manage this team');
+  const repo = req.body && typeof req.body.repo === 'string' ? req.body.repo.trim() : '';
+  const label = req.body && typeof req.body.label === 'string' ? req.body.label.trim() : '';
+  const listened = teamWakeMembers(teamId).some((m) => m.triggers.some((t) =>
+    t && t.type === 'github-event' && typeof t.repo === 'string' && t.repo.trim() === repo
+    && typeof t.labelFilter === 'string' && t.labelFilter.trim() === label));
+  if (!listened) return res.status(400).json({ error: 'Only a wake label one of this team\u2019s triggers listens on can be created here' });
+  const actor = (req.user && (req.user.username || req.user.email || req.user.sub)) || null;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/repo-labels`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo, label, actor }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // POST /api/teams/:teamId/flow-board-release — "Release claim" on a row the
 // board flags as stuck on an orphaned `:wip` claim (#2754). Body `{ rowId }`.
 // Unlike Remove, this DOES change the GitHub item (swaps `<wake>:wip` back to
@@ -9461,6 +9845,59 @@ app.post('/api/teams/:teamId/flow-board-release', apiLimiter, async (req, res) =
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ rowId, actor }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/flow-board-wake — "Wake again" on a row the board
+// flags as "wake never delivered" (#2873). Body `{ rowId }`. Delivers the wake
+// label already on the GitHub item to its agent again, without touching any
+// label; gated like every other board write, and the actor — always the
+// session user, never the body — is stamped onto the Event Log line.
+app.post('/api/teams/:teamId/flow-board-wake', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!canManageTeam(scope, teamId)) return denyAdmin(res, 'You may not manage this team');
+  const rowId = req.body && typeof req.body.rowId === 'string' ? req.body.rowId.trim() : '';
+  if (!rowId || rowId.length > 300) return res.status(400).json({ error: 'rowId is required' });
+  const actor = (req.user && (req.user.username || req.user.email || req.user.sub)) || null;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/flow-board-wake`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rowId, actor }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/flow-board-adopt — "Adopt" (#2877): start the rows
+// the board reads as carried over from another instance or an earlier flow.
+// Body `{ rowIds? }` (none = every carried-over row). Gated like every board
+// write; the actor is always the session user.
+app.post('/api/teams/:teamId/flow-board-adopt', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!canManageTeam(scope, teamId)) return denyAdmin(res, 'You may not manage this team');
+  const raw = req.body && req.body.rowIds;
+  if (raw != null && (!Array.isArray(raw) || raw.length > 200 || raw.some((id) => typeof id !== 'string' || id.length > 300))) {
+    return res.status(400).json({ error: 'rowIds must be a list of at most 200 row ids' });
+  }
+  const actor = (req.user && (req.user.username || req.user.email || req.user.sub)) || null;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/flow-board-adopt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rowIds: raw || null, actor }),
     });
     const data = await resp.json().catch(() => ({}));
     return res.status(resp.status).json(data);
@@ -11042,11 +11479,25 @@ function backfillDraftAccess() {
 // AC3 — the by-id gate, applied identically by every route below. Answers with
 // the AC7 indistinguishable-404 so the endpoint never confirms that a draft the
 // caller may not see exists.
+//
+// This is the HOLDER gate (#2870): a caller who reaches the draft only through
+// "Visible to everyone" gets the module's READ_ONLY 403 here, so every write
+// and share route refuses them server-side (AC11), not just the hidden button.
 function requireDraftAccess(req, res, id) {
   if (!DRAFT_ID_RE.test(id)) { res.status(400).json({ error: 'Invalid draft id' }); return null; }
   const verdict = draftAccess.authorizeDraft(getScope(req), readDraft(id));
-  if (!verdict.ok) { res.status(verdict.status).json({ error: verdict.error }); return null; }
+  if (!verdict.ok) { res.status(verdict.status).json({ error: verdict.error, code: verdict.code }); return null; }
   return verdict.draft;
+}
+
+// #2870 AC9 — the READ gate: holders, plus every authenticated user while the
+// draft is visible to everyone. Used by the plain GET only; same AC7 404 for
+// "absent" and "not visible to you".
+function requireDraftRead(req, res, id) {
+  if (!DRAFT_ID_RE.test(id)) { res.status(400).json({ error: 'Invalid draft id' }); return null; }
+  const verdict = draftAccess.authorizeDraftRead(getScope(req), readDraft(id));
+  if (!verdict.ok) { res.status(verdict.status).json({ error: verdict.error }); return null; }
+  return verdict;
 }
 
 app.get('/api/process/drafts', (req, res) => {
@@ -11055,9 +11506,10 @@ app.get('/api/process/drafts', (req, res) => {
   const drafts = listDraftIds().map(id => {
     const d = readDraft(id);
     if (!d) return null;
-    // AC6 — the list filter is the same predicate as the by-id gate; a System
-    // Admin (scope.all) sees every draft (DD7).
-    if (!draftAccess.canAccessDraft(scope, d)) return null;
+    // AC6 — the list filter is the same read predicate as the by-id read gate
+    // (holders, plus everyone while "Visible to everyone" is on — #2870); a
+    // System Admin (scope.all) sees every draft (DD7).
+    if (!draftAccess.canViewDraft(scope, d)) return null;
     return {
       id,
       name: d.name || id,
@@ -11065,7 +11517,9 @@ app.get('/api/process/drafts', (req, res) => {
       updatedAt: d.updatedAt || null,
       // AC16 — private vs shared, and who created one the viewer did not. Never
       // a raw user id: the list has no way to render one.
-      ...draftAccess.draftAccessView(d, { viewerId: scope.userId, usersById: users }),
+      ...draftAccess.draftAccessView(d, {
+        viewerId: scope.userId, usersById: users, canEdit: draftAccess.canAccessDraft(scope, d),
+      }),
     };
   }).filter(Boolean).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   res.json(drafts);
@@ -11100,9 +11554,12 @@ app.post('/api/process/drafts', apiLimiter, (req, res) => {
 });
 
 app.get('/api/process/drafts/:id', (req, res) => {
-  const d = requireDraftAccess(req, res, req.params.id);
-  if (!d) return undefined;
-  return res.json(d);
+  const verdict = requireDraftRead(req, res, req.params.id);
+  if (!verdict) return undefined;
+  // #2870 AC10 — `viewerCanEdit` tells the editor to open read-only for a
+  // global-only reader. Response-only: stripAccessFields drops it on the way
+  // back in, and the write routes enforce the same rule on their own.
+  return res.json({ ...verdict.draft, viewerCanEdit: verdict.canEdit });
 });
 
 // The resolved access set behind the Share dialog. Same projection as the
@@ -11111,23 +11568,48 @@ app.get('/api/process/drafts/:id', (req, res) => {
 app.get('/api/process/drafts/:id/access', (req, res) => {
   const d = requireDraftAccess(req, res, req.params.id);
   if (!d) return undefined;
-  return res.json({ users: draftAccess.resolveAccessList(d, usersById()) });
+  return res.json({
+    users: draftAccess.resolveAccessList(d, usersById()),
+    visibleToEveryone: draftAccess.isVisibleToEveryone(d),
+  });
 });
 
 // Share (DD2 — available to everyone already in the access set, with no action
 // reserved to the creator). Writes ONLY the access set: the bundle is untouched,
 // so a share can never be a way to smuggle a template edit past validation.
+//
+// #2870 AC5/AC6 — takes `userIds: [...]` (bulk) or the original single
+// `userId`. Every id is validated before anything is written, and the set is
+// written in ONE atomic write, so a bulk share is all-or-nothing: an unknown id
+// refuses the whole request with the set unchanged.
 app.post('/api/process/drafts/:id/access', apiLimiter, (req, res) => {
   const { id } = req.params;
   const d = requireDraftAccess(req, res, id);
   if (!d) return undefined;
-  const userId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : '';
+  const userIds = Array.isArray(req.body?.userIds) ? req.body.userIds : [req.body?.userId];
   // D3 — existing accounts only; there are no invitations of people without one.
-  if (!usersById().has(userId)) return res.status(400).json({ error: 'Unknown user' });
-  const result = draftAccess.addAccess(d, userId);
-  if (!result.ok) return res.status(result.status).json({ error: result.error });
+  const users = usersById();
+  const result = draftAccess.addAccessMany(d, userIds, { knownUserIds: new Set(users.keys()) });
+  if (!result.ok) return res.status(result.status).json({ error: result.error, code: result.code });
   if (result.changed) writeJsonAtomic(draftPath(id), { ...d, accessUserIds: result.accessUserIds });
-  return res.json({ users: draftAccess.resolveAccessList({ accessUserIds: result.accessUserIds }, usersById()) });
+  return res.json({
+    users: draftAccess.resolveAccessList({ accessUserIds: result.accessUserIds }, users),
+    added: result.added,
+    skipped: result.skipped,
+  });
+});
+
+// #2870 AC8/AC13 — the "Visible to everyone" switch. Holders only (the same
+// gate as sharing — a global-only reader gets READ_ONLY). Writes ONLY the flag:
+// the bundle and the explicit access set are untouched in both directions.
+app.put('/api/process/drafts/:id/visibility', apiLimiter, (req, res) => {
+  const { id } = req.params;
+  const d = requireDraftAccess(req, res, id);
+  if (!d) return undefined;
+  const result = draftAccess.setVisibility(d, req.body?.visibleToEveryone);
+  if (!result.ok) return res.status(result.status).json({ error: result.error });
+  if (result.changed) writeJsonAtomic(draftPath(id), result.draft);
+  return res.json({ visibleToEveryone: draftAccess.isVisibleToEveryone(result.draft) });
 });
 
 // Unshare. Anyone in the set may remove anyone (DD2), including themselves —
@@ -11452,11 +11934,20 @@ function commitSkillWrite({ destDir, overwrite, copyFrom, skillMd, provenance, s
   const underPool = !!relFromPool && !relFromPool.startsWith('..') && !path.isAbsolute(relFromPool);
   if (!underTeams && !underPool) return { error: 'skill destination escapes the skills root' };
   destDir = resolvedDest;
+  // #2839: an overwrite that continues the destination's own chain keeps the
+  // destination's version snapshots (they belong to that chain); a fresh-chain
+  // overwrite drops them with the rest of the old dir.
+  const keepSnapshots = !!(overwrite && stamp && stamp.continueFrom && typeof stamp.continueFrom === 'object');
+  let parkedSnapshots = null;
   try {
+    if (keepSnapshots && fs.existsSync(path.join(destDir, skillManifest.SNAPSHOT_DIR))) {
+      parkedSnapshots = `${destDir}.versions-${process.pid}-${Date.now()}`;
+      try { fs.renameSync(path.join(destDir, skillManifest.SNAPSHOT_DIR), parkedSnapshots); } catch { parkedSnapshots = null; }
+    }
     if (overwrite) fs.rmSync(destDir, { recursive: true, force: true });
     if (copyFrom) {
       fs.mkdirSync(path.dirname(destDir), { recursive: true });
-      fs.cpSync(copyFrom, destDir, { recursive: true });
+      fs.cpSync(copyFrom, destDir, { recursive: true, filter: skillManifest.snapshotCopyFilter });
     } else {
       fs.mkdirSync(destDir, { recursive: true });
     }
@@ -11467,7 +11958,12 @@ function commitSkillWrite({ destDir, overwrite, copyFrom, skillMd, provenance, s
       fs.writeFileSync(path.join(destDir, 'provenance.json'), JSON.stringify(provenance, null, 2));
     }
   } catch (err) {
+    if (parkedSnapshots) { try { fs.rmSync(parkedSnapshots, { recursive: true, force: true }); } catch { /* best effort */ } }
     return { error: err.message };
+  }
+  if (parkedSnapshots) {
+    try { fs.renameSync(parkedSnapshots, path.join(destDir, skillManifest.SNAPSHOT_DIR)); }
+    catch { try { fs.rmSync(parkedSnapshots, { recursive: true, force: true }); } catch { /* best effort */ } }
   }
   if (stamp) {
     const s = { name: stamp.name, by: stamp.by, action: stamp.action };
@@ -11839,6 +12335,43 @@ app.get('/api/skills/:name/content', (req, res) => {
   res.json({ content, ...skillManifestSummary(dir) });
 });
 
+// Resolve the ONE skill copy a lineage/version request is about —
+// `?source=pool|team|agent` (+ `teamId`/`agentId`) — with the same scope gate
+// the lineage view has always applied per tier: an agent copy needs a visible
+// agent, a team copy a visible team (both 404 otherwise, never leaking
+// existence); the global pool is visible to every caller. Returns
+// { scope, viewed, dir, cfg? } or { status, error }.
+function resolveViewedSkillCopy(req, name) {
+  if (!SKILL_NAME_RE.test(name || '')) return { status: 400, error: 'Invalid skill name' };
+  const scope = getScope(req);
+  const source = typeof req.query.source === 'string' ? req.query.source : 'pool';
+  const qTeamId = typeof req.query.teamId === 'string' ? req.query.teamId : undefined;
+  const qAgentId = typeof req.query.agentId === 'string' ? req.query.agentId : undefined;
+
+  let viewed;
+  let dir;
+  let cfg = null;
+  if (source === 'agent') {
+    if (!qAgentId || !AGENT_ID_RE.test(qAgentId)) return { status: 400, error: 'Invalid agent id' };
+    cfg = readJsonFile(path.join(AGENTS_DIR, qAgentId, 'config.json'), null);
+    if (!cfg || !visibleAgent(scope, agentMetaForScope(cfg))) return { status: 404, error: 'Skill not found' };
+    viewed = { tier: 'agent', agentId: qAgentId, teamId: cfg.teamId };
+    dir = safeAgentSkillDir(qAgentId, name);
+    if (!dir) return { status: 400, error: 'Invalid agent id or skill name' };
+  } else if (source === 'team') {
+    dir = safeTeamSkillDir(qTeamId, name);
+    if (!dir) return { status: 400, error: 'Invalid team id or skill name' };
+    if (!visibleTeam(scope, qTeamId)) return { status: 404, error: 'Skill not found' };
+    viewed = { tier: 'team', teamId: qTeamId };
+  } else {
+    dir = safeGlobalSkillDir(name);
+    if (!dir) return { status: 400, error: 'Invalid skill name' };
+    viewed = { tier: 'global' };
+  }
+  if (!fs.existsSync(path.join(dir, 'SKILL.md'))) return { status: 404, error: 'Skill not found' };
+  return { scope, viewed, dir, cfg };
+}
+
 // Full lineage view for one skill copy (#632, epic #624 phase 5) — the data the
 // Skills detail panel's Versions + Lineage tabs render: the viewed copy's
 // version history + origin (its skill.json), its knowledge provenance
@@ -11847,40 +12380,228 @@ app.get('/api/skills/:name/content', (req, res) => {
 // copy; visibility is scope-gated per tier. The pure assembler shapes the view.
 app.get('/api/skills/:name/lineage', (req, res) => {
   const { name } = req.params;
-  if (!SKILL_NAME_RE.test(name)) return res.status(400).json({ error: 'Invalid skill name' });
-  const scope = getScope(req);
-
-  const source = typeof req.query.source === 'string' ? req.query.source : 'pool';
-  const qTeamId = typeof req.query.teamId === 'string' ? req.query.teamId : undefined;
-  const qAgentId = typeof req.query.agentId === 'string' ? req.query.agentId : undefined;
-
-  let viewed;
-  let viewedDir;
-  if (source === 'agent') {
-    if (!qAgentId || !AGENT_ID_RE.test(qAgentId)) return res.status(400).json({ error: 'Invalid agent id' });
-    const cfg = readJsonFile(path.join(AGENTS_DIR, qAgentId, 'config.json'), null);
-    if (!cfg || !visibleAgent(scope, agentMetaForScope(cfg))) return res.status(404).json({ error: 'Skill not found' });
-    viewed = { tier: 'agent', agentId: qAgentId, teamId: cfg.teamId };
-    viewedDir = safeAgentSkillDir(qAgentId, name);
-    if (!viewedDir) return res.status(400).json({ error: 'Invalid agent id or skill name' });
-  } else if (source === 'team') {
-    viewedDir = safeTeamSkillDir(qTeamId, name);
-    if (!viewedDir) return res.status(400).json({ error: 'Invalid team id or skill name' });
-    if (!visibleTeam(scope, qTeamId)) return res.status(404).json({ error: 'Skill not found' });
-    viewed = { tier: 'team', teamId: qTeamId };
-  } else {
-    viewedDir = safeGlobalSkillDir(name);
-    if (!viewedDir) return res.status(400).json({ error: 'Invalid skill name' });
-    viewed = { tier: 'global' };
-  }
-  if (!fs.existsSync(path.join(viewedDir, 'SKILL.md'))) return res.status(404).json({ error: 'Skill not found' });
+  const r = resolveViewedSkillCopy(req, name);
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  const { scope, viewed, dir: viewedDir } = r;
 
   let manifest = null;
   try { manifest = skillManifest.readManifest(viewedDir); } catch { manifest = null; }
   const provenance = readSkillProvenance(viewedDir);
   const copies = gatherSkillCopies(name, scope);
+  // #2839: the working hash picks the ONE current entry (and surfaces an agent
+  // copy's unversioned edits); the snapshot hashes say which entries can be
+  // opened / compared / restored.
+  let workingHash = null;
+  try { workingHash = skillManifest.hashSkillDir(viewedDir); } catch { workingHash = null; }
+  const availableHashes = skillManifest.listSnapshotHashes(viewedDir);
 
-  res.json(skillLineage.assembleLineage({ name, viewed, manifest, provenance, copies }));
+  res.json(skillLineage.assembleLineage({ name, viewed, manifest, provenance, copies, workingHash, availableHashes }));
+});
+
+/* ─── Skill version snapshots (#2839) ─────────────────────────────────── */
+// Every stamped content state of a copy is kept as a full snapshot in
+// `<skill>/_versions/<hash>.json` (skill-manifest.js). These routes let any
+// caller who can SEE the copy open an old version read-only and compare any two
+// versions; restoring needs the same permission as editing that copy.
+// `working` stands for the copy's current on-disk content.
+
+// The files of one version of a copy as [{path, bytes}], or null when that
+// content is not available (no snapshot, or a corrupt one).
+function readSkillVersionFiles(dir, hash) {
+  let workingHash = null;
+  try { workingHash = skillManifest.hashSkillDir(dir); } catch { workingHash = null; }
+  if (hash === 'working' || (hash && hash === workingHash)) {
+    return { hash: workingHash, files: skillManifest.normalizeFiles(skillManifest.readSkillDirFiles(dir)) };
+  }
+  if (!skillManifest.isContentHash(hash)) return null;
+  const files = skillManifest.readSnapshot(dir, hash);
+  return files ? { hash, files } : null;
+}
+
+// The newest history entry recording `hash` (what "v3" means for that content).
+function skillVersionEntry(dir, hash) {
+  const man = skillManifest.readManifest(dir);
+  const hist = man && Array.isArray(man.history) ? man.history : [];
+  return hist.find(h => h && h.hash === hash) || null;
+}
+
+function versionHashParam(req) {
+  const h = req.params.hash;
+  return h === 'working' || skillManifest.isContentHash(h) ? h : null;
+}
+
+// File listing of one version (same shape as GET …/files; snapshots keep files
+// only, so `dirs` is empty — an empty folder is not content).
+app.get('/api/skills/:name/versions/:hash/files', (req, res) => {
+  const r = resolveViewedSkillCopy(req, req.params.name);
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  const hash = versionHashParam(req);
+  if (!hash) return res.status(400).json({ error: 'Invalid version hash' });
+  const v = readSkillVersionFiles(r.dir, hash);
+  if (!v) return res.status(404).json({ error: 'content not available for this version', unavailable: true });
+  const entry = skillVersionEntry(r.dir, v.hash);
+  res.json({
+    hash: v.hash,
+    entry,
+    files: v.files.map(f => ({ path: f.path, size: f.bytes.length }))
+      .sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: 'base' })),
+    dirs: [],
+  });
+});
+
+// One file of one version (same shape + caps as GET …/file). The file is looked
+// up inside the snapshot by its normalized path — nothing on disk is resolved
+// from the query, so there is no path to escape.
+app.get('/api/skills/:name/versions/:hash/file', (req, res) => {
+  const r = resolveViewedSkillCopy(req, req.params.name);
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  const hash = versionHashParam(req);
+  if (!hash) return res.status(400).json({ error: 'Invalid version hash' });
+  const rel = skillManifest.normalizeRelPath(req.query.file);
+  if (!rel || rel.split('/').includes('..')) return res.status(400).json({ error: 'invalid path' });
+  const v = readSkillVersionFiles(r.dir, hash);
+  if (!v) return res.status(404).json({ error: 'content not available for this version', unavailable: true });
+  const f = v.files.find(x => x.path === rel);
+  if (!f) return res.status(404).json({ error: 'not found' });
+  // `encoding=base64` returns the raw bytes (binary / over-cap files) for
+  // "Edit from this version", which turns them into pending uploads.
+  if (req.query.encoding === 'base64') {
+    return res.json({ path: rel, size: f.bytes.length, base64: f.bytes.toString('base64') });
+  }
+  const truncated = f.bytes.length > SKILL_FILE_MAX_BYTES;
+  const buf = truncated ? f.bytes.subarray(0, SKILL_FILE_MAX_BYTES) : f.bytes;
+  const isBinary = buf.subarray(0, Math.min(buf.length, 8192)).includes(0);
+  res.json({ path: rel, size: f.bytes.length, truncated, binary: isBinary, content: isBinary ? null : buf.toString('utf8') });
+});
+
+// Compare two versions of a copy (`from`/`to` = hash or `working`). The order is
+// normalised older → newer by the copy's history so either pick order reads the
+// same; the working copy is always the newest side.
+app.get('/api/skills/:name/versions/diff', (req, res) => {
+  const r = resolveViewedSkillCopy(req, req.params.name);
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  const valid = h => h === 'working' || skillManifest.isContentHash(h);
+  let from = typeof req.query.from === 'string' ? req.query.from : '';
+  let to = typeof req.query.to === 'string' ? req.query.to : 'working';
+  if (!valid(from) || !valid(to)) return res.status(400).json({ error: 'from/to must be a version hash or "working"' });
+  const a = readSkillVersionFiles(r.dir, from);
+  const b = readSkillVersionFiles(r.dir, to);
+  if (!a || !b) return res.status(404).json({ error: 'content not available for this version', unavailable: true });
+  const man = skillManifest.readManifest(r.dir);
+  const hist = man && Array.isArray(man.history) ? man.history : [];
+  // Age rank: the working copy is newest (-1); otherwise the index of the newest
+  // history entry with that hash (newest-first, so a smaller index is newer).
+  const rank = (side, raw) => {
+    if (raw === 'working') return -1;
+    const i = hist.findIndex(h => h && h.hash === side.hash);
+    return i < 0 ? hist.length : i;
+  };
+  let older = a;
+  let newer = b;
+  if (rank(a, from) < rank(b, to)) { older = b; newer = a; [from, to] = [to, from]; }
+  const diff = skillVersionDiff.diffSkillVersions(older.files, newer.files);
+  res.json({
+    from: { hash: older.hash, working: from === 'working', entry: skillVersionEntry(r.dir, older.hash) },
+    to: { hash: newer.hash, working: to === 'working', entry: skillVersionEntry(r.dir, newer.hash) },
+    ...diff,
+  });
+});
+
+// Restore an old version: the copy's content is REPLACED by the snapshot's
+// files (sidecars, _archive and the snapshots themselves stay) and stamped as a
+// NEW version with action `restored` — history is never rewritten. Same
+// permission as editing that copy (pool: System Admin / Team Admin via the
+// edit rule; agent copy: the install permission), same `baseHash` 409 as the
+// editor's save-all, staging swap so a failure writes nothing, and exactly one
+// auto-resync for a global/team skill.
+app.post('/api/skills/:name/versions/:hash/restore', (req, res) => {
+  const { name } = req.params;
+  const r = resolveViewedSkillCopy(req, name);
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  const { scope, viewed, dir: root } = r;
+  if (viewed.tier === 'agent') {
+    if (!canManageAgent(scope, agentMetaForScope(r.cfg))) {
+      return res.status(403).json({ error: 'forbidden: restoring an agent copy requires permission to manage that agent' });
+    }
+  } else {
+    const permit = skillTransfer.permitTransfer(
+      skillTransfer.requiredPoolWritePermission(viewed.tier, viewed.teamId),
+      { systemAdmin: !!scope.all, isTeamAdmin: (tid) => canManageTeam(scope, tid), isTeamAdminOfAny: () => isTeamAdminOfAny(scope) },
+      'restore',
+    );
+    if (!permit.ok) return res.status(403).json({ error: permit.error });
+  }
+  const hash = req.params.hash;
+  if (!skillManifest.isContentHash(hash)) return res.status(400).json({ error: 'Invalid version hash' });
+
+  const body = req.body || {};
+  const currentHash = skillManifest.hashSkillDir(root);
+  if (typeof body.baseHash !== 'string' || body.baseHash !== currentHash) {
+    return res.status(409).json({ error: 'The skill was changed in the meantime. Reload it and try again.', conflict: true, currentHash });
+  }
+  if (hash === currentHash) {
+    return res.json({ restored: false, unchanged: true, hash: currentHash });
+  }
+  const files = skillManifest.readSnapshot(root, hash);
+  if (!files) return res.status(404).json({ error: 'content not available for this version', unavailable: true });
+  const entry = skillVersionEntry(root, hash);
+  const restoredFrom = entry && Number.isInteger(entry.version) ? entry.version : undefined;
+
+  const parent = path.dirname(root);
+  const tag = `${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  const staging = path.join(parent, `.${path.basename(root)}.restore-${tag}`);
+  const backup = path.join(parent, `.${path.basename(root)}.prev-${tag}`);
+  try {
+    fs.mkdirSync(staging);
+    // Carry what is not content (sidecars, _archive, _versions) unchanged.
+    for (const e of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!skillManifest.isExcludedPath(e.name)) continue;
+      fs.cpSync(path.join(root, e.name), path.join(staging, e.name), { recursive: true, verbatimSymlinks: true });
+    }
+    for (const f of files) {
+      const target = path.resolve(staging, f.path);
+      const rel = path.relative(staging, target);
+      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error(`invalid path in snapshot: ${f.path}`);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, f.bytes);
+    }
+  } catch (err) {
+    try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ }
+    return res.status(500).json({ error: `Restore failed, nothing was written: ${err.message}` });
+  }
+  try {
+    fs.renameSync(root, backup);
+    try {
+      fs.renameSync(staging, root);
+    } catch (err) {
+      fs.renameSync(backup, root);
+      throw err;
+    }
+  } catch (err) {
+    try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ }
+    return res.status(500).json({ error: `Restore failed, nothing was written: ${err.message}` });
+  }
+  try { fs.rmSync(backup, { recursive: true, force: true }); } catch { /* best effort */ }
+
+  const manifest = stampSkill(root, {
+    name, by: skillActor(req), action: 'restored', restoredFrom,
+    note: restoredFrom != null ? `restored from v${restoredFrom}` : `restored from ${hash}`,
+  });
+  if (viewed.tier === 'agent') {
+    // Same as install: mirror the restored copy into a running isolated
+    // agent's own volume right away (no-op on the shared volume).
+    notifyAgentReseed(viewed.agentId, [`skills/${name}`]);
+  } else {
+    autoResyncOnEdit(name, viewed.tier === 'team' ? { tier: 'team', teamId: viewed.teamId } : { tier: 'global' });
+  }
+  let newHash = null;
+  try { newHash = skillManifest.hashSkillDir(root); } catch { newHash = null; }
+  res.json({
+    restored: true,
+    restoredFrom: restoredFrom != null ? restoredFrom : null,
+    version: manifest && manifest.version != null ? manifest.version : null,
+    hash: newHash,
+  });
 });
 
 /* ─── Skill directory contents (multi-file browser/editor) ───────────── */
@@ -11936,6 +12657,8 @@ function listSkillFiles(rootDir) {
       const relPath = rel ? `${rel}/${d.name}` : d.name;
       const full = path.join(dir, d.name);
       if (d.isDirectory()) {
+        // #2839: version snapshots are not skill files (hidden from the editor tree).
+        if (!rel && d.name === skillManifest.SNAPSHOT_DIR) continue;
         walk(full, relPath);
       } else if (d.isFile()) {
         let size = 0;
@@ -11957,7 +12680,11 @@ app.get('/api/skills/:name/files', (req, res) => {
   const root = skillRootDir(source, name, agentId, teamId);
   if (!root) return res.status(400).json({ error: 'Invalid skill name, agent id or team id' });
   if (!fs.existsSync(path.join(root, 'SKILL.md'))) return res.status(404).json({ error: 'Skill not found' });
-  res.json({ files: listSkillFiles(root) });
+  // `dirs` lets the skill editor show persisted empty folders; `hash` is the
+  // content hash the editor sends back as `baseHash` on save (#2837 AC16/AC22).
+  let hash = null;
+  try { hash = skillManifest.hashSkillDir(root); } catch { hash = null; }
+  res.json({ files: listSkillFiles(root), dirs: skillFileBatch.listSkillDirs(root), hash });
 });
 
 // Read a single file from a skill directory. Caps reads and flags binary files
@@ -12024,6 +12751,7 @@ app.put('/api/skills/:name/file', (req, res) => {
   if (!permit.ok) return res.status(403).json({ error: permit.error });
   const root = skillRootDir(source, name, undefined, teamId);
   if (!root) return res.status(400).json({ error: 'Invalid skill name or team id' });
+  if (skillManifest.normalizeRelPath(file).split('/')[0] === skillManifest.SNAPSHOT_DIR) return res.status(400).json({ error: 'invalid path' });
   const target = safeSkillFilePath(root, file);
   if (!target) return res.status(400).json({ error: 'invalid path' });
   if (!fs.statSync(target).isFile()) return res.status(400).json({ error: 'not a file' });
@@ -12038,6 +12766,93 @@ app.put('/api/skills/:name/file', (req, res) => {
   stampSkill(root, { name, by: skillActor(req), action: 'edited' });
   autoResyncOnEdit(name, source === 'team' ? { tier: 'team', teamId } : { tier: 'global' });
   res.json({ path: String(file), source: 'pool' });
+});
+
+// Atomic multi-file save for the full-screen skill editor (#2837). One request
+// carries every pending change (deletes, moves, writes incl. uploads, empty
+// folders); skill-file-batch.js validates it against the current listing. The
+// changes are applied to a STAGING copy of the skill dir which is then swapped
+// in, so a failure anywhere writes nothing (AC11). `baseHash` is the content
+// hash the editor loaded; a mismatch means someone else changed the skill and
+// the save is refused with 409 (AC16). Exactly one version stamp + one
+// auto-resync per save (AC12). Same permission gate as PUT …/file (#2307, AC24).
+app.post('/api/skills/:name/files/batch', (req, res) => {
+  const { name } = req.params;
+  const { source, teamId } = req.query;
+  if (source === 'agent') {
+    return res.status(403).json({ error: 'Agent skills are read-only from the registry. Promote the skill to the pool to edit it.' });
+  }
+  if (!SKILL_NAME_RE.test(name || '') || (source === 'team' && !POOL_TEAM_ID_RE.test(teamId || ''))) {
+    return res.status(400).json({ error: 'Invalid skill name or team id' });
+  }
+  const scope = getScope(req);
+  const permit = skillTransfer.permitTransfer(
+    skillTransfer.requiredPoolWritePermission(source === 'team' ? 'team' : 'global', teamId),
+    { systemAdmin: !!scope.all, isTeamAdmin: (tid) => canManageTeam(scope, tid), isTeamAdminOfAny: () => isTeamAdminOfAny(scope) },
+    'edit',
+  );
+  if (!permit.ok) return res.status(403).json({ error: permit.error });
+  const root = source === 'team' ? safeTeamSkillDir(teamId, name) : safeGlobalSkillDir(name);
+  if (!root) return res.status(400).json({ error: 'Invalid skill name or team id' });
+  if (!fs.existsSync(path.join(root, 'SKILL.md'))) return res.status(404).json({ error: 'Skill not found' });
+
+  const body = req.body || {};
+  const currentHash = skillManifest.hashSkillDir(root);
+  if (typeof body.baseHash !== 'string' || body.baseHash !== currentHash) {
+    return res.status(409).json({ error: 'This skill was changed elsewhere since you opened it. Reload to see the current version — your pending changes are kept until you do.', conflict: true, currentHash });
+  }
+  const listing = { files: listSkillFiles(root).map(f => f.path), dirs: skillFileBatch.listSkillDirs(root) };
+  const planned = skillFileBatch.planBatch(body, listing);
+  if (!planned.ok) return res.status(planned.status).json({ error: planned.error, ...(planned.file ? { file: planned.file } : {}) });
+
+  // SKILL.md must keep a usable frontmatter — but only refuse when the save
+  // would break one that is valid today, so legacy skills stay editable.
+  const mdWrite = planned.plan.writes.find(w => w.path === 'SKILL.md');
+  if (mdWrite) {
+    let before = '';
+    try { before = fs.readFileSync(path.join(root, 'SKILL.md'), 'utf8'); } catch { /* treated as invalid */ }
+    const after = skillImport.validateSkillMd(mdWrite.bytes.toString('utf8'));
+    if (skillImport.validateSkillMd(before).ok && !after.ok) {
+      return res.status(400).json({ error: after.error, file: 'SKILL.md' });
+    }
+  }
+
+  const parent = path.dirname(root);
+  const tag = `${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  const staging = path.join(parent, `.${path.basename(root)}.edit-${tag}`);
+  const backup = path.join(parent, `.${path.basename(root)}.prev-${tag}`);
+  try {
+    fs.cpSync(root, staging, { recursive: true, verbatimSymlinks: true });
+    skillFileBatch.applyBatch(staging, planned.plan);
+  } catch (err) {
+    try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ }
+    return res.status(500).json({ error: `Save failed, nothing was written: ${err.message}` });
+  }
+  try {
+    fs.renameSync(root, backup);
+    try {
+      fs.renameSync(staging, root);
+    } catch (err) {
+      fs.renameSync(backup, root);
+      throw err;
+    }
+  } catch (err) {
+    try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ }
+    return res.status(500).json({ error: `Save failed, nothing was written: ${err.message}` });
+  }
+  try { fs.rmSync(backup, { recursive: true, force: true }); } catch { /* best effort */ }
+
+  const manifest = stampSkill(root, { name, by: skillActor(req), action: 'edited' });
+  autoResyncOnEdit(name, source === 'team' ? { tier: 'team', teamId } : { tier: 'global' });
+  let hash = null;
+  try { hash = skillManifest.hashSkillDir(root); } catch { hash = null; }
+  res.json({
+    saved: true,
+    version: manifest && manifest.version != null ? manifest.version : null,
+    hash,
+    files: listSkillFiles(root),
+    dirs: skillFileBatch.listSkillDirs(root),
+  });
 });
 
 // Stream a ZIP archive of an entire skill directory (pool or agent source).
@@ -12059,7 +12874,8 @@ app.get('/api/skills/:name/export', heavyLimiter, async (req, res) => {
     // Scratch zip lives in /tmp so `zip -r` doesn't try to archive its own output.
     zipDir = fs.mkdtempSync(path.join('/tmp', 'skill-zip-'));
     const zipPath = path.join(zipDir, 'skill.zip');
-    const zipResult = await runArchiveTool('zip', ['-r', '-q', zipPath, dirName], { cwd: parentDir });
+    // #2839: version snapshots stay with this copy — never exported.
+    const zipResult = await runArchiveTool('zip', ['-r', '-q', zipPath, dirName, '-x', path.posix.join(dirName, skillManifest.SNAPSHOT_DIR, '*')], { cwd: parentDir });
     if (zipResult.code !== 0) {
       throw new Error(describeArchiveFailure('zip', zipResult));
     }
@@ -12200,7 +13016,7 @@ app.post('/api/skills/import', heavyLimiter, _skillImportUpload.single('file'), 
     // forward by cpSync).
     if (plan.onCollision === 'overwrite') fs.rmSync(dst.dir, { recursive: true, force: true });
     fs.mkdirSync(path.dirname(dst.dir), { recursive: true });
-    fs.cpSync(skillRoot, dst.dir, { recursive: true });
+    fs.cpSync(skillRoot, dst.dir, { recursive: true, filter: skillManifest.snapshotCopyFilter });
 
     // Identity round-trip (AC3/AC4): honour an embedded skill.json — the version
     // chain continues and an `imported` event is appended (forceHistory records
@@ -12315,7 +13131,7 @@ app.post('/api/skills/promote', (req, res) => {
   const srcId = skillSourceIdentity(srcDir);
   try {
     if (overwrite) fs.rmSync(dstDir, { recursive: true, force: true });
-    fs.cpSync(srcDir, dstDir, { recursive: true });
+    fs.cpSync(srcDir, dstDir, { recursive: true, filter: skillManifest.snapshotCopyFilter });
   } catch (err) {
     return res.status(500).json({ error: `Failed to promote skill: ${err.message}` });
   }
@@ -12556,7 +13372,7 @@ function archiveDeletedSkill(srcDir, plan, name, srcId, req, now = Date.now()) {
     const rel = path.relative(base, dst);
     if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
     fs.mkdirSync(path.dirname(dst), { recursive: true });
-    fs.cpSync(srcDir, dst, { recursive: true });
+    fs.cpSync(srcDir, dst, { recursive: true, filter: skillManifest.snapshotCopyFilter });
     fs.writeFileSync(path.join(dst, 'archive-meta.json'), JSON.stringify({
       id, tier: plan.tier, name, teamId: plan.teamId, agentId: plan.agentId,
       hash: srcId.sourceHash || null, version: srcId.sourceVersion,
@@ -12722,7 +13538,7 @@ app.post('/api/skills/archive/restore', heavyLimiter, (req, res) => {
   try {
     if (overwrite) fs.rmSync(dst.dir, { recursive: true, force: true });
     fs.mkdirSync(path.dirname(dst.dir), { recursive: true });
-    fs.cpSync(srcDir, dst.dir, { recursive: true, filter: (s) => path.basename(s) !== 'archive-meta.json' });
+    fs.cpSync(srcDir, dst.dir, { recursive: true, filter: (s) => path.basename(s) !== 'archive-meta.json' && skillManifest.snapshotCopyFilter(s) });
   } catch (err) {
     return res.status(500).json({ error: `Failed to restore skill: ${err.message}` });
   }
@@ -12803,7 +13619,7 @@ app.post('/api/skills/promote-to-global', (req, res) => {
   const srcId = skillSourceIdentity(srcDir);
   try {
     if (overwrite) fs.rmSync(dstDir, { recursive: true, force: true });
-    fs.cpSync(srcDir, dstDir, { recursive: true });
+    fs.cpSync(srcDir, dstDir, { recursive: true, filter: skillManifest.snapshotCopyFilter });
   } catch (err) {
     return res.status(500).json({ error: `Failed to promote skill: ${err.message}` });
   }
@@ -12883,7 +13699,7 @@ function archiveSkillDir(srcDir, fromRef, name, hash) {
     const rel = path.relative(base, dst);
     if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
     fs.mkdirSync(path.dirname(dst), { recursive: true });
-    fs.cpSync(srcDir, dst, { recursive: true });
+    fs.cpSync(srcDir, dst, { recursive: true, filter: skillManifest.snapshotCopyFilter });
     return dst;
   } catch { return null; }
 }
@@ -15278,7 +16094,7 @@ app.delete('/api/admin/users/:id/password', apiLimiter, (req, res) => {
 // Self-service per-user preferences (#1437, #2397, #2740). A logged-in user
 // updates their OWN profile settings (Agent-Chat transcript font size; the
 // "agent you messaged is back" browser-notification opt-in; the Agent-Chat
-// rail team selection) without
+// rail team selection; the Flows rail selection, #2859) without
 // System-Admin rights. The write is pinned to the caller's OWN resolved userId
 // (never an id from the request), so — unlike the admin CRUD above — it can
 // touch no other user's record. Since #2059 every authenticated caller resolves
@@ -15301,6 +16117,10 @@ app.put('/api/me/preferences', apiLimiter, (req, res) => {
   // Agent-Chat rail team selection (#2740) — validated by teamsStore.
   if (req.body && req.body.chatListFilter !== undefined) {
     patch.chatListFilter = req.body.chatListFilter;
+  }
+  // Flows rail selection (#2859) — same shape, its own preference.
+  if (req.body && req.body.flowsListFilter !== undefined) {
+    patch.flowsListFilter = req.body.flowsListFilter;
   }
   if (Object.keys(patch).length === 0) {
     return res.status(400).json({ error: 'No supported preference in request body', code: 'no_preference' });
@@ -15580,12 +16400,13 @@ app.get('/api/environments', (req, res) => {
       // of team assignment — `isGlobalEnvironment` re-reads its own
       // preconditions, so this can never widen past what the record currently
       // qualifies for.
-      : !isTemplateEnvironment(e) && (visibleEnvironment(scope, e) || isGlobalEnvironment(e)))
+      : !isTemplateEnvironment(e) && (visibleEnvironment(scope, e) || isGlobalEnvironment(e)));
+  const byEnv = envs.length ? agentsByEnvironment() : new Map(); // one fleet read for the whole list (#570)
+  res.json(envs
     .map(e => {
-      const agents = agentsUsingEnvironment(e.id, scope); // (#439)
+      const agents = agentsUsingEnvironment(e.id, scope, byEnv); // (#439)
       return { ...e, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, e) };
-    });
-  res.json(envs);
+    }));
 });
 
 app.get('/api/environments/:id', (req, res) => {
@@ -17114,6 +17935,41 @@ function suffixLabelColor(suffix) {
   return `${f(0)}${f(8)}${f(4)}`;
 }
 
+// #2878: the label names of `repos` from the orchestrator — `{ labels, unreadable }`,
+// or null when it cannot be asked (never throws, bounded to a few seconds).
+async function fetchRepoLabels(repos) {
+  if (!Array.isArray(repos) || !repos.length) return { labels: {}, unreadable: [] };
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/repo-labels?repos=${encodeURIComponent(repos.join(','))}`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return { labels: data.labels || {}, unreadable: Array.isArray(data.unreadable) ? data.unreadable : [] };
+  } catch {
+    return null;
+  }
+}
+
+// #2878: a team's members with their triggers — the label listeners.
+function teamWakeMembers(teamId) {
+  const out = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
+    if (!isLiveGraphMember(cfg, teamId)) continue;
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    out.push({ id, triggers: Array.isArray(triggers) ? triggers : [] });
+  }
+  return out;
+}
+
+// #2878: after materialisation — one line per wake label that is still missing.
+async function missingLabelWarningsFor(teamId) {
+  const members = teamWakeMembers(teamId);
+  const labels = await fetchRepoLabels(wakeLabelRepos(members));
+  return labels ? missingWakeLabelWarnings(missingWakeLabels(members, labels.labels)) : [];
+}
+
 // Best-effort label provisioning call to the orchestrator after materialisation.
 // Creates missing GitHub labels for the stamped token set. Failures are warnings.
 async function provisionGithubLabels(orchestratorUrl, envId, tokenSet, suffix) {
@@ -17433,6 +18289,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   // is empty (byte-identical output). Warnings surface un-stamped prompt mentions.
   let suffixWarnings = [];
   let suffixTokenSet = null;
+  let suffixExempt = [];
   if (labelSuffix) {
     const stamped = applyLabelSuffix(customRolesRaw, bundleLabels, labelSuffix, bundleHumans);
     customRolesRaw = stamped.members;
@@ -17442,6 +18299,9 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     bundleHumans = stamped.humans;
     suffixWarnings = stamped.warnings;
     suffixTokenSet = stamped.tokenSet;
+    // A label that already ended in the suffix was left as is — record it, so
+    // the console never splits it into base + suffix (#2858).
+    suffixExempt = stamped.skipped.filter(t => !stamped.tokenSet.has(t));
   }
 
   const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
@@ -17742,6 +18602,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           // Label suffix (#902): stored so extend-mode adds roles with the same
           // suffix and Flow-Editor dialogs can pre-fill new label inputs.
           ...(labelSuffix ? { labelSuffix } : {}),
+          ...(suffixExempt.length ? { labelSuffixExempt: suffixExempt } : {}),
           // Human owner (#2077, D8) — the authenticated creator of the team.
           ...ownerFor(req),
         }),
@@ -17875,6 +18736,8 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     // Create the stamped labels in the target repo so `gh issue edit --add-label`
     // doesn't fail on a label that doesn't exist yet. Failures are logged only.
     provisionGithubLabels(orchestratorUrl, envId, suffixTokenSet, labelSuffix)
+      // #2878: then check that every wake label exists on its repository.
+      .then(async provWarn => [...provWarn, ...await missingLabelWarningsFor(teamId)])
       .then(provWarn => {
         if (provWarn.length) console.warn(`[Team] Label provisioning warnings for ${teamId}:`, provWarn);
       })
@@ -18168,6 +19031,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // Label-suffix stamping (#902) — see the non-streaming handler.
   let suffixWarnings = [];
   let suffixTokenSet = null;
+  let suffixExempt = [];
   if (labelSuffix) {
     const stamped = applyLabelSuffix(customRolesRaw, bundleLabels, labelSuffix, bundleHumans);
     customRolesRaw = stamped.members;
@@ -18177,6 +19041,9 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
     bundleHumans = stamped.humans;
     suffixWarnings = stamped.warnings;
     suffixTokenSet = stamped.tokenSet;
+    // A label that already ended in the suffix was left as is — record it, so
+    // the console never splits it into base + suffix (#2858).
+    suffixExempt = stamped.skipped.filter(t => !stamped.tokenSet.has(t));
   }
 
   const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
@@ -18499,6 +19366,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           ...(bundleLabels.length ? { labels: bundleLabels } : {}),
           // Label suffix (#902) — see the non-streaming handler.
           ...(labelSuffix ? { labelSuffix } : {}),
+          ...(suffixExempt.length ? { labelSuffixExempt: suffixExempt } : {}),
           // Human owner (#2077, D8) — the authenticated creator of the team.
           ...ownerFor(req),
         }),
@@ -18635,6 +19503,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
     // Emit provisioning warnings as individual warning events so the wizard
     // result step can surface them inline.
     const provWarn = await provisionGithubLabels(orchestratorUrl, envId, suffixTokenSet, labelSuffix);
+    // #2878: then check that every wake label now exists on its repository.
+    provWarn.push(...await missingLabelWarningsFor(teamId));
     for (const w of provWarn) {
       emit({ type: 'warning', message: w });
     }
@@ -19584,99 +20454,61 @@ jobs:
 // opt-in changes the default response (AC8), and the admission rule itself is
 // the pure `matrix-agent-list.js`. Visibility scoping (#302) is unchanged, so an
 // opt-in can only ever widen the list within what this caller may already see.
-// #2789: roster fields for a pool instance waiting on an open PR. Only a
-// record for THIS spawn counts (a recycled instance id must not inherit an
-// earlier instance's state); primitives only, the roster diff is shallow.
-function poolWaitingFields(waitingMap, id, spawnedAt) {
-  const rec = waitingMap && typeof waitingMap === 'object' ? waitingMap[id] : null;
-  if (!rec || typeof rec !== 'object' || rec.waiting !== true) return {};
-  if ((rec.spawnedAt || null) !== (spawnedAt || null)) return {};
-  const prs = Array.isArray(rec.prs) ? rec.prs.filter((n) => Number.isInteger(n) && n > 0) : [];
-  return { poolWaiting: true, poolWaitingPr: prs.length ? Math.min(...prs) : null };
+// #566: the fleet is read ONCE per TTL into caller-independent entries (pure
+// `matrix-agent-roster.js` `buildRosterEntries`), shared by every tab and every
+// query variant behind a single-flight cache — the same shape as
+// `/api/agents/statuses`. Admission, scoping and the caller-specific fields are
+// applied per request (`projectRoster`), so a member still sees only their
+// Agent Teams. A successful roster-affecting console mutation clears the cache
+// (`mutationInvalidatesRoster`, wired behind the auth gate) so a
+// create/rename/enable shows on the next fetch; orchestrator-side changes (a
+// pool spawn/reap, an idle reclaim) surface within the TTL.
+// `AGENT_ROSTER_TTL_MS=0` turns caching off (a full unscoped sweep per request).
+const ROSTER_CACHE_TTL_MS = rosterTtlMsFromEnv(process.env);
+const rosterCache = createTtlCache({ ttlMs: ROSTER_CACHE_TTL_MS, maxEntries: 1 });
+
+function invalidateRosterCache() {
+  rosterCache.clear();
+  agentStatusCache.invalidate(); // #570: same configs; revalidate, keep serving the old set meanwhile
 }
 
-app.get('/api/matrix/agents', (req, res) => {
+// An agent skipped from the build is logged once per (agent, error), not on
+// every 2 s rebuild.
+const rosterEntryErrorsLogged = new Set();
+
+function buildRoster() {
+  return buildRosterEntries(listAgentDirs(), {
+    readConfig: (id) => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null),
+    readDmRoomId: (id) => matrix.getAgentDmRoom(id)?.roomId || null,
+    readEnvironmentName: (envId) => loadEnvironment(envId)?.name || null,
+    // #2789: each team's pool-waiting record (orchestrator `poolReapSweepTeam`).
+    readPoolWaiting: (teamId) => readJsonFile(controlOrAgentPath(teamId, 'pool-waiting.json'), null),
+    agentMetaForScope,
+    onEntryError: (id, err) => {
+      const key = `${id}\u0000${err && err.message}`;
+      if (rosterEntryErrorsLogged.has(key)) return;
+      rosterEntryErrorsLogged.add(key);
+      console.error(`[Admin] Chat roster skipped agent ${id}: ${err && err.message}`);
+    },
+  });
+}
+
+const ROSTER_ACCESS = { visibleAgent, canManageAgent, canChatAgent, canManageTeam };
+
+app.get('/api/matrix/agents', async (req, res) => {
   const scope = getScope(req);
   const includeDisabled = req.query.includeDisabled === '1' || req.query.includeDisabled === 'true';
   const includeStubs = req.query.includeStubs === '1' || req.query.includeStubs === 'true';
-  const ids = listAgentDirs();
-  const out = [];
-  // #2789: each team's pool-waiting record (orchestrator `poolReapSweepTeam`),
-  // read once per team per request.
-  const poolWaitingByTeam = new Map();
-  const poolWaitingOf = (teamId) => {
-    if (!poolWaitingByTeam.has(teamId)) {
-      poolWaitingByTeam.set(teamId, readJsonFile(controlOrAgentPath(teamId, 'pool-waiting.json'), null));
-    }
-    return poolWaitingByTeam.get(teamId);
-  };
-  for (const id of ids) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
-    if (!cfg) continue;
-    if (!admitsToChatList(cfg, { includeDisabled, includeStubs })) continue;
-    if (!visibleAgent(scope, agentMetaForScope(cfg))) continue; // team + visibility scoping (#302)
-    const dm = matrix.getAgentDmRoom(id);
-    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-    out.push({
-      id,
-      displayName: cfg.displayName || id,
-      role: cfg.role || 'agent',
-      userId: cfg.userId || `@${id}:local`,
-      enabled: cfg.enabled !== false,
-      // Whether the agent has ever been provisioned — never the token itself.
-      // Shipped so the shared `agentState()` can tell "paused" from "stub" on
-      // this payload too; since #1957 it is the field that *identifies* the stub
-      // rows `?includeStubs=1` admits (it was always true before that).
-      hasToken: !!cfg.token,
-      // Whether THIS caller may run management actions on the agent — the same
-      // boundary the mutating routes enforce (#989), so the chat's lifecycle
-      // menu can disable what the server would reject (mirrors `canSwitch` on
-      // GET /api/agents/:id/model).
-      canManage: canManageAgent(scope, agentMetaForScope(cfg)),
-      // Whether THIS caller may WRITE in the agent's chat (#2713) — false only
-      // for a System Admin outside the agent's team (scope.js `canChatAgent`,
-      // the predicate the send and chat-upload routes enforce). The composer
-      // renders read-only on false instead of re-deriving the rule.
-      canChat: canChatAgent(scope, agentMetaForScope(cfg)),
-      // Whether THIS caller may change the team's MEMBER LIST — the predicate
-      // `POST`/`DELETE /api/admin/memberships` enforce, shipped so the Share
-      // panel (#2082) can offer a read-only list instead of buttons that 403.
-      // For a `role: 'team'` row `canManage` above happens to resolve to the
-      // same thing (`agentMetaForScope().teamId === cfg.id`, so `canManageAgent`
-      // falls through to `canManageTeam`), and that coincidence is exactly why
-      // this is a separate field: a later change to the agent predicate must
-      // not silently open the member list (#2041 §7.1). Only on team rows —
-      // absent elsewhere, so a caller cannot read it as "not permitted".
-      ...(cfg.role === 'team' ? { canManageTeam: canManageTeam(scope, id) } : {}),
-      dmRoomId: dm?.roomId || null,
-      environmentId: cfg.environmentId || null,
-      environmentName: env?.name || cfg.environmentId || null,
-      parentTeamId: cfg.parentTeamId || null,
-      parentOrchestratorId: cfg.parentOrchestratorId || null,
-      // Pool instance markers (#2297): present only on an ephemeral
-      // `<team>-<role>-i<item>` spawned from a pooled role — `poolOf` names the
-      // role template's own agent id, which is what lets the rail
-      // (`agent-list-model.js` `buildGroups`) nest the instance under it
-      // instead of listing it as a flat sibling. Absent on every other row, same
-      // shape convention as `canManageTeam` above.
-      ...(cfg.poolInstance ? {
-        poolInstance: true,
-        poolOf: cfg.poolOf || null,
-        poolItem: cfg.poolItem != null ? cfg.poolItem : null,
-        poolSpawnedAt: cfg.poolSpawnedAt || null,
-        // #2789: idle and kept alive for its open PR — `poolWaitingPr` is the
-        // lowest open PR number (null when GitHub could not be read).
-        ...poolWaitingFields(cfg.parentTeamId ? poolWaitingOf(cfg.parentTeamId) : null, id, cfg.poolSpawnedAt),
-      } : {}),
-      // #2760 AC5: a pooled role TEMPLATE's "Max parallel instances" cap, so
-      // the rail can show its "Instances (n)" count against it ("5 / 3").
-      // `null` = no per-role cap; absent on every non-pooled row.
-      ...(!cfg.poolInstance && cfg.pool && typeof cfg.pool === 'object' && cfg.pool.enabled === true ? {
-        poolMaxInstances: Number.isInteger(cfg.pool.maxInstances) && cfg.pool.maxInstances >= 1 ? cfg.pool.maxInstances : null,
-      } : {}),
-    });
+  let entries;
+  try {
+    entries = await rosterCache.getOrCompute('roster', buildRoster);
+  } catch (err) {
+    // Only a fleet-wide failure gets here (one bad agent is skipped inside the
+    // build); the detail stays in the server log.
+    console.error(`[Admin] Chat roster build failed: ${err && err.message}`);
+    return res.status(500).json({ error: 'Failed to read the agent roster' });
   }
-  res.json(out);
+  res.json(projectRoster(entries, scope, { includeDisabled, includeStubs }, ROSTER_ACCESS));
 });
 
 // 2. Idempotent create-or-get DM room with an agent.
@@ -19744,6 +20576,8 @@ async function ensureAgentDmRoom(agentId) {
     createdAt: new Date().toISOString(),
     createdBy: adminUserId,
   });
+  // The roster ships `dmRoomId` (#566): show the new room on the next fetch.
+  invalidateRosterCache();
   // Nudge a running agent to re-pull dm-room.json now, so an isolated agent
   // learns its DM room for trigger/claim posts without waiting for the next
   // 60s sync (#185 Phase 2). No-op if the agent isn't running yet.

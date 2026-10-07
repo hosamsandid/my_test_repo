@@ -91,6 +91,36 @@ The left list is how you choose what the canvas shows. It has two sections:
 The list can be collapsed to give the canvas the full width, and the divider
 between it and the canvas can be dragged; both are remembered.
 
+The **filter** at the top of the list narrows it to the flows you care about —
+the same control as the agent list filter in Agent Chat. Collapsed, it reads
+**All flows**, the one flow's name, or **N of M flows**; click it to open the
+panel (Escape closes it). The panel lists every team and draft under **Teams**
+and **Drafts**, each with the same second line as its row (environment, or the
+draft's agent count and sharing), so two flows with the same name stay apart.
+Tick or untick flows, search by name (searching never changes what is ticked),
+and use **Select all** / **Deselect all** on the listed flows. The quick filters
+replace the selection with a preset you can then adjust:
+
+- **Only my private flows** — teams where you are the only member, and your own
+  unshared drafts.
+- **Flows I am a member of** — teams you belong to in any role, and every draft
+  you have access to (your own and the ones shared with you).
+- **Flows where I am Team Admin** / **…a regular member** — teams by your role;
+  drafts have no roles, so they never match these.
+
+Membership means exactly what it means in Agent Chat. A System Admin sees flows
+they are not a member of; those match no quick filter. The quick filters are
+greyed out until your memberships have loaded.
+
+The list then shows only the ticked flows. A section whose flows are all hidden
+says so, and with nothing ticked at all the list points you to the filter. The
+choice is saved for your user (separately from the Agent Chat filter), so it
+follows you to other browsers. It remembers what you *hid*: a flow created or
+shared with you later appears automatically, as does a renamed draft. Opening a
+hidden flow — from a link, **New flow**, **Create team…** or when the page
+restores your last flow — ticks it back in, so the open flow is always in the
+list.
+
 There is no third section. Earlier versions listed a read-only **Role
 templates** blueprint and a **BriefingPack flows** source; both are gone, and a
 bookmark pointing at either falls back silently to no selection rather than to
@@ -165,8 +195,26 @@ has access, and a picker of the colleagues you can add. It offers existing
 accounts only — there are no invitations — and shows each person by display
 name and email, nothing else.
 
+The picker is a checklist, so you can share with many colleagues in one step:
+type in the filter box to narrow the list by name or email, tick the people
+you want (or use **Select all**, which picks only the people the filter
+currently shows; **Clear selection** starts over), then press **Share with N**.
+The whole selection is shared at once or not at all: if someone you ticked has
+had their account deleted in the meantime, nothing is shared, the panel says
+so and refreshes the list.
+
+**Visible to everyone.** The switch at the top of the panel makes the draft
+readable by every platform user — today's and anyone added later. Turning it
+on asks for confirmation first; turning it off takes effect immediately and
+leaves the access list exactly as it was. Readers who reach a draft only this
+way see it in their Drafts list marked *Visible to everyone · read-only*, and
+can open, export and create a team from it, or use **Duplicate to my drafts**
+to get their own editable copy. They cannot edit, rename, share or delete it,
+and they do not count towards the access list. The setting belongs to the
+stored draft: it is not part of an exported file and an import never sets it.
+
 **Everyone you share with becomes a full equal.** There are no roles, no
-read-only mode and no privileges kept back for whoever created the draft.
+read-only mode for them and no privileges kept back for whoever created the draft.
 Anyone with access can:
 
 - open, edit, rename and export it,
@@ -346,6 +394,31 @@ within one poll interval, roughly 30 seconds. The label on GitHub is the single
 source of truth: a person re-applying the same label wakes the consumer exactly
 like an agent does, and every wake shows up in the **GitHub Event Log**. (The
 former *Direct (internal)* delivery option was removed in #2578.)
+
+The label must **exist on the repository**. GitHub refuses to add a label that
+does not exist, so such a hand-off can never fire. For a live team the issues
+panel then shows **Wake label does not exist on GitHub**, naming the label, the
+repository and the listening agent. Team Admins can fix it there with **Create
+label** — the same warning, with the same button, appears in Agent Chat →
+**Settings** under **Wake labels on GitHub**. Team creation checks this too and
+lists a missing label among its warnings.
+
+### Team labels: the base and the suffix chip
+
+On a live team created with a **label suffix**, every label field — the
+hand-off, channel, gate and rejection labels, event filters, an outcome's
+*set label* action, a human role's labels and the label registry — shows the
+editable **base** (`ready-for-review`) with the suffix as a muted, read-only
+chip (`-k3f9`). You type only the base; the field saves `ready-for-review-k3f9`.
+Typing or pasting the full name (`ready-for-review-k3f9`) is fine — it is
+trimmed back to the base. A claimed wake label reads as base, chip and `:wip`.
+
+A label that does not carry the team's suffix (one you wired by hand, or one
+that already ended in it when the template was created) is shown as-is, with
+no chip, and is never stamped behind your back. A team without a suffix looks
+exactly as before. Drafts and templates have no suffix, so their fields are
+plain. To change the suffix itself, use **Team Settings → General → Label
+suffix** in Agent Chat.
 
 ### Holding a PR hand-off until CI is green
 

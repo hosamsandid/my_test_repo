@@ -110,6 +110,105 @@ test('IO wrappers round-trip through a real directory', () => {
 test('ACTIONS is the closed set from the concept', () => {
   assert.deepEqual(m.ACTIONS, [
     'created', 'edited', 'imported', 'adopted', 'promoted',
-    'lifted', 'shared', 'moved', 'merged', 'extended', 'resynced',
+    'lifted', 'shared', 'moved', 'merged', 'extended', 'resynced', 'restored',
   ]);
+});
+
+/* ─── Version snapshots (#2839) ──────────────────────────────────────────── */
+
+for (const c of FIXTURE.snapshotPruneCases) {
+  test(`golden snapshot prune: ${c.name}`, () => {
+    assert.deepEqual(m.planSnapshotPrune(c.existing, c.manifest), c.expected);
+  });
+}
+
+for (const c of FIXTURE.snapshotCases) {
+  test(`golden snapshot: ${c.name}`, () => {
+    const snap = m.buildSnapshot(filesToBytes(c.files));
+    assert.equal(snap.hash, c.expectedHash);
+    assert.equal(snap.hash, m.computeContentHash(filesToBytes(c.files)));
+    assert.deepEqual(snap.files.map(f => f.path), c.expectedPaths);
+    const back = m.parseSnapshot(snap, c.expectedHash);
+    assert.equal(m.computeContentHash(back), c.expectedHash);
+  });
+}
+
+test('snapshot: parseSnapshot refuses a hash mismatch, traversal and excluded paths', () => {
+  const snap = m.buildSnapshot([{ path: 'SKILL.md', bytes: Buffer.from('a') }]);
+  assert.equal(m.parseSnapshot(snap, 'ffffffffffff'), null);
+  assert.equal(m.parseSnapshot({ files: [{ path: '../x', b64: '' }] }), null);
+  assert.equal(m.parseSnapshot({ files: [{ path: '_versions/x.json', b64: '' }] }), null);
+  assert.equal(m.parseSnapshot(null), null);
+});
+
+test('snapshot: every stamp keeps a full snapshot; unchanged content dedups; _versions is not content', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-snap-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), 'v1\n');
+    fs.mkdirSync(path.join(dir, 'scripts'));
+    fs.writeFileSync(path.join(dir, 'scripts', 'run.sh'), 'echo 1\n');
+    const v1 = m.stampSkillDir(dir, { by: 't', action: 'created' });
+    assert.deepEqual(m.listSnapshotHashes(dir), [v1.contentHash]);
+    assert.equal(m.hashSkillDir(dir), v1.contentHash, 'the _versions dir does not change the content hash');
+
+    const files = m.readSnapshot(dir, v1.contentHash);
+    assert.deepEqual(files.map(f => [f.path, f.bytes.toString()]), [['SKILL.md', 'v1\n'], ['scripts/run.sh', 'echo 1\n']]);
+
+    // forceHistory on unchanged content → a new entry, the SAME snapshot.
+    const again = m.stampSkillDir(dir, { by: 'u', action: 'imported', forceHistory: true });
+    assert.equal(again.history.length, 2);
+    assert.deepEqual(m.listSnapshotHashes(dir), [v1.contentHash]);
+
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), 'v2\n');
+    const v2 = m.stampSkillDir(dir, { by: 't', action: 'edited' });
+    assert.deepEqual(m.listSnapshotHashes(dir), [v1.contentHash, v2.contentHash].sort());
+
+    // A restore stamp records restoredFrom.
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), 'v1\n');
+    const r = m.stampSkillDir(dir, { by: 't', action: 'restored', restoredFrom: 1, note: 'restored from v1' });
+    assert.equal(r.version, 3);
+    assert.equal(r.history[0].action, 'restored');
+    assert.equal(r.history[0].restoredFrom, 1);
+    assert.equal(r.history[0].hash, v1.contentHash);
+    assert.deepEqual(m.listSnapshotHashes(dir), [v1.contentHash, v2.contentHash].sort());
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('snapshot: at most HISTORY_LIMIT versions are kept, pruned together with their history entries', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-snap-prune-'));
+  try {
+    for (let i = 1; i <= m.HISTORY_LIMIT + 5; i++) {
+      fs.writeFileSync(path.join(dir, 'SKILL.md'), `body ${i}\n`);
+      m.stampSkillDir(dir, { by: 't', action: i === 1 ? 'created' : 'edited' });
+    }
+    const man = m.readManifest(dir);
+    assert.equal(man.history.length, m.HISTORY_LIMIT);
+    const snaps = m.listSnapshotHashes(dir);
+    assert.equal(snaps.length, m.HISTORY_LIMIT);
+    assert.deepEqual(snaps, man.history.map(h => h.hash).sort());
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('snapshot: snapshotCopyFilter keeps _versions out of a copy; snapshotSkillDir backfills the copy', () => {
+  const src = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-snap-src-'));
+  const dst = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'skill-snap-dst-')), 'copy');
+  try {
+    fs.writeFileSync(path.join(src, 'SKILL.md'), 'a\n');
+    m.stampSkillDir(src, { by: 't', action: 'created' });
+    fs.writeFileSync(path.join(src, 'SKILL.md'), 'b\n');
+    const man = m.stampSkillDir(src, { by: 't', action: 'edited' });
+    assert.equal(m.listSnapshotHashes(src).length, 2);
+
+    fs.cpSync(src, dst, { recursive: true, filter: m.snapshotCopyFilter });
+    assert.equal(fs.existsSync(path.join(dst, m.SNAPSHOT_DIR)), false, 'snapshots never travel with a copy');
+    m.snapshotSkillDir(dst);
+    assert.deepEqual(m.listSnapshotHashes(dst), [man.contentHash], 'the copy keeps only its own current content');
+  } finally {
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(path.dirname(dst), { recursive: true, force: true });
+  }
 });

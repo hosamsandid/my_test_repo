@@ -35,3 +35,31 @@ export function shouldRefreshOnVisible(prevHidden, nextHidden) {
 export function isStaleRosterResponse(seq, appliedSeq) {
   return seq < appliedSeq;
 }
+
+/**
+ * When a polled snapshot was last known fresh, or `null` while it is (#566). A
+ * poll paused in a hidden tab keeps showing its last response, which can be
+ * minutes old by the time the tab is looked at again, and a consumer that reads
+ * "nothing is running" off it against a clock that kept running would draw a
+ * conclusion the data never supported. The timestamp lets it judge the
+ * snapshot as of the moment it was taken instead. So:
+ *
+ *   - `'hidden'`: the tab went to the background — the snapshot starts aging
+ *     now, or keeps the earlier moment if it was already aging (hide → show →
+ *     hide before the refresh lands does not make old data look newer);
+ *   - `'landed'`: a fetch settled (success OR error, so a failing refresh can
+ *     never hold a consumer in "stale" forever) — fresh, unless it landed while
+ *     the tab is still hidden, where it ages from now with no tick to replace it.
+ *
+ * @param {number|null} prevSince
+ * @param {'hidden'|'landed'} event
+ * @param {boolean} hidden  `document.hidden` at the event
+ * @param {number} now      `Date.now()` at the event
+ * @returns {number|null}
+ */
+export function nextSnapshotStaleSince(prevSince, event, hidden, now) {
+  const prev = Number.isFinite(prevSince) ? prevSince : null;
+  if (event === 'hidden') return prev ?? now;
+  if (event === 'landed') return hidden ? now : null;
+  return prev;
+}

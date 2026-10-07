@@ -2463,3 +2463,129 @@ test("_fanOutBatch (#2822): the comment filter never gates the trigger's other e
   const { enqueued } = await runBatch(poller, [[issueOpened]], [sub]);
   assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["io-1"]);
 });
+
+// ── #2876: remove + re-add of a wake label on a PR, whose `unlabeled` events
+// arrive without the label's name, re-fires exactly once.
+
+function prLabelEvent(id, action, label, fullSet, number = 2863) {
+  return {
+    id,
+    actor: { login: "thorsten" },
+    created_at: new Date().toISOString(),
+    type: "PullRequestEvent",
+    repo: { name: "org/repo" },
+    payload: {
+      action,
+      ...(label ? { label: { name: label } } : {}),
+      ...(fullSet ? { labels: fullSet.map((name) => ({ name })) } : {}),
+      pull_request: { number, title: "Flows rail filter", html_url: `https://github.com/org/repo/pull/${number}` },
+    },
+  };
+}
+
+const prReviewerSub = () => [{
+  agentId: "code-reviewer",
+  triggerId: "code-reviewer-on-pr-ready-for-review",
+  events: new Set(["pull_request.labeled"]),
+  labelFilter: "ready-for-review",
+  claimAdd: "ready-for-review:wip",
+  horizon: null,
+}];
+
+async function runPrBatches(batches) {
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+    poller._enrichPullRequestPayload = async (_key, payload) => payload;
+    for (const batch of batches) await poller._fanOutBatch("org/repo", batch, prReviewerSub(), "tok");
+    return { fired: enqueued.map((e) => e.entry.github.eventId), recorded, poller };
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+}
+
+test("_fanOutBatch (#2876): the #2863 sequence — nameless unlabeled events, then the re-add — re-fires once", async () => {
+  const { fired, recorded } = await runPrBatches([
+    [prLabelEvent("p-1", "labeled", "ready-for-review", ["ready-for-review"])],
+    [
+      // 07:22:45 — four `unlabeled` events, no label name, no snapshot.
+      prLabelEvent("p-2", "unlabeled", null, null),
+      prLabelEvent("p-3", "unlabeled", null, null),
+      prLabelEvent("p-4", "unlabeled", null, null),
+      prLabelEvent("p-5", "unlabeled", null, null),
+      // 07:23:24 — the re-add; its snapshot names the wake again.
+      prLabelEvent("p-6", "labeled", "ready-for-review", ["ready-for-review"]),
+    ],
+  ]);
+  assert.deepEqual(fired, ["p-1", "p-6"]);
+  const readd = recorded.find((r) => r.eventId === "p-6");
+  assert.equal(readd.outcomes[0].status, "delivered");
+});
+
+test("_fanOutBatch (#2876): after the re-add fires, a duplicate add and later churn are dropped again", async () => {
+  const { fired, recorded } = await runPrBatches([[
+    prLabelEvent("q-1", "labeled", "ready-for-review", ["ready-for-review"]),
+    prLabelEvent("q-2", "unlabeled", null, null),
+    prLabelEvent("q-3", "labeled", "ready-for-review", ["ready-for-review"]),
+    // A second event naming the same add (the Events API repeats itself).
+    prLabelEvent("q-4", "labeled", "ready-for-review", ["ready-for-review"]),
+    // Unrelated churn while the wake still hangs on.
+    prLabelEvent("q-5", "labeled", "bug", ["ready-for-review", "bug"]),
+  ]]);
+  assert.deepEqual(fired, ["q-1", "q-3"]);
+  for (const id of ["q-4", "q-5"]) {
+    const r = recorded.find((x) => x.eventId === id);
+    assert.equal(r.outcomes[0].reason, "wake-already-armed", id);
+  }
+});
+
+test("_fanOutBatch (#2876): a nameless unlabeled with a snapshot disarms by presence, so the re-add fires", async () => {
+  const { fired } = await runPrBatches([[
+    prLabelEvent("s-1", "labeled", "ready-for-review", ["ready-for-review"]),
+    prLabelEvent("s-2", "unlabeled", null, ["bug"]),
+    // Even a collapsed re-add that names another label recovers the wake.
+    prLabelEvent("s-3", "labeled", "bug", ["ready-for-review", "bug"]),
+  ]]);
+  assert.deepEqual(fired, ["s-1", "s-3"]);
+});
+
+test("_fanOutBatch (#2876): unrelated churn after a nameless removal never re-fires (the add must name the wake)", async () => {
+  const { fired } = await runPrBatches([[
+    prLabelEvent("c-1", "labeled", "ready-for-review", ["ready-for-review"]),
+    prLabelEvent("c-2", "unlabeled", null, null), // some other label went
+    prLabelEvent("c-3", "labeled", "bug", ["ready-for-review", "bug"]),
+  ]]);
+  assert.deepEqual(fired, ["c-1"]);
+});
+
+test("_fanOutBatch (#2876): the agent's claim and completion swaps still never double-fire (#2776 stays green)", async () => {
+  const { fired, recorded } = await runPrBatches([[
+    prLabelEvent("w-1", "labeled", "ready-for-review", ["ready-for-review"]),
+    // The claim swap: a nameless removal of the wake plus the `:wip` add, whose
+    // stale snapshot still lists the wake.
+    prLabelEvent("w-2", "unlabeled", null, null),
+    prLabelEvent("w-3", "labeled", "ready-for-review:wip", ["ready-for-review", "ready-for-review:wip"]),
+    // The completion swap, same shape.
+    prLabelEvent("w-4", "unlabeled", null, null),
+    prLabelEvent("w-5", "labeled", "ready-for-review:completed", ["ready-for-review:completed"]),
+  ]]);
+  assert.deepEqual(fired, ["w-1"]);
+  for (const id of ["w-3", "w-5"]) {
+    assert.equal(recorded.find((x) => x.eventId === id).outcomes[0].reason, "self-claim-label", id);
+  }
+});
+
+test("_fanOutBatch (#2876): the removal mark is persisted beside the armed set and cleared on re-arm", async () => {
+  const { poller } = await runPrBatches([
+    [prLabelEvent("m-1", "labeled", "ready-for-review", ["ready-for-review"]), prLabelEvent("m-2", "unlabeled", null, null)],
+  ]);
+  const st = poller.state["org/repo"];
+  const key = Object.keys(st.armed)[0];
+  assert.ok(Object.prototype.hasOwnProperty.call(st.removedSince, key), "the mark survives the batch (state.json)");
+  await poller._fanOutBatch("org/repo", [prLabelEvent("m-3", "labeled", "ready-for-review", ["ready-for-review"])], prReviewerSub(), "tok");
+  assert.deepEqual(st.removedSince, {});
+});

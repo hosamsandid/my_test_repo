@@ -199,8 +199,8 @@ export default function AgentList({
   // Group and single-agent reorder are only offered when every entry is
   // selected, so the visual position matches the stored order — with teams
   // hidden a move would be ambiguous. Member-within-group reorder is
-  // unambiguous when exactly one team is shown too: that view holds the team's
-  // complete, ordered member set (#1725, #2740 AC11).
+  // unambiguous for every shown team whatever else the filter hides: the
+  // filter never hides a shown team's members (#1725, #2740 AC11, #2846).
   const selectionEntryList = useMemo(
     () => selectionEntries(rawGroups, rawSingles),
     [rawGroups, rawSingles],

@@ -3,6 +3,8 @@ import { Link } from 'react-router';
 import { RefreshCw, Clock, CalendarClock, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch, Repeat, Puzzle } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
+import SuffixedLabelInput, { SuffixedLabelText, LabelSuffixContext, useLabelSuffix } from '../../components/SuffixedLabelInput';
+import { labelSuffixContextFor } from '../process/label-suffix-view.js';
 import ScriptViewerPanel from '../../components/ScriptViewerPanel';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import FormInput from '../../components/FormInput';
@@ -1783,10 +1785,10 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
                 <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
                   Required label on the item
                 </div>
-                <input
+                <SuffixedLabelInput
                   type="text"
                   value={form.requireLabel}
-                  onChange={e => set('requireLabel', e.target.value)}
+                  onChange={v => set('requireLabel', v)}
                   placeholder={REQUIRE_LABEL_PLACEHOLDER}
                   style={{ ...FIELD_STYLE, width: '100%' }}
                 />
@@ -1809,10 +1811,10 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
                 Label name filter
               </div>
-              <input
+              <SuffixedLabelInput
                 type="text"
                 value={form.labelFilter}
-                onChange={e => set('labelFilter', e.target.value)}
+                onChange={v => set('labelFilter', v)}
                 placeholder="e.g. ready (leave empty to fire for any label)"
                 style={{ ...FIELD_STYLE, width: '100%' }}
               />
@@ -1822,7 +1824,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               {form.labelFilter.trim() && form.events.some(e => e === 'issues.labeled' || e === 'pull_request.labeled') && (
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', cursor: 'pointer' }}>
                   <input type="checkbox" checked={form.claimOn} onChange={e => set('claimOn', e.target.checked)} />
-                  Claim the wake label on fire (<code>{form.labelFilter.trim()}</code> → <code>{form.labelFilter.trim()}:wip</code>) — makes work-in-progress visible on GitHub
+                  Claim the wake label on fire (<SuffixedLabelText label={form.labelFilter.trim()} /> → <SuffixedLabelText label={`${form.labelFilter.trim()}:wip`} />) — makes work-in-progress visible on GitHub
                 </label>
               )}
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
@@ -2052,6 +2054,27 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
     setTriggerStatus(null);
   }, [agentId]);
 
+  // #2858: label fields show a suffixed team's labels as base + chip. Inside
+  // the Flow editor the canvas already provides the team's suffix; on its own
+  // (Agent Chat → Triggers) the panel reads it from the agent's team.
+  const outerSuffixCtx = useLabelSuffix();
+  const [ownSuffixCtx, setOwnSuffixCtx] = useState(null);
+  useEffect(() => {
+    setOwnSuffixCtx(null);
+    if (outerSuffixCtx || isDraft || !agentId) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const cfg = await apiCall('GET', `/api/agents/${encodeURIComponent(agentId)}`);
+        const teamCfg = cfg && cfg.role === 'team' ? cfg
+          : cfg && cfg.parentTeamId ? await apiCall('GET', `/api/agents/${encodeURIComponent(cfg.parentTeamId)}`)
+          : null;
+        if (!cancelled) setOwnSuffixCtx(labelSuffixContextFor(teamCfg));
+      } catch { /* no chip — the fields stay plain inputs */ }
+    })();
+    return () => { cancelled = true; };
+  }, [agentId, isDraft, outerSuffixCtx]);
+
   const fetchTriggers = useCallback(async (id) => {
     if (!id) { setTriggers([]); return; }
     setLoading(true);
@@ -2210,6 +2233,7 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
   }
 
   return (
+    <LabelSuffixContext.Provider value={outerSuffixCtx || ownSuffixCtx}>
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       {toolbar}
 
@@ -2287,5 +2311,6 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
 
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
+    </LabelSuffixContext.Provider>
   );
 }

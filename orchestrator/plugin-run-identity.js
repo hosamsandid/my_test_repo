@@ -280,7 +280,7 @@ function decideCredentialGrant({ active, senderUserId, senderResolved = false, p
       item: 'personal-credential',
       who: 'you',
       what: `your personal ${pluginName} access`,
-      how: `add your ${pluginName} e-mail and API token in the Admin Console under Connections → Plugin Tokens (${pagePath}) — it is yours alone, nobody else can use or see it`,
+      how: `add your ${pluginName} e-mail and API token in Agent Studio under Connections → Plugin Tokens (${pagePath}) — it is yours alone, nobody else can use or see it`,
     });
   }
   if (siteMissing) {

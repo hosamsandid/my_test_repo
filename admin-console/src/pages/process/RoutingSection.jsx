@@ -4,6 +4,7 @@ import { Plus, X, Trash2, Sparkles, Save, Loader2, AlertTriangle,
   Clock, CalendarClock, Globe, Github, Pencil } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
+import SuffixedLabelInput from '../../components/SuffixedLabelInput';
 import PageHelpButton from '../../components/PageHelpButton';
 import { FLOWS_HELP_SECTIONS } from './flows-help-sections';
 import { TriggerForm } from '../agent-chat/TriggersPanel';
@@ -943,7 +944,7 @@ function ActionRow({ action, node, peers = [], option, onChange, onRemove }) {
       </select>
       {type === 'setLabel' && (
         <>
-          <input value={action.label || ''} placeholder="label" onChange={e => onChange({ ...action, type: 'setLabel', label: e.target.value })}
+          <SuffixedLabelInput value={action.label || ''} placeholder="label" onChange={v => onChange({ ...action, type: 'setLabel', label: v })}
             style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} />
           {/* #2629: where the label lands. GitHub reports a PR label as
               pull_request.labeled and an issue label as issues.labeled, so the

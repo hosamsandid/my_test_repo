@@ -65,6 +65,8 @@ import MemoryField from '../process/MemoryField';
 import { memoryLimitError } from '../memory-limit-view.js';
 import { poolControlUrl, livePoolCount } from '../process/pool-cap-view.js';
 import ParallelismPanel from '../process/ParallelismPanel';
+import LabelSuffixSection from './LabelSuffixSection';
+import MissingWakeLabelsSection from './MissingWakeLabelsSection';
 
 // #2236: which help chapter each tab's "?" opens, and the tab's own label for
 // the button's title. General/Skills/Plugins point at the same field-by-field
@@ -714,6 +716,18 @@ export default function AgentEditForm({
             />
           )}
         </div>
+      )}
+
+      {/* #2858: the team's label suffix, changed centrally — applies
+          immediately through its own route (it rewrites every member and
+          renames the labels on GitHub), never batched into this form's Save. */}
+      {isTeam && activeTab === 'general' && (
+        <LabelSuffixSection key={agent.labelSuffix || ''} team={agent} onApplied={onImmediateApply} />
+      )}
+
+      {/* #2878: wake labels the team listens on that are missing on GitHub. */}
+      {isTeam && activeTab === 'general' && (
+        <MissingWakeLabelsSection teamId={agent.id} />
       )}
 
       {/* #2167/#2236: the team's environment fields, re-hosted as five of the

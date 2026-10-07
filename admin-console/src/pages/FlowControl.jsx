@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
-  AlertTriangle, RefreshCw, ExternalLink, Info, Pause, Play, Waves, Zap, Power, Columns, UserRound, EyeOff, RotateCcw, LockOpen, CheckCircle2,
+  AlertTriangle, RefreshCw, ExternalLink, Info, Pause, Play, Waves, Zap, Power, Columns, UserRound, EyeOff, RotateCcw, LockOpen, CheckCircle2, BellRing,
 } from 'lucide-react';
-import { Link as RouterLink } from 'react-router';
+import { Link as RouterLink, useSearchParams } from 'react-router';
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import PageHelpButton from '../components/PageHelpButton';
@@ -11,8 +11,10 @@ import { usePageActions } from '../context/PageActionsContext';
 import {
   boardView, updatedAgo, AUTO_REFRESH_MS, readAutoRefresh, writeAutoRefresh, configFormRows, configFromForm,
   withoutRows, REMOVE_CONFIRM_TEXT, removeDialogTitle, RELEASE_CONFIRM_TEXT, releaseDialogTitle, releaseNotice, CHAT_LINK_CLASS, CHAT_LINK_CSS,
+  WAKE_CONFIRM_TEXT, wakeDialogTitle, wakeNotice, ADOPT_CONFIRM_TEXT, adoptDialogTitle, adoptNotice,
 } from './process/flow-control-view';
 import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections';
+import { readCurrentTeam, writeCurrentTeam, resolveFlowControlTeam } from './current-team';
 
 // The Flow Control board (#2573, concept `docs/flow-control-concept.md`
 // Amendment 3): who is working on what, where a person is needed, and how far
@@ -50,13 +52,28 @@ export default function FlowControl() {
   const [columnsOpen, setColumnsOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState(null);
   const [releaseTarget, setReleaseTarget] = useState(null);
+  const [wakeTarget, setWakeTarget] = useState(null);
+  const [adoptOpen, setAdoptOpen] = useState(false);
   const [removedOpen, setRemovedOpen] = useState(false);
   const loadSeq = useRef(0);
 
-  // Default to the first team once the list arrives; never override a choice.
+  const [searchParams] = useSearchParams();
+  const urlTeam = searchParams.get('team') || '';
+
+  // Open on `?team=`, else the team last worked with in Agent Chat or picked
+  // here (#2850), else the first team — once the list arrives, so no other
+  // team's board is fetched first; never override a choice.
   useEffect(() => {
-    if (!teamId && teams.length > 0) setTeamId(teams[0].id);
-  }, [teams, teamId]);
+    if (teamId) return;
+    const resolved = resolveFlowControlTeam({ urlTeam, rememberedTeam: readCurrentTeam(username), teams });
+    if (resolved) setTeamId(resolved);
+  }, [teams, teamId, urlTeam, username]);
+
+  // A pick in the picker becomes the current team for every page.
+  const pickTeam = useCallback((id) => {
+    setTeamId(id);
+    writeCurrentTeam(username, id);
+  }, [username]);
 
   // The preference is per user, and the user record can arrive after mount.
   useEffect(() => { setAutoRefresh(readAutoRefresh(username)); }, [username]);
@@ -137,6 +154,31 @@ export default function FlowControl() {
       if (res && Array.isArray(res.warnings) && res.warnings.length) setActionError(res.warnings.join(' · '));
     },
     'Failed to release the claim',
+  ), [teamId, mutate]);
+
+  // "Wake again" (#2873): the server re-checks the row on a fresh board and the
+  // label on GitHub, then delivers the parked wake to its role again — no label
+  // change. A wake that could not be delivered comes back as a warning.
+  const wakeAgain = useCallback((target) => mutate(
+    async () => {
+      const res = await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/flow-board-wake`, { rowId: target.id });
+      setWakeTarget(null);
+      setActionNotice(wakeNotice(res, target.ref));
+      if (res && Array.isArray(res.warnings) && res.warnings.length) setActionError(res.warnings.join(' · '));
+    },
+    'Failed to wake the agent again',
+  ), [teamId, mutate]);
+
+  // "Adopt all" (#2877): start every row carried over from another instance or
+  // an earlier flow, through the same server-side checks as Wake again.
+  const adoptAll = useCallback((rowIds) => mutate(
+    async () => {
+      const res = await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/flow-board-adopt`, { rowIds });
+      setAdoptOpen(false);
+      setActionNotice(adoptNotice(res));
+      if (res && Array.isArray(res.warnings) && res.warnings.length) setActionError(res.warnings.join(' · '));
+    },
+    'Failed to adopt the carried-over items',
   ), [teamId, mutate]);
 
   const saveColumns = useCallback((config) => mutate(
@@ -227,7 +269,7 @@ export default function FlowControl() {
         ) : (
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
-              <TeamPicker teams={teams} value={teamId} onChange={setTeamId} />
+              <TeamPicker teams={teams} value={teamId} onChange={pickTeam} />
               {view.canManage && (
                 <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 'var(--eb-space-2)' }}>
                   {view.removed.length > 0 && (
@@ -265,7 +307,7 @@ export default function FlowControl() {
             {state.data && !view.maintenance && (
               <>
                 <WorkingNow view={view} busy={busy} onSetState={setRoleState} onForceDispatch={forceDispatch} />
-                {view.needsYou && <NeedsYou items={view.needsYou} canManage={view.canManage} busy={busy} onRelease={setReleaseTarget} />}
+                {view.needsYou && <NeedsYou items={view.needsYou} canManage={view.canManage} busy={busy} onRelease={setReleaseTarget} onWake={setWakeTarget} carriedOver={view.carriedOver} onAdoptAll={() => setAdoptOpen(true)} />}
                 <InProgress view={view} busy={busy} onRemove={setRemoveTarget} />
                 {view.doneRows.length > 0 && (
                   <RecentlyCompleted rows={view.doneRows} hint={view.retentionHint} canManage={view.canManage} busy={busy} onRemove={setRemoveTarget} />
@@ -320,6 +362,49 @@ export default function FlowControl() {
           </ul>
           <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
             {RELEASE_CONFIRM_TEXT}
+          </p>
+        </Modal>
+      )}
+      {wakeTarget && (
+        <Modal
+          open
+          onClose={() => setWakeTarget(null)}
+          title={wakeDialogTitle(wakeTarget.ref)}
+          maxWidth={480}
+          footer={(
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
+              <HeaderButton icon={BellRing} label="Wake again" title="Deliver the wake label to its agent again" disabled={busy} onClick={() => wakeAgain(wakeTarget)} />
+            </div>
+          )}
+        >
+          <p style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>{wakeTarget.title}</p>
+          <ul style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+            {wakeTarget.wakes.filter((w) => w.roles.length > 0).map((w) => <li key={`${w.ref}:${w.label}`}>{w.target}</li>)}
+          </ul>
+          <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+            {WAKE_CONFIRM_TEXT}
+          </p>
+        </Modal>
+      )}
+      {adoptOpen && (
+        <Modal
+          open
+          onClose={() => setAdoptOpen(false)}
+          title={adoptDialogTitle(view.carriedOver.length)}
+          maxWidth={480}
+          footer={(
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
+              <HeaderButton icon={BellRing} label="Adopt all" title="Deliver each carried-over wake label to its agent once" disabled={busy || view.carriedOver.length === 0} onClick={() => adoptAll(view.carriedOver)} />
+            </div>
+          )}
+        >
+          <ul style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+            {(view.needsYou || []).filter((n) => view.carriedOver.includes(n.id)).flatMap((n) => n.wakes.filter((w) => w.roles.length > 0).map((w) => (
+              <li key={`${n.id}:${w.ref}:${w.label}`}>{w.target}</li>
+            )))}
+          </ul>
+          <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+            {ADOPT_CONFIRM_TEXT}
           </p>
         </Modal>
       )}
@@ -413,6 +498,12 @@ const lineStyle = {
   fontSize: 'var(--eb-text-sm)',
 };
 
+const nestedLineStyle = {
+  ...lineStyle,
+  marginLeft: 'var(--eb-space-6)',
+  borderLeft: '3px solid var(--eb-border-default)',
+};
+
 const mutedStyle = { color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' };
 
 // In-console link to the chat of the agent working right now (#2723): a real
@@ -443,26 +534,32 @@ function Link({ href, children }) {
 
 /* ── area ①: working now ───────────────────────────────────────────── */
 
+// One running run. `nested` (#2848): an instance listed beneath its pool line.
+function SessionLine({ s, nested = false }) {
+  return (
+    <div style={nested ? nestedLineStyle : lineStyle}>
+      <span style={{ color: 'var(--eb-text-primary)', fontWeight: 500 }}>
+        <ChatLink chat={s.chat}>
+          {s.role}{s.instance && <span style={mutedStyle}> {s.instance}</span>}
+        </ChatLink>
+      </span>
+      <span style={{ fontFamily: 'var(--eb-font-mono)', ...mutedStyle }}>{s.item}</span>
+      {s.title && <span style={{ color: 'var(--eb-text-primary)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.title}</span>}
+      <span style={{ marginLeft: 'auto', ...mutedStyle }} title="Running for">{s.running}</span>
+    </div>
+  );
+}
+
 function WorkingNow({ view, busy, onSetState, onForceDispatch }) {
   const nothing = view.sessions.length === 0 && view.pools.length === 0 && view.held.length === 0;
   return (
     <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
       <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.working} helpLabel="What Working now shows">Working now</AreaHeading>
       {nothing && <p style={{ margin: 0, ...mutedStyle }}>No agent is running.</p>}
-      {view.sessions.map((s) => (
-        <div key={s.id} style={lineStyle}>
-          <span style={{ color: 'var(--eb-text-primary)', fontWeight: 500 }}>
-            <ChatLink chat={s.chat}>
-              {s.role}{s.instance && <span style={mutedStyle}> {s.instance}</span>}
-            </ChatLink>
-          </span>
-          <span style={{ fontFamily: 'var(--eb-font-mono)', ...mutedStyle }}>{s.item}</span>
-          {s.title && <span style={{ color: 'var(--eb-text-primary)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.title}</span>}
-          <span style={{ marginLeft: 'auto', ...mutedStyle }} title="Running for">{s.running}</span>
-        </div>
-      ))}
+      {view.sessions.map((s) => <SessionLine key={s.id} s={s} />)}
       {view.pools.map((p) => (
-        <div key={p.key} style={lineStyle}>
+        <React.Fragment key={p.key}>
+        <div style={lineStyle}>
           <span style={{ color: 'var(--eb-text-primary)', fontWeight: 500 }}>{p.label}</span>
           <span style={mutedStyle}>{p.occupancy}</span>
           {p.stateText && (
@@ -487,6 +584,8 @@ function WorkingNow({ view, busy, onSetState, onForceDispatch }) {
             <PageHelpButton label="Pause, Drain and Switch on" size={12} section={FLOW_CONTROL_HELP_SECTIONS.poolControls} style={{ padding: 0 }} />
           </span>
         </div>
+        {p.instances.map((s) => <SessionLine key={s.id} s={s} nested />)}
+        </React.Fragment>
       ))}
       {view.held.map((h) => (
         <div key={h.id} style={lineStyle}>
@@ -509,14 +608,20 @@ function WorkingNow({ view, busy, onSetState, onForceDispatch }) {
 
 /* ── area ②: needs you ─────────────────────────────────────────────── */
 
-function NeedsYou({ items, canManage, busy, onRelease }) {
+function NeedsYou({ items, canManage, busy, onRelease, onWake, carriedOver = [], onAdoptAll }) {
   return (
     <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
       <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.needsYou} helpLabel="What to do about each reason">
         Needs you ({items.length})
       </AreaHeading>
+      {canManage && carriedOver.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', ...mutedStyle }}>
+          <span>{carriedOver.length === 1 ? '1 item was' : `${carriedOver.length} items were`} carried over from before this team&rsquo;s triggers started here.</span>
+          <SmallButton icon={BellRing} label={`Adopt all (${carriedOver.length})`} title="Start every carried-over item here" disabled={busy} onClick={onAdoptAll} />
+        </div>
+      )}
       {items.map((n) => (
-        <div key={n.id} style={{ ...lineStyle, borderLeft: '3px solid var(--eb-status-warning, #d97706)' }}>
+        <div key={n.id} style={{ ...lineStyle, flexWrap: 'wrap', borderLeft: '3px solid var(--eb-status-warning, #d97706)' }}>
           <UserRound size={13} style={{ flexShrink: 0, color: 'var(--eb-text-secondary)' }} />
           <span style={{ fontFamily: 'var(--eb-font-mono)', ...mutedStyle }}>{n.ref}</span>
           <Link href={n.url}>{n.title}</Link>
@@ -524,6 +629,22 @@ function NeedsYou({ items, canManage, busy, onRelease }) {
           <span style={{ marginLeft: 'auto', ...mutedStyle }} title="Waiting for">{n.waiting}</span>
           {canManage && n.release.length > 0 && (
             <SmallButton icon={LockOpen} label="Release claim" title={`Release the stale claim (${n.release.map((c) => c.text).join(', ')})`} disabled={busy} onClick={() => onRelease(n)} />
+          )}
+          {canManage && n.canWake && (
+            <SmallButton icon={BellRing} label={n.carriedOver ? 'Adopt' : 'Wake again'} title={n.wakes.filter((w) => w.roles.length > 0).map((w) => w.target).join(', ')} disabled={busy} onClick={() => onWake(n)} />
+          )}
+          {/* #2872: which wake label never reached its agent, and why — the
+              cause links to the GitHub Event Log row that recorded it. */}
+          {n.wakes.length > 0 && (
+            <ul style={{ flexBasis: '100%', margin: 0, paddingLeft: 'calc(13px + var(--eb-space-3))', listStyle: 'none', ...mutedStyle }}>
+              {n.wakes.map((w) => (
+                <li key={`${w.ref}:${w.label}`}>
+                  {w.ref}: <code>{w.label}</code> — {w.href
+                    ? <RouterLink to={w.href} className={CHAT_LINK_CLASS} style={{ textDecoration: 'underline' }} title="Open this event in the GitHub Event Log">{w.text}</RouterLink>
+                    : w.text}
+                </li>
+              ))}
+            </ul>
           )}
         </div>
       ))}

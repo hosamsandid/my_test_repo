@@ -27,6 +27,7 @@
 
 const { listensTo } = require('./event-key-aliases');
 const handoffGate = require('./handoff-gate');
+const { isDirectWakeListener } = require('./pool-wake-target');
 
 const TARGET_KINDS = ['issue', 'pr'];
 
@@ -72,12 +73,15 @@ function validateLabelAppliedRequest(body) {
 // `transport` field on a trigger is ignored (#2578). Returns
 // [{agentId, triggerId}] in agent order; a PR listener whose trigger carries a
 // readiness gate (#2795) also gets its normalized `readinessGate`, so the
-// caller holds that wake instead of delivering it.
+// caller holds that wake instead of delivering it. A pool instance (its
+// `config.poolInstance`) is never a listener (#2875) — the same rule the
+// poller's plan applies, so both paths wake the same set.
 function matchPollerListeners({ repo, label, kind }, agents) {
   const key = eventKeyForKind(kind);
   const out = [];
   for (const a of Array.isArray(agents) ? agents : []) {
     if (!a || a.enabled === false || !Array.isArray(a.triggers)) continue;
+    if (!isDirectWakeListener(a.config)) continue;
     for (const t of a.triggers) {
       if (!t || t.type !== 'github-event' || t.enabled === false) continue;
       if (t.repo !== repo) continue;

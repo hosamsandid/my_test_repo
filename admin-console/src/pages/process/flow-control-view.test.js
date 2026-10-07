@@ -18,7 +18,18 @@ import {
   doneTitle,
   sessionView,
   poolView,
+  groupWorkingNow,
   needsYouView,
+  wakeCauseText,
+  WAKE_CONFIRM_TEXT,
+  wakeDialogTitle,
+  wakeTargetText,
+  wakeNotice,
+  ADOPT_CONFIRM_TEXT,
+  CARRIED_OVER_REASON,
+  adoptDialogTitle,
+  adoptNotice,
+  WAKE_CAUSE_TEXT,
   boardView,
   EMPTY_TEXT,
   retentionHint,
@@ -362,7 +373,7 @@ test('chat link CSS gives hover and keyboard-focus affordances', () => {
 
 test('FlowControl wires the chat links: router Link, stage cell and Working-now line (#651 source guard)', () => {
   const jsx = fs.readFileSync(path.join(here, '..', 'FlowControl.jsx'), 'utf8');
-  assert.match(jsx, /import \{ Link as RouterLink \} from 'react-router';/);
+  assert.match(jsx, /import \{ Link as RouterLink(, [^}]*)? \} from 'react-router';/);
   assert.match(jsx, /<style>\{CHAT_LINK_CSS\}<\/style>/);
   assert.match(jsx, /if \(!chat\) return children;/);
   assert.match(jsx, /<RouterLink to=\{chat\.to\} title=\{chat\.label\} aria-label=\{chat\.label\} className=\{CHAT_LINK_CLASS\}/);
@@ -444,6 +455,40 @@ test('help-topics/flow-control.md quotes every tooltip verbatim', () => {
 test('needsYouView: plain reason and waiting time', () => {
   const v = needsYouView({ id: 'o/r#61', title: 'Fix', issue: null, prs: [{ repo: 'o/r', number: 61 }], reason: 'conflict with base', since: ago(130) }, { now: NOW });
   assert.deepEqual({ ref: v.ref, reason: v.reason, waiting: v.waiting }, { ref: 'PR #61', reason: 'conflict with base', waiting: '2h 10m' });
+});
+
+test('needsYouView: a wake never delivered names each label, its cause and the Event Log row (#2872)', () => {
+  const v = needsYouView({
+    id: 'o/r#2819', title: 'Release button', issue: { repo: 'o/r', number: 2819 }, prs: [],
+    reason: 'wake never delivered', since: ago(1094),
+    wakes: [
+      { repo: 'o/r', number: 2820, kind: 'pr', label: 'ready-for-review', roles: [{ id: 't-rev', label: 'Code Reviewer' }], cause: 'history-horizon', eventId: '123', since: ago(1094) },
+      { repo: 'o/r', number: 2862, kind: 'pr', label: 'changes-requested', cause: 'not-seen', eventId: null, since: ago(1000) },
+    ],
+  }, { now: NOW });
+  assert.equal(v.reason, 'wake never delivered');
+  assert.deepEqual(v.wakes, [
+    {
+      ref: 'PR #2820', label: 'ready-for-review', cause: 'history-horizon', text: WAKE_CAUSE_TEXT['history-horizon'], href: '/github-events?event=123',
+      roles: [{ id: 't-rev', label: 'Code Reviewer' }], target: 'Wake Code Reviewer for PR #2820 (ready-for-review)',
+    },
+    {
+      ref: 'PR #2862', label: 'changes-requested', cause: 'not-seen', text: 'never reported by the GitHub Events API', href: null,
+      roles: [], target: 'Wake its agent for PR #2862 (changes-requested)',
+    },
+  ]);
+  assert.equal(v.canWake, true);
+  const other = needsYouView({ id: 'x', reason: 'conflict with base' }, { now: NOW });
+  assert.deepEqual([other.wakes, other.canWake], [[], false]);
+});
+
+test('wakeCauseText: the four causes the board reports (#2872)', () => {
+  assert.equal(wakeCauseText({ cause: 'history-horizon' }), 'older than its agent\u2019s trigger (flow re-applied or team moved)');
+  assert.equal(wakeCauseText({ cause: 'wake-already-armed' }), 're-add dropped as already armed');
+  assert.equal(wakeCauseText({ cause: 'not-seen' }), 'never reported by the GitHub Events API');
+  assert.equal(wakeCauseText({ cause: 'dropped', dropReason: 'throttle' }), 'dropped (throttle)');
+  assert.equal(wakeCauseText({ cause: 'dropped' }), 'dropped (unknown)');
+  assert.equal(wakeCauseText(null), '');
 });
 
 test('boardView: an orphaned claim flagged needs-help shows amber on its working row and in Needs you with its waiting time (#2734)', () => {
@@ -629,4 +674,126 @@ test('#2795: a PR held by its hand-off gate shows "waiting for CI" on the row', 
   assert.equal(free.gateTitle, '');
   const jsx = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'FlowControl.jsx'), 'utf8');
   assert.match(jsx, /\{row\.gateText && <div style=\{mutedStyle\} title=\{row\.gateTitle\}>⏳ \{row\.gateText\}<\/div>\}/);
+});
+
+// #2848 — running instances nested beneath their pool line.
+test('groupWorkingNow: pooled instances go beneath their own pool, in server order (AC1, AC2, edge: stable order)', () => {
+  const v = boardView({
+    sessions: [
+      { id: 'a', agentId: 't-dev-i8', roleId: 't-dev', roleLabel: 'Developer', instance: 8, startedAt: ago(9) },
+      { id: 'b', agentId: 't-rev-i3', roleId: 't-rev', roleLabel: 'Reviewer', instance: 3, startedAt: ago(5) },
+      { id: 'c', agentId: 't-dev-i7', roleId: 't-dev', roleLabel: 'Developer', instance: 7, startedAt: ago(2) },
+    ],
+    pools: [
+      { agentId: 't-rev', roleId: 'rev', label: 'Reviewer', busy: 1, capacity: 3 },
+      { agentId: 't-dev', roleId: 'dev', label: 'Developer', busy: 2, capacity: 3 },
+    ],
+  }, NOW);
+  assert.deepEqual(v.sessions, []);
+  assert.deepEqual(v.pools.map((p) => [p.label, p.instances.map((s) => s.id)]), [
+    ['Reviewer', ['b']],
+    ['Developer', ['a', 'c']],
+  ]);
+});
+
+test('groupWorkingNow: instance lines keep their content and chat link (AC3)', () => {
+  const v = boardView({
+    repos: ['o/r'],
+    sessions: [{ id: 'a', agentId: 't-dev-i7', roleId: 't-dev', roleLabel: 'Developer', instance: 7, issue: { repo: 'o/r', number: 7 }, title: 'Fix it', startedAt: ago(3) }],
+    pools: [{ agentId: 't-dev', roleId: 'dev', label: 'Developer', busy: 1, capacity: 3 }],
+  }, NOW);
+  const s = v.pools[0].instances[0];
+  assert.deepEqual(s, sessionView({ id: 'a', agentId: 't-dev-i7', roleId: 't-dev', roleLabel: 'Developer', instance: 7, issue: { repo: 'o/r', number: 7 }, title: 'Fix it', startedAt: ago(3) }, { now: NOW }));
+  assert.equal(s.chat.to, '/chats/t-dev-i7');
+  assert.equal(s.instance, '#7');
+});
+
+test('groupWorkingNow: idle pools have no children; non-pooled and unmatched runs stay top level (AC4, AC5, AC6)', () => {
+  const v = boardView({
+    sessions: [
+      { id: 'plain', agentId: 't-po', roleId: 't-po', roleLabel: 'PO' },
+      { id: 'orphan', agentId: 't-qa-i4', roleId: 't-qa', roleLabel: 'QA', instance: 4 },
+      { id: 'noRole', agentId: 't-x', roleLabel: 'X' },
+    ],
+    pools: [{ agentId: 't-dev', roleId: 'dev', label: 'Developer', busy: 0, capacity: 3, state: 'paused' }],
+  }, NOW);
+  assert.deepEqual(v.sessions.map((s) => s.id), ['plain', 'orphan', 'noRole']);
+  assert.deepEqual(v.pools[0].instances, []);
+  assert.equal(v.pools[0].stateText, 'Paused');
+});
+
+test('groupWorkingNow: a draining pool keeps its finishing instances and its badge; no run is lost or doubled', () => {
+  const sessions = [
+    { id: 'a', roleId: 't-dev', role: 'Developer' },
+    { id: 'b', roleId: 't-po', role: 'PO' },
+  ];
+  const pools = [poolView({ agentId: 't-dev', roleId: 'dev', label: 'Developer', busy: 1, state: 'draining' })];
+  const g = groupWorkingNow(sessions, pools);
+  assert.equal(g.pools[0].stateText, 'Draining, 1 still running');
+  const all = [...g.sessions, ...g.pools.flatMap((p) => p.instances)].map((s) => s.id).sort();
+  assert.deepEqual(all, ['a', 'b']);
+  assert.deepEqual(groupWorkingNow(undefined, undefined), { sessions: [], pools: [] });
+});
+
+test('help topic says pooled instances are listed beneath their role (AC8)', () => {
+  const md = fs.readFileSync(HELP_TOPIC, 'utf8');
+  const section = md.split('## Who is working right now')[1].split('\n## ')[0];
+  assert.match(section, /indented directly beneath/);
+});
+
+test('Wake again copy: dialog title, target line and the notice after a click (#2873)', () => {
+  assert.equal(wakeDialogTitle('#2813'), 'Wake the agent for #2813 again?');
+  assert.equal(wakeDialogTitle(''), 'Wake the agent again?');
+  assert.match(WAKE_CONFIRM_TEXT, /no label is changed/);
+  assert.match(WAKE_CONFIRM_TEXT, /own instance/);
+  assert.match(WAKE_CONFIRM_TEXT, /readiness gate/);
+  assert.equal(
+    wakeTargetText({ ref: 'PR #2844', label: 'ready-for-review-prod', roles: [{ id: 'a', label: 'Code Reviewer' }, { id: 'b' }] }),
+    'Wake Code Reviewer and b for PR #2844 (ready-for-review-prod)',
+  );
+  assert.equal(
+    wakeNotice({ woken: 1, results: [{ ok: true, delivered: 1, held: 0 }] }, '#2813'),
+    'Wake delivered again for #2813 — its agent starts on its next check (within a few seconds).',
+  );
+  assert.equal(
+    wakeNotice({ woken: 2, results: [{ ok: true, delivered: 0, held: 1 }] }, null),
+    '2 wakes delivered again — its hand-off waits for CI first.',
+  );
+  assert.equal(wakeNotice({ woken: 0 }, '#1'), null);
+  assert.equal(wakeNotice(null, '#1'), null);
+});
+
+test('help topic quotes the Wake again confirmation (#2873)', () => {
+  const topic = fs.readFileSync(HELP_TOPIC, 'utf8').replace(/\s+/g, ' ');
+  assert.ok(topic.includes(WAKE_CONFIRM_TEXT), 'flow-control.md must quote WAKE_CONFIRM_TEXT');
+});
+
+test('Adopt (#2877): a carried-over row reads Adopt; boardView lists the rows Adopt all would start', () => {
+  assert.equal(CARRIED_OVER_REASON, 'carried over — not started here');
+  const carried = {
+    id: 'o/r#2819', title: 'Release', issue: { repo: 'o/r', number: 2819 }, prs: [],
+    reason: CARRIED_OVER_REASON, since: ago(140),
+    wakes: [{ repo: 'o/r', number: 2820, kind: 'pr', label: 'ready-for-review', roles: [{ id: 't-rev', label: 'Code Reviewer' }], cause: 'not-seen', carriedOver: true }],
+  };
+  const parked = { ...carried, id: 'o/r#2859', reason: 'wake never delivered' };
+  const noConsumer = { ...carried, id: 'o/r#2900', wakes: [{ ...carried.wakes[0], roles: [] }] };
+  assert.equal(needsYouView(carried, { now: NOW }).carriedOver, true);
+  assert.equal(needsYouView(parked, { now: NOW }).carriedOver, false);
+  const v = boardView({
+    stages: STAGES, rows: [], sessions: [], pools: [], repos: ['o/r'], generatedAt: ago(0),
+    needsHuman: [carried, parked, noConsumer], carriedOver: ['o/r#2819', 'o/r#2900'],
+  }, NOW);
+  assert.deepEqual(v.carriedOver, ['o/r#2819']); // nobody to wake for #2900
+  assert.deepEqual(boardView({ stages: STAGES, rows: [], needsHuman: [], sessions: [], pools: [], repos: ['o/r'], generatedAt: ago(0) }, NOW).carriedOver, []);
+});
+
+test('Adopt copy: title, confirmation and notice (#2877)', () => {
+  assert.equal(adoptDialogTitle(1), 'Adopt 1 carried-over item?');
+  assert.equal(adoptDialogTitle(3), 'Adopt 3 carried-over items?');
+  assert.match(ADOPT_CONFIRM_TEXT, /no label is changed/);
+  assert.equal(adoptNotice({ adopted: 3 }), '3 items adopted — each agent starts on its next check.');
+  assert.equal(adoptNotice({ adopted: 1 }), '1 item adopted — each agent starts on its next check.');
+  assert.equal(adoptNotice({ adopted: 0 }), null);
+  const topic = fs.readFileSync(HELP_TOPIC, 'utf8').replace(/\s+/g, ' ');
+  assert.ok(topic.includes(ADOPT_CONFIRM_TEXT), 'flow-control.md must quote ADOPT_CONFIRM_TEXT');
 });

@@ -708,6 +708,10 @@ function describeAuthz({ username, adminUsername, users = [], memberships = [], 
   const chatListFilter = (self && self.chatListFilter && Array.isArray(self.chatListFilter.hidden))
     ? { hidden: self.chatListFilter.hidden.filter(k => typeof k === 'string') }
     : null;
+  // Per-user Flows rail selection (#2859): same shape and `null` semantics.
+  const flowsListFilter = (self && self.flowsListFilter && Array.isArray(self.flowsListFilter.hidden))
+    ? { hidden: self.flowsListFilter.hidden.filter(k => typeof k === 'string') }
+    : null;
   return {
     admin: scope.all,                    // full visibility: env admin OR System Admin
     envAdmin,                            // env single-admin credential
@@ -721,6 +725,7 @@ function describeAuthz({ username, adminUsername, users = [], memberships = [], 
     chatFontSize,
     chatNotifyOnBack,
     chatListFilter,
+    flowsListFilter,
     teams,
   };
 }

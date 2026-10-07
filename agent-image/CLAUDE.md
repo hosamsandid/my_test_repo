@@ -118,7 +118,7 @@ guessing. Open pull requests with `gh-as-agent pr` (above), never a raw
 
 ## Parent ticket (`ticket.json`)
 
-A conversation may be bound to a **parent GitHub issue** by a human in the Admin Console. When it is, a `ticket.json` file is present at your workspace root:
+A conversation may be bound to a **parent GitHub issue** by a human in Agent Studio. When it is, a `ticket.json` file is present at your workspace root:
 
 ```json
 { "repo": "owner/name", "number": 1383, "url": "https://github.com/owner/name/issues/1383", "title": "…", "children": [1401, 1402] }
@@ -206,6 +206,9 @@ that could read stdin), pass `</dev/null` rather than a long timeout.
 Run it right after `gh-as-agent push` from your clone of the PR's branch: it
 waits until GitHub shows your pushed commit as the PR's head and never reports
 the previous head's result (`--head <sha>` names the commit explicitly).
+While it waits, the platform posts one short *waiting for CI* note to the chat
+for you (`AEE_STATUS_FILE`) — do not post your own; your final reply still
+reports the verdict.
 Never wait for CI in a background shell or `Task`, and
 do not hand-roll `gh pr checks` loops. On timeout, end your turn; unattended
 flows continue through the gated PR hand-off or a `pull_request.checks_*`
@@ -273,7 +276,7 @@ knowledge promote <id> --to agent
 knowledge promote <id> --to agent --name my-private-skill
 ```
 
-A human can later lift it to the whole team (agent→team) from the Admin Console
+A human can later lift it to the whole team (agent→team) from Agent Studio
 when it proves broadly useful.
 
 ## Token usage (`usage`)

@@ -1,6 +1,6 @@
 # Autonomous Triggers
 
-Agents are driven by triggers defined in a per-agent `triggers.json` file. The scheduler syncs changes every 60 seconds. All trigger types are created and managed per agent via the Admin Console — inline in the **Agent Chat** right rail, under the **Triggers** tab.
+Agents are driven by triggers defined in a per-agent `triggers.json` file. The scheduler syncs changes every 60 seconds. All trigger types are created and managed per agent in Agent Studio — inline in the **Agent Chat** right rail, under the **Triggers** tab.
 
 ## Trigger Types
 
@@ -45,7 +45,7 @@ The orchestrator exposes a second HTTP server on `HOOK_PORT` (default `4003`). E
 **Endpoint:** `POST http://<host>:4003/hooks/<agentId>/<triggerId>`  
 **Auth:** `X-Hook-Secret: <secret>` header, e.g. `curl -X POST -H "X-Hook-Secret: <secret>" http://<host>:4003/hooks/<agentId>/<triggerId>` — or, for a GitHub webhook (which cannot send custom headers), the secret as the webhook's **Secret**: the `X-Hub-Signature-256` HMAC over the body is verified instead (#2680). A signed GitHub `ping` returns 200 without firing. Bodies over 25 MB → 413.
 
-The webhook secret is generated automatically when the trigger is created. It is visible in the Admin Console trigger editor.
+The webhook secret is generated automatically when the trigger is created. It is visible in the Agent Studio trigger editor.
 
 ## GitHub Poller
 
@@ -129,6 +129,7 @@ The two mechanisms above wake an agent in a **later** run. An agent that needs t
 - **Push during the wait**: the new head is evaluated from scratch; `headSha` names the commit the verdict belongs to.
 - **Push right before the wait** (#2818): GitHub can still show the previous commit as the PR's head for a few seconds. The expected head is `--head <sha>` or, by default, the local clone's HEAD when the clone is on the PR's branch; while the PR's head is not it, the old head's red CI or conflict is not reported and the PR is re-read every ~5 s. With the local default this applies only while GitHub's head is an older commit of the branch — a head the clone does not have (a teammate's push) is evaluated as before. Not shown after 3 minutes → error with `staleHead: true` (was the push made?). `expectedHead` in the result names the expected commit.
 - **Rate limiting** is backed off and retried, never reported as a failure.
+- **Status note in chat** (#2841): once a wait actually starts (the PR is not settled at the first look), `aee-wait-ci` appends one line to the per-turn file named by `AEE_STATUS_FILE`; the runtime watches that file and posts **one** short `m.notice` to the run's room — *Pull request #2838 is open — waiting for CI to finish (up to 20 min).*, the PR number linking to the repository the wait resolved. A second wait on the same PR in the same run names the attempt (*attempt 2*). The note is in German when the chat message was, else English; it carries `io.aee.status-note` (`kind`, `repo`, `pr`, `attempt`, `timeoutMinutes`, `correlationId`). It is posted by the runtime, not the agent, so it never depends on the agent remembering to; it never replaces the final reply. No note for a usage error, a PR already settled at the first look, or a run without a room.
 - **Not for unattended flows**: on timeout it says so — continue via a gated hand-off or a `pull_request.checks_*` trigger, never via a background task (which is killed when the turn ends).
 
 ## Operational note: host clock skew (Podman machine)
@@ -204,6 +205,6 @@ The loop posts a summary and stops when it reaches any terminal state:
 | **paused** | Platform runaway safeguard tripped. |
 | **stopped** | User pressed **Stop** mid-loop. |
 
-### Admin Console
+### In Agent Studio
 
 The **Start a loop** dialog opens from the **loop icon** (`<Repeat/>`) in the chat composer (bottom-left of the message input area in Agent Chat). The icon carries a tooltip and screen-reader label — "Run a loop — repeats until the goal is met" — shown on hover **and** keyboard focus, so it is discoverable without prior context. Core settings (number of tries, who checks the work) are always visible; the stop condition, token budget, and gap options live under **Advanced settings**. The loop icon is **launch-only** (#1427): while any chat turn or loop is running for the selected agent, the primary-action button (the **Send** position) switches to a unified **Stop** (⏹) control; pressing it aborts whatever is running via the session-stop path and returns to **Send**. A turn stop also inserts a distinct "Stopped by user" marker in the transcript.

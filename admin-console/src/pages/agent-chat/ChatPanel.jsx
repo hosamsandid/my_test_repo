@@ -42,6 +42,7 @@ import { providerWarningText, providerBudgetWarningText, personalProviderNoticeT
 import { RESUME_MESSAGE } from './resume-session';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
 import { AUTHOR_FIELD, authorStampFor, buildAuthorDirectory } from './message-author.js';
+import { STATUS_NOTE_FIELD, lastTurnMessage } from './status-note.js';
 import {
   resolveInitialFontSize, loadStoredFontSize, FONT_SIZE_CHANGED_EVENT,
 } from './chat-font-size.js';
@@ -392,6 +393,7 @@ export default function ChatPanel({
             'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
             'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
             'io.aee.triggerFailure':  ev.content?.['io.aee.triggerFailure'] || null,
+            [STATUS_NOTE_FIELD]:  ev.content?.[STATUS_NOTE_FIELD] || null,
             [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
             [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
             [AUTHOR_FIELD]:        ev.content?.[AUTHOR_FIELD] || null,
@@ -443,6 +445,7 @@ export default function ChatPanel({
           'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
           'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
           'io.aee.triggerFailure':  ev.content?.['io.aee.triggerFailure'] || null,
+          [STATUS_NOTE_FIELD]:  ev.content?.[STATUS_NOTE_FIELD] || null,
           [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
           [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
           [AUTHOR_FIELD]:        ev.content?.[AUTHOR_FIELD] || null,
@@ -562,6 +565,7 @@ export default function ChatPanel({
       'io.aee.trigger':  triggerMeta,
       'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
       'io.aee.triggerFailure':  ev.content?.['io.aee.triggerFailure'] || null,
+      [STATUS_NOTE_FIELD]:  ev.content?.[STATUS_NOTE_FIELD] || null,
       [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
       [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
       [AUTHOR_FIELD]:        ev.content?.[AUTHOR_FIELD] || null,
@@ -684,6 +688,7 @@ export default function ChatPanel({
             'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
             'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
             'io.aee.triggerFailure':  ev.content?.['io.aee.triggerFailure'] || null,
+            [STATUS_NOTE_FIELD]:  ev.content?.[STATUS_NOTE_FIELD] || null,
             [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
             [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
             [AUTHOR_FIELD]:        ev.content?.[AUTHOR_FIELD] || null,
@@ -1302,7 +1307,9 @@ export default function ChatPanel({
   // signal: when the shared active-sessions poll sees a trigger session for
   // this room we show the same animated indicator (#1852 AC1-3).
   const hasActiveTriggerRun = hasActiveTriggerSessionForRoom(activeSessions, roomId);
-  const lastMsg = messages[messages.length - 1];
+  // A runner status note (#2841, e.g. "waiting for CI") is mid-turn progress,
+  // not the agent's reply — it must not end the thinking indicator.
+  const lastMsg = lastTurnMessage(messages);
   const showThinking =
     !!lastMsg &&
     lastMsg.type !== 'context-reset' &&

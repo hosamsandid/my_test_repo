@@ -46,7 +46,7 @@ carry orphans. Two System-Admin-only endpoints clean them up:
 | `POST /api/agents/orphans/cleanup` | Removes the `removable` ones. Re-plans first and logs the same listing before deleting anything, then reports `planned`, `removable`, `reportOnly`, `deleted` and any `warnings`. |
 
 ```bash
-# From a shell that can reach the Admin Console, with an admin session cookie:
+# From a shell that can reach Agent Studio, with an admin session cookie:
 curl -s --cookie "$COOKIE" http://localhost:4000/api/agents/orphans | jq
 curl -s --cookie "$COOKIE" -X POST http://localhost:4000/api/agents/orphans/cleanup | jq
 ```

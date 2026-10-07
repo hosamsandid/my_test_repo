@@ -15,13 +15,24 @@ import { buildFlowsRailMenu, intentForMenuKey, parseFlowIntent } from './process
 import { downloadBundle } from './process/bundle-download.js';
 import { canSubmitRename, nextUntitledName, BLANK_RENAME_HINT } from './process/draft-names.js';
 import { flowScopeStatus, flowNotFoundCopy } from './process/flow-scope-status.js';
+import { railSectionState, RAIL_SECTION_LOADING_TEXT, RAIL_SECTION_ERROR_TEXT } from './process/rail-section-state.js';
 import SidePanel from '../components/SidePanel';
 import { useHelpSubject } from '../context/HelperChatContext';
 import { OVERLAY_DRAFT_SHARE } from '../context/page-help-view.js';
 import {
-  draftSubtitle, draftAccessTitle, accessRows, shareCandidates, addControlState,
+  draftSubtitle, draftAccessTitle, accessRows, shareCandidates,
   removeState, deleteImpactNotice, draftWriteError,
+  filterCandidates, selectAllIds, pruneSelection, pickerState, shareResultNotice, bulkShareError,
+  VISIBLE_TO_EVERYONE_LABEL, VISIBLE_TO_EVERYONE_CONFIRM, duplicateDraftBody,
 } from './process/draft-share-view.js';
+import ListFilterControl from './agent-chat/ListFilterControl.jsx';
+import { quickFiltersDisabledReason } from './agent-chat/list-selection.js';
+import { useTeamMemberships } from '../hooks/useTeamMemberships.js';
+import {
+  FLOWS_FILTER_COPY, FLOWS_QUICK_FILTERS, NO_FLOWS_SELECTED_HINT,
+  normalizeSelection, flowsFilterEntries, flowsSelectionSummary,
+  applyFlowsFilterAction, revealKeyForProc, flowsRailView,
+} from './process/flows-rail-filter.js';
 import {
   IMPORT_BRIEFINGS_COPY, importCandidates, importSubmitState, importRequestBody, importErrorText,
 } from './process/import-briefings-view';
@@ -32,6 +43,9 @@ const ProcessGraphPanel = lazy(() =>
   import('./ProcessCanvas').then(m => ({ default: m.ProcessGraphPanel })));
 
 const LAST_SELECTED_KEY_PREFIX = 'flows.lastSelected';
+// Same debounce as the Agent Chat rail filter's preference write (#2740).
+const FILTER_SAVE_DEBOUNCE_MS = 400;
+const RAIL_HINT_STYLE = { padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' };
 const SIDEBAR_WIDTH_KEY = 'flowsPaneWidth';
 const SIDEBAR_MIN = 160;
 const SIDEBAR_MAX = 600;
@@ -253,15 +267,32 @@ function KebabButton({ label, active, onOpen }) {
 // stated as a hint on the disabled button rather than discovered as a rejected
 // request, though the server refuses it either way.
 //
+// #2870 — the picker is a filterable checkbox list (Select all / Clear, one
+// all-or-nothing request for the whole selection) instead of a one-at-a-time
+// dropdown, and the panel carries the "Visible to everyone" switch. The access
+// list and the picker scroll independently, and the Share button sits below
+// the picker's scroll box, so nothing overlaps at ~100 users (AC7).
+//
 // Mounted only while the panel is open (SidePanel returns null when closed), so
 // the help subject comes and goes with it and needs no `active:` flag.
+const SHARE_SECTION_HEADING = { margin: '0 0 var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' };
+const SHARE_SMALL_BTN = {
+  padding: '2px 8px', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+  background: 'transparent', border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-sm)', color: 'var(--eb-text-secondary)', cursor: 'pointer',
+};
+
 function ShareDraftPanel({ draft, viewerId, onChanged, onGone }) {
   useHelpSubject({ overlay: OVERLAY_DRAFT_SHARE });
   const [access, setAccess] = useState([]);
   const [directory, setDirectory] = useState([]);
-  const [addUserId, setAddUserId] = useState('');
+  const [visibleToEveryone, setVisibleToEveryone] = useState(false);
+  const [confirmGlobal, setConfirmGlobal] = useState(false);
+  const [selected, setSelected] = useState(() => new Set());
+  const [query, setQuery] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(null);
   const [loaded, setLoaded] = useState(false);
 
   const base = `/api/process/drafts/${encodeURIComponent(draft.id)}/access`;
@@ -273,6 +304,7 @@ function ShareDraftPanel({ draft, viewerId, onChanged, onGone }) {
         apiCall('GET', '/api/users/directory'),
       ]);
       setAccess(Array.isArray(a?.users) ? a.users : []);
+      setVisibleToEveryone(a?.visibleToEveryone === true);
       setDirectory(Array.isArray(dir) ? dir : []);
       setLoaded(true);
     } catch (e) {
@@ -288,6 +320,7 @@ function ShareDraftPanel({ draft, viewerId, onChanged, onGone }) {
   async function mutate(fn) {
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       const res = await fn();
       setAccess(Array.isArray(res?.users) ? res.users : []);
@@ -300,9 +333,62 @@ function ShareDraftPanel({ draft, viewerId, onChanged, onGone }) {
     }
   }
 
+  // AC5/AC6 — one request for the whole selection. The server validates every
+  // id before writing anything, so a refusal leaves the list exactly as it was.
+  async function shareSelected() {
+    const userIds = [...selected];
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await apiCall('POST', base, { userIds });
+      setAccess(Array.isArray(res?.users) ? res.users : []);
+      setSelected(new Set());
+      setQuery('');
+      setNotice(shareResultNotice(res));
+      onChanged();
+    } catch (e) {
+      if (e && e.status === 404) { onGone(); return; }
+      const { message, reload } = bulkShareError(e);
+      setError(message);
+      if (reload) await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // AC8/AC13 — on asks for confirmation first; off is immediate.
+  async function setGlobal(value) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await apiCall('PUT', `/api/process/drafts/${encodeURIComponent(draft.id)}/visibility`, { visibleToEveryone: value });
+      setVisibleToEveryone(res?.visibleToEveryone === true);
+      onChanged();
+    } catch (e) {
+      if (e && e.status === 404) { onGone(); return; }
+      setError(draftWriteError(e, 'Could not change who can see this draft.'));
+    } finally {
+      setBusy(false);
+      setConfirmGlobal(false);
+    }
+  }
+
   const rows = accessRows(access, viewerId);
   const candidates = shareCandidates(directory, access);
-  const addState = addControlState({ candidates, selectedId: addUserId, busy });
+  const visible = filterCandidates(candidates, query);
+  // Edge case: someone ticked was shared with meanwhile, or their account went.
+  const liveSelected = pruneSelection(selected, candidates);
+  const picker = pickerState({ candidates, visible, selected: liveSelected, busy, query });
+
+  function toggle(id) {
+    setSelected(prev => {
+      const next = pruneSelection(prev, candidates);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -315,89 +401,174 @@ function ShareDraftPanel({ draft, viewerId, onChanged, onGone }) {
         <PageHelpButton section={FLOWS_HELP_SECTIONS.sharingDrafts} label="How sharing a draft works" />
       </div>
 
-      <div>
-        <h3 style={{ margin: '0 0 var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
-          Has access
-        </h3>
-        {!loaded ? (
-          <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>Loading…</p>
-        ) : rows.map(r => {
-          const rm = removeState(access, r.id);
-          return (
-            <div key={r.id} style={{
-              display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
-              padding: 'var(--eb-space-2) 0', borderBottom: '1px solid var(--eb-border-default)',
-            }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
-                  {r.label}{r.you ? ' (you)' : ''}
-                </div>
-                {r.email && (
-                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{r.email}</div>
-                )}
-              </div>
-              <button
-                type="button"
-                disabled={busy || rm.disabled}
-                title={rm.hint || (r.you ? 'Leave this draft' : `Remove ${r.label}`)}
-                onClick={() => mutate(() => apiCall('DELETE', `${base}/${encodeURIComponent(r.id)}`))}
-                style={{
-                  padding: '4px 10px', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
-                  background: 'transparent', border: '1px solid var(--eb-border-default)',
-                  borderRadius: 'var(--eb-radius-sm)',
-                  color: rm.disabled ? 'var(--eb-text-muted)' : 'var(--eb-status-error)',
-                  cursor: (busy || rm.disabled) ? 'not-allowed' : 'pointer',
-                  opacity: rm.disabled ? 0.6 : 1,
-                }}
-              >{r.you ? 'Leave' : 'Remove'}</button>
-            </div>
-          );
-        })}
+      {/* #2870 Part B — the "Visible to everyone" switch. */}
+      <div style={{
+        display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+        padding: 'var(--eb-space-2) var(--eb-space-3)', border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-surface)',
+      }}>
+        <input
+          id="draft-visible-to-everyone"
+          type="checkbox"
+          role="switch"
+          aria-checked={visibleToEveryone}
+          checked={visibleToEveryone}
+          disabled={busy || !loaded}
+          onChange={e => { if (e.target.checked) setConfirmGlobal(true); else setGlobal(false); }}
+          style={{ marginTop: 3, cursor: (busy || !loaded) ? 'not-allowed' : 'pointer' }}
+        />
+        <label htmlFor="draft-visible-to-everyone" style={{ flex: 1, cursor: 'pointer' }}>
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-medium)' }}>
+            {VISIBLE_TO_EVERYONE_LABEL}
+          </div>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            {visibleToEveryone
+              ? 'Every platform user can open, export, create a team from and duplicate this draft — read-only. Only the people below can change it.'
+              : 'Off: only the people below can see this draft.'}
+          </div>
+        </label>
       </div>
 
       <div>
-        <h3 style={{ margin: '0 0 var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
-          Share with
-        </h3>
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-          <select
-            value={addUserId}
-            onChange={e => setAddUserId(e.target.value)}
-            disabled={busy || candidates.length === 0}
-            style={{
-              flex: 1, minWidth: 0, padding: '6px 8px', fontFamily: 'inherit',
-              fontSize: 'var(--eb-text-sm)', background: 'var(--eb-bg-surface)',
-              color: 'var(--eb-text-primary)', border: '1px solid var(--eb-border-default)',
-              borderRadius: 'var(--eb-radius-sm)',
-            }}
-          >
-            <option value="">{addState.placeholder}</option>
-            {candidates.map(u => (
-              <option key={u.id} value={u.id}>{u.email ? `${u.displayName} — ${u.email}` : u.displayName}</option>
-            ))}
-          </select>
+        <h3 style={SHARE_SECTION_HEADING}>Has access{loaded ? ` (${rows.length})` : ''}</h3>
+        {!loaded ? (
+          <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>Loading…</p>
+        ) : (
+          <div style={{ maxHeight: '30vh', overflowY: 'auto' }}>
+            {rows.map(r => {
+              const rm = removeState(access, r.id);
+              return (
+                <div key={r.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+                  padding: 'var(--eb-space-2) 0', borderBottom: '1px solid var(--eb-border-default)',
+                }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+                      {r.label}{r.you ? ' (you)' : ''}
+                    </div>
+                    {r.email && (
+                      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{r.email}</div>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busy || rm.disabled}
+                    title={rm.hint || (r.you ? 'Leave this draft' : `Remove ${r.label}`)}
+                    onClick={() => mutate(() => apiCall('DELETE', `${base}/${encodeURIComponent(r.id)}`))}
+                    style={{
+                      padding: '4px 10px', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+                      background: 'transparent', border: '1px solid var(--eb-border-default)',
+                      borderRadius: 'var(--eb-radius-sm)',
+                      color: rm.disabled ? 'var(--eb-text-muted)' : 'var(--eb-status-error)',
+                      cursor: (busy || rm.disabled) ? 'not-allowed' : 'pointer',
+                      opacity: rm.disabled ? 0.6 : 1,
+                    }}
+                  >{r.you ? 'Leave' : 'Remove'}</button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <h3 style={SHARE_SECTION_HEADING}>Share with</h3>
+        <input
+          type="search"
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder="Filter by name or email…"
+          aria-label="Filter colleagues by name or email"
+          disabled={picker.filterDisabled}
+          style={{
+            width: '100%', boxSizing: 'border-box', padding: '6px 8px', fontFamily: 'inherit',
+            fontSize: 'var(--eb-text-sm)', background: 'var(--eb-bg-surface)',
+            color: 'var(--eb-text-primary)', border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-sm)',
+          }}
+        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', margin: 'var(--eb-space-2) 0' }}>
           <button
             type="button"
-            disabled={addState.disabled}
-            onClick={() => mutate(async () => {
-              const res = await apiCall('POST', base, { userId: addUserId });
-              setAddUserId('');
-              return res;
-            })}
+            disabled={picker.selectAllDisabled}
+            onClick={() => setSelected(prev => selectAllIds(pruneSelection(prev, candidates), visible))}
+            style={{ ...SHARE_SMALL_BTN, opacity: picker.selectAllDisabled ? 0.5 : 1, cursor: picker.selectAllDisabled ? 'not-allowed' : 'pointer' }}
+          >{query.trim() ? `Select all ${visible.length} shown` : 'Select all'}</button>
+          <button
+            type="button"
+            disabled={picker.clearDisabled}
+            onClick={() => setSelected(new Set())}
+            style={{ ...SHARE_SMALL_BTN, opacity: picker.clearDisabled ? 0.5 : 1, cursor: picker.clearDisabled ? 'not-allowed' : 'pointer' }}
+          >Clear selection</button>
+          <span style={{ marginLeft: 'auto', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            {liveSelected.size} selected
+          </span>
+        </div>
+        <div
+          role="group"
+          aria-label="Colleagues without access"
+          style={{
+            maxHeight: '35vh', overflowY: 'auto', border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-sm)',
+          }}
+        >
+          {!loaded ? null : picker.emptyText ? (
+            <p style={{ margin: 0, padding: 'var(--eb-space-2) var(--eb-space-3)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
+              {picker.emptyText}
+            </p>
+          ) : visible.map(u => (
+            <label key={u.id} style={{
+              display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', cursor: 'pointer',
+              padding: 'var(--eb-space-1) var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)',
+            }}>
+              <input
+                type="checkbox"
+                checked={liveSelected.has(u.id)}
+                disabled={busy}
+                onChange={() => toggle(u.id)}
+              />
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ display: 'block', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>{u.displayName}</span>
+                {u.email && (
+                  <span style={{ display: 'block', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{u.email}</span>
+                )}
+              </span>
+            </label>
+          ))}
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'var(--eb-space-2)' }}>
+          <button
+            type="button"
+            disabled={picker.shareDisabled}
+            onClick={shareSelected}
             style={{
               padding: '6px 12px', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
               background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
               border: 'none', borderRadius: 'var(--eb-radius-sm)',
-              cursor: addState.disabled ? 'not-allowed' : 'pointer',
-              opacity: addState.disabled ? 0.5 : 1,
+              cursor: picker.shareDisabled ? 'not-allowed' : 'pointer',
+              opacity: picker.shareDisabled ? 0.5 : 1,
             }}
-          >Share</button>
+          >{picker.shareLabel}</button>
         </div>
       </div>
 
-      {error && (
-        <p style={{ margin: 0, color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{error}</p>
+      {notice && (
+        <p role="status" style={{ margin: 0, color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>{notice}</p>
       )}
+      {error && (
+        <p role="alert" style={{ margin: 0, color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{error}</p>
+      )}
+
+      <ConfirmDialog
+        open={confirmGlobal}
+        title="Make this draft visible to everyone?"
+        variant="warning"
+        confirmLabel="Make visible to everyone"
+        busy={busy}
+        message={VISIBLE_TO_EVERYONE_CONFIRM}
+        onConfirm={() => setGlobal(true)}
+        onCancel={() => setConfirmGlobal(false)}
+      />
     </div>
   );
 }
@@ -425,7 +596,7 @@ function FlowNotFound({ proc, onBack }) {
 }
 
 export default function Briefings() {
-  const { user } = useAuth();
+  const { user, patchUser } = useAuth();
   const lastSelectedKey = user ? `${LAST_SELECTED_KEY_PREFIX}.${user.username}` : null;
   const [searchParams, setSearchParams] = useSearchParams();
   const [navCollapsed, setNavCollapsed] = useState(false);
@@ -540,13 +711,86 @@ export default function Briefings() {
   }, [proc, staleFlowParam, setSearchParams]);
 
   const navigate = useNavigate();
-  const { data: agents, refetch: refetchAgents } = useApi('/api/agents');
+  const { data: agents, error: agentsError, refetch: refetchAgents } = useApi('/api/agents');
   const { data: environments } = useApi('/api/environments');
-  const { data: draftsList, refetch: refetchDrafts } = useApi('/api/process/drafts');
+  const { data: draftsList, error: draftsError, refetch: refetchDrafts } = useApi('/api/process/drafts');
 
   const teams = (agents || []).filter(a => a.role === 'team');
   const drafts = Array.isArray(draftsList) ? draftsList : [];
+  // Loading / error / empty / list per rail section (#2847) — the `[]` above
+  // must not read as "empty" while the first load is still in flight.
+  const teamsSection = railSectionState({ data: agents, error: agentsError, items: teams });
+  const draftsSection = railSectionState({ data: draftsList, error: draftsError, items: drafts });
   const envNameById = new Map((environments || []).map(e => [e.id, e.name]));
+
+  // Rail filter (#2859): the Agent Chat rail filter (#2740) applied to this
+  // list. Stored as the hidden `team:<id>` / `draft:<id>` keys, per user, on
+  // the server (`flowsListFilter`, via PUT /api/me/preferences); every decision
+  // lives in process/flows-rail-filter.js.
+  const { memberships, directory, loaded: membershipsLoaded } = useTeamMemberships();
+  const viewerId = user?.userId || null;
+  const [flowsFilter, setFlowsFilter] = useState(() => normalizeSelection(user?.flowsListFilter));
+  const filterEntries = useMemo(
+    () => flowsFilterEntries({
+      teams: (agents || []).filter(a => a.role === 'team'),
+      drafts: Array.isArray(draftsList) ? draftsList : [],
+      envNameById: new Map((environments || []).map(e => [e.id, e.name])),
+      draftSubtitle,
+    }),
+    [agents, draftsList, environments],
+  );
+  const railView = flowsRailView({ teams, drafts, selection: flowsFilter });
+  // The page-level hint replaces both sections only once neither is loading,
+  // so a slow section never hides behind "No flows selected".
+  const showNoFlowsHint = railView.nothingSelected && teamsSection !== 'loading' && draftsSection !== 'loading';
+
+  const filterSaveTimerRef = useRef(null);
+  const pendingFilterSaveRef = useRef(null);
+  const flushFilterSave = useCallback(() => {
+    clearTimeout(filterSaveTimerRef.current);
+    const next = pendingFilterSaveRef.current;
+    if (!next) return;
+    pendingFilterSaveRef.current = null;
+    apiCall('PUT', '/api/me/preferences', { flowsListFilter: next }).catch(() => {});
+  }, []);
+  useEffect(() => flushFilterSave, [flushFilterSave]);
+  const persistFilter = useCallback((next) => {
+    setFlowsFilter(next);
+    // Keep the session copy current so a remount restores what was just picked.
+    patchUser({ flowsListFilter: next });
+    pendingFilterSaveRef.current = next;
+    clearTimeout(filterSaveTimerRef.current);
+    filterSaveTimerRef.current = setTimeout(flushFilterSave, FILTER_SAVE_DEBOUNCE_MS);
+  }, [patchUser, flushFilterSave]);
+
+  const filterRef = useRef(null);
+  filterRef.current = {
+    selection: flowsFilter,
+    entries: filterEntries,
+    membership: { memberships, directory, viewerId },
+    // Only a loaded section may prune its keys (a failed drafts fetch must not
+    // un-hide every draft on the next write).
+    loaded: {
+      teamsLoaded: teamsSection === 'list' || teamsSection === 'empty',
+      draftsLoaded: draftsSection === 'list' || draftsSection === 'empty',
+    },
+  };
+  const handleFilterAction = useCallback((action) => {
+    const f = filterRef.current;
+    persistFilter(applyFlowsFilterAction(f.selection, action, f.entries, f.membership, f.loaded));
+  }, [persistFilter]);
+
+  // Reveal on open (AC11): whenever the open flow changes — deep link,
+  // last-selected restore, New flow, Create team, a rail menu action — a flow
+  // hidden by the filter is ticked back in, so it is never invisible in the
+  // rail. On arrival only: unticking the flow that is already open is honoured.
+  const revealedProcRef = useRef(undefined);
+  useEffect(() => {
+    if (revealedProcRef.current === proc) return;
+    revealedProcRef.current = proc;
+    const key = revealKeyForProc(proc, filterRef.current.selection);
+    if (key) handleFilterAction({ type: 'reveal', key });
+  }, [proc, handleFilterAction]);
 
   // An unknown `?proc=` (old `/process/<team>` bookmark, deleted team/draft,
   // shared link without access) gets a "not found" state instead of an empty
@@ -787,6 +1031,20 @@ export default function Briefings() {
     }
   }
 
+  // #2870 AC10 — "Duplicate to my drafts": a global-only reader's way to an
+  // editable copy. Fetch the bundle, create an ordinary private draft from it
+  // through the SAME create route every other entry point uses, and open it.
+  async function duplicateFromRail(target) {
+    try {
+      const bundle = await apiCall('GET', `/api/process/drafts/${encodeURIComponent(target.id)}`);
+      const d = await apiCall('POST', '/api/process/drafts', duplicateDraftBody(bundle));
+      refetchDrafts();
+      selectProc(`draft:${d.id}`);
+    } catch (e) {
+      setImportError(`Duplicate failed: ${draftWriteError(e, e.message)}`);
+    }
+  }
+
   function chooseMenuItem(key) {
     const target = menuRequest?.target;
     if (!target) return;
@@ -803,6 +1061,7 @@ export default function Briefings() {
       return;
     }
     if (key === 'export') { exportFromRail(target); return; }
+    if (key === 'duplicate') { duplicateFromRail(target); return; }
     if (key === 'share') { setShareTarget({ id: target.id, name: target.name }); return; }
     if (key === 'delete') { openDeleteDraft(target); return; }
     if (key === 'open-chat') { navigate(`/chats/${encodeURIComponent(target.id)}`); }
@@ -1060,8 +1319,11 @@ export default function Briefings() {
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
+              gap: 'var(--eb-space-2)',
+              // Anchors the filter panel to the header's width (#2859).
+              position: 'relative',
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', minWidth: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', minWidth: 0, flex: 1 }}>
                 {/* The Welcome banner and this page's own help drawer moved into
                     the `flows` help topic (#1876) — the "?" opens the Help panel
                     on its "This page" face.
@@ -1078,6 +1340,19 @@ export default function Briefings() {
                   section={FLOWS_HELP_SECTIONS.overview}
                   style={{ padding: 2, flexShrink: 0 }}
                 />
+                {/* Rail filter (#2859) — the Agent Chat control with this list's
+                    wording, quick filters and summary. */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <ListFilterControl
+                    entries={filterEntries}
+                    selection={flowsFilter}
+                    onAction={handleFilterAction}
+                    quickFiltersDisabledReason={quickFiltersDisabledReason({ membershipsLoaded, viewerId })}
+                    copy={FLOWS_FILTER_COPY}
+                    quickFilters={FLOWS_QUICK_FILTERS}
+                    summary={flowsSelectionSummary(filterEntries, flowsFilter)}
+                  />
+                </div>
               </div>
               <button
                 onClick={() => setNavCollapsed(true)}
@@ -1100,14 +1375,33 @@ export default function Briefings() {
                   used to sit here, above the list. They moved into the unified
                   top-bar header (#1912) — see `headerAction` below. */}
 
+              {/* Nothing selected in the filter (#2859 AC5): one hint pointing
+                  at it instead of two sections of "hidden" notes. */}
+              {showNoFlowsHint && (
+                <div role="status" style={{ ...RAIL_HINT_STYLE, paddingTop: 'var(--eb-space-3)' }}>
+                  {NO_FLOWS_SELECTED_HINT}
+                </div>
+              )}
+              {!showNoFlowsHint && (<>
+
               {/* Teams — each team is a process (live orchestration graph) */}
               <SectionHeader>Teams</SectionHeader>
-              {teams.length === 0 ? (
+              {teamsSection === 'loading' ? (
+                <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                  {RAIL_SECTION_LOADING_TEXT}
+                </div>
+              ) : teamsSection === 'error' ? (
+                <div role="alert" style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error-text)' }}>
+                  {RAIL_SECTION_ERROR_TEXT.teams}
+                </div>
+              ) : teamsSection === 'empty' ? (
                 <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
                   No teams yet.
                 </div>
+              ) : railView.teamsHint ? (
+                <div style={RAIL_HINT_STYLE}>{railView.teamsHint}</div>
               ) : (
-                teams.map(t => (
+                railView.teams.map(t => (
                   <ListRow
                     key={t.id}
                     icon={Users}
@@ -1124,12 +1418,22 @@ export default function Briefings() {
 
               {/* Drafts — processes being authored, not yet materialised */}
               <SectionHeader>Drafts</SectionHeader>
-              {drafts.length === 0 ? (
+              {draftsSection === 'loading' ? (
+                <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                  {RAIL_SECTION_LOADING_TEXT}
+                </div>
+              ) : draftsSection === 'error' ? (
+                <div role="alert" style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error-text)' }}>
+                  {RAIL_SECTION_ERROR_TEXT.drafts}
+                </div>
+              ) : draftsSection === 'empty' ? (
                 <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
                   No drafts. Use “New flow”.
                 </div>
+              ) : railView.draftsHint ? (
+                <div style={RAIL_HINT_STYLE}>{railView.draftsHint}</div>
               ) : (
-                drafts.map(d => (
+                railView.drafts.map(d => (
                   <ListRow
                     key={d.id}
                     icon={FileText}
@@ -1142,11 +1446,12 @@ export default function Briefings() {
                     selected={proc === `draft:${d.id}`}
                     onSelect={() => selectProc(`draft:${d.id}`)}
                     onRequestMenu={(anchor) => handleRequestMenu(
-                      { kind: 'draft', id: d.id, name: d.name, roleCount: d.roleCount }, anchor,
+                      { kind: 'draft', id: d.id, name: d.name, roleCount: d.roleCount, canEdit: d.canEdit }, anchor,
                     )}
                   />
                 ))
               )}
+              </>)}
 
             </div>
           </>

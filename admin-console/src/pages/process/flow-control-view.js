@@ -15,6 +15,7 @@
 //     maintenance }
 
 import { absoluteWhen } from '../../components/format-when.js';
+import { eventLogHref } from '../github-event-focus.js';
 
 // ---------------------------------------------------------------------------
 // Durations
@@ -253,6 +254,7 @@ export function sessionView(s, { now = Date.now(), singleRepo = true } = {}) {
     role,
     instance: s.instance != null ? `#${s.instance}` : null,
     agentId: s.agentId,
+    roleId: s.roleId || null,
     chat: chatLink(s.agentId, role, s.instance != null ? s.instance : null),
     item,
     title: s.title || null,
@@ -306,6 +308,7 @@ export function poolView(p) {
   return {
     key: p.roleId || p.agentId,
     roleId: p.roleId,
+    agentId: p.agentId || null,
     label: p.label || p.roleId,
     occupancy,
     state: p.state || 'running',
@@ -317,6 +320,30 @@ export function poolView(p) {
       nextState: a === 'pause' ? 'paused' : a === 'drain' ? 'draining' : 'running',
     })),
   };
+}
+
+// #2848: each running instance of a pooled role is listed beneath that role's
+// pool line. A session's `roleId` is its role's member id — the pool's
+// `agentId`, the same key the server counts the pool's occupancy by (the pool's
+// own `roleId` is the short role id). A session whose pool is not on the board
+// stays top level, so no run ever disappears. Server order (longest-running
+// first) is kept, so instances do not jump around on refresh.
+export function groupWorkingNow(sessions, pools) {
+  const list = Array.isArray(sessions) ? sessions : [];
+  const byRole = new Map();
+  const grouped = (Array.isArray(pools) ? pools : []).map((p) => {
+    const g = { ...p, instances: [] };
+    const key = p.agentId || p.roleId;
+    if (key && !byRole.has(key)) byRole.set(key, g);
+    return g;
+  });
+  const top = [];
+  for (const s of list) {
+    const pool = s && s.roleId ? byRole.get(s.roleId) : null;
+    if (pool) pool.instances.push(s);
+    else top.push(s);
+  }
+  return { sessions: top, pools: grouped };
 }
 
 // ---------------------------------------------------------------------------
@@ -341,6 +368,60 @@ export function releaseNotice(res, ref) {
   return `${what}${ref ? ` on ${ref}` : ''} — its agent picks it up on the next poll (within about a minute).`;
 }
 
+// "Wake never delivered" (#2872): why each parked wake label never reached its
+// agent, as the GitHub Event Log recorded it. `help-topics/flow-control.md`
+// explains the same four causes.
+export const WAKE_CAUSE_TEXT = Object.freeze({
+  'history-horizon': 'older than its agent\u2019s trigger (flow re-applied or team moved)',
+  'wake-already-armed': 're-add dropped as already armed',
+  'not-seen': 'never reported by the GitHub Events API',
+});
+
+export function wakeCauseText(w) {
+  if (!w || typeof w !== 'object') return '';
+  if (WAKE_CAUSE_TEXT[w.cause]) return WAKE_CAUSE_TEXT[w.cause];
+  return `dropped (${w.dropReason || 'unknown'})`;
+}
+
+// "Wake again" (#2873): what the confirm dialog says before a parked wake is
+// delivered to its agent again. `help-topics/flow-control.md` quotes it.
+export const WAKE_CONFIRM_TEXT = 'The wake label already on the GitHub item is delivered to its agent again, directly — no label is changed. A pooled role starts on the item\u2019s own instance; a hand-off with a readiness gate still waits for CI. Only do this when nobody is already working on it.';
+
+// "Adopt" (#2877): the same delivery for a row carried over from another
+// instance or an earlier flow. `help-topics/flow-control.md` quotes it.
+export const CARRIED_OVER_REASON = 'carried over — not started here';
+export const ADOPT_CONFIRM_TEXT = 'These items already carry a wake label from before this team\u2019s triggers were activated here — after a move to this instance or a flow re-apply. Adopting delivers each label to its agent once, directly — no label is changed. Items an agent is already working on, or that wait in a queue, are skipped.';
+
+export function adoptDialogTitle(n) {
+  return n === 1 ? 'Adopt 1 carried-over item?' : `Adopt ${n} carried-over items?`;
+}
+
+// The notice after "Adopt all"; null when nothing was adopted.
+export function adoptNotice(res) {
+  const n = res && Number.isFinite(res.adopted) ? res.adopted : 0;
+  if (n < 1) return null;
+  return `${n === 1 ? '1 item' : `${n} items`} adopted — each agent starts on its next check.`;
+}
+
+export function wakeDialogTitle(ref) {
+  return ref ? `Wake the agent for ${ref} again?` : 'Wake the agent again?';
+}
+
+// "Wake Code Reviewer for PR #2844 (ready-for-review)".
+export function wakeTargetText(w) {
+  const roles = (Array.isArray(w && w.roles) ? w.roles : []).map((r) => r && (r.label || r.id)).filter(Boolean);
+  return `Wake ${roles.join(' and ') || 'its agent'} for ${w.ref} (${w.label})`;
+}
+
+// The notice after a wake that reached at least one agent; null otherwise
+// (the error bar carries that).
+export function wakeNotice(res, ref) {
+  const n = res && Number.isFinite(res.woken) ? res.woken : 0;
+  if (n < 1) return null;
+  const held = (Array.isArray(res.results) ? res.results : []).some((r) => r && r.ok && r.held > 0 && !r.delivered);
+  return `${n === 1 ? 'Wake' : `${n} wakes`} delivered again${ref ? ` for ${ref}` : ''} — ${held ? 'its hand-off waits for CI first' : 'its agent starts on its next check (within a few seconds)'}.`;
+}
+
 export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}) {
   const ref = entry.issue
     ? itemRef(entry.issue.repo, entry.issue.number, singleRepo)
@@ -355,6 +436,17 @@ export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}
       wake: c.wake,
       text: `${c.claim} → ${c.wake}`,
     }));
+  const wakes = (Array.isArray(entry.wakes) ? entry.wakes : [])
+    .filter((w) => w && typeof w.label === 'string')
+    .map((w) => ({
+      ref: `${w.kind === 'pr' ? 'PR ' : ''}${itemRef(w.repo, w.number, singleRepo)}`,
+      label: w.label,
+      cause: w.cause,
+      text: wakeCauseText(w),
+      href: eventLogHref(w.eventId),
+      roles: (Array.isArray(w.roles) ? w.roles : []).filter((r) => r && r.id),
+    }))
+    .map((w) => ({ ...w, target: wakeTargetText(w) }));
   return {
     id: entry.id,
     ref,
@@ -363,6 +455,10 @@ export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}
     reason: entry.reason || (entry.needsHuman && entry.needsHuman.reason) || '',
     waiting: since(entry.since || (entry.needsHuman && entry.needsHuman.since), now),
     release,
+    wakes,
+    canWake: wakes.some((w) => w.roles.length > 0),
+    // #2877: a carried-over row's wake button reads "Adopt".
+    carriedOver: (entry.reason || (entry.needsHuman && entry.needsHuman.reason)) === CARRIED_OVER_REASON,
   };
 }
 
@@ -395,13 +491,19 @@ export function boardView(data, now = Date.now()) {
   const doneRetentionHours = d.doneRetentionHours ?? (d.config && d.config.doneRetentionHours) ?? null;
   const needs = (Array.isArray(d.needsHuman) ? d.needsHuman : []).map((n) => needsYouView(n, opts));
   const removed = (Array.isArray(d.removed) ? d.removed : []).map((r) => removedView(r, opts));
+  const working = groupWorkingNow(
+    (Array.isArray(d.sessions) ? d.sessions : []).map((s) => sessionView(s, opts)),
+    (Array.isArray(d.pools) ? d.pools : []).map(poolView),
+  );
   return {
     stages,
     roles: Array.isArray(d.roles) ? d.roles : [],
-    sessions: (Array.isArray(d.sessions) ? d.sessions : []).map((s) => sessionView(s, opts)),
-    pools: (Array.isArray(d.pools) ? d.pools : []).map(poolView),
+    sessions: working.sessions,
+    pools: working.pools,
     held: Array.isArray(d.held) ? d.held : [],
     needsYou: needs.length ? needs : null,
+    // #2877: rows the board's "Adopt all" would start.
+    carriedOver: Array.isArray(d.carriedOver) ? d.carriedOver.filter((id) => needs.some((n) => n.id === id && n.canWake)) : [],
     activeRows,
     doneRows,
     removed,

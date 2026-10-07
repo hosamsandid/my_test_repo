@@ -113,7 +113,10 @@ function projectAgentRows(entries, agentId) {
   for (const e of list) {
     if (!e || e.source !== REFIRE_SOURCE || !e.refireOf) continue;
     for (const o of e.outcomes || []) {
-      if (o && o.agentId === agentId) refires.set(`${e.refireOf.eventId}\u0000${o.triggerId}`, e);
+      // #2875: a pool instance's drop is re-fired through its template.
+      if (o && (o.agentId === agentId || e.refireOf.agentId === agentId)) {
+        refires.set(`${e.refireOf.eventId}\u0000${o.triggerId}`, e);
+      }
     }
   }
   const rows = [];

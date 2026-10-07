@@ -466,6 +466,19 @@ its result are folded into one block, and hovering a row dims everything that
 does not belong to the same turn, so you can follow one exchange through a busy
 log. Long logs are windowed, so a run with thousands of steps stays responsive.
 
+A tool that runs for a long time shows that it is still going: its block reads
+*running · 6m 00s* and the time counts up in place, and once it finishes it
+reads *took 6m 12s* (only for calls long enough to report progress). If the run
+ended first, it reads *stopped after …*. Expand the block for the details —
+the background task id and type, and the latest raw progress report. A wait
+for a pull request's CI (`aee-wait-ci`) shows as a card instead of a command:
+*Waiting for CI · PR #2838 · 6m 00s of max 20m*, then the verdict — **CI
+passed**, **No CI configured**, **CI failed**, **Merge conflict**, **Timed
+out** or **Error** — with the PR linked; the command and raw result stay on
+expand. In the chat itself the agent's room gets one short note when such a
+wait starts (*Pull request #2838 is open — waiting for CI to finish*), so you
+know why the agent is quiet; the agent's answer still follows when it is done.
+
 While the agent is working through a task list, that list is shown live — inline
 in the timeline and in a **TODO panel** docked to the bottom, with a
 *done/total · current step* summary. It is built from the agent's own task
@@ -681,6 +694,13 @@ dropped with the reason. On a *wake-already-armed*, *throttle* or
 now with the same prompt. Refused if the item is merged/closed, the wake label
 is gone, or it was already re-fired.
 
+A *history-horizon* drop — a label added before the trigger was activated, for
+example just before the flow was re-applied or the team moved to another
+instance — can be fired again too, but only while that wake label is **still
+on the open item**. It is offered only for an event that added the trigger's
+own wake label; the dialog says that the event predates the trigger. The
+poller itself still ignores such events on its own.
+
 A pull request linked to an issue reads `#2798 → closes #2794 <title>` here and
 in the **Fire again** dialog — the same `→ closes #N` the chat's
 `⚡ Trigger fired — …` notice carries — so you can search by the issue number.
@@ -846,6 +866,24 @@ belongs to this team):
 sitting at the same level as everything else rather than as separate sections
 below a box; a team with nothing installed or configured still shows all
 eight tabs, each explaining its own empty state rather than disappearing.
+
+**General → Label suffix** is the one place a team's label suffix is changed
+after creation — the suffix that keeps parallel teams on one repository from
+waking each other. It follows the same rule as at creation (up to eight
+lowercase letters, digits and single inner dashes; empty means no suffix), so
+you can also give an unsuffixed team a suffix or remove one. **Change…**
+first shows a confirmation with how many labels and agents the change touches
+and a warning that the labels are renamed in place on GitHub; only then is
+anything written. It rewrites every place the team uses those labels —
+triggers and claims, channels, outcomes' *set label* actions, the label and
+human-role registries and the prompt text (only whole label names; a plain
+word such as *ready* stays as it is) — and renames the GitHub labels, so open
+issues and pull requests keep them. A suffix that would produce a label name
+another team on the same repository already uses is refused. If a GitHub
+rename fails, the team is still updated and the section lists the pending
+renames with a **Retry GitHub rename** button. Running sessions pick up the
+new labels and prompts on their next run. It applies immediately, not through
+Save.
 
 Saving General or Skills uses this form's own Save button; the five
 environment tabs and Plugins keep their own, unrelated save/apply behaviour

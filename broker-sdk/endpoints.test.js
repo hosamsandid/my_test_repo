@@ -49,6 +49,15 @@ test('health: reports the image build identity from the environment', async () =
   assert.equal(res.body.backend, 'reachable');
 });
 
+// #2893: the release tag + distance travel along on /healthz.
+test('health: reports the release tag and distance when the image recorded one', async () => {
+  const env = { AEE_BUILD_COMMIT: 'abc1234', AEE_BUILD_TAG: 'v0.4.0', AEE_BUILD_TAG_DISTANCE: '12' };
+  const res = fakeRes();
+  await healthEndpoint(null, { env })({}, res);
+  assert.equal(res.body.build.tag, 'v0.4.0');
+  assert.equal(res.body.build.tagDistance, 12);
+});
+
 test('teardown: 401 on a forged/missing token, reap never runs', async () => {
   let reaped = false;
   const handler = teardownScopeEndpoint(() => { reaped = true; }, { secret: SECRET });

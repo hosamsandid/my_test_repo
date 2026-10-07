@@ -753,6 +753,79 @@ test('cli writes: /add-stories creates stories under an existing Epic, registers
   }
 });
 
+test('cli writes: /add-subtasks creates Sub-tasks under an existing issue, registers own writes, audits (#2900)', async () => {
+  // A distinct site keeps the process-lifetime field catalog off other fixtures.
+  broker.scopeCredentials.set('team-1', { 'site-url': 'addsubtasksco', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  const created = [];
+  const ISSUES = {
+    'KAN-10': { key: 'KAN-10', fields: { summary: 'Checkout', project: { key: 'KAN' }, issuetype: { name: 'Story', hierarchyLevel: 0 } } },
+    'KAN-12': { key: 'KAN-12', fields: { summary: 'Payments', project: { key: 'KAN' }, issuetype: { name: 'Epic', hierarchyLevel: 1 } } },
+  };
+  global.fetch = async (url, opts) => {
+    const u = String(url);
+    if (u.includes('127.0.0.1')) return origFetch(url, opts);
+    if (u.match(/\/rest\/api\/3\/field$/)) return { ok: true, status: 200, text: async () => '[]' };
+    const get = u.match(/\/rest\/api\/3\/issue\/([^/?]+)\?fields=/);
+    if (get && (!opts || !opts.method || opts.method === 'GET')) {
+      const issue = ISSUES[decodeURIComponent(get[1])];
+      return issue
+        ? { ok: true, status: 200, text: async () => JSON.stringify(issue) }
+        : { ok: false, status: 404, text: async () => '{"errorMessages":["Issue does not exist or you do not have permission to see it."]}' };
+    }
+    if (u.match(/\/rest\/api\/3\/project\/KAN$/)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'KAN', issueTypes: [
+        { id: '1', name: 'Story', hierarchyLevel: 0 }, { id: '4', name: 'Epic', hierarchyLevel: 1 }, { id: '5', name: 'Sub-task', subtask: true, hierarchyLevel: -1 },
+      ] }) };
+    }
+    if (u.includes('/rest/api/3/issue/createmeta/')) return { ok: true, status: 200, text: async () => JSON.stringify({ total: 0, fields: [] }) };
+    if (opts && opts.method === 'POST' && u.match(/\/rest\/api\/3\/issue$/)) {
+      created.push(JSON.parse(opts.body).fields);
+      return { ok: true, status: 201, text: async () => JSON.stringify({ key: `KAN-${300 + created.length}` }) };
+    }
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  };
+  const srv = await listen();
+  try {
+    const ok = await call(srv, 'POST', '/cli/add-subtasks', {
+      token: TOKEN, body: { parent: 'kan-10', subtasks: [{ summary: 'One' }, { summary: 'Two' }, { summary: 'Three' }] },
+    });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.parent.key, 'KAN-10');
+    assert.equal(ok.body.created, 3);
+    assert.deepEqual(ok.body.subtasks.map((s) => s.key), ['KAN-301', 'KAN-302', 'KAN-303']);
+    assert.ok(created.every((f) => f.issuetype.id === '5' && f.parent.key === 'KAN-10'), 'Sub-tasks, each under KAN-10');
+    const own = broker.ownWritesStore.snapshot('team-1');
+    assert.ok(own.issues['KAN-301'] && own.issues['KAN-302'] && own.issues['KAN-303'], 'created Sub-tasks are own writes (origin = agent)');
+    assert.ok(own.fields['KAN-301|*']);
+    // AC7: the poller's issue_created for a created Sub-task reads origin = agent
+    const { extractIssueCreatedEvents } = require('./event-extract');
+    const [ev] = extractIssueCreatedEvents({ key: 'KAN-302', issueType: 'Sub-task', created: new Date().toISOString() }, { ownWrites: own });
+    assert.equal(ev.origin, 'agent');
+    assert.ok(auditLines().some((l) => l.subcommand === 'add-subtasks' && l.outcome === 'ok' && l.detail === 'KAN-10 +3/3 sub-tasks'));
+
+    const before = created.length;
+    const missing = await call(srv, 'POST', '/cli/add-subtasks', { token: TOKEN, body: { parent: 'OTHER-1', subtasks: [{ summary: 'S' }] } });
+    assert.equal(missing.status, 404);
+    assert.match(missing.body.error, /OTHER-1 was not found, or it is outside this team's Jira scope/);
+    const epic = await call(srv, 'POST', '/cli/add-subtasks', { token: TOKEN, body: { parent: 'KAN-12', subtasks: [{ summary: 'S' }] } });
+    assert.equal(epic.status, 400);
+    assert.match(epic.body.error, /KAN-12 is an Epic — Jira does not allow Sub-tasks directly under an Epic/);
+    assert.equal((await call(srv, 'POST', '/cli/add-subtasks', { token: TOKEN, body: { subtasks: [{ summary: 'S' }] } })).status, 400);
+    assert.equal((await call(srv, 'POST', '/cli/add-subtasks', { token: TOKEN, body: { parent: 'KAN-10', subtasks: [] } })).status, 400);
+    assert.equal(created.length, before, 'no refused call created anything');
+
+    const nocred = await call(srv, 'POST', '/cli/add-subtasks', { token: OTHER, body: { parent: 'X-1', subtasks: [{ summary: 'S' }] } });
+    assert.equal(nocred.status, 400);
+    assert.equal(nocred.body.code, 'no-service-account');
+    assert.equal((await call(srv, 'GET', '/cli/add-subtasks', { token: TOKEN })).status, 404);
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
 test('cli writes: /add-stories with a type creates a Bug and a Task under the Epic; a bad type fails only its issue (#2896)', async () => {
   // A distinct site keeps the process-lifetime field catalog off other fixtures.
   broker.scopeCredentials.set('team-1', { 'site-url': 'addtypedco', email: 'a@b.c', 'api-token': 'tok' });
@@ -1728,7 +1801,7 @@ test('a refused grant blocks EVERY subcommand before Jira is touched (AC4/AC5)',
     const routes = [
       ['GET', '/cli/whoami'], ['GET', '/cli/inbox'], ['GET', '/cli/inbox?consume=KAN-1:1'], ['GET', '/cli/projects'],
       ['GET', '/cli/show?issue=KAN-1'], ['GET', '/cli/sprint/list?board=B'], ['GET', '/cli/attachment?issue=KAN-1&id=1'], ['GET', '/cli/users?query=Anna'], ['GET', '/cli/comments?issue=KAN-1'],
-      ['POST', '/cli/comment'], ['POST', '/cli/transition'], ['POST', '/cli/create-epic'], ['POST', '/cli/add-stories'], ['POST', '/cli/create-issue'], ['POST', '/cli/set-epic'], ['POST', '/cli/edit'], ['POST', '/cli/sprint/create'],
+      ['POST', '/cli/comment'], ['POST', '/cli/transition'], ['POST', '/cli/create-epic'], ['POST', '/cli/add-stories'], ['POST', '/cli/add-subtasks'], ['POST', '/cli/create-issue'], ['POST', '/cli/set-epic'], ['POST', '/cli/edit'], ['POST', '/cli/sprint/create'],
       ['POST', '/cli/attachment/add'],
     ];
     for (const [method, url] of routes) {

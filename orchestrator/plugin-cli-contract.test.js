@@ -875,6 +875,49 @@ test('aee-jira add-stories: listed in --help; bad payloads are usage errors; wir
   }
 });
 
+test('aee-jira add-subtasks: listed in --help; bad payloads are usage errors; wired to /add-subtasks; exit 1 on a failed Sub-task (#2900)', async () => {
+  const ws = grantedJiraWorkspace();
+  const flat = runJira(['--help'], ws).stdout.replace(/\s+/g, ' ');
+  assert.match(flat, /add-subtasks create Sub-tasks under an EXISTING Story \/ Task \/ Bug/);
+  assert.match(flat, /aee-jira add- ?subtasks --parent KAN-10 --file subtasks.json/); // argparse may wrap at the hyphen
+  const file = (doc) => { const p = path.join(ws, `p-${Math.random()}.json`); fs.writeFileSync(p, doc); return p; };
+  assert.equal(runJira(['add-subtasks', '--file', file('{"subtasks":[{"summary":"S"}]}')], ws).status, 2);
+  assert.equal(runJira(['add-subtasks', '--parent', 'KAN-10', '--file', file('not json'), '--json'], ws).status, 2);
+  assert.equal(runJira(['add-subtasks', '--parent', 'KAN-10', '--file', file('{"subtasks":[]}'), '--json'], ws).status, 2);
+  assert.equal(runJira(['add-subtasks', '--parent', 'KAN-10', '--file', file('{"stories":[{"summary":"S"}]}'), '--json'], ws).status, 2);
+
+  const http = require('node:http');
+  const seen = [];
+  let failed = 0;
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, body: JSON.parse(raw) });
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ parent: { key: 'KAN-10' }, subtasks: [], created: 3, failed }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const live = grantedJiraWorkspace(`http://127.0.0.1:${port}/`);
+    const payload = file('{"subtasks":[{"summary":"A"},{"summary":"B","status":"In Progress"},{"summary":"C"}]}');
+    let r = await runJiraAsync(['add-subtasks', '--parent', 'KAN-10', '--type', 'Unteraufgabe', '--file', payload, '--json'], live);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(seen[0], {
+      method: 'POST', url: '/cli/add-subtasks',
+      body: { parent: 'KAN-10', type: 'Unteraufgabe', subtasks: [{ summary: 'A' }, { summary: 'B', status: 'In Progress' }, { summary: 'C' }] },
+    });
+    failed = 1;
+    r = await runJiraAsync(['add-subtasks', '--parent', 'KAN-10', '--file', payload, '--json'], live);
+    assert.equal(r.status, 1, 'a partial result exits non-zero, like add-stories');
+    assert.deepEqual(seen[1].body, { parent: 'KAN-10', subtasks: [{ summary: 'A' }, { summary: 'B', status: 'In Progress' }, { summary: 'C' }] });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('aee-jira add-stories: --type and an "issues" payload add any standard type under the Epic (#2896)', async () => {
   const ws = grantedJiraWorkspace();
   const flat = runJira(['add-stories', '--help'], ws).stdout.replace(/\s+/g, ' ');

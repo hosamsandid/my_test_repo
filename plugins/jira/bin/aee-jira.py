@@ -44,6 +44,7 @@ ticket is routine and reversible):
     aee-jira add-stories --epic KAN-12 --file stories.json   # add new Stories to an EXISTING Epic (no new Epic)
     aee-jira add-stories --epic KAN-12 --type Bug --file bugs.json   # ... or Bugs, Tasks, any standard type
     aee-jira create-issue --project KAN --type Bug --summary "Login fails"   # one standalone issue, no Epic
+    aee-jira add-subtasks --parent KAN-10 --file subtasks.json   # new Sub-tasks under an EXISTING Story/Task/Bug
     aee-jira set-epic KAN-30 KAN-31 --epic KAN-12   # put EXISTING issues under an Epic (or move them to it)
     aee-jira set-epic KAN-30 --none               # take an existing issue out of its Epic
     aee-jira edit KAN-10 --summary "New title" --priority High --add-label backend   # change standard fields
@@ -147,6 +148,29 @@ lists the project's types), an Epic type (use create-epic), a sub-task type, a
 required field the project needs but the call does not set (named in the
 error), a custom field off a non-empty writable-custom-fields allow-list, or a
 value Jira rejects (e.g. an unknown assignee accountId).
+
+`add-subtasks` splits an existing Story, Task or Bug: it creates N new
+Sub-tasks under the issue named by --parent, in that issue's project. Each
+Sub-task takes create-issue's fields — "summary" (required), "description",
+"assignee", "priority", "labels", "status" (a follow-up transition) and
+"fields" (custom fields by Jira name) — plus an optional "type":
+
+    {
+      "subtasks": [
+        { "summary": "Write the migration", "assignee": "<accountId>" },
+        { "summary": "Update the docs", "status": "In Progress" }
+      ]
+    }
+
+The sub-task type is the project's own ("Sub-task", "Unteraufgabe", …): with
+exactly one it is used without being named; with several, name it with --type
+(for the whole call) or a per-Sub-task "type". Refused before anything is
+created: a parent that does not exist or is outside the team's Jira scope, a
+parent that is an Epic or itself a Sub-task, a project without a sub-task type
+(Sub-tasks disabled), or several sub-task types and none named. An unknown or
+non-sub-task type, a required field the Sub-task does not set, or a value Jira
+rejects fails only that Sub-task — the others are still created; the result
+reports each key/URL or the reason, and the CLI exits 1 if any failed.
 
 `set-epic` re-parents issues that already exist: every listed issue goes under
 the Epic named by --epic (moved there if it is under another Epic), or with
@@ -757,6 +781,21 @@ def build_parser():
         help='optional JSON object with the same keys (summary, description, assignee, priority, labels, status, fields); "-" reads stdin; flags win',
     )
 
+    p_add_subtasks = sub.add_parser(
+        "add-subtasks", parents=[common],
+        help="create Sub-tasks under an EXISTING Story / Task / Bug (payload from --file or stdin), e.g. "
+             "aee-jira add-subtasks --parent KAN-10 --file subtasks.json",
+    )
+    p_add_subtasks.add_argument("--parent", required=True, help="key of the existing issue the Sub-tasks go under, e.g. KAN-10")
+    p_add_subtasks.add_argument(
+        "--type",
+        help='the sub-task type for every Sub-task in the call — only needed when the project has several; a per-Sub-task "type" wins',
+    )
+    p_add_subtasks.add_argument(
+        "--file", metavar="PATH",
+        help='JSON payload describing {"subtasks": [...]}; omit or use "-" to read stdin',
+    )
+
     p_set_epic = sub.add_parser(
         "set-epic", parents=[common],
         help="put EXISTING issues under an Epic, move them to it, or take them out (--none), e.g. "
@@ -848,7 +887,7 @@ def build_parser():
 
 
 def _read_payload_text(file_path):
-    """The create-epic / add-stories payload text: from --file, or stdin when omitted / "-"."""
+    """The create-epic / add-stories / add-subtasks payload text: from --file, or stdin when omitted / "-"."""
     if not file_path or file_path == "-":
         return sys.stdin.read()
     with open(file_path, "r", encoding="utf-8") as fh:
@@ -1006,6 +1045,26 @@ def main(argv=None):
         if isinstance(doc.get("issueTypes"), dict):
             body["issueTypes"] = doc["issueTypes"]
         path, method = "/add-stories", "POST"
+    elif args.cmd == "add-subtasks":
+        try:
+            raw = _read_payload_text(args.file)
+        except OSError as e:
+            emit({"ok": False, "error": "usage", "message": "cannot read payload file: %s" % e}, as_json)
+            return EXIT_USAGE
+        try:
+            doc = json.loads(raw)
+        except ValueError as e:
+            emit({"ok": False, "error": "usage", "message": "payload is not valid JSON: %s" % e}, as_json)
+            return EXIT_USAGE
+        entries = doc.get("subtasks") if isinstance(doc, dict) else None
+        if not isinstance(entries, list) or not entries:
+            emit({"ok": False, "error": "usage",
+                  "message": 'payload must be a JSON object with a non-empty "subtasks" array'}, as_json)
+            return EXIT_USAGE
+        body = {"parent": args.parent, "subtasks": entries}
+        if args.type:
+            body["type"] = args.type
+        path, method = "/add-subtasks", "POST"
     elif args.cmd == "create-issue":
         issue = {}
         if args.file:
@@ -1165,8 +1224,9 @@ def main(argv=None):
     # automated caller notices a partial result, while still printing the Epic
     # key + the per-story map above.
     # add-stories follows the same convention (#2890).
-    # set-epic likewise reports one outcome per issue (#2895).
-    if args.cmd in ("create-epic", "add-stories", "set-epic") and isinstance(result, dict) and result.get("failed"):
+    # set-epic likewise reports one outcome per issue (#2895), add-subtasks
+    # one per Sub-task (#2900).
+    if args.cmd in ("create-epic", "add-stories", "set-epic", "add-subtasks") and isinstance(result, dict) and result.get("failed"):
         return EXIT_DOMAIN_ERROR
     # create-issue (#2894): the issue exists, but the requested status could not
     # be reached — exit 1 so the caller notices, while still printing the key.

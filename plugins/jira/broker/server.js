@@ -703,6 +703,46 @@ async function handleCli(req, res, cliPath) {
     }
   }
 
+  // ── new Sub-tasks under an EXISTING standard issue (#2900) ───────────────
+  // The CLI sends `{ parent: "<KEY>", subtasks[], type? }`; the broker checks
+  // the parent is a visible Story / Task / Bug (not an Epic or Sub-task) and
+  // the project has a sub-task type, then creates each Sub-task under it
+  // (jira.addSubtasksToIssue) with a per-Sub-task outcome. Gated like
+  // add-stories: the same `create` write policy, allow-list and own-writes
+  // registration per created key; audited as `add-subtasks`.
+  if (cliPath === '/add-subtasks' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('create');
+    if (!authz.allow) {
+      auditCall('add-subtasks', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = credFor();
+    if (!cred) return noCredential('add-subtasks');
+    const body = parseJson(await readBody(req));
+    const parentKey = String(body.parent || '').trim().toUpperCase();
+    if (!parentKey) return sendJson(res, 400, { error: 'a --parent key is required' });
+    if (!Array.isArray(body.subtasks) || !body.subtasks.length) return sendJson(res, 400, { error: 'at least one sub-task is required' });
+    try {
+      const result = await jira.addSubtasksToIssue(cred, {
+        parentKey,
+        subtasks: body.subtasks,
+        defaultType: typeof body.type === 'string' ? body.type : undefined,
+        allowList: cred.writableCustomFields || [],
+        attribution: `Created by an agent on team "${scopeId}" via Agent Studio.`,
+        issueTypes: body.issueTypes && typeof body.issueTypes === 'object' ? body.issueTypes : undefined,
+        onCreated: (key) => recordOwnWrite(() => {
+          ownWritesStore.recordIssue(scopeId, key);
+          ownWritesStore.recordField(scopeId, key, '*');
+        }),
+      });
+      auditCall('add-subtasks', 'ok', `${result.parent.key} +${result.created}/${result.subtasks.length} sub-tasks`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      auditCall('add-subtasks', failureOutcome(err), `${parentKey}: ${err.message}`);
+      return sendJiraError(err);
+    }
+  }
+
   // ── parent Epic of EXISTING issues: put under, move, take out (#2895) ────
   // The CLI sends `{ epic: "<KEY>", issues[] }` or `{ remove: true, issues[] }`
   // — removal is explicit, so a missing epic is never read as "take out". The

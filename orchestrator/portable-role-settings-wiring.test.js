@@ -18,13 +18,10 @@ function fnBody(name) {
   return SRC.slice(start, SRC.indexOf('\n}\n', start));
 }
 
-test('memberPortableFields carries prompt mode, model pin and memory onto a member config', () => {
-  const body = fnBody('memberPortableFields');
-  assert.match(body, /promptMode/);
-  assert.match(body, /modelOverride/);
-  assert.match(body, /normalizeMemoryLimit\(opts\.memoryLimit\)/);
-  // An inherit member stores no own prompt text.
-  assert.match(body, /promptMode !== PROMPT_MODES\.INHERIT/);
+test('addTeamMember records the portable fields through the shared memberPortableFields helper', () => {
+  assert.match(SRC, /const \{ memberPortableFields \} = require\("\.\/member-portable-fields"\);/);
+  // Both the stub and the materialised branch of addTeamMember use it.
+  assert.equal((SRC.match(/memberPortableFields\(opts\)/g) || []).length, 2);
 });
 
 test('every container start sizes from the role memory, clamped to the ceiling (AC3/AC5)', () => {

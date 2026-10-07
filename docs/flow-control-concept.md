@@ -628,7 +628,8 @@ is read from the members' ports: labels a role emits (`emits`, trigger
 Roots are roles woken by a label no role emits; roles are placed by
 breadth-first depth, a loop-back role (e.g. a Reworker) before its forward
 sibling, then the longest forward path. Board columns = **Ready**, one per
-role in that order, **Done**. A role on several paths appears once; pool
+role in that order, **Done**. *(Superseded by #2637: the first column is
+**Draft** — see Amendment 4.)* A role on several paths appears once; pool
 instances (`<team>-<role>-i<item>`, live or already reaped) count as their
 role. An optional per-team `flow-board.json` (`{doneRetentionHours, stages:
 {<memberId>: {label, hidden, mergeInto}}}`) renames, merges or hides stages.
@@ -640,7 +641,8 @@ or — for an issue — carries a label a team role consumes (released). An
 issue and the PRs its woken agent opened form one row, linked through the
 pr-created record's correlation id to the waking event — no `Closes #n`
 needed. Dependabot PRs never appear. Finished rows stay for
-`doneRetentionHours` (default 24).
+`doneRetentionHours` (default 24); the console lists them in a separate
+**Recently completed** section below **In progress**, never mixed in (#2607).
 
 **A3.4 — sessions know their work item.** The agent runtime now records a
 `workItem` (`{repo, kind, number}`) on each triggered session, so the
@@ -653,6 +655,8 @@ with base, waiting for approval (a label the flow hands to no agent),
 approved — waiting for merge, checks failing, or no agent is scheduled to
 continue (nothing woke or queued for 30 min after the last run). A conflict
 already queued for an agent is not a human block.
+*(Extended by #2734/#2754: two more reasons — **stuck — no progress, needs
+help** and **nobody picks it up** — see Amendment 5.)*
 
 **A3.6 — Drain now ends in Off.** `pool-control.json` gains a third state,
 `off`: it refuses every dispatch, including reuse of a live instance.
@@ -664,3 +668,190 @@ also redelivers work held while the role was paused/draining/off.
 **Removed from the board:** the stat chips, the epic roll-up, the Backlog
 column and the list of all open PRs. The pool-lane panel is folded into
 "Working now".
+
+## Amendment 4 — Draft stage and Remove from board (#2637)
+
+**A4.1 — Ready becomes Draft.** Stage 0 only ever held rows with no running
+session, claim label, wake label or delivered wake — items nobody had
+released, not released ones (a released item already sits at the role it
+wakes, as *queued*). The column is now **Draft** and its rows carry status
+`draft` (UI: *awaiting release*).
+
+**A4.2 — Remove from board.** A Team Admin can take a row off the board while
+no agent is working on it or queued for it (`removable` on each row; the
+orchestrator re-checks it). Removals are stored per team in
+`flow-board-removed.json` beside `flow-board.json` —
+`{ "<row id>": { removedAt, keys: ["<repo>#<n>", …] } }` — and written through
+`POST /api/teams/:teamId/flow-board-removed` (`{ action: remove|restore,
+rowId }`). The GitHub item is never touched. The board returns the hidden rows
+as `removed[]` (the **Removed (n)** list with **Restore**).
+
+**A4.3 — a removal ends on new flow activity.** `removalRevived` brings a row
+back when, after `removedAt`, an agent is working on or queued for it, a wake
+was delivered on any of its items, or a team agent opened a PR for it. Edits,
+comments and cross-references (`updatedAt` only) do not count. Revived entries,
+and entries whose row left the snapshot, are pruned from the store — only for
+repos the sweep actually reached, so a GitHub outage never forgets a removal.
+
+## Amendment 5 — Release claim and wakes nobody can pick up (#2754)
+
+**A5.1 — the stuck reason gets a way out.** #2734 added the reason *stuck — no
+progress, needs help*: a row has read *working* for more than an hour only
+because of a `<wake>:wip` claim, and no session or pool instance is alive for
+it. The board only reported it. Since #2754 such a row carries a `release`
+list (`{repo, number, kind, claim, wake}`), one entry per `:wip` claim whose
+wake label still has a live consumer. A Team Admin (`canManageTeam`) gets a
+**Release claim** button with a confirmation dialog listing `claim → wake`.
+
+**A5.2 — the release swaps the label on GitHub, nothing else.** The console
+route `POST /api/teams/:teamId/flow-board-release` (`{ rowId }`; the actor is
+the session user, never the body) proxies to the orchestrator's
+`POST /internal/teams/:teamId/flow-board-release`. It re-reads a **fresh**
+board and refuses a stale board (503), an unknown row (404), or a row that is
+no longer stuck or has no claim (409) — `planClaimRelease` in the pure
+`orchestrator/flow-claim-release.js`. `swapClaimLabel` then removes the claim
+**first** and adds the wake label back (on a failed add it creates the label
+and retries once), with the token `resolveRepoGithubTokenId` picks for the
+repo. When the wake label still hangs next to the claim (the #2713 shape: the
+wake was re-applied on top, so the board marks the entry `wakePresent`),
+adding it again would create no `labeled` event, so the swap also removes the
+wake before re-adding it (claim → wake → re-add). After a successful swap the
+route clears the poller's armed wake-edge key for that label on the item
+(`disarmWake`), because on a pull request the Events API reports no standalone
+`unlabeled` and the re-add would otherwise be dropped as `wake-already-armed`.
+There is no in-process wake: the poller sees the re-applied wake label
+and re-dispatches the item on its next poll, as if a person had re-applied it.
+A partial failure comes back as a warning that says what to do by hand. Every
+swap writes one GitHub Event Log line, `flow-control.claim-released` (UI:
+*claim released (Flow Control)*), with the actor and the outcome. The board
+never releases a claim on its own.
+
+**A5.3 — wakes whose every consumer is switched off.** A new reason, *nobody
+picks it up — its agent is switched off*, replaces queued/stuck for an item
+with no live session when every wake label it carries (or its claim) is
+consumed only by switched-off agents — the agent is disabled, or its trigger
+on that label is. One live consumer clears it. Such rows get no release,
+because releasing would wake nobody. The flow lint
+`wake-label-no-live-consumer` (warning, *Nobody picks this label up*) reports
+the same on the Flows page; the graph endpoints now carry `enabled: false` on
+switched-off nodes. A label with no consumer at all stays with
+`dead-end-emitter` / `outcome-without-consumer`.
+
+## Amendment 6 — wakes that were never delivered (#2872, epic #2880)
+
+**A6.1 — the problem.** Label wakes are edge-triggered on the GitHub Events
+API: the poller wakes a consumer on the one `labeled` event. If that event is
+dropped or never arrives, the wake label stays on the item, the row reads
+*<stage> / up next* for good, and nothing re-checks it. On 2026-10-06 five PRs
+of `agent-studio-3-0` sat like this for ~18 h, for three different causes.
+
+**A6.2 — detection (report-only).** `buildFlowBoard` flags a row with the new
+reason *wake never delivered* (`REASONS.wakeLost`) when its position is
+`queued` and:
+- no session or live pool instance is behind any of its items;
+- no dispatch for any of its items waits in a member's pending queue or the
+  team's admission lane (`queued` input, from `entryTicketRef` over both);
+- no readiness gate holds its PR hand-off (#2795);
+- one of its open items carries a wake label (`consumersOf`) without that
+  label's `:wip` claim, with at least one live consumer (otherwise A5.3's
+  *nobody picks it up* applies), whose Event Log trail shows it never reached a
+  consumer role — for longer than `PARKED_WAKE_MS` (30 min).
+
+The trail is every log entry on the item about that label: its own add/remove,
+its `:wip`/`:completed` swaps, or an outcome stamped with it as `wakeLabel`.
+The latest entry decides (`parkedWakes`):
+
+| Latest entry | Cause | Clock starts |
+|---|---|---|
+| the label's add; a consumer outcome got through (delivered, held, digest) | — not parked | — |
+| the label's add; the consumer was dropped as `history-horizon` | `history-horizon` | the event's `createdAt` |
+| the label's add; dropped as `wake-already-armed` | `wake-already-armed` | the event's `createdAt` |
+| the label's add; dropped for another reason / no consumer outcome | `dropped` + `dropReason` (`no-subscriber`) | the event's `createdAt` |
+| none, or a later swap / removal | `not-seen` — the add that put the label back never surfaced | the item's `updatedAt` (or the trail's last entry, the later) |
+
+The clock uses GitHub's own `createdAt`, so a `history-horizon` drop logged
+hours late flags at once. A delivered outcome with no label stamp at all
+(entries from before #1846) on a label event counts as delivered, so an old
+log never raises the flag. Each flagged wake is listed on the row's
+`needsHuman.wakes` (`{repo, number, kind, label, cause, dropReason?, eventId,
+since}`), and the board's **Needs you** area shows `label — cause`, linked to
+the GitHub Event Log row (`/github-events?event=<id>`, which shows that one
+event over the 7-day retention). Each wake also names its switched-on consumer
+`roles` (`{id, label}`) for the action below.
+
+## Amendment 7 — Wake again (#2873, epic #2880)
+
+**A7.1 — the action.** A Team Admin (`canManageTeam`) gets a **Wake again**
+button on a *wake never delivered* row. The confirmation names each wake's
+role, item and label (*Wake Code Reviewer for PR #2844 (ready-for-review)*).
+The console route `POST /api/teams/:teamId/flow-board-wake` (`{ rowId }`; the
+actor is the session user, never the body) proxies to the orchestrator's
+`POST /internal/teams/:teamId/flow-board-wake`.
+
+**A7.2 — the checks.** An in-flight guard per `<team>::<row>`, taken before
+any await, turns concurrent clicks away with 409 `in-progress`. The route then
+re-reads a **fresh** board and refuses a stale board (503), an unknown row
+(404), or a row that is no longer parked or has no switched-on consumer (409)
+— `planWakeAgain` in the pure `orchestrator/flow-wake-again.js`. For each wake
+it re-reads the item on GitHub (`checkWakeStillPresent`): an item that is
+closed, has lost the label or cannot be read is skipped with a warning.
+
+**A7.3 — the delivery.** Labels are left alone and the Events API is not
+involved. The route clears the poller's armed wake-edge key (`disarmWake`),
+then calls the label fast-path (`wakeGithubLabelListeners`) with `onlyAgentIds`
+set to the wake's consumer **role templates** (`templateListeners`). Pool
+instances inherit their role's trigger, so the raw listener list holds every
+live instance, another item's included (#2875); only the template is woken,
+and `enqueuePending` → `planPoolDispatch` routes it onto the item's own
+instance exactly as a poller delivery does. A listener with a readiness gate
+(#2795) gets a poller hold (`holdWake`), never a bypass. The fast-path writes
+the Event Log line (`source: 'flow-control'`, the actor as the event's actor)
+and its dedup marker, so the Events API's late copy of the same label is
+dropped as `internal-dedup`. Afterwards the board shows the dispatch as queued,
+held or delivered, so a second click is refused as no longer parked — the
+persisted half of "at most once".
+
+## Amendment 8 — Adopting in-flight items after a move or flow re-apply (#2877, epic #2880)
+
+**A8.1 — the problem.** Moving a team to another instance, or re-applying /
+re-materialising its flow, stamps every trigger with a fresh `activatedAt`.
+Wake labels already on open items predate that stamp, so the history horizon
+(#320/#525) drops their events by design — and on a new instance the Event Log
+may hold nothing about them at all. The items sit at *up next* forever
+(`agent-studio-3-0`, 2026-10-05: #2820/#2842/#2844, ~18 h).
+
+**A8.2 — no implicit replay.** #320 stays the default: nothing is woken on
+import, materialise or re-apply. Adoption is an explicit click.
+
+**A8.3 — detection.** The scan is the board itself: every board computation
+looks at the team's open items (A6). `buildRoleGraph` records, per role and
+wake label, the earliest `activatedAt` (else `createdAt`) of its triggers on
+that label (`horizons`; unknown for any trigger = unknown). A parked wake
+(A6.2) is **carried over** (`carriedOver: true`) when its cause is
+`history-horizon`, or `not-seen` with the label's latest possible add time
+(`since`) before every live consumer's horizon. A carried-over wake needs no
+`PARKED_WAKE_MS` window — no delivery will ever come. A row whose every parked
+wake is carried over reads *carried over — not started here*
+(`REASONS.carriedOver`); the board lists those rows in `carriedOver`. Without a
+known horizon the row falls back to A6's *wake never delivered*. Orphaned
+`:wip` claims from the old instance are A5's *stuck — needs help* + Release
+claim; they are not adopted.
+
+**A8.4 — the action.** **Adopt** (row) is the A7 delivery under another label.
+**Adopt all (n)** posts `POST /api/teams/:teamId/flow-board-adopt` (`{ rowIds? }`,
+session actor) → `POST /internal/teams/:teamId/flow-board-adopt`: one fresh
+board, `planAdopt` (named rows, or every `carriedOver` row; a row no longer
+adoptable is skipped with its reason), then per row the same in-flight guard
+and `deliverBoardWakes` as Wake again — GitHub re-check, `disarmWake`,
+template-only fast-path delivery, readiness holds kept, one Event Log line per
+wake.
+
+**A8.5 — pools, sessions, knowledge (the open question).** Adoption does not
+re-key pool instances. It wakes the role template, and `planPoolDispatch`
+spawns a fresh item-keyed instance on the new instance. Old instances, their
+session pointers and chat history stay on the old instance; nothing migrates
+them. The adopted run starts a fresh session and resumes from what GitHub
+holds (labels, branch, PR, review comments). The team's knowledge base lives
+in git and carries over unchanged. Migrating instance sessions is out of
+scope. A session pointer is bound to the old instance's `claude-home`, and
+replaying it on another instance is not safe.

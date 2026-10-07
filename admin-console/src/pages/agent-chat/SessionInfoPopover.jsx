@@ -197,7 +197,7 @@ export default function SessionInfoPopover({
                         title={`${r.changesCount} uncommitted change${r.changesCount !== 1 ? 's' : ''}`}
                         style={{
                           display: 'inline-block', width: 6, height: 6,
-                          borderRadius: '50%', background: 'var(--eb-color-warning, #f59e0b)',
+                          borderRadius: '50%', background: 'var(--eb-status-warning)',
                           marginLeft: 4, verticalAlign: 'middle', flexShrink: 0,
                         }}
                       />

@@ -399,4 +399,16 @@ Item 6 replaces the model (a room per `(human, agent)` pair, so two humans chatt
 
 ---
 
-*This document is a concept. It commits to a recommendation in each area and flags the cost-heavy decisions, but no auth middleware, SSO integration, or permission enforcement is implemented here — that work is captured by the issues in §10 (see Amendment 1 and Amendment 2 for the items that have since partially landed).*
+## Amendment 3 — Every human has an identity; no shared-admin fallback (#2721, 2026-10-01)
+
+*Supersedes the fallback in Amendment 2 §2.1 and the "not auto-provisioned / NOT affected" items of Amendment 1 §1.3–§1.4 for the bootstrap admin and single-operator mode. The room model is still unchanged (§10 item 6).*
+
+- **Fail closed.** `POST /api/matrix/rooms/:roomId/messages` (typed messages, quick-reply answers, slash commands) and `POST /api/agents/:id/handover/nudge` send only as the acting human's own account (`admin-console/api/chat-send-identity.js`). A missing identity is provisioned on demand via `POST /internal/admin/users/:id/matrix-identity`; if it still cannot be established the send is refused with `503 { code: 'chat-identity-not-ready' }` and the composer keeps the text. There is no `MATRIX_ACCESS_TOKEN` fallback for a human's message.
+- **Backfill and retry.** `orchestrator/human-matrix-provisioner.js` owns the policy around the idempotent `ensureHumanMatrixIdentity`: a startup pass plus a periodic retry (`HUMAN_MATRIX_RETRY_INTERVAL_MS`, default 2 min) provision every user without a usable identity — the bootstrap System Admin included — and concurrent calls for one user share a single in-flight attempt, so two first sends never create two accounts. A deleted user is never (re-)provisioned. Per-user status (`ready` / `pending` / `failed`) is exposed on the user list for the Users page.
+- **Single-operator mode** (env admin, no user record) gets its own `@u-…` identity keyed by its login subject, stored in the `users/matrix/_operator.json` slot of `human-matrix-store.js` and provisioned via `POST /internal/admin/operator/matrix-identity`.
+- **The shared admin is never a person.** `teamsStore.setUserMatrixIdentity` accepts only a personal `@u-<hash>:<server>` id, startup clears any non-personal `matrixUserId` pointer, and usage/credential attribution (`usage-attribution.js` `userIdForMatrixId`) resolves only personal ids — a turn from the shared admin runs as baseline.
+- Amendment 1 §1.4's "adopt the shared-admin rooms" plan for the bootstrap admin is dropped: their past messages stay under the shared admin sender; new ones are theirs.
+
+---
+
+*This document is a concept. It commits to a recommendation in each area and flags the cost-heavy decisions, but no auth middleware, SSO integration, or permission enforcement is implemented here — that work is captured by the issues in §10 (see Amendments 1–3 for the items that have since partially landed).*

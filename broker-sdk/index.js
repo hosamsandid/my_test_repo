@@ -35,6 +35,7 @@ const {
   maskSecretsOrDefault,
 } = require('./mask-secrets');
 const { healthEndpoint, teardownScopeEndpoint, internalPushEndpoint, INTERNAL_SCOPE_ID } = require('./endpoints');
+const { buildInfoFromEnv } = require('./build-info');
 const { withUnexpectedErrors } = require('./unexpected-error');
 const { needsApproval, approvalHoldingPen, parkForApproval } = require('./approval');
 const { authorizeAction, isActionPermitted } = require('./authz');
@@ -86,6 +87,8 @@ module.exports = {
   // platform routes (§4.9)
   healthEndpoint,
   teardownScopeEndpoint,
+  // build identity reported on the health route (#2646)
+  buildInfoFromEnv,
   // unexpected-error containment (§4.9)
   withUnexpectedErrors,
   internalPushEndpoint,

@@ -123,7 +123,7 @@ audited console endpoint, so every application is captured by the machinery we a
 | prompt-improvement | the three #990 prompt choke-points | prompt-history rollback |
 | flow-wiring | `PUT /api/agents/:id` ports (`emits`/`channels`/outcomes) → reconcilers re-derive triggers | port edit (reconcilers are idempotent) |
 | threshold-tuning | `PUT /api/agents/:teamId` (`anomalyThresholds`, `hillClimb.*`) | previous value stored on the card |
-| trigger-hygiene | `DELETE /api/agents/:id/triggers/:tid` (never touches `intrinsic: true`, `dataFlow`, `channel`, or human-gate listeners) | card retains the deleted trigger JSON |
+| trigger-hygiene | `DELETE /api/agents/:id/triggers/:tid` (never touches `intrinsic: true`, `dataFlow`, `channel`, human-gate listeners, or Flow label hand-off listeners whose label a team member still emits — #2710) | card retains the deleted trigger JSON |
 | knowledge-handoff | curator candidate store | curator's own review flow |
 
 Application is governed by a per-team **autonomy dial** `hillClimb.autonomy`, deliberately shaped

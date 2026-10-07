@@ -197,7 +197,7 @@ your reply still work too.
 
 ---
 
-## 8. Admin Console UI gotchas
+## 8. Agent Studio UI (admin-console) gotchas
 
 - **Popovers/tooltips inside scrollable or `overflow`-clipped ancestors get
   clipped — and `z-index` cannot rescue them.** Any absolutely/relatively
@@ -221,6 +221,12 @@ your reply still work too.
   `--eb-status-info` = blue (active session), `--eb-status-success` = green
   (new/unread message), `--eb-status-warning` = orange (busy),
   `--eb-status-error` = red (problem), `--eb-text-muted` = grey (idle).
+  Every `var(--eb-…)` under `src/` must be defined for all three themes —
+  `theme/theme-tokens.test.js` fails on an undefined token and also asserts
+  WCAG AA contrast. For coloured text use `--eb-status-{success,warning,error}-text`
+  (not the status fill colour); on `--eb-accent-primary` fills use
+  `--eb-text-inverted`, never `#fff` (#2701); on a solid `--eb-status-warning`
+  fill use `--eb-text-on-warning` (#2752).
 - **`docs/` and root `CLAUDE.md` are living documentation.** When a PR changes
   documented runtime behaviour, **update the relevant `CLAUDE.md` section in the
   same PR** — reviewers flag a missing doc update as a non-blocking suggestion.

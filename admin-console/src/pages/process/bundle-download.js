@@ -37,7 +37,10 @@ export function bundleFilename(name) {
  * import side already refuses to honour them, so carrying them out is pure leak
  * with no matching capability. A team-template export never has them.
  */
-const NON_PORTABLE_FIELDS = ['createdBy', 'accessUserIds'];
+//
+// #2870 AC15 — the "Visible to everyone" flag and the read route's
+// `viewerCanEdit` annotation are the same kind of storage/response metadata.
+const NON_PORTABLE_FIELDS = ['createdBy', 'accessUserIds', 'visibleToEveryone', 'viewerCanEdit'];
 
 /** The portable form of a bundle: everything except the storage metadata. */
 export function portableBundle(bundle) {

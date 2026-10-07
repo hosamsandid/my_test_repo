@@ -23,6 +23,7 @@
 
 const store = require('./agent-templates-store');
 const { parseBranchFilter } = require('./branch-filter');
+const { commentFilterFields } = require('./comment-filter');
 
 const { TRIGGER_TYPES, PATTERN_ROLES } = store;
 
@@ -109,6 +110,7 @@ function sanitizeTemplateTrigger(tr) {
     if (isNonEmptyString(tr.labelFilter)) out.labelFilter = tr.labelFilter;
     const branches = parseBranchFilter(tr.branchFilter);
     if (branches.length) out.branchFilter = branches;
+    Object.assign(out, commentFilterFields(tr)); // #2822
   }
   if (isNonEmptyString(tr.preCheckScript)) out.preCheckScript = tr.preCheckScript;
   if (tr.preCheckEnv && typeof tr.preCheckEnv === 'object' && !Array.isArray(tr.preCheckEnv)) {

@@ -67,7 +67,7 @@ test('noMatchTooltip explains the no-subscriber case with an action', () => {
 
 test('#2525: the legend explains every drop reason the poller stamps', () => {
   const keys = OUTCOME_LEGEND.map(e => e.key);
-  for (const r of ['wake-already-armed', 'internal-dedup', 'self-claim-label', 'push-duplicate', 'throttle', 'label-filter', 'branch-filter', 'history-horizon']) {
+  for (const r of ['wake-already-armed', 'internal-dedup', 'self-claim-label', 'push-duplicate', 'throttle', 'label-filter', 'branch-filter', 'history-horizon', 'comment-target', 'agent-comment', 'comment-label']) {
     assert.ok(keys.includes(r), `legend missing ${r}`);
     assert.equal(outcomeLegendKey({ status: 'dropped', reason: r }), r);
   }
@@ -84,4 +84,49 @@ test('#2525: refireNote names who fired a manual re-fire row again', () => {
 test('#2571: the legend explains the producer-filter drop', () => {
   assert.equal(outcomeLegendKey({ status: 'dropped', reason: 'producer-filter' }), 'producer-filter');
   assert.match(outcomeTooltip({ status: 'dropped', reason: 'producer-filter' }), /pushed by/);
+});
+
+test('#2602 AC4: the legend explains the knowledge-branch drop as built in', () => {
+  assert.equal(outcomeLegendKey({ status: 'dropped', reason: 'knowledge-branch' }), 'knowledge-branch');
+  const t = outcomeTooltip({ status: 'dropped', reason: 'knowledge-branch' });
+  assert.match(t, /knowledge-base branch/);
+  assert.match(t, /can't be changed/);
+});
+
+// #2596: a pool pause/drain hold explains the role control, not the WIP lane.
+test('outcomeTooltip: a pool hold points at the role, a WIP hold is unchanged', () => {
+  assert.match(outcomeTooltip({ status: 'held', reason: 'pool-paused' }), /auto-scaled role.*paused, draining or off/);
+  assert.match(outcomeTooltip({ status: 'held', reason: 'wip' }), /Work-in-Progress limit/);
+});
+
+// #2693: the poller stores a burst digest as `delivered` + `digest: true`, and
+// the provisioning sweep writes `reaped` / `reap-failed` with `reason: null`.
+test('#2693: outcomeLegendKey maps a delivered+digest outcome to the digest legend entry', () => {
+  assert.equal(outcomeLegendKey({ status: 'delivered', digest: true }), 'digest');
+  assert.equal(outcomeLegendKey({ status: 'delivered', digest: false }), 'delivered');
+  assert.match(outcomeTooltip({ status: 'delivered', digest: true }), /folded into one summary wake/);
+});
+
+test('#2693: outcomeLegendKey maps sweep reaped / reap-failed to their own legend entries, never a drop', () => {
+  assert.equal(outcomeLegendKey({ status: 'reaped', reason: null }), 'reaped');
+  assert.equal(outcomeLegendKey({ status: 'reap-failed', reason: null }), 'reap-failed');
+  const keys = OUTCOME_LEGEND.map(e => e.key);
+  assert.ok(keys.includes('reaped') && keys.includes('reap-failed'));
+  for (const status of ['reaped', 'reap-failed']) {
+    const tip = outcomeTooltip({ status, reason: null });
+    assert.doesNotMatch(tip, /Dropped by a protection layer/);
+    assert.match(tip, /provisioning sweep/);
+  }
+});
+
+test('#2795: every readiness-gate outcome has its own legend entry and tooltip', () => {
+  assert.equal(outcomeLegendKey({ status: 'held', reason: 'readiness-gate', gates: ['ci'] }), 'readiness-gate');
+  assert.equal(outcomeLegendKey({ status: 'delivered', reason: 'gate-released' }), 'gate-released');
+  assert.equal(outcomeLegendKey({ status: 'delivered', reason: null }), 'delivered');
+  for (const r of ['gate-failed', 'gate-timeout', 'gate-cancelled']) {
+    assert.equal(outcomeLegendKey({ status: 'dropped', reason: r }), r);
+  }
+  assert.match(outcomeTooltip({ status: 'held', reason: 'readiness-gate' }), /checks pass and it merges cleanly/);
+  assert.match(outcomeTooltip({ status: 'dropped', reason: 'gate-failed' }), /revisions-required/);
+  assert.match(outcomeTooltip({ status: 'dropped', reason: 'gate-timeout' }), /needs-human/);
 });

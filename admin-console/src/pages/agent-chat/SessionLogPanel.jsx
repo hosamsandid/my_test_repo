@@ -2,7 +2,9 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { Loader2, PanelRightClose, Info } from 'lucide-react';
 import { useSSE } from '../../hooks/useSSE';
 import { useAuth } from '../../auth/AuthContext';
+import { useApi } from '../../hooks/useApi';
 import LogEvent from './LogEvent';
+import { buildAuthorDirectory } from './message-author.js';
 import PinnedTodoPanel from './PinnedTodoPanel';
 import VirtualList from '../../components/VirtualList.jsx';
 import { EventErrorBoundary } from '../../components/ErrorBoundary.js';
@@ -10,6 +12,9 @@ import { sumContextTokens, resolveContextTokensForResult } from './context-windo
 import { mergeThinkingTokens } from './system-event.js';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
 import { annotateTaskRows } from './task-todo.js';
+import { mergeToolPairs } from './tool-progress.js';
+import { buildRepoDirectory, parseCiWaitCommand } from './ci-wait-view.js';
+import { firstRowKeyForCorrelation, revealStatus, jumpHighlightCss, JUMP_HIGHLIGHT_MS } from './session-jump.js';
 import {
   HOVER_CORRELATION_COACHMARK,
   hasSeenCoachmark,
@@ -70,10 +75,17 @@ import {
  *     ChatPanel's `onTodoBoundary`) so the pinned To-Do panel from the
  *     *previous* session is dismissed even though no new task-list change has
  *     arrived yet (#273). Default 0 = "never fired" so mount doesn't dismiss.
+ *   revealRequest              — `{ correlationId, ts }` from "Show in session
+ *     log" (#2603): once loaded, scroll to that run's first row, flash all of
+ *     its rows and move focus there. Pauses stick-to-bottom so a live run's
+ *     new rows don't yank the view away.
+ *   onRevealMissing()          — the load finished without a row of the
+ *     requested run; the parent shows its "not found" notice.
  */
 export default function SessionLogPanel({
   agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate,
   todoCloseSignal = 0, embedded = false, scopeCorrelationId = null, staticOnly = false,
+  revealRequest = null, onRevealMissing,
 }) {
   const [events, setEvents]       = useState([]);
   const [cursor, setCursor]       = useState(0);
@@ -89,6 +101,12 @@ export default function SessionLogPanel({
   // returning user never gets a flash; the effect flips it on for a newcomer.
   const { user } = useAuth();
   const username = user?.username;
+
+  // Names the author of `message.received` rows from the same directory the
+  // transcript uses (#2715). A failed/forbidden read falls back to the login
+  // subject stamped on the row; memoized so LogEvent's memo keeps holding.
+  const { data: directoryUsers } = useApi('/api/admin/users');
+  const authorDirectory = useMemo(() => buildAuthorDirectory(directoryUsers), [directoryUsers]);
   const [coachmarkSeen, setCoachmarkSeen]           = useState(true);
   const [coachmarkDismissed, setCoachmarkDismissed] = useState(false);
   useEffect(() => {
@@ -113,6 +131,11 @@ export default function SessionLogPanel({
   // Backfill bumps a generation counter so a slow response from the previous
   // (agent, room) can't clobber the current state.
   const reqIdRef = useRef(0);
+  // Which (agent, room, scope) the last *finished* backfill was for. A reveal
+  // (#2603) only judges found/missing against a settled load — right after a
+  // mount `loading` is still false before the backfill effect has run.
+  const loadKey = `${agentId}|${roomId}|${scopeCids ? scopeCids.join(',') : ''}`;
+  const [loadedKey, setLoadedKey] = useState(null);
 
   /* ─── 1. Backfill on agent/room change ──────────────────────────────── */
   const loadBackfill = useCallback(() => {
@@ -149,7 +172,10 @@ export default function SessionLogPanel({
         setError(`Log load failed: ${e.message}`);
       })
       .finally(() => {
-        if (reqId === reqIdRef.current) setLoading(false);
+        if (reqId === reqIdRef.current) {
+          setLoading(false);
+          setLoadedKey(`${agentId}|${roomId}|${scopeCids ? scopeCids.join(',') : ''}`);
+        }
       });
   }, [agentId, roomId, scopeCids]);
 
@@ -247,12 +273,70 @@ export default function SessionLogPanel({
   // incremental task-tracking events (TaskCreate/TaskUpdate/…, #1662) into a
   // running list: `annotated.rows` carry a per-row `taskSnapshot` for the
   // inline checklist/summary, and `annotated.{todos,lastToolId,…}` drive the
-  // pinned TODO panel below.
+  // pinned TODO panel below. Tool pairing also folds each call's tool_progress
+  // heartbeats and task_started row into its block (#2841); a historical view
+  // has no live run left, so nothing in it keeps spinning.
   const annotated = useMemo(
-    () => annotateTaskRows(mergeToolPairs(mergeThinkingTokens(scopedEvents))),
-    [scopedEvents],
+    () => annotateTaskRows(mergeToolPairs(mergeThinkingTokens(scopedEvents), { ended: staticOnly })),
+    [scopedEvents, staticOnly],
   );
   const renderable = annotated.rows;
+
+  // CI-wait cards (#2841) link the PR on GitHub; a `--repo <clone-dir>` or a
+  // bare PR number is resolved through the agent's repositories, read only
+  // once the log actually contains an aee-wait-ci call.
+  const hasCiWait = useMemo(
+    () => renderable.some(r => r.kind === 'tool' && r.toolUse?.tool === 'Bash'
+      && parseCiWaitCommand(r.toolUse.input?.command) !== null),
+    [renderable],
+  );
+  const { data: repoData } = useApi(hasCiWait && agentId
+    ? `/api/agents/${encodeURIComponent(agentId)}/repositories` : null);
+  const repoDirectory = useMemo(() => buildRepoDirectory(repoData?.repositories), [repoData]);
+
+  /* ─── 4b. "Show in session log" reveal (#2603) ─────────────────────────
+   * A request is settled once: scroll to the run's first row (VirtualList
+   * #2310 seek), then flash every row of the run via CSS and focus the target
+   * row. A load without a row of the run reports back instead (AC6). */
+  const [revealKey, setRevealKey]       = useState(null);
+  const [highlightCid, setHighlightCid] = useState(null);
+  const revealRef = useRef(null); // the request being settled, null when done
+  useEffect(() => {
+    revealRef.current = revealRequest && revealRequest.correlationId ? revealRequest : null;
+    setRevealKey(null);
+    setHighlightCid(null);
+    if (revealRef.current) setAtBottom(false);
+  }, [revealRequest]);
+  useEffect(() => {
+    const req = revealRef.current;
+    if (!req) return;
+    const status = revealStatus({ loading: loading || loadedKey !== loadKey, rows: renderable, correlationId: req.correlationId, keyOf: logKeyOf });
+    if (status === 'pending') return;
+    revealRef.current = null;
+    if (status === 'found') {
+      setRevealKey(firstRowKeyForCorrelation(renderable, req.correlationId, logKeyOf));
+    } else if (onRevealMissing) {
+      onRevealMissing();
+    }
+  }, [loading, loadedKey, loadKey, renderable, onRevealMissing]);
+  const handleScrolledToReveal = useCallback(() => {
+    const req = revealRequest;
+    setRevealKey(null);
+    if (!req) return;
+    setHighlightCid(req.correlationId);
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    const row = Array.from(scroller.querySelectorAll('[data-cid]'))
+      .find(el => el.getAttribute('data-cid') === req.correlationId);
+    const target = row || scroller;
+    if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+    target.focus({ preventScroll: true });
+  }, [revealRequest]);
+  useEffect(() => {
+    if (!highlightCid) return undefined;
+    const t = setTimeout(() => setHighlightCid(null), JUMP_HIGHLIGHT_MS);
+    return () => clearTimeout(t);
+  }, [highlightCid]);
 
   /* ─── 5. Session cost aggregation ──────────────────────────────────── */
   const costTotals = useMemo(() => {
@@ -543,7 +627,9 @@ export default function SessionLogPanel({
         <VirtualList
           items={renderable}
           scrollerRef={scrollerRef}
-          keyOf={(ev, i) => ev._key ?? `e${i}`}
+          keyOf={logKeyOf}
+          scrollToKey={revealKey}
+          onScrolledToKey={handleScrolledToReveal}
           estimateHeight={44}
           overscan={10}
           renderItem={(ev) => {
@@ -566,7 +652,7 @@ export default function SessionLogPanel({
                   marginLeft: 'var(--eb-space-1)',
                 }}
               >
-                <LogEvent event={ev} />
+                <LogEvent event={ev} authorDirectory={authorDirectory} repoDirectory={repoDirectory} />
               </div>
               </EventErrorBoundary>
             );
@@ -587,6 +673,7 @@ export default function SessionLogPanel({
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         ${hoverBaseCss('log')}
         ${hoverDimCss('log', hoveredCorrelationId)}
+        ${jumpHighlightCss('log', highlightCid)}
       `}</style>
     </div>
   );
@@ -594,53 +681,9 @@ export default function SessionLogPanel({
 
 /* ─── Helpers ─────────────────────────────────────────────────────────── */
 
-/**
- * Walk the event list once and pair each `tool_use` with its matching
- * `tool_result` (same `toolId`). Pairs are emitted as a single
- * { kind: 'tool', toolUse, toolResult, correlationId, ts, _key } element.
- * Unpaired uses keep `toolResult: null`. Orphan results (result with no
- * prior use) are emitted as standalone events — LogEvent renders them via
- * a single-sided ToolBlock.
- */
-function mergeToolPairs(events) {
-  const out = [];
-  // Map: toolId → index in `out` of the merged tool entry awaiting its result
-  const pendingByToolId = new Map();
-
-  events.forEach((ev, idx) => {
-    if (!ev || typeof ev !== 'object') {
-      out.push({ ...ev, _key: `e${idx}` });
-      return;
-    }
-    if (ev.type === 'tool_use' && ev.toolId) {
-      const merged = {
-        kind: 'tool',
-        ts: ev.ts,
-        correlationId: ev.correlationId,
-        toolUse: { tool: ev.tool, toolId: ev.toolId, input: ev.input },
-        toolResult: null,
-        _key: `tool-${ev.toolId}-${idx}`,
-      };
-      pendingByToolId.set(ev.toolId, out.length);
-      out.push(merged);
-      return;
-    }
-    if (ev.type === 'tool_result' && ev.toolId && pendingByToolId.has(ev.toolId)) {
-      const i = pendingByToolId.get(ev.toolId);
-      pendingByToolId.delete(ev.toolId);
-      const target = out[i];
-      out[i] = {
-        ...target,
-        toolResult: { ok: ev.ok !== false, content: ev.content },
-      };
-      return;
-    }
-    // Preserve a stable _key set upstream (e.g. the consolidated thinking_tokens
-    // row, #870) so React updates it in place instead of remounting; otherwise
-    // fall back to a positional key.
-    out.push({ ...ev, _key: ev._key ?? `e${idx}` });
-  });
-  return out;
+/** Stable row key for the VirtualList and the #2603 reveal seek. */
+function logKeyOf(ev, i) {
+  return ev._key ?? `e${i}`;
 }
 
 /**

@@ -187,3 +187,13 @@ test('round-trip: buildMemberFromTemplate reproduces prompt/sessionPolicy/trigge
   const gh = member.triggers.find(x => x.id === 'on-ready');
   assert.equal(gh.repo, 'beta/repo');
 });
+
+test('sanitizeTemplateTrigger (#2822) keeps a comment listener\'s filters', () => {
+  const out = extract.sanitizeTemplateTrigger({
+    id: 'answer', type: 'github-event', events: ['issue_comment.created'], prompt: 'Resume.',
+    requireLabel: 'clarifying', skipAgentComments: true, target: 'issue',
+  });
+  assert.equal(out.requireLabel, 'clarifying');
+  assert.equal(out.skipAgentComments, true);
+  assert.equal(out.target, 'issue');
+});

@@ -373,7 +373,12 @@ test('drift guard — no work-plane route escapes the mount list', () => {
   // And the one exemption really does gate itself, so the allowlist above is
   // not a hole someone can widen by adding a name to it.
   const list = API_CODE.slice(API_CODE.indexOf("app.get('/api/matrix/agents',"));
-  assert.match(list.slice(0, list.indexOf('\napp.')), /visibleAgent\(scope, agentMetaForScope\(cfg\)\)/);
+  // Since #566 the route filters through the pure `projectRoster`, handed the
+  // real scope.js `visibleAgent` via ROSTER_ACCESS.
+  assert.match(list.slice(0, list.indexOf('\napp.')), /projectRoster\(entries, scope, \{ includeDisabled, includeStubs \}, ROSTER_ACCESS\)/);
+  assert.match(API_CODE, /const ROSTER_ACCESS = \{ visibleAgent,/);
+  const roster = fs.readFileSync(path.join(__dirname, 'matrix-agent-roster.js'), 'utf8');
+  assert.match(roster, /if \(!access\.visibleAgent\(scope, meta\)\) continue;/);
 });
 
 test('every mounted prefix still corresponds to real routes', () => {

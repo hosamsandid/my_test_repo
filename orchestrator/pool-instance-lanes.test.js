@@ -219,3 +219,73 @@ test('buildTeamPoolLanes on an empty role list returns an empty array', () => {
   assert.deepEqual(lanes.buildTeamPoolLanes([], []), []);
   assert.deepEqual(lanes.buildTeamPoolLanes(null, null), []);
 });
+
+// #2789 — instances waiting on an open PR.
+
+test('#2789: an instance waiting on an open PR is tagged waiting, with its PRs, never timed-out', () => {
+  const out = lanes.buildPoolInstanceLanes({
+    role: { ...ROLE, maxRuntimeMs: 60_000 },
+    instances: [instance({ waiting: true, prs: [40], waitedMs: 0 })],
+    tickets: [ticket()],
+    now: Date.parse('2026-01-02T00:00:00.000Z'),
+  });
+  assert.equal(out.lanes[0].status, 'waiting');
+  assert.deepEqual(out.lanes[0].prs, [40]);
+});
+
+test('#2789 AC2: time spent waiting is left out of the lane timed-out test, like the reaper', () => {
+  const now = Date.parse('2026-01-01T00:02:00.000Z');
+  const role = { ...ROLE, maxRuntimeMs: 100_000 };
+  const plain = lanes.buildPoolInstanceLanes({ role, instances: [instance()], tickets: [ticket()], now });
+  assert.equal(plain.lanes[0].status, 'timed-out');
+  const waited = lanes.buildPoolInstanceLanes({ role, instances: [instance({ waitedMs: 60_000 })], tickets: [ticket()], now });
+  assert.equal(waited.lanes[0].status, 'running');
+  assert.equal('prs' in waited.lanes[0], false, 'only waiting lanes carry prs');
+});
+
+// ─── #2814: per-role instance rows for the Flow Editor's role-node hint ─────
+
+test('#2814 liveInstanceRows: one row per live instance with its item number and the lane status rule', () => {
+  const now = Date.parse('2026-01-01T02:00:00.000Z');
+  const rows = lanes.liveInstanceRows({
+    role: { maxRuntimeMs: 60 * 60 * 1000 },
+    now,
+    instances: [
+      instance({ instanceId: 'acme-developer-i71', itemKey: 71, spawnedAt: '2026-01-01T01:30:00.000Z' }),
+      instance({ instanceId: 'acme-developer-i9', itemKey: 9, spawnedAt: '2026-01-01T00:00:00.000Z' }),
+      instance({ instanceId: 'acme-developer-i12', itemKey: 12, waiting: true, prs: [40] }),
+    ],
+  });
+  assert.deepEqual(rows, [
+    { instanceId: 'acme-developer-i9', item: 9, status: 'timed-out' },
+    { instanceId: 'acme-developer-i12', item: 12, status: 'waiting' },
+    { instanceId: 'acme-developer-i71', item: 71, status: 'running' },
+  ]);
+});
+
+test('#2814 liveInstanceRows: waiting time does not count toward the timeout, like the reaper', () => {
+  const now = Date.parse('2026-01-01T02:00:00.000Z');
+  const rows = lanes.liveInstanceRows({
+    role: { maxRuntimeMs: 60 * 60 * 1000 },
+    now,
+    instances: [instance({ spawnedAt: '2026-01-01T00:00:00.000Z', waitedMs: 90 * 60 * 1000 })],
+  });
+  assert.equal(rows[0].status, 'running');
+});
+
+test('#2814 liveInstanceRows: an instance without a repo/item is still listed; junk is dropped', () => {
+  const rows = lanes.liveInstanceRows({
+    role: { maxRuntimeMs: null },
+    instances: [instance({ repo: null, itemKey: null }), null, { repo: 'x' }],
+  });
+  assert.deepEqual(rows, [{ instanceId: 'acme-developer-i1', item: null, status: 'running' }]);
+});
+
+test('#2814 instanceStatus agrees with the lane tag for the same instance', () => {
+  const now = Date.parse('2026-01-01T02:00:00.000Z');
+  const role = { ...ROLE, maxRuntimeMs: 60 * 60 * 1000 };
+  for (const inst of [instance(), instance({ waiting: true, prs: [] }), instance({ spawnedAt: '2026-01-01T01:59:00.000Z' })]) {
+    const lane = lanes.buildPoolInstanceLanes({ role, instances: [inst], tickets: [], now }).lanes[0];
+    assert.equal(lanes.instanceStatus(inst, role.maxRuntimeMs, now), lane.status);
+  }
+});

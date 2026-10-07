@@ -274,6 +274,31 @@ function roleForTeam(viewer, teamId) {
   return VIEWER_ROLES.includes(r) ? r : 'team-member';
 }
 
+// Whether a body parser upstream already consumed this request's body, so the
+// proxy must re-serialise `req.body` instead of streaming `req` (which would
+// forward an empty body). Express 4 (body-parser 1) flags it with `req._body`;
+// Express 5 (body-parser 2) dropped the flag and only leaves the stream read
+// to its end. `req.body` alone is not enough: body-parser 1 sets it to `{}`
+// even for a body it did not parse (and left unread).
+function bodyWasParsed(req) {
+  if (!req) return false;
+  if (req._body === true) return true;
+  return req.body !== undefined && req.readableEnded === true;
+}
+
+// The #1858 label fast-path kind for a label-add through the GitHub Issues
+// plugin (#2746). The broker reports whether it labelled an issue or a pull
+// request (from GitHub's own refetched item) in this response header; the
+// proxy reads it from the upstream response, never from the browser's request.
+// Anything else — a missing header from an older broker image included —
+// degrades to 'issue', the pre-#2746 behaviour.
+const LABEL_TARGET_KIND_HEADER = 'x-aee-label-target-kind';
+function labelTargetKindFromHeaders(headers) {
+  const raw = headers && headers[LABEL_TARGET_KIND_HEADER];
+  const v = String(Array.isArray(raw) ? raw[0] : (raw || '')).trim().toLowerCase();
+  return v === 'pr' ? 'pr' : 'issue';
+}
+
 module.exports = {
   ROLE_RANK,
   roleRank,
@@ -282,6 +307,9 @@ module.exports = {
   enforceUiRoute,
   signViewerHeaders,
   roleForTeam,
+  bodyWasParsed,
+  LABEL_TARGET_KIND_HEADER,
+  labelTargetKindFromHeaders,
   verifyViewerHeaders,
   HEADER_NAMES: HDR,
 };

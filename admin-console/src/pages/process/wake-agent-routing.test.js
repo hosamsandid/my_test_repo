@@ -150,7 +150,7 @@ test('#2031: ActionRow is actually GIVEN the node and peers it needs', () => {
   // silently yields an empty list if the caller does not thread them, and the
   // row would render a select whose only entry is the placeholder.
   assert.match(CODE, /<ActionRow key=\{i\} action=\{a\} node=\{node\} peers=\{peers\}/);
-  assert.match(CODE, /function ActionRow\(\{ action, node, peers = \[\], onChange, onRemove \}\)/);
+  assert.match(CODE, /function ActionRow\(\{ action, node, peers = \[\], option, onChange, onRemove \}\)/);
 });
 
 test('#2032: the suggest call sends the peer list a wakeAgent needs', () => {

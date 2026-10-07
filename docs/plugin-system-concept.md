@@ -483,6 +483,40 @@ plugin upgrade = image update + CLI re-sync (live). Breaking CLI changes are
 the plugin author's problem to version (`aee-<x> --version`); the platform
 only guarantees contract-level stability (`pluginVersion`).
 
+**Amendment (#2646) — build identity instead of a version field.** No reference
+plugin sets `version`, and every broker image is tagged `:latest`, so the
+identity a plugin actually carries is the git commit it was built from, in the
+console's own version format (short hash + `-dirty`, commit timestamp):
+
+- **Broker image** — `make plugin-images` passes `AEE_BUILD_COMMIT` /
+  `AEE_BUILD_DIRTY` / `AEE_BUILD_COMMIT_TIME` as build args; each broker
+  Dockerfile bakes them into the environment and OCI labels
+  (`org.opencontainers.image.revision`, `aee.build.*`). The Broker SDK's health
+  route reports them as `build` (`broker-sdk/build-info.js`).
+- **Installed files** — `make seed-plugins` writes `build-info.json` into each
+  pool plugin; install copies it into the registry.
+- **Release version (#2893)** — every identity also records the nearest release
+  tag (`v<major>.<minor>.<patch>`) and the commit distance to it
+  (`scripts/git-release-tag.sh` → `AEE_BUILD_TAG` / `AEE_BUILD_TAG_DISTANCE`,
+  labels `aee.build.tag` / `aee.build.tag-distance`, `build-info.json`
+  `tag` / `tagDistance`). The card shows `v0.4.0` on the tag,
+  `v0.4.0+12 (5500e15)` after it and the bare hash without a tag; the
+  mismatch hints keep comparing commits only.
+- **Surface** — the orchestrator probes every live sidecar's `/healthz`
+  (`orchestrator/plugin-build-info.js`) and returns `brokerBuild` from
+  `GET /internal/plugins`, plus `imageBuild` — the OCI labels of
+  `manifest.sidecar.image` in the local store (libpod image inspect; `null` on
+  Kubernetes, whose node cache is out of reach). `GET /api/plugins` adds
+  `sourceBuild` (registry for installed, pool for available). The Plugins page
+  shows all three (`plugin-registry-view.js` `buildIdentity`) with two hints:
+  running broker ≠ image (the image was rebuilt under a live sidecar — the
+  registry files do not move on a rebuild, so only this comparison catches it)
+  and running broker ≠ installed files. Unknown identities are shown as
+  "unknown", never blank.
+
+Refreshing the pool, "update available" offers and recreating sidecars on an
+image change stay out of this amendment (#2639).
+
 ## 5. Failure modes and edge cases
 
 | Scenario | Behaviour |
@@ -657,7 +691,9 @@ before it moves from catalog to roadmap.
     wake this plugin introduced), `aee-jira` read/write CLI, `/` + `/admin` UI.
     See `docs/jira-plugin.md`.
 23. **Documentation publishing** — push generated docs to
-    Confluence/SharePoint spaces per team.
+    Confluence/SharePoint spaces per team. Confluence is planned as the
+    second Atlassian plugin (read/search, ownership-tiered writes, page and
+    comment events): `docs/confluence-plugin-plan.md`.
 24. **Notification bridge** — outbound Teams/Slack/e-mail summaries beyond
     Matrix; broker rate-limits and templates.
 25. **Observability query** — read-only Grafana/Prometheus/Loki queries so an
@@ -820,6 +856,14 @@ before it moves from catalog to roadmap.
   per-agent stacks — the natural reading for a container sandbox — while a
   shared, expensive backend simply omits the field and keeps the `team`
   default. See §4.4.
+- **In-place plugin upgrade**: `POST /api/plugins/:id/install` 409s on an
+  installed plugin, and uninstall reaps every scope's plugin credential
+  (`plugin-credential-store.js`) — so upgrading a credential-bearing plugin
+  (Jira's event kinds, `docs/jira-plugin-events-implementation.md` §6) is a
+  documented manual file refresh, not an action. Wanted: an install
+  `?force=1` (or an *Upgrade* action) that overwrites the registry copy and
+  restarts the broker while keeping credentials and state. Deferred until a
+  second plugin needs it.
 - **Claude Code plugins as "agent plugins"**: worth adopting the CLI's own
   marketplace format as a distribution channel for agent-side content
   (skills, commands, hooks)? It solves a different problem than this

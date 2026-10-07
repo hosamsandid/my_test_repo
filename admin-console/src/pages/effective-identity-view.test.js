@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { describeEffectiveCredential, personalCredentialChangeNotice, loadPersonalCredentialChangeNotice } from './effective-identity-view.js';
+import {
+  describeEffectiveCredential, personalCredentialChangeNotice, loadPersonalCredentialChangeNotice,
+  personalUsageCell, personalCreateRestartNote, replaceRestartNote,
+} from './effective-identity-view.js';
 
 const teamCred = { id: 'team-pat', name: 'Team PAT' };
 
@@ -83,4 +86,62 @@ test('#2560 loadPersonalCredentialChangeNotice reads /api/me/baseline-teams and 
   assert.equal(asked, '/api/me/baseline-teams');
   assert.match(text, /your team \(Alpha\)/);
   assert.equal(await loadPersonalCredentialChangeNotice(async () => { throw new Error('502'); }, { kind: 'github', action: 'added' }), null);
+});
+
+// #2655: several personal credentials of one kind — only the first is resolved.
+const mineWith = (displayName, credId) => ({
+  agentId: displayName.toLowerCase(), displayName,
+  github: { source: 'personal', owner: { label: 'Me', isYou: true }, credential: { id: credId, name: credId } },
+  ssh: { source: 'none' },
+});
+
+test('#2655 adding a second personal token does not claim it is now used', () => {
+  const text = personalCredentialChangeNotice({
+    kind: 'github', action: 'added', credentialId: 'pat-b', restarted: false,
+    teams: [mineWith('Alpha', 'pat-a'), mineWith('Beta', 'pat-a')],
+  });
+  assert.doesNotMatch(text, /is now used/);
+  assert.match(text, /new personal GitHub token is not in use: Alpha, Beta keep using your personal GitHub token pat-a/);
+  assert.match(text, /the one you added first/);
+  assert.match(text, /No agent was restarted/);
+});
+
+test('#2655 adding the resolved token names the teams and reports the restart', () => {
+  const text = personalCredentialChangeNotice({
+    kind: 'github', action: 'added', credentialId: 'pat-a', restarted: true, teams: [mineWith('Alpha', 'pat-a')],
+  });
+  assert.match(text, /now used by your team \(Alpha\)/);
+  assert.match(text, /running agents were restarted/);
+  assert.doesNotMatch(text, /next start/);
+});
+
+test('#2655 loadPersonalCredentialChangeNotice forwards credentialId and restarted', async () => {
+  const text = await loadPersonalCredentialChangeNotice(async () => ({ teams: [mineWith('Alpha', 'pat-a')] }),
+    { kind: 'github', action: 'added', credentialId: 'pat-b', restarted: false });
+  assert.match(text, /not in use/);
+});
+
+test('#2655 personalUsageCell marks the active personal credential', () => {
+  assert.equal(personalUsageCell({ scope: 'team', id: 't' }, 'github'), null);
+  assert.equal(personalUsageCell({ scope: 'personal', id: 'p' }, 'github'), null); // older server: no flag
+  const on = personalUsageCell({ scope: 'personal', activePersonal: true }, 'github');
+  assert.equal(on.label, 'Active (personal)');
+  assert.equal(on.active, true);
+  const off = personalUsageCell({ scope: 'personal', activePersonal: false }, 'ssh');
+  assert.equal(off.label, 'Not in use');
+  assert.match(off.title, /SSH key is used — the one you added first/);
+});
+
+test('#2655 create dialog warns about the restart only for the first personal credential', () => {
+  assert.equal(personalCreateRestartNote({ kind: 'github', scope: 'team' }), null);
+  assert.match(personalCreateRestartNote({ kind: 'github', scope: 'personal', hasActivePersonal: false }), /restarts your running agents/);
+  assert.match(personalCreateRestartNote({ kind: 'ssh', scope: 'personal', hasActivePersonal: true }), /stays inactive and no agent is restarted/);
+});
+
+test('#2655 replace panel names who is restarted per tier', () => {
+  assert.match(replaceRestartNote({ scope: 'team' }, 'github'), /Every environment that references this token/);
+  assert.match(replaceRestartNote({ scope: 'personal', activePersonal: true }, 'github'), /Your running agents are restarted/);
+  assert.doesNotMatch(replaceRestartNote({ scope: 'personal', activePersonal: true }, 'github'), /environment/);
+  assert.match(replaceRestartNote({ scope: 'personal', activePersonal: false }, 'ssh'), /not in use, so no agent is restarted/);
+  assert.match(replaceRestartNote({ scope: 'system' }, 'ssh'), /pick up the new key/);
 });

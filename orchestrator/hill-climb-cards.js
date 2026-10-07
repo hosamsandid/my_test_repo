@@ -161,6 +161,19 @@ function normalizeCard(raw, { teamId = '', now = Date.now(), source = 'heuristic
   return { ok: true, card };
 }
 
+// Human-readable name for a zero-fire trigger: the agent, the event and the
+// label it listens for (#2710) — never just the raw trigger id, which means
+// nothing to the person reading the card.
+function describeTrigger(t) {
+  const who = t.agentName || t.agentId || 'agent';
+  const events = Array.isArray(t.events) && t.events.length ? t.events.join(', ') : '';
+  if (t.labelFilter) return `${who}'s listener for '${t.labelFilter}'${events ? ` (${events})` : ''}`;
+  if (events) return `${who}'s ${events} trigger`;
+  if (t.type === 'cron') return `${who}'s scheduled trigger`;
+  if (t.type) return `${who}'s ${t.type} trigger`;
+  return `${who}'s trigger '${t.triggerId}'`;
+}
+
 // ── deterministic heuristic findings (concept §3.2 honest fallback) ──────────
 //
 // With no reachable analyst provider the pass still ships its mechanically
@@ -181,14 +194,18 @@ function heuristicFindings(snapshot, opts = {}) {
   };
 
   // 1) Zero-fire triggers → trigger-hygiene (burning nothing but review noise).
-  for (const t of Array.isArray(dead.zeroFireTriggers) ? dead.zeroFireTriggers : []) {
+  //    Below the run floor a quiet trigger is no evidence of a dead one — a new
+  //    team simply has not run yet — so no deletion card is raised (#2710).
+  const zeroFire = snapshot && snapshot.insufficientData ? [] : dead.zeroFireTriggers;
+  for (const t of Array.isArray(zeroFire) ? zeroFire : []) {
     if (!t || !t.triggerId) continue;
     const ref = `${t.agentId || '?'}/${t.triggerId}`;
+    const label = describeTrigger(t);
     push({
       class: 'trigger-hygiene',
       object: { kind: 'trigger', id: ref },
-      title: `Trigger '${t.triggerId}' has not fired this window`,
-      detail: `${t.agentId || 'agent'}'s trigger '${t.triggerId}' recorded zero fires over the measurement window. Consider deleting it, re-scoping its events, or tightening its labelFilter.`,
+      title: `${label} has not fired this window`,
+      detail: `${label} (trigger id '${t.triggerId}') recorded zero fires over the measurement window. Consider deleting it, re-scoping its events, or tightening its labelFilter.`,
       evidence: [{ type: 'metric', ref: 'metrics.deadConfig.zeroFireTriggers', value: ref }],
       proposedChange: { action: 'delete-or-rescope', agentId: t.agentId || null, triggerId: t.triggerId },
       targetMetric: 'waste.wasteRuns',
@@ -309,6 +326,7 @@ function mergeCards(existingCards, incomingCards, opts = {}) {
         // Bump the open card's evidence (dedupe by JSON identity), never duplicate.
         latest.evidence = mergeEvidence(latest.evidence, inc.evidence);
         latest.seen = (Number.isFinite(latest.seen) ? latest.seen : 1) + 1;
+        latest.title = inc.title || latest.title;
         latest.detail = inc.detail || latest.detail;
         latest.proposedChange = inc.proposedChange != null ? inc.proposedChange : latest.proposedChange;
         latest.updatedAt = new Date(now).toISOString();
@@ -360,6 +378,27 @@ function mergeCards(existingCards, incomingCards, opts = {}) {
     deferredCooldown,
     deferredBudget,
   };
+}
+
+// Supersede open trigger cards whose trigger no longer exists (#2710). A card
+// keyed to a deleted trigger can never be applied (the console answers 409
+// stale-card), and since it is never re-detected it would otherwise stay open
+// forever. `liveTriggerRefs` is every `"<agentId>/<triggerId>"` the team
+// declares right now. Mutates and returns the count of superseded cards. Pure
+// otherwise.
+function supersedeVanishedTriggerCards(cards, liveTriggerRefs, opts = {}) {
+  const live = liveTriggerRefs instanceof Set ? liveTriggerRefs : new Set(liveTriggerRefs || []);
+  const nowIso = new Date(opts.now || Date.now()).toISOString();
+  let superseded = 0;
+  for (const c of Array.isArray(cards) ? cards : []) {
+    if (!c || c.status !== 'open' || !c.object || c.object.kind !== 'trigger') continue;
+    if (typeof c.object.id !== 'string' || live.has(c.object.id)) continue;
+    c.status = 'superseded';
+    c.supersededReason = 'trigger no longer exists';
+    c.updatedAt = nowIso;
+    superseded += 1;
+  }
+  return superseded;
 }
 
 // Union two evidence lists, de-duplicating by canonical JSON so a re-detection
@@ -506,6 +545,8 @@ module.exports = {
   validateCard,
   normalizeCard,
   heuristicFindings,
+  describeTrigger,
+  supersedeVanishedTriggerCards,
   recurringAnomalyIdentities,
   mergeCards,
   mergeEvidence,

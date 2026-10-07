@@ -9,6 +9,12 @@ import {
   installAction,
   sidecarStatus,
   pluginRegistryRow,
+  isInvalidInstalled,
+  settledStartIds,
+  REMOVABLE_DIR_NAME_RE,
+  needsBrokerPoll,
+  BROKER_START_WINDOW_MS,
+  uninstallDialog,
 } from './plugin-registry-view.js';
 
 function manifest(extra = {}) {
@@ -70,7 +76,10 @@ test('an invalid manifest can never be installed, regardless of role', () => {
   const entry = { id: 'x', ok: false, errors: ['capabilities has unknown entries: root'], manifest: null };
   const a = installAction(entry, { canManage: true, stackRuntime: 'podman' });
   assert.equal(a.disabled, true);
-  assert.match(a.hint, /unknown entries/);
+  assert.equal(a.label, 'Cannot install');
+  // The error is listed on the card already; the hint must not repeat it (#2649).
+  assert.doesNotMatch(a.hint, /unknown entries/);
+  assert.match(a.hint, /errors above/);
 });
 
 test('a non-System-Admin sees the button disabled with an honest reason', () => {
@@ -158,5 +167,384 @@ test('pluginRegistryRow degrades safely on a broken entry', () => {
   assert.equal(row.name, 'broken');
   assert.deepEqual(row.capabilities, []);
   assert.equal(row.action.disabled, true);
-  assert.match(row.quota, /uncapped/i);
+  // No manifest → no invented defaults (#2649).
+  assert.equal(row.quota, '');
+  assert.deepEqual(row.scopes, []);
+  assert.equal(row.invalid, false, 'an available (not installed) broken entry is not an invalid INSTALLED one');
+});
+
+// ── #2649: starting state, and invalid registry entries ─────────────────────
+
+test('a broker just installed from the page reads "starting", not "not running"', () => {
+  const entry = { id: 'p', ok: true, errors: [], manifest: manifest(), installed: true, sidecarRunning: false };
+  const s = sidecarStatus(entry, { startingSince: 1000, now: 1000 + 5_000, stackRuntime: 'podman' });
+  assert.equal(s.state, 'starting');
+  assert.match(s.label, /starting/i);
+  assert.doesNotMatch(s.label, /not running/i);
+  // Without an install from this page the old "not running" still applies.
+  assert.equal(sidecarStatus(entry, { stackRuntime: 'podman' }).state, 'stopped');
+});
+
+test('once running, the starting window no longer matters', () => {
+  const entry = { id: 'p', ok: true, errors: [], manifest: manifest(), installed: true, sidecarRunning: true };
+  assert.equal(sidecarStatus(entry, { startingSince: 1000, now: 1001 }).state, 'running');
+});
+
+test('a broker that never comes up turns into "did not start" with a reason', () => {
+  const entry = { id: 'p', ok: true, errors: [], manifest: manifest(), installed: true, sidecarRunning: false };
+  const at = (ms) => sidecarStatus(entry, { startingSince: 0, now: ms, stackRuntime: 'podman' });
+  assert.equal(at(BROKER_START_WINDOW_MS - 1).state, 'starting');
+  const s = at(BROKER_START_WINDOW_MS);
+  assert.equal(s.state, 'failed');
+  assert.equal(s.tone, 'warn');
+  assert.match(s.label, /did not start/);
+  assert.match(s.reason, /make plugin-images/);
+  assert.match(s.reason, /orchestrator log/);
+});
+
+test('a platform mismatch is named as the reason instead of a "starting" wait', () => {
+  const entry = { id: 'p', ok: true, errors: [], manifest: manifest({ platforms: ['podman'] }), installed: true, sidecarRunning: false };
+  const s = sidecarStatus(entry, { startingSince: 0, now: 1, stackRuntime: 'kubernetes' });
+  assert.equal(s.state, 'stopped');
+  assert.match(s.reason, /declares podman but the stack runs kubernetes/);
+  // Also on a plain page load, not only right after install.
+  assert.match(sidecarStatus(entry, { stackRuntime: 'kubernetes' }).reason, /runs kubernetes/);
+  assert.equal(sidecarStatus(entry, { stackRuntime: 'podman' }).reason, '');
+});
+
+test('needsBrokerPoll is true only while some broker is starting', () => {
+  const mk = (state) => ({ status: { state } });
+  assert.equal(needsBrokerPoll([mk('running'), mk('starting')]), true);
+  assert.equal(needsBrokerPoll([mk('running'), mk('stopped'), mk('failed'), mk('invalid')]), false);
+  assert.equal(needsBrokerPoll([]), false);
+  assert.equal(needsBrokerPoll(null), false);
+});
+
+test('pluginRegistryRow threads the starting window into the status', () => {
+  const entry = { id: 'p', ok: true, errors: [], manifest: manifest(), installed: true, sidecarRunning: false };
+  const row = pluginRegistryRow(entry, { canManage: true, stackRuntime: 'podman', startingSince: 0, now: 10 });
+  assert.equal(row.status.state, 'starting');
+  assert.equal(needsBrokerPoll([row]), true);
+});
+
+test('an invalid installed entry is marked broken, with no plugin defaults', () => {
+  const entry = {
+    id: 'jira.bak-20260930-210131', ok: false, installed: true, sidecarRunning: null, manifest: null,
+    errors: ['invalid plugin id "jira.bak-20260930-210131": a plugin id must be …'],
+  };
+  assert.equal(isInvalidInstalled(entry), true);
+  const row = pluginRegistryRow(entry, { canManage: true, stackRuntime: 'podman', startingSince: 0, now: 1 });
+  assert.equal(row.invalid, true);
+  assert.equal(row.status.state, 'invalid');
+  assert.doesNotMatch(row.status.label, /broker/i);
+  assert.deepEqual(row.scopes, []);
+  assert.equal(row.quota, '');
+  assert.deepEqual(row.capabilities, []);
+  assert.equal(row.errors.length, 1);
+  assert.equal(needsBrokerPoll([row]), false, 'a broken entry never polls');
+});
+
+test('an invalid installed entry can be removed by a System Admin only', () => {
+  const entry = { id: 'x.bak', ok: false, installed: true, errors: ['e'], manifest: null };
+  const admin = installAction(entry, { canManage: true, stackRuntime: 'podman' });
+  assert.equal(admin.action, 'uninstall');
+  assert.equal(admin.label, 'Remove');
+  assert.equal(admin.disabled, false);
+  assert.equal(admin.hint, '');
+  const viewer = installAction(entry, { canManage: false, stackRuntime: 'podman' });
+  assert.equal(viewer.disabled, true);
+  assert.match(viewer.hint, /System Admin/);
+});
+
+test('a broken entry whose name DELETE would refuse offers no working Remove (S1)', () => {
+  for (const id of ['jira copy', 'jira+old', 'a'.repeat(129)]) {
+    const a = installAction({ id, ok: false, installed: true, errors: ['e'], manifest: null }, { canManage: true });
+    assert.equal(a.action, 'none', id);
+    assert.equal(a.disabled, true, id);
+    assert.match(a.hint, /plugins volume/, id);
+  }
+  // The longest accepted name and a dotted backup still get Remove.
+  for (const id of ['a'.repeat(128), 'jira.bak-20260930', 'Jira_Old']) {
+    assert.equal(REMOVABLE_DIR_NAME_RE.test(id), true, id);
+    const a = installAction({ id, ok: false, installed: true, errors: ['e'], manifest: null }, { canManage: true });
+    assert.equal(a.action, 'uninstall', id);
+    assert.equal(a.disabled, false, id);
+  }
+});
+
+test('settledStartIds drops only ids whose broker is now running (S3)', () => {
+  const mk = (id, state) => ({ id, status: { state } });
+  const rows = [mk('a', 'running'), mk('b', 'starting'), mk('c', 'running'), mk('d', 'failed')];
+  assert.deepEqual(settledStartIds(rows, { a: 1, b: 2, d: 3 }), ['a']);
+  assert.deepEqual(settledStartIds(rows, {}), []);
+  assert.deepEqual(settledStartIds(null, null), []);
+  // a: 0 is a real timestamp, not "absent"
+  assert.deepEqual(settledStartIds([mk('a', 'running')], { a: 0 }), ['a']);
+});
+
+test('the remove confirm for a broken entry does not talk about a broker', () => {
+  const d = uninstallDialog({ id: 'x.bak', name: 'x.bak', invalid: true });
+  assert.equal(d.title, 'Remove x.bak?');
+  assert.equal(d.confirmLabel, 'Remove');
+  assert.match(d.body, /not a valid plugin/);
+  const u = uninstallDialog({ id: 'jira', name: 'Jira', invalid: false });
+  assert.equal(u.title, 'Uninstall Jira?');
+  assert.equal(u.confirmLabel, 'Uninstall');
+  assert.equal(u.body, '');
+});
+
+// ─── build identity (#2646) ─────────────────────────────────────────────────
+
+import {
+  describeBuild,
+  formatBuildVersion,
+  isAgentStudioImage,
+  fetchedVersionText,
+  brokerBuildLine,
+  imageBuildLine,
+  buildIdentity,
+  BROKER_MISMATCH_HINT,
+  BROKER_MISMATCH_DETAIL,
+  BROKER_IMAGE_MISMATCH_HINT,
+  BROKER_IMAGE_MISMATCH_DETAIL,
+} from './plugin-registry-view.js';
+import { absoluteWhen } from '../components/format-when.js';
+import fs from 'node:fs';
+
+const NEW = { commit: 'bbbbbbb', dirty: '', commitTime: '2026-09-30T21:08:25+02:00' };
+const OLD = { commit: 'aaaaaaa', dirty: '', commitTime: '2026-09-29T08:05:00Z' };
+const brokerManifest = (image = 'localhost/aee-plugin-jira:latest') => manifest({ id: 'jira', sidecar: { image, capabilities: ['egress'], internalPort: 4009 } });
+
+// AC4 / AC7: same formatter as the console's own version display.
+test('describeBuild: hash (with -dirty) and commit timestamp in version-info.js format', () => {
+  assert.deepStrictEqual(describeBuild(NEW), { known: true, hash: 'bbbbbbb', version: 'bbbbbbb', time: '2026-09-30 21:08 +0200', text: 'bbbbbbb · 2026-09-30 21:08 +0200' });
+  assert.strictEqual(describeBuild({ ...NEW, dirty: 'dirty' }).hash, 'bbbbbbb-dirty');
+  assert.strictEqual(describeBuild(OLD).time, '2026-09-29 08:05 +0000');
+  assert.strictEqual(describeBuild({ commit: 'bbbbbbb', dirty: '', commitTime: '' }).text, 'bbbbbbb · time unknown');
+});
+
+// AC6: never empty — unknown is said out loud.
+test('describeBuild: missing / unknown build → "unknown"', () => {
+  for (const b of [null, undefined, {}, { commit: 'unknown', dirty: 'dirty', commitTime: '2026-09-30T21:08:25+02:00' }, { commit: '' }]) {
+    assert.deepStrictEqual(describeBuild(b), { known: false, hash: 'unknown', version: 'unknown', time: 'unknown', text: 'unknown' });
+  }
+});
+
+// ─── release tag + distance (#2893) ─────────────────────────────────────────
+const TAGGED = { commit: '5500e15', dirty: '', commitTime: '2026-09-30T21:08:25+02:00', tag: 'v0.4.0', tagDistance: 12 };
+
+// AC1: a build exactly on the tag shows the tag alone.
+test('describeBuild: build on a release tag → the tag', () => {
+  const d = describeBuild({ ...TAGGED, tagDistance: 0 });
+  assert.strictEqual(d.version, 'v0.4.0');
+  assert.strictEqual(d.text, 'v0.4.0 · 2026-09-30 21:08 +0200');
+  assert.strictEqual(d.hash, '5500e15');
+});
+
+// AC2: N commits after the tag → tag+N with the short hash.
+test('describeBuild: build after a release tag → tag+N (hash)', () => {
+  const d = describeBuild(TAGGED);
+  assert.strictEqual(d.version, 'v0.4.0+12 (5500e15)');
+  assert.strictEqual(d.text, 'v0.4.0+12 (5500e15) · 2026-09-30 21:08 +0200');
+});
+
+// AC4: the -dirty suffix and the commit timestamp stay.
+test('describeBuild: dirty builds keep -dirty on the hash, even on the tag', () => {
+  assert.strictEqual(describeBuild({ ...TAGGED, dirty: 'dirty' }).text, 'v0.4.0+12 (5500e15-dirty) · 2026-09-30 21:08 +0200');
+  assert.strictEqual(describeBuild({ ...TAGGED, tagDistance: 0, dirty: 'dirty' }).version, 'v0.4.0 (5500e15-dirty)');
+  assert.strictEqual(describeBuild({ ...TAGGED, commitTime: '' }).text, 'v0.4.0+12 (5500e15) · time unknown');
+});
+
+// AC3 / AC7: no tag reachable, or a build recorded before #2893 → hash as today.
+test('describeBuild: no or unusable tag info → the hash alone, as before', () => {
+  const plain = { commit: '5500e15', dirty: '', commitTime: '2026-09-30T21:08:25+02:00' };
+  for (const extra of [{}, { tag: '', tagDistance: null }, { tag: 'v0.4.0' }, { tag: 'v0.4.0', tagDistance: -1 }, { tag: 'v0.4.0', tagDistance: '12' }, { tag: 'nightly', tagDistance: 3 }]) {
+    const d = describeBuild({ ...plain, ...extra });
+    assert.strictEqual(d.version, '5500e15', JSON.stringify(extra));
+    assert.strictEqual(d.text, '5500e15 · 2026-09-30 21:08 +0200', JSON.stringify(extra));
+  }
+  // An unknown commit stays "unknown", whatever tag info came along.
+  assert.strictEqual(describeBuild({ commit: 'unknown', tag: 'v0.4.0', tagDistance: 0 }).text, 'unknown');
+});
+
+test('formatBuildVersion: falls back to the given hash', () => {
+  assert.strictEqual(formatBuildVersion(null, 'abc1234'), 'abc1234');
+  assert.strictEqual(formatBuildVersion({ tag: 'v1.0.0', tagDistance: 1 }, 'abc1234'), 'v1.0.0+1 (abc1234)');
+});
+
+// AC5: every identity line — installed files / source, running broker, image.
+test('buildIdentity: the version rule applies to files, broker and image', () => {
+  const b = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: TAGGED, brokerBuild: { ...TAGGED }, imageBuild: { ...TAGGED, tagDistance: 0 } });
+  assert.strictEqual(b.files.version, 'v0.4.0+12 (5500e15)');
+  assert.strictEqual(b.broker.version, 'v0.4.0+12 (5500e15)');
+  assert.strictEqual(b.image.version, 'v0.4.0');
+  const pool = buildIdentity({ installed: false, manifest: brokerManifest(), sourceBuild: TAGGED });
+  assert.strictEqual(pool.filesLabel, 'Source');
+  assert.strictEqual(pool.files.text, 'v0.4.0+12 (5500e15) · 2026-09-30 21:08 +0200');
+});
+
+// AC6: hints keep comparing commits — tag info never causes or hides one.
+test('buildIdentity: mismatch hints compare commits, not tag info', () => {
+  const untagged = { commit: '5500e15', dirty: '', commitTime: TAGGED.commitTime };
+  const same = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: TAGGED, brokerBuild: untagged, imageBuild: { ...TAGGED, tag: 'v0.3.0', tagDistance: 40 } });
+  assert.strictEqual(same.mismatch, false);
+  assert.deepStrictEqual(same.hints, []);
+  const other = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: TAGGED, brokerBuild: { ...TAGGED, commit: 'aaaaaaa' }, imageBuild: TAGGED });
+  assert.deepStrictEqual(other.hints.map((h) => h.text), [BROKER_IMAGE_MISMATCH_HINT, BROKER_MISMATCH_HINT]);
+});
+
+test('isAgentStudioImage: reference broker images vs third-party images', () => {
+  assert.strictEqual(isAgentStudioImage('localhost/aee-plugin-jira:latest'), true);
+  assert.strictEqual(isAgentStudioImage('aee-plugin-jira'), true);
+  assert.strictEqual(isAgentStudioImage('europe-west3-docker.pkg.dev/p/r/aee-plugin-jira@sha256:abc'), true);
+  assert.strictEqual(isAgentStudioImage('docker.io/library/busybox:latest'), false);
+  assert.strictEqual(isAgentStudioImage(''), false);
+  assert.strictEqual(isAgentStudioImage(undefined), false);
+});
+
+test('fetchedVersionText: repo@ref plus the local fetch time', () => {
+  const iv = { repo: 'github/spec-kit', ref: 'v0.0.90', fetchedAt: '2026-09-30T19:08:25.000Z', fileCount: 9 };
+  assert.strictEqual(fetchedVersionText(iv), `github/spec-kit@v0.0.90, fetched ${absoluteWhen(iv.fetchedAt)}`);
+  assert.strictEqual(fetchedVersionText({ repo: 'github/spec-kit', ref: 'main', fetchedAt: 'garbage' }), 'github/spec-kit@main');
+  assert.strictEqual(fetchedVersionText(null), '');
+  assert.strictEqual(fetchedVersionText({ ref: 'main' }), '');
+});
+
+test('brokerBuildLine: running broker reports its build', () => {
+  const line = brokerBuildLine({ installed: true, manifest: brokerManifest(), sidecarRunning: true, brokerBuild: OLD });
+  assert.strictEqual(line.state, 'known');
+  assert.strictEqual(line.text, 'aaaaaaa · 2026-09-29 08:05 +0000');
+});
+
+// AC6 + edge cases: every "don't know" case is named, never blank.
+test('brokerBuildLine: unknown cases are explicit', () => {
+  const entry = (extra) => ({ installed: true, manifest: brokerManifest(), ...extra });
+  assert.strictEqual(brokerBuildLine(entry({ sidecarRunning: true, brokerBuild: null })).text, 'unknown (image reports no build)');
+  assert.strictEqual(brokerBuildLine(entry({ sidecarRunning: true, brokerBuild: { commit: 'unknown' } })).text, 'unknown (image reports no build)');
+  assert.strictEqual(brokerBuildLine(entry({ sidecarRunning: false })).text, 'unknown (broker not running)');
+  assert.strictEqual(brokerBuildLine(entry({ sidecarRunning: null })).text, 'unknown (broker status unknown)');
+  // dummy-echo runs busybox: an external image, not an error.
+  const ext = brokerBuildLine({ installed: true, manifest: brokerManifest('busybox:latest'), sidecarRunning: true, brokerBuild: null });
+  assert.strictEqual(ext.state, 'external');
+  assert.strictEqual(ext.text, 'unknown (external image)');
+});
+
+test('brokerBuildLine: no line for command-only, not-installed or invalid plugins', () => {
+  assert.strictEqual(brokerBuildLine({ installed: true, manifest: manifest({ id: 'spec-kit', sidecar: undefined }), sidecarRunning: null }), null);
+  assert.strictEqual(brokerBuildLine({ installed: false, manifest: brokerManifest(), sidecarRunning: false }), null);
+  assert.strictEqual(brokerBuildLine({ installed: true, manifest: null, sidecarRunning: null }), null);
+  assert.strictEqual(brokerBuildLine(null), null);
+});
+
+// AC5 / AC8: the old sidecar keeps running after the plugin files moved on.
+test('buildIdentity: running broker on another commit → mismatch hint', () => {
+  const b = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: NEW, brokerBuild: OLD });
+  assert.strictEqual(b.filesLabel, 'Installed files');
+  assert.strictEqual(b.files.text, 'bbbbbbb · 2026-09-30 21:08 +0200');
+  assert.strictEqual(b.broker.text, 'aaaaaaa · 2026-09-29 08:05 +0000');
+  assert.strictEqual(b.mismatch, true);
+  assert.deepStrictEqual(b.hints, [{ text: BROKER_MISMATCH_HINT, detail: BROKER_MISMATCH_DETAIL }]);
+});
+
+test('buildIdentity: same commit → no hint; dirty vs clean counts as different', () => {
+  const same = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: NEW, brokerBuild: { ...NEW } });
+  assert.strictEqual(same.mismatch, false);
+  assert.deepStrictEqual(same.hints, []);
+  const dirty = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: NEW, brokerBuild: { ...NEW, dirty: 'dirty' } });
+  assert.strictEqual(dirty.mismatch, true);
+});
+
+// An unknown side is not evidence of a difference: say "unknown", no hint.
+test('buildIdentity: no mismatch hint when either side is unknown', () => {
+  const noFiles = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: null, brokerBuild: OLD });
+  assert.strictEqual(noFiles.files.text, 'unknown');
+  assert.strictEqual(noFiles.mismatch, false);
+  const noBroker = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: false, sourceBuild: NEW, brokerBuild: null });
+  assert.strictEqual(noBroker.mismatch, false);
+});
+
+test('imageBuildLine: the image a recreated sidecar would run', () => {
+  const entry = (extra) => ({ installed: true, manifest: brokerManifest(), sidecarRunning: true, ...extra });
+  const known = imageBuildLine(entry({ imageBuild: NEW }));
+  assert.strictEqual(known.state, 'known');
+  assert.strictEqual(known.text, 'bbbbbbb · 2026-09-30 21:08 +0200');
+  // Also shown when the broker is not running — the next start uses it.
+  assert.strictEqual(imageBuildLine(entry({ sidecarRunning: false, imageBuild: NEW })).text, known.text);
+  assert.strictEqual(imageBuildLine(entry({ imageBuild: { commit: 'unknown', dirty: '', commitTime: '' } })).text, 'unknown (image reports no build)');
+  assert.strictEqual(imageBuildLine(entry({ imageBuild: null })).text, 'unknown (image not inspectable)');
+  assert.strictEqual(imageBuildLine(entry({})).text, 'unknown (image not inspectable)');
+  assert.strictEqual(imageBuildLine({ installed: true, manifest: brokerManifest('busybox:latest'), imageBuild: { commit: 'unknown' } }).text, 'unknown (external image)');
+  assert.strictEqual(imageBuildLine({ installed: true, manifest: manifest({ id: 'spec-kit', sidecar: undefined }) }), null);
+  assert.strictEqual(imageBuildLine({ installed: false, manifest: brokerManifest(), imageBuild: NEW }), null);
+  assert.strictEqual(imageBuildLine(null), null);
+});
+
+// AC8: `make plugin-images` on a new commit while the old sidecar keeps
+// running. The registry files are untouched by a rebuild, so files and broker
+// agree — only the image moved on. The page must show the old running commit
+// and the hint until the sidecar is recreated.
+test('buildIdentity: image rebuilt under a running old sidecar → image mismatch hint', () => {
+  const b = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: OLD, brokerBuild: OLD, imageBuild: NEW });
+  assert.strictEqual(b.broker.text, 'aaaaaaa · 2026-09-29 08:05 +0000');
+  assert.strictEqual(b.image.text, 'bbbbbbb · 2026-09-30 21:08 +0200');
+  assert.strictEqual(b.mismatch, true);
+  assert.deepStrictEqual(b.hints, [{ text: BROKER_IMAGE_MISMATCH_HINT, detail: BROKER_IMAGE_MISMATCH_DETAIL }]);
+  // …and the hint clears once the sidecar is recreated from the new image.
+  const recreated = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: OLD, brokerBuild: NEW, imageBuild: NEW });
+  assert.deepStrictEqual(recreated.hints.map((h) => h.text), [BROKER_MISMATCH_HINT]);
+  const inStep = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: NEW, brokerBuild: NEW, imageBuild: NEW });
+  assert.strictEqual(inStep.mismatch, false);
+});
+
+test('buildIdentity: broker differs from both image and files → both hints', () => {
+  const b = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: NEW, brokerBuild: OLD, imageBuild: NEW });
+  assert.deepStrictEqual(b.hints.map((h) => h.text), [BROKER_IMAGE_MISMATCH_HINT, BROKER_MISMATCH_HINT]);
+  const dirtyImage = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: null, brokerBuild: NEW, imageBuild: { ...NEW, dirty: 'dirty' } });
+  assert.deepStrictEqual(dirtyImage.hints.map((h) => h.text), [BROKER_IMAGE_MISMATCH_HINT]);
+});
+
+test('buildIdentity: no image hint when the broker or the image is unknown', () => {
+  const notRunning = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: false, sourceBuild: NEW, brokerBuild: null, imageBuild: OLD });
+  assert.strictEqual(notRunning.mismatch, false);
+  const noImage = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: OLD, brokerBuild: OLD, imageBuild: null });
+  assert.strictEqual(noImage.mismatch, false);
+  assert.strictEqual(noImage.image.text, 'unknown (image not inspectable)');
+});
+
+test('buildIdentity: available plugin shows its pool source only', () => {
+  const b = buildIdentity({ installed: false, manifest: brokerManifest(), sidecarRunning: false, sourceBuild: NEW, installedVersion: { repo: 'x/y', ref: 'main' } });
+  assert.strictEqual(b.filesLabel, 'Source');
+  assert.strictEqual(b.files.text, 'bbbbbbb · 2026-09-30 21:08 +0200');
+  assert.strictEqual(b.broker, null);
+  assert.strictEqual(b.image, null);
+  assert.strictEqual(b.fetched, '');
+});
+
+test('buildIdentity: command-only fetch plugin shows its upstream version', () => {
+  const b = buildIdentity({
+    installed: true, manifest: manifest({ id: 'spec-kit', sidecar: undefined }), sidecarRunning: null,
+    sourceBuild: NEW, installedVersion: { repo: 'github/spec-kit', ref: 'v0.0.90', fetchedAt: '2026-09-30T19:08:25.000Z' },
+  });
+  assert.strictEqual(b.broker, null);
+  assert.strictEqual(b.mismatch, false);
+  assert.ok(b.fetched.startsWith('github/spec-kit@v0.0.90, fetched '));
+});
+
+test('pluginRegistryRow: carries the build identity', () => {
+  const row = pluginRegistryRow({ id: 'jira', ok: true, errors: [], installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: NEW, brokerBuild: OLD });
+  assert.strictEqual(row.build.mismatch, true);
+  assert.strictEqual(row.build.files.hash, 'bbbbbbb');
+});
+
+// #651 source guard: the card renders every build field the view computes.
+test('Plugins.jsx renders the build identity block', () => {
+  const src = fs.readFileSync(new URL('./Plugins.jsx', import.meta.url), 'utf8');
+  assert.match(src, /<BuildIdentity build=\{row\.build\} \/>/);
+  assert.match(src, /\{build\.filesLabel\}: <code style=\{mono\}>\{build\.files\.text\}<\/code>/);
+  assert.match(src, /\{build\.broker && \(\s*<span>Running broker: <code style=\{mono\}>\{build\.broker\.text\}<\/code><\/span>/);
+  assert.match(src, /\{build\.fetched && <span>Fetched from: <code style=\{mono\}>\{build\.fetched\}<\/code><\/span>\}/);
+  assert.match(src, /\{build\.image && \(\s*<span>Broker image: <code style=\{mono\}>\{build\.image\.text\}<\/code><\/span>/);
+  assert.match(src, /\{build\.hints\.map\(\(hint\) => \(/);
+  assert.match(src, /title=\{hint\.detail\}/);
+  assert.match(src, /\{hint\.text\}\s*<\/span>/);
 });

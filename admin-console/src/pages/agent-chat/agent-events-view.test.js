@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   REFIRABLE_REASONS,
+  LABEL_PRESENT_REASONS,
   EVENT_RANGES,
   DEFAULT_EVENT_RANGE,
   rangeSince,
@@ -47,6 +48,7 @@ test('AC3: every required drop reason reads as plain language, naming the ignore
   }
   assert.match(dropReasonText(drop('label-filter', { label: 'next-wave', wakeLabel: null })), /'next-wave'/);
   assert.match(dropReasonText(drop('self-claim-label', { label: 'ready:wip', wakeLabel: null })), /'ready:wip'/);
+  assert.match(dropReasonText(drop('self-claim-label', { label: 'ready-for-review:completed', wakeLabel: null })), /'ready-for-review:completed'.*':completed'/);
   assert.match(dropReasonText(drop('wake-already-armed')), /'ready-for-review'/);
   assert.equal(dropReasonText(drop('meteor')), 'Dropped (meteor).');
 });
@@ -67,7 +69,7 @@ test('AC4: only delivered rows link to their session, by the runner correlationI
 test('AC5/AC7: Fire again is offered only on the three protection drops, to a manager, once', () => {
   assert.deepEqual([...REFIRABLE_REASONS], ['wake-already-armed', 'throttle', 'internal-dedup']);
   for (const r of REFIRABLE_REASONS) assert.equal(canRefire(drop(r), { canManage: true }), true, r);
-  for (const r of ['label-filter', 'self-claim-label', 'history-horizon', 'push-duplicate']) {
+  for (const r of ['label-filter', 'self-claim-label', 'push-duplicate']) {
     assert.equal(canRefire(drop(r), { canManage: true }), false, r);
   }
   assert.equal(canRefire(drop('throttle'), { canManage: false }), false, 'read-only for a member');
@@ -93,6 +95,21 @@ test('AC6: a re-fired row says who and when', () => {
   assert.equal(refiredText(drop('throttle')), '');
   assert.equal(workItemText(drop('throttle')), '#42 Add thing');
   assert.equal(workItemText({ workItem: { number: 3 } }), '#3');
+});
+
+test('#2799 AC8: a linked PR row and its re-fire dialog name the closing issue(s)', () => {
+  const pr = (closesIssues, extra = {}) => drop('throttle', {
+    workItem: { kind: 'pr', number: 2798, title: 'PR readiness', url: 'u', closesIssues }, ...extra,
+  });
+  assert.equal(workItemText(pr([2794])), '#2798 → closes #2794 PR readiness');
+  assert.equal(workItemText(pr([15, 12, 15])), '#2798 → closes #12, #15 PR readiness');
+  assert.equal(workItemText({ workItem: { kind: 'pr', number: 7, closesIssues: [3] } }), '#7 → closes #3');
+  assert.match(refireDialog(pr([2794])).why, /#2798 → closes #2794 PR readiness had too many events/);
+  // Unlinked / malformed PR rows and issue rows are unchanged.
+  for (const bad of [undefined, [], '2794', [0, -1, 'x']]) {
+    assert.equal(workItemText(pr(bad)), '#2798 PR readiness');
+  }
+  assert.equal(workItemText({ workItem: { kind: 'issue', number: 5, title: 'T', closesIssues: [9] } }), '#5 T');
 });
 
 // ── Drift guard: JSX wiring (JSX itself is not executed under node:test) ────
@@ -128,4 +145,54 @@ test('#2570: a branch-filter drop names the pushed branch (or tag) in plain lang
   assert.match(dropReasonText(drop('branch-filter', { ref: 'refs/tags/v1.2' })), /^Tag 'v1\.2' is not/);
   assert.match(dropReasonText(drop('branch-filter', {})), /^This branch is not/);
   assert.equal(canRefire(drop('branch-filter'), { canManage: true }), false);
+});
+
+test('#2822: comment-filter drops read in plain language and are never re-firable', () => {
+  assert.equal(dropReasonText(drop('comment-label', { requireLabel: 'clarifying' })),
+    "The commented item did not carry the label 'clarifying', so the comment was ignored.");
+  assert.match(dropReasonText(drop('comment-label', {})), /the required label/);
+  assert.match(dropReasonText(drop('agent-comment')), /written by an agent/);
+  assert.match(dropReasonText(drop('comment-target')), /other kind of item/);
+  for (const r of ['comment-label', 'agent-comment', 'comment-target']) assert.equal(canRefire(drop(r), { canManage: true }), false);
+});
+
+test('#2602 AC4: a knowledge-branch drop names the KB branch and is never re-firable', () => {
+  assert.equal(dropReasonText(drop('knowledge-branch', { ref: 'refs/heads/agent-knowledge' })),
+    "Branch 'agent-knowledge' is a knowledge-base branch — pushes to it never wake push triggers.");
+  assert.doesNotMatch(dropReasonText(drop('knowledge-branch', {})), /branch filter/);
+  assert.equal(canRefire(drop('knowledge-branch'), { canManage: true }), false);
+});
+
+test('#2693: outcomeView reads the digest flag and shows sweep rows as reaped, not dropped', () => {
+  assert.deepEqual(outcomeView({ status: 'delivered', digest: true }), { tone: 'info', text: 'digested' });
+  assert.equal(outcomeView({ status: 'reaped', reason: null }).text, 'reaped (orphaned instance cleaned up)');
+  assert.deepEqual(outcomeView({ status: 'reap-failed', reason: null }), { tone: 'warning', text: 'reap failed' });
+  assert.equal(sessionCorrelationId({ status: 'delivered', digest: true, triggerId: 't', eventId: 'e' }), null);
+  assert.equal(sessionCorrelationId(null), null);
+});
+
+test('#2795: readiness-gate rows read as held / cleared, and gate drops explain what happened on the PR', () => {
+  assert.deepEqual(outcomeView({ ...drop('readiness-gate'), status: 'held', gates: ['ci', 'conflict'] }),
+    { tone: 'info', text: 'held — waiting for CI / conflict-free' });
+  assert.deepEqual(outcomeView({ ...drop('gate-released'), status: 'delivered' }),
+    { tone: 'success', text: 'delivered (gate cleared)' });
+  assert.match(dropReasonText(drop('gate-failed', { gates: ['ci'] })), /its checks failed — 'ready-for-review' was removed, the failure label set/);
+  assert.match(dropReasonText(drop('gate-failed', { gates: ['conflict'] })), /merge conflict/);
+  assert.match(dropReasonText(drop('gate-timeout', { gates: ['ci'] })), /not CI within the gate timeout.*'needs-human'/);
+  assert.match(dropReasonText(drop('gate-cancelled', { cancelReason: 'closed' })), /the PR was closed first/);
+  assert.match(dropReasonText(drop('gate-cancelled', { cancelReason: 'label-removed' })), /'ready-for-review' was removed first/);
+});
+
+test('#2874: a history-horizon drop of a label add is offered, with copy that says the event predates the trigger', () => {
+  assert.deepEqual([...LABEL_PRESENT_REASONS], ['history-horizon']);
+  assert.equal(canRefire(drop('history-horizon'), { canManage: true }), true);
+  // Not a label being added → nothing to re-check, never offered.
+  for (const event of ['pull_request.opened', 'pull_request.unlabeled', 'push']) {
+    assert.equal(canRefire(drop('history-horizon', { event }), { canManage: true }), false, event);
+  }
+  assert.equal(canRefire(drop('history-horizon', { label: null }), { canManage: true }), false);
+  assert.equal(canRefire(drop('history-horizon'), { canManage: false }), false);
+  const d = refireDialog(drop('history-horizon'));
+  assert.match(d.why, /predates the trigger: 'ready-for-review' was added to #42 Add thing before the trigger was activated/);
+  assert.match(d.why, /only fired again while 'ready-for-review' is still on the item/);
 });

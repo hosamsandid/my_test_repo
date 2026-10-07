@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { readFileSync } from 'node:fs';
 import {
   hasOwnSkills, buildInitialForm, buildEditSubmit, isFormDirty, poolSectionError,
+  skillPoolTeamId, skillsListUrl,
 } from './agent-edit-form-model.js';
 import { PROMPT_MODES } from '../prompt-mode-view.js';
 
@@ -301,4 +303,28 @@ test('list fields compare by content, so re-selecting the same skills is clean',
   const base = buildInitialForm({ ...member, skillsOverride: ['a', 'b'] });
   assert.equal(isFormDirty({ ...member, skillsOverride: ['a', 'b'] }, { ...base, skillsOverride: ['a', 'b'] }), false);
   assert.equal(isFormDirty({ ...member, skillsOverride: ['a', 'b'] }, { ...base, skillsOverride: ['b', 'a'] }), true);
+});
+
+/* ─── #2689: the grant picker lists the team pool the agent seeds from ────── */
+
+test('skillPoolTeamId: Agent Team id for a team and its members, not the legacy "default" teamId', () => {
+  const team = { id: 'uitest-chat-agent-team', role: 'team', teamId: 'default' };
+  assert.equal(skillPoolTeamId(team), 'uitest-chat-agent-team');
+  assert.equal(skillPoolTeamId({ id: 'm', role: 'team-member', parentTeamId: team.id, teamId: 'default' }), team.id);
+  assert.equal(skillPoolTeamId({ id: 'solo', role: 'agent', teamId: 'acme' }), 'acme');
+  assert.equal(skillPoolTeamId({ id: 'solo', role: 'agent' }), null);
+  assert.equal(skillPoolTeamId(null), null);
+});
+
+test('skillsListUrl: queries the Agent Team pool', () => {
+  assert.equal(skillsListUrl({ id: 'my-team', role: 'team', teamId: 'default' }), '/api/skills?teamId=my-team');
+  assert.equal(skillsListUrl({ id: 'solo', role: 'agent' }), '/api/skills');
+});
+
+// #651 guard: the JSX is uncovered, so pin that the Skills tab's list URL comes
+// from the tested helper and never from the legacy `agent.teamId` again.
+test('AgentEditForm.jsx loads the skills list via skillsListUrl(agent)', () => {
+  const src = readFileSync(new URL('./AgentEditForm.jsx', import.meta.url), 'utf8');
+  assert.match(src, /const skillsUrl = skillsListUrl\(agent\);/);
+  assert.doesNotMatch(src, /\/api\/skills\?teamId=\$\{encodeURIComponent\(agent\.teamId\)\}/);
 });

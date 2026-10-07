@@ -10,6 +10,7 @@ the agent image (`agent-image/scripts/`) and always on `PATH`:
 | `aee-emit` | *Deprecated shim (#2578), removed next release* — applies a label on an issue / PR; use `gh … --add-label` instead |
 | `gh-as-agent` | Do git / GitHub actions stamped with this agent's identity |
 | `aee-ask` | Put a structured decision to the human and pause the turn (quick-reply card) |
+| `aee-wait-ci` | Wait in the foreground, bounded, for a pull request's CI and merge status (#2796) |
 
 These stay **baked into the image** — they are flow primitives, never
 toggleable plugins (see `plugin-system-concept.md` §7). What they *do* share
@@ -63,7 +64,7 @@ through unchanged.
 
 ### 4. Exit codes
 
-One vocabulary across all four:
+One vocabulary across all of them:
 
 | Code | Meaning |
 |---|---|
@@ -71,6 +72,15 @@ One vocabulary across all four:
 | `1` | **Domain error** — the command was well-formed but the operation could not complete (no such artifact, no search match, a local write/commit failed, not inside a git repo, the backend was reachable but rejected the request) |
 | `2` | **Usage error** — bad or missing arguments, an unknown subcommand, or a missing required precondition such as `AGENT_ID` |
 | `3` | **Backend unreachable** — the orchestrator could not be reached, so the effect did **not** happen (the hand-off was not delivered, nothing was pushed). Distinct from `1` so a caller can tell "rejected" from "never arrived" |
+
+`aee-wait-ci` extends this vocabulary with one code per verdict, because its
+result *is* the verdict: `0` passed / no CI · `4` failed · `5` conflict ·
+`6` timeout (`1` = error such as no token or a closed PR, `3` = GitHub
+unreachable, `2` = usage, as above). It always prints its JSON result, `--json`
+or not. Its verdict rules are read from `pr-readiness-rules.json` next to the
+script — shared data, not a dependency. When a wait really starts it appends
+one `{"kind":"ci-wait",…}` line to `$AEE_STATUS_FILE` (if set), from which the
+runtime posts a single chat status note (#2841); a write failure is ignored.
 
 When `--json` is set, errors are reported as `{"ok": false, "error": "…"}` on
 stdout with the matching exit code, so a JSON caller never has to scrape

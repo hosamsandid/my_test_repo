@@ -39,6 +39,7 @@
 // load-time cycle.
 const {
   isAuthoredOutcomes, normalizeOutcomes, outcomeEmitPairs, outcomeSetLabels, outcomesToGithub,
+  setLabelTarget, labelTargetEvent,
   // #2031: the `{to, note?, outcome}` triples a port hands off directly — the
   // wake-edge index, the sibling of `outcomeEmitPairs`.
   outcomeWakePairs,
@@ -46,7 +47,7 @@ const {
 // Claim-label convention (#958) — the suffix is defined once, in process-template,
 // so the lint below can never drift from what the expanders derive. Acyclic:
 // process-template requires only ./outcomes, never this module.
-const { CLAIM_SUFFIX, rawTriggerError } = require('./process-template');
+const { CLAIM_SUFFIX, rawTriggerError, triggerReadiness, readinessFailureLabel } = require('./process-template');
 
 // ─── gate/brake classification (#928) ────────────────────────────────────────
 //
@@ -203,6 +204,10 @@ function triggerView(t) {
     // editor can render the claim badge and the read-only claim readout.
     const c = claimView(t);
     if (c) v.claim = c;
+    // Readiness gate (#2795): carried so the editor's hand-off dialog can show
+    // and edit it, and the graph can wire the gate's failure label.
+    const rg = triggerReadiness(t);
+    if (rg) v.readinessGate = rg;
   } else if (t.type === 'cron') {
     v.cron = t.cron || null;
   } else if (t.type === 'once') {
@@ -325,7 +330,8 @@ function humanNode(h) {
  *   [{ id, name, description?, stage?, emits?, consumes? }]. Synthesized as
  *   `kind: 'human'` nodes; their `emits` classify as gates, and their `consumes`
  *   bind the #981 `@human` gate/brake/delivery edges to the named node.
- * @returns {{ nodes, edges, gates, labels }}
+ * @returns {{ nodes, edges, gates, labels, unusedLabels }}
+ *   `unusedLabels` (#2716): sorted registry names no flow element references.
  */
 function buildProcessGraph(agents, options) {
   const list = Array.isArray(agents) ? agents : [];
@@ -413,6 +419,9 @@ function buildProcessGraph(agents, options) {
       ...(authored ? { outcomes: normalizeOutcomes(a.outcomes) } : {}),
       // DM-only front door: nothing wakes it from git, it talks to a human.
       isEntryPoint: !hasGithubEvent,
+      // Switched off (#2754) — carried only when false so an enabled or
+      // template node stays byte-identical.
+      ...(a.enabled === false ? { enabled: false } : {}),
     };
   });
   const nodeIds = new Set(nodes.map(n => n.id));
@@ -423,7 +432,13 @@ function buildProcessGraph(agents, options) {
   const allListenKeys = new Set();
   const labelMeta = new Map(); // name -> { humanGate, brake }
 
-  const noteLabel = (name) => {
+  // Labels some flow element references (#2716) — everything noteLabel sees
+  // EXCEPT the registry seed below, plus human-role emits/consumes. A registry
+  // entry outside this set is "unused": it is in graph.labels only because of
+  // its own registry entry, so the Label registry panel may offer to delete it.
+  const referencedLabels = new Set();
+  const noteLabel = (name, { seed = false } = {}) => {
+    if (!seed) referencedLabels.add(name);
     if (!labelMeta.has(name)) {
       labelMeta.set(name, { humanGate: isHumanGate(name), brake: isBrake(name) });
     }
@@ -433,7 +448,7 @@ function buildProcessGraph(agents, options) {
   // when no port references it yet — otherwise the flag that makes it a gate or
   // a brake would be silently dropped on export and the label would come back
   // as a plain agent label.
-  for (const name of classifier.registryNames) noteLabel(name);
+  for (const name of classifier.registryNames) noteLabel(name, { seed: true });
 
   const addEmit = (label, agentId) => {
     if (!emitIndex.has(label)) emitIndex.set(label, new Set());
@@ -479,6 +494,25 @@ function buildProcessGraph(agents, options) {
     }
   }
   const ocOf = (label, agentId) => (outcomeByEmit.get(label) || new Map()).get(agentId);
+
+  // Failure labels set by a hand-off readiness gate (#2795): the gate applies
+  // its failure label to the PR on the consumer's behalf, so a listener on it is
+  // wired from the gated consumer, not an orphan. label -> [owner node ids]
+  const gateFailureEmitters = new Map();
+  for (const n of nodes) {
+    const fls = new Set();
+    for (const ch of (Array.isArray(n.channels) ? n.channels : [])) {
+      if (ch && ch.artifact === 'pr' && readinessFailureLabel(ch.readiness)) fls.add(readinessFailureLabel(ch.readiness));
+    }
+    for (const t of (n.triggers || [])) {
+      const fl = readinessFailureLabel(triggerReadiness(t));
+      if (fl) fls.add(fl);
+    }
+    for (const fl of fls) {
+      if (!gateFailureEmitters.has(fl)) gateFailureEmitters.set(fl, []);
+      gateFailureEmitters.get(fl).push(n.id);
+    }
+  }
 
   const edges = [];
   const gateSet = new Set();
@@ -549,7 +583,12 @@ function buildProcessGraph(agents, options) {
           }
         } else {
           const emitters = [...(emitIndex.get(key) || [])];
-          if (emitters.length === 0) {
+          const gateOwners = emitters.length === 0 ? (gateFailureEmitters.get(key) || []) : [];
+          if (gateOwners.length) {
+            for (const s of gateOwners) {
+              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id, gateFailure: true, ...evs, ...clm });
+            }
+          } else if (emitters.length === 0) {
             // No agent emits this label. Without an origin filter we can't infer
             // whether a human sets it, so it's drawn as an orphan listener
             // (advisory lint) — a human applying the label still fires it at
@@ -744,6 +783,22 @@ function buildProcessGraph(agents, options) {
 
   const gates = [...gateSet].sort().map(label => ({ label, humanOnly: true }));
   const labels = [...labelMeta.keys()].sort().map(name => ({ name, ...labelMeta.get(name) }));
+  // Human roles (#987) reference labels without entering labelMeta (their
+  // emits must stay out of the emit index) — they still count as "in use".
+  for (const h of humanRoles) {
+    for (const e of h.emits) referencedLabels.add(e);
+    for (const c of h.consumes) if (c.label) referencedLabels.add(c.label);
+  }
+  // An outcome `setLabel` is a reference even for a registry human gate:
+  // `n.emits` drops those (the `human-label-as-outcome` lint owns them), so the
+  // raw outcome labels are counted unfiltered — otherwise deleting the "unused"
+  // entry would strip the gate flag of a label the flow still sets.
+  for (const a of list) {
+    if (!isAuthoredOutcomes(a.outcomes)) continue;
+    for (const { label } of outcomeEmitPairs(a.outcomes)) referencedLabels.add(label);
+  }
+  const unusedLabels = [...new Set(classifier.registryNames)]
+    .filter(name => !referencedLabels.has(name)).sort();
 
   // Named human roles (#987) join the node set as first-class `kind: 'human'`
   // boxes. Appended last so every agent-side loop above ran over the agent
@@ -754,7 +809,7 @@ function buildProcessGraph(agents, options) {
   const allNodes = humanRoles.length ? [...nodes, ...humanRoles] : nodes;
 
   return {
-    nodes: allNodes, edges, gates, labels,
+    nodes: allNodes, edges, gates, labels, unusedLabels,
     humanTouchpoints: computeHumanTouchpoints(allNodes, edges, humanIds),
     lints: computeLints(allNodes, edges, classifier),
   };
@@ -943,6 +998,52 @@ function computeLints(nodes, edges, classifier) {
       }
     }
   }
+  // A wake label every listener of which is switched off (#2754): the agent is
+  // disabled, or its trigger on that label is. The label still lands on GitHub,
+  // but nothing ever picks the item up — on the Flow Control board it reads
+  // "nobody picks it up". A label with NO listener at all is already
+  // `dead-end-emitter`/`outcome-without-consumer`.
+  const labelListeners = new Map(); // label -> [{ nodeId, live }]
+  for (const n of nodes) {
+    for (const t of (n.triggers || [])) {
+      const l = labelListenKey(t);
+      if (!l) continue;
+      if (!labelListeners.has(l)) labelListeners.set(l, []);
+      labelListeners.get(l).push({ nodeId: n.id, live: n.enabled !== false && t.enabled !== false });
+    }
+  }
+  for (const [label, listeners] of labelListeners) {
+    if (listeners.some(x => x.live)) continue;
+    const ids = [...new Set(listeners.map(x => x.nodeId))];
+    lints.push({ code: 'wake-label-no-live-consumer', severity: 'warning', label, nodeId: ids[0],
+      message: `\`${label}\` wakes only ${ids.map(id => `\`${id}\``).join(', ')}, and ${ids.length === 1 ? 'it is' : 'all are'} switched off — an item carrying it is never picked up.` });
+  }
+  // gate-failure-label-unheard (#2795). A gated PR hand-off that fails CI or hits
+  // a merge conflict sets its failure label instead of waking the consumer — if
+  // nobody listens on that label, the failure only shows as a PR comment and the
+  // item stalls. A gate can come from a channel port (a draft's listeners are
+  // not expanded yet) or from a trigger (derived or raw).
+  const heardLabels = new Set(labelListeners.keys());
+  for (const n of nodes) for (const l of channelLabels(n)) heardLabels.add(l);
+  for (const e of edges) if (e && e.label && e.to && !e.orphan) heardLabels.add(e.label);
+  for (const n of nodes) {
+    if (n.synthetic) continue;
+    const unheard = new Set();
+    for (const ch of (Array.isArray(n.channels) ? n.channels : [])) {
+      if (ch && ch.artifact === 'pr') {
+        const fl = readinessFailureLabel(ch.readiness);
+        if (fl && !heardLabels.has(fl)) unheard.add(fl);
+      }
+    }
+    for (const t of (n.triggers || [])) {
+      const fl = readinessFailureLabel(triggerReadiness(t));
+      if (fl && !heardLabels.has(fl)) unheard.add(fl);
+    }
+    for (const label of unheard) {
+      lints.push({ code: 'gate-failure-label-unheard', severity: 'warning', nodeId: n.id, label,
+        message: `\`${n.id}\` has a CI/conflict-gated hand-off that sets \`${label}\` on failure, but nothing listens on \`${label}\` — a failed hand-off stalls unnoticed.` });
+    }
+  }
   // The former `direct-handoff-candidate` hint (#2032) only ever fired on edges
   // that had already opted out of GitHub delivery via the internal transport.
   // With that transport removed (#2578) every labelled edge is poller-delivered
@@ -1083,7 +1184,11 @@ function computeLints(nodes, edges, classifier) {
       lints.push({
         code: 'raw-trigger-nonconformant', severity: 'info', nodeId: n.id,
         ...(t.id ? { triggerIds: [t.id] } : {}),
-        message: `\`${n.id}\` trigger ${t.id ? `\`${t.id}\`` : '(unnamed)'} deviates from the wiring rules: ${te}. It still runs — edit it to conform.`,
+        // An invalid cron (#2626) is not a tolerated deviation: the agent's
+        // scheduler skips it, so the lint must not claim it still runs.
+        message: t.type === 'cron'
+          ? `\`${n.id}\` trigger ${t.id ? `\`${t.id}\`` : '(unnamed)'} never fires: ${te}. Fix the schedule.`
+          : `\`${n.id}\` trigger ${t.id ? `\`${t.id}\`` : '(unnamed)'} deviates from the wiring rules: ${te}. It still runs — edit it to conform.`,
       });
     }
   }
@@ -1169,6 +1274,51 @@ function computeLints(nodes, edges, classifier) {
           lints.push({ code: 'same-label-multiple-outcomes', severity: 'warning', nodeId: n.id, label: lbl,
             message: `\`${n.id}\` sets \`${lbl}\` from ${ids.size} exactlyOne options (${[...ids].map(i => `\`${i}\``).join(', ')})`
               + ` — consumers can't distinguish the branches.` });
+        }
+      }
+    }
+  }
+
+  // label-target-mismatch (#2629, warning): a producer's outcome sets a label on
+  // a PR (or an issue) — explicitly via `target`, or implied by the outcome /
+  // the producer's own triggers (setLabelTarget) — but a consumer listening on
+  // that label only subscribes to the OTHER object's `.labeled` event. GitHub
+  // emits `pull_request.labeled` for a PR label and `issues.labeled` for an
+  // issue label, never both, so that consumer can never wake: the hand-off
+  // silently dies. An unknown target is not flagged (nothing to disagree with).
+  const seenMismatch = new Set();
+  for (const n of nodes) {
+    if (n.synthetic) continue;
+    const oc = n.outcomes;
+    if (!oc || !Array.isArray(oc.options)) continue;
+    for (const o of oc.options) {
+      for (const a of (Array.isArray(o.actions) ? o.actions : [])) {
+        if (!a || a.type !== 'setLabel' || typeof a.label !== 'string') continue;
+        const lbl = a.label.trim();
+        if (!lbl || isHumanGate(lbl)) continue;
+        const target = setLabelTarget(o, a, n.triggers);
+        const expected = labelTargetEvent(target);
+        if (!expected) continue;
+        for (const m of nodes) {
+          if (m.synthetic || m.id === n.id) continue;
+          for (const t of (m.triggers || [])) {
+            if (!t || t.type !== 'github-event') continue;
+            const lf = typeof t.labelFilter === 'string' ? t.labelFilter.trim() : '';
+            if (lf !== lbl) continue;
+            const evs = Array.isArray(t.events) ? t.events : [];
+            const labeled = evs.filter(e => e === 'issues.labeled' || e === 'pull_request.labeled');
+            if (!labeled.length || labeled.includes(expected)) continue;
+            const key = `${n.id}|${o.id}|${m.id}|${t.id || ''}`;
+            if (seenMismatch.has(key)) continue;
+            seenMismatch.add(key);
+            const noun = target === 'pr' ? 'a pull request' : 'an issue';
+            lints.push({
+              code: 'label-target-mismatch', severity: 'warning', nodeId: m.id, label: lbl, outcome: o.id,
+              ...(t.id ? { triggerIds: [t.id] } : {}),
+              message: `\`${n.id}\` outcome \`${o.id}\` sets \`${lbl}\` on ${noun}, but \`${m.id}\``
+                + ` listens on \`${labeled.join('`, `')}\` — GitHub reports it as \`${expected}\`, so \`${m.id}\` never wakes.`,
+            });
+          }
         }
       }
     }

@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import {
   ADMIN_TABS, DEFAULT_ADMIN_TAB, resolveAdminTab,
   allTeamRows, isUnadministered, teamDeleteImpact,
-  groupAgentsForOwnership,
+  groupAgentsForOwnership, agentsSectionTitle, agentOwnershipNote, agentTeamOwnerOptions,
+  userNameIndex, ownerLabel,
   environmentTierSummary, mcpTierSummary, environmentOwnershipError, environmentOwnershipPatch,
   ownershipUnchanged,
 } from './administration-view.js';
@@ -279,4 +280,62 @@ test('an unchanged tier is recognised as a no-op, in both directions and for a l
     ownershipUnchanged({ scope: 'system', assignedTeamIds: ['alpha'] }, { scope: 'system', assignedTeamIds: ['alpha', 'beta'] }),
     false,
   );
+});
+
+/* ── #2695: Resources tab — Agent Team options, owner names, counts ────── */
+
+test('agentTeamOwnerOptions lists Agent Teams only, as { id, name }, sorted by name', () => {
+  const out = agentTeamOwnerOptions([
+    { id: 'uitest', role: 'team', displayName: 'UI test team' },
+    { id: 'agent-studio-2-0', role: 'team', displayName: 'Agent Studio 2.0' },
+    { id: 'agent-studio-2-0-developer', role: 'team-member', parentTeamId: 'agent-studio-2-0' },
+    { id: 'eph', role: 'agent' },
+    { id: 'bare', role: 'team', displayName: '  ' },
+    null,
+  ]);
+  assert.deepEqual(out, [
+    { id: 'agent-studio-2-0', name: 'Agent Studio 2.0' },
+    { id: 'bare', name: 'bare' },
+    { id: 'uitest', name: 'UI test team' },
+  ]);
+  assert.deepEqual(agentTeamOwnerOptions(undefined), []);
+});
+
+test('the legacy access-scope id is not an Agent Team option', () => {
+  const ids = agentTeamOwnerOptions([{ id: 'agent-studio-2-0', role: 'team' }]).map(t => t.id);
+  assert.ok(!ids.includes('default'));
+});
+
+test('ownerLabel: display name, then subject, then the id; "unknown" for none', () => {
+  const idx = userNameIndex([
+    { id: 'u1', displayName: 'Jane Doe', subject: 'jane' },
+    { id: 'u2', subject: 'bob@corp.com' },
+    { id: 'u3' },
+    null,
+  ]);
+  assert.equal(ownerLabel('u1', idx), 'Jane Doe');
+  assert.equal(ownerLabel('u2', idx), 'bob@corp.com');
+  assert.equal(ownerLabel('u3', idx), 'u3');
+  assert.equal(ownerLabel('9b2c-uuid', idx), '9b2c-uuid');
+  assert.equal(ownerLabel(undefined, idx), 'unknown');
+  assert.equal(ownerLabel('u1', undefined), 'u1');
+});
+
+test('agentsSectionTitle counts teams AND agents, not teams labelled as agents', () => {
+  const agentTeams = [
+    { team: { id: 'a' }, members: [{}, {}, {}, {}] },
+    { team: { id: 'b' }, members: [{}, {}, {}, {}, {}] },
+    { team: { id: 'c' }, members: [{}] },
+  ];
+  assert.equal(agentsSectionTitle({ agentTeams, standaloneAgents: [] }), 'Agent Teams (3) · 10 agents');
+  assert.equal(agentsSectionTitle({ agentTeams: [{ team: {}, members: [] }], standaloneAgents: [{}] }), 'Agent Teams (1) · 1 agent');
+  assert.equal(agentsSectionTitle({}), 'Agent Teams (0) · 0 agents');
+});
+
+test('agentOwnershipNote states the derived boundary and resolves the owner name', () => {
+  const idx = userNameIndex([{ id: 'u1', displayName: 'Jane Doe' }]);
+  assert.equal(agentOwnershipNote({ id: 't', role: 'team', ownerId: 'u1' }, idx), 'Access: members of this Agent Team · owner Jane Doe');
+  assert.equal(agentOwnershipNote({ id: 't', role: 'team' }, idx), 'Access: members of this Agent Team · no owner recorded');
+  assert.equal(agentOwnershipNote({ id: 'm', role: 'team-member', parentTeamId: 'gone' }, idx), "Orphaned: parent Agent Team 'gone' not found");
+  assert.equal(agentOwnershipNote({ id: 'x', role: 'retired', ownerId: 'u9' }, idx), 'No Agent Team · owner u9');
 });

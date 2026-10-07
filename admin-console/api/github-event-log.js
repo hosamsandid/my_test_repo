@@ -113,7 +113,10 @@ function projectAgentRows(entries, agentId) {
   for (const e of list) {
     if (!e || e.source !== REFIRE_SOURCE || !e.refireOf) continue;
     for (const o of e.outcomes || []) {
-      if (o && o.agentId === agentId) refires.set(`${e.refireOf.eventId}\u0000${o.triggerId}`, e);
+      // #2875: a pool instance's drop is re-fired through its template.
+      if (o && (o.agentId === agentId || e.refireOf.agentId === agentId)) {
+        refires.set(`${e.refireOf.eventId}\u0000${o.triggerId}`, e);
+      }
     }
   }
   const rows = [];
@@ -141,6 +144,12 @@ function projectAgentRows(entries, agentId) {
         wakeLabel,
         // #2571: who pushed, on a producer-filter drop (null = unknown).
         ...(o.reason === 'producer-filter' ? { producer: typeof o.producer === 'string' ? o.producer : null } : {}),
+        // #2822: the label a comment-label drop wanted on the commented item.
+        ...(o.reason === 'comment-label' && typeof o.requireLabel === 'string' ? { requireLabel: o.requireLabel } : {}),
+        // #2795: the readiness gates a held / failed / timed-out hand-off was
+        // about, and why a hold was cancelled.
+        ...(Array.isArray(o.gates) ? { gates: o.gates.filter(g => typeof g === 'string') } : {}),
+        ...(o.reason === 'gate-cancelled' && typeof o.cancelReason === 'string' ? { cancelReason: o.cancelReason } : {}),
         refiredBy: e.refiredBy || null,
         refireOf: e.refireOf || null,
         refired: ref ? { eventId: String(ref.eventId), by: ref.refiredBy || null, at: ref.ts || null } : null,
@@ -208,7 +217,34 @@ function queryAgentEntries({ agentId, since, until, limit, now = Date.now() } = 
   }
 }
 
+// #2596: a delivered outcome of a pooled role carries the per-ticket instance
+// it ran on (`instanceId`). Pure: add what the Event Log needs to name and link
+// it — the instance's display name ("Developer · #2562"), whether it still
+// exists (a reaped instance's config is gone), and the pooled role's own name
+// for the "open the role's chat instead" fallback. `readConfig(agentId)` returns
+// the agent's config or null. An outcome without an instanceId (every
+// non-pooled row, and every row recorded before #2596) is returned unchanged.
+function projectPoolInstance(outcome, readConfig) {
+  if (!outcome || typeof outcome.instanceId !== 'string' || !outcome.instanceId) return outcome;
+  const instanceId = outcome.instanceId;
+  const instanceCfg = readConfig(instanceId);
+  const roleCfg = outcome.agentId ? readConfig(outcome.agentId) : null;
+  const poolRoleName = (roleCfg && roleCfg.displayName) || outcome.agentId || null;
+  // The instance id is `<role>-i<item>` (agent-pool.js poolInstanceId), so a
+  // reaped instance can still be named after its ticket.
+  const prefix = `${outcome.agentId}-i`;
+  const item = outcome.agentId && instanceId.startsWith(prefix) ? instanceId.slice(prefix.length) : null;
+  const derivedName = item && roleCfg && roleCfg.displayName ? `${roleCfg.displayName} · #${item}` : null;
+  return {
+    ...outcome,
+    instanceName: (instanceCfg && instanceCfg.displayName) || derivedName || instanceId,
+    instanceExists: !!instanceCfg,
+    instanceItem: item,
+    poolRoleName,
+  };
+}
+
 module.exports = {
-  queryEntries, filterEntries, listDayFiles, EVENT_LOG_DIR,
+  queryEntries, filterEntries, listDayFiles, EVENT_LOG_DIR, projectPoolInstance,
   projectAgentRows, queryAgentEntries, AGENT_DEFAULT_WINDOW_MS,
 };

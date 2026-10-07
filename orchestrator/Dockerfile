@@ -50,6 +50,9 @@ WORKDIR /app
 COPY package.json .
 RUN npm install --omit=dev
 COPY *.js ./
+# PR readiness verdict rules (#2796), required by pr-readiness.js and shared
+# byte-identical with the agent image's `aee-wait-ci`.
+COPY pr-readiness-rules.json ./
 
 # `gh-as-agent` wrapper: tags git commits and PR/review/comment bodies
 # with the per-agent identity so the GitHub poller can filter out events

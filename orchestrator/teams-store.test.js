@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { createTeamsStore, DEFAULT_TEAM_ID, normalizeGithubHandle, coerceGithubHandle, coerceChatFontSize, coerceChatNotifyOnBack } = require('./teams-store');
+const { createTeamsStore, DEFAULT_TEAM_ID, normalizeGithubHandle, coerceGithubHandle, coerceChatFontSize, coerceChatNotifyOnBack, coerceChatListFilter, coerceFlowsListFilter, isValidEmail, INVALID_EMAIL_REASON } = require('./teams-store');
 
 function freshStore() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'teams-store-'));
@@ -59,6 +59,32 @@ test('matrix identity: setUserMatrixIdentity validates its inputs', () => {
   assert.throws(() => store.setUserMatrixIdentity('nope', '@u-1:local'), /not found/);
   assert.throws(() => store.setUserMatrixIdentity(u.id, ''), /matrixUserId is required/);
   assert.throws(() => store.setUserMatrixIdentity(u.id, '   '), /matrixUserId is required/);
+});
+
+test('matrix identity: a service account can never be stamped as a person (#2721 AC7)', () => {
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'jane@corp.com' });
+  for (const service of ['@k-zyskowski_accent:local', '@admin:local', '@my-assistant:local', '@u-payments:local']) {
+    assert.throws(() => store.setUserMatrixIdentity(u.id, service), /personal Matrix identity/);
+  }
+  assert.equal(store.getUser(u.id).matrixUserId, undefined);
+});
+
+test('matrix identity: clearNonPersonalMatrixIdentities drops shared-admin pointers only (#2721 AC7)', () => {
+  const { store, root } = freshStore();
+  const a = store.createUser({ subject: 'admin@corp.com', systemAdmin: true });
+  const b = store.createUser({ subject: 'jane@corp.com' });
+  store.setUserMatrixIdentity(b.id, '@u-0123456789abcdef:local');
+  // Simulate a record pointed at the shared admin account by an older build.
+  const indexPath = path.join(root, 'users', 'index.json');
+  const raw = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+  raw.find(r => r.id === a.id).matrixUserId = '@k-zyskowski_accent:local';
+  fs.writeFileSync(indexPath, JSON.stringify(raw));
+
+  assert.deepEqual(store.clearNonPersonalMatrixIdentities(), [a.id]);
+  assert.equal(store.getUser(a.id).matrixUserId, undefined);
+  assert.equal(store.getUser(b.id).matrixUserId, '@u-0123456789abcdef:local');
+  assert.deepEqual(store.clearNonPersonalMatrixIdentities(), [], 'idempotent');
 });
 
 test('matrix identity: deleting a user drops the pointer with the record', () => {
@@ -296,6 +322,70 @@ test('chatNotifyOnBack: only persisted when true; false/blank clears it', () => 
   assert.equal(store.updateUser(plain.id, { displayName: 'Plain' }).chatNotifyOnBack, true);
   // A non-boolean is rejected at the store boundary.
   assert.throws(() => store.updateUser(plain.id, { chatNotifyOnBack: 'on' }), /must be a boolean/);
+});
+
+// ---- Agent-Chat rail team selection (#2740) -------------------------------
+
+test('chatListFilter: coerce accepts { hidden: string[] }, folds duplicates, treats blank as unset', () => {
+  assert.deepEqual(coerceChatListFilter({ hidden: ['team:a', 'singles', 'team:a'] }), { hidden: ['team:a', 'singles'] });
+  assert.deepEqual(coerceChatListFilter({ hidden: [] }), { hidden: [] });
+  assert.equal(coerceChatListFilter(undefined), undefined);
+  assert.equal(coerceChatListFilter(null), undefined);
+  assert.equal(coerceChatListFilter(''), undefined);
+  assert.throws(() => coerceChatListFilter(['team:a']), /hidden array/);
+  assert.throws(() => coerceChatListFilter({ hidden: 'team:a' }), /hidden array/);
+  assert.throws(() => coerceChatListFilter({ hidden: [42] }), /non-empty strings/);
+  assert.throws(() => coerceChatListFilter({ hidden: [''] }), /non-empty strings/);
+  assert.throws(() => coerceChatListFilter({ hidden: ['x'.repeat(513)] }), /non-empty strings/);
+  const tooMany = Array.from({ length: 2001 }, (_, i) => `team:t${i}`);
+  assert.throws(() => coerceChatListFilter({ hidden: tooMany }), /at most 2000/);
+});
+
+test('chatListFilter: an oversized hidden array is rejected before its entries are inspected', () => {
+  // 2001 non-string entries: the size check must fire first, not the per-key one.
+  assert.throws(() => coerceChatListFilter({ hidden: Array(2001).fill(42) }), /at most 2000 entries/);
+  // A huge array must be rejected without iterating it (no O(n²) dedupe on the event loop).
+  const huge = new Proxy(Array(1_000_000).fill('team:x'), {
+    get(target, prop, receiver) {
+      if (prop === Symbol.iterator) throw new Error('hidden was iterated');
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  assert.throws(() => coerceChatListFilter({ hidden: huge }), /at most 2000 entries/);
+  // Duplicates up to the cap are still folded.
+  assert.deepEqual(coerceChatListFilter({ hidden: Array(2000).fill('team:a') }), { hidden: ['team:a'] });
+});
+
+test('chatListFilter: update stores it, leaves it alone when absent, blank clears it', () => {
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'filter@corp.com' });
+  assert.equal(u.chatListFilter, undefined);
+  assert.deepEqual(store.updateUser(u.id, { chatListFilter: { hidden: ['team:a'] } }).chatListFilter, { hidden: ['team:a'] });
+  assert.deepEqual(store.getUser(u.id).chatListFilter, { hidden: ['team:a'] });
+  // An untouched update leaves the saved selection alone.
+  assert.deepEqual(store.updateUser(u.id, { displayName: 'F' }).chatListFilter, { hidden: ['team:a'] });
+  // Unknown properties are not carried over into the stored record.
+  assert.deepEqual(store.updateUser(u.id, { chatListFilter: { hidden: [], extra: 1 } }).chatListFilter, { hidden: [] });
+  assert.equal(store.updateUser(u.id, { chatListFilter: null }).chatListFilter, undefined);
+  assert.throws(() => store.updateUser(u.id, { chatListFilter: { hidden: [1] } }), /non-empty strings/);
+});
+
+// ---- Flows rail selection (#2859) -----------------------------------------
+
+test('flowsListFilter: same shape and bounds as chatListFilter, stored separately', () => {
+  assert.deepEqual(coerceFlowsListFilter({ hidden: ['draft:a', 'team:b', 'draft:a'] }), { hidden: ['draft:a', 'team:b'] });
+  assert.equal(coerceFlowsListFilter(null), undefined);
+  assert.throws(() => coerceFlowsListFilter({ hidden: 'draft:a' }), /flowsListFilter must be an object/);
+  assert.throws(() => coerceFlowsListFilter({ hidden: [''] }), /flowsListFilter\.hidden entries/);
+  assert.throws(() => coerceFlowsListFilter({ hidden: Array(2001).fill('x') }), /at most 2000/);
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'flows@corp.com' });
+  store.updateUser(u.id, { chatListFilter: { hidden: ['team:c'] } });
+  assert.deepEqual(store.updateUser(u.id, { flowsListFilter: { hidden: ['draft:x'] } }).flowsListFilter, { hidden: ['draft:x'] });
+  // The two preferences never overwrite each other.
+  assert.deepEqual(store.getUser(u.id).chatListFilter, { hidden: ['team:c'] });
+  assert.deepEqual(store.updateUser(u.id, { chatListFilter: null }).flowsListFilter, { hidden: ['draft:x'] });
+  assert.equal(store.updateUser(u.id, { flowsListFilter: '' }).flowsListFilter, undefined);
 });
 
 test('users: delete cascades memberships', () => {
@@ -568,4 +658,39 @@ test('users: a lone ordinary user (legacy stack, no System Admin) is still delet
   const only = store.createUser({ subject: 'lonely@corp.com' });
   store.deleteUser(only.id);
   assert.equal(store.listUsers().length, 0);
+});
+
+// ---- Email validation (#2695 finding 88) -----------------------------------
+
+test('users: a malformed email is refused on create and on update (400)', () => {
+  const { store } = freshStore();
+  for (const bad of ['not-an-email', 'jane@corp', '@corp.com', 'jane doe@corp.com', 'jane@@corp.com']) {
+    assert.throws(() => store.createUser({ subject: `s-${bad}`, email: bad }), (err) => {
+      assert.equal(err.statusHint, 400);
+      assert.equal(err.code, 'invalid-email');
+      assert.equal(err.message, INVALID_EMAIL_REASON);
+      return true;
+    }, bad);
+  }
+  assert.equal(store.listUsers().length, 0, 'a refused create must not persist a record');
+
+  const u = store.createUser({ subject: 'jane', email: ' jane.doe@corp.com ' });
+  assert.equal(u.email, 'jane.doe@corp.com');
+  assert.throws(() => store.updateUser(u.id, { email: 'not-an-email' }), (err) => err.statusHint === 400);
+  assert.equal(store.getUser(u.id).email, 'jane.doe@corp.com', 'a refused update keeps the stored email');
+  // Blank still clears — the field stays optional.
+  assert.equal(store.updateUser(u.id, { email: '  ' }).email, '');
+  assert.equal(store.createUser({ subject: 'no-mail' }).email, '');
+});
+
+test('users: a malformed configured seed email is dropped, not fatal to seeding', () => {
+  const { store } = freshStore();
+  const seeded = store.seedInitialSystemAdmin({ subject: 'admin', email: 'not-an-email' });
+  assert.ok(seeded && seeded.systemAdmin);
+  assert.equal(seeded.email, '');
+});
+
+test('isValidEmail accepts plausible addresses only', () => {
+  for (const ok of ['a@b.co', 'jane.doe+x@corp.example.com']) assert.equal(isValidEmail(ok), true, ok);
+  for (const bad of ['', 'x', 'a@b', 'a b@c.d', null, 42]) assert.equal(isValidEmail(bad), false, String(bad));
 });

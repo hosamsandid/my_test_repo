@@ -106,13 +106,52 @@ Three consequences that surprise people:
   costs nothing and nothing is delivered twice. The very first poll after a
   restart only establishes that baseline — it delivers nothing.
 
+### CI results and merge conflicts (PR checks passed / failed, PR merge conflict)
+
+GitHub's event feed says nothing about CI or merge conflicts. So for a
+repository where some trigger listens to **PR checks passed**, **PR checks
+failed** or **PR merge conflict**, the poller looks at the open pull requests
+itself on every cycle and logs one row the moment a verdict is reached. These
+rows use the usual PR event keys `pull_request.checks_passed`,
+`pull_request.checks_failed` and `pull_request.merge_conflict`. This works for
+**GitHub only**, not GitLab.
+
+- **Checks passed** — the PR's latest commit has at least one check, and all of
+  them succeeded (or were neutral or skipped).
+- **Checks failed** — any check failed, was cancelled or timed out, even while
+  others are still running. The wake names the failed checks.
+- **Merge conflict** — GitHub reports the PR as conflicting with its base branch.
+
+**Every check counts**, including CodeQL and checks that are not required to
+merge. If a commit has no checks at all after 3 minutes, CI is counted as absent,
+and nothing is logged. That commit's checks are not looked at again, so checks
+that only start later (for example after a long queue) are missed. While GitHub is still working out whether a PR can merge,
+nothing is reported yet; the poller asks again on the next cycle.
+
+**Each verdict fires once per commit.** A new push starts over for the new commit.
+A result for the old commit is never delivered after that. A re-run that turns
+failed checks green still logs *PR checks passed*. A PR closed while its checks
+are still running logs nothing.
+
+**Turning this on does not replay the past.** On the first look at a repository
+(or the first after its last such trigger was removed), results that already
+exist are only noted. They wake nobody. After that, nothing is lost to an
+outage: if GitHub was unreachable or the orchestrator was down, a result reached
+in the meantime still wakes the trigger on the next successful cycle.
+
+**Cost.** It costs one extra GitHub request per cycle for each repository with
+such a trigger. A second request is made only while some PR's checks are still
+open. Repositories without such a trigger cost nothing. While the repository's
+polling is backing off (rate limit, GitHub unreachable), nothing is evaluated,
+and nothing is guessed.
+
 ### The poller is not the only writer
 
 Three other things write rows here, which is why this stays one honest timeline of
 every wake rather than a log of one delivery mechanism:
 
 - **Labels applied in the console.** A label a human applies through the GitHub
-  Issues plugin is delivered immediately on an internal fast path, and the poller's
+  Issues plugin (to an issue or a pull request) is delivered immediately on an internal fast path, and the poller's
   later sighting of the same `*.labeled` event is dropped as a duplicate.
 - **Direct agent-to-agent hand-offs.** A `wakeAgent` hand-off wakes a teammate
   straight through the platform — no issue, PR or label — so this log is its
@@ -142,28 +181,44 @@ legend — this is the longer version.
 | **dropped (horizon)** | The event is older than that subscriber's subscription window (its activation time plus a short grace). | Expected right after wiring or reactivating a trigger. A new agent deliberately does not react to history that predates it. |
 | **dropped (label-filter)** | The event carried a label this trigger does not subscribe to. | No — that is label routing working. |
 | **dropped (branch-filter)** | A push went to a branch (or a tag) that this trigger's **Branches** filter does not list. | No — that is branch routing working. Widen the filter if the branch should wake the agent. |
+| **dropped (comment-target)** | A comment on an issue reached a trigger set to **Comments on: pull requests only** — or the other way round. | No — that is comment routing working. |
+| **dropped (agent-comment)** | The comment was posted by an agent, and the trigger has **Ignore comments written by agents** on. | No — it stops agents from waking themselves with their own comments. |
+| **dropped (comment-label)** | The commented issue or PR did not carry the trigger's **Required label on the item** when the comment arrived. The row names the label. | No, unless the label should have been there — add it to the item. |
+| **dropped (knowledge-branch)** | Push to a knowledge-base branch (`agent-knowledge`); never wakes push triggers. | No; built in. |
 | **dropped (internal-dedup)** | The wake was already delivered on the internal fast path; this is GitHub telling us about the same label a second time. | No. |
 | **dropped (wake-already-armed)** | Already woken for this label on this item; a repeat does not wake it again until the label is removed and re-added. | Usually no. Re-fire a lost hand-off from the agent's Events tab. |
+| **dropped (self-claim-label)** | The label is one the agent's own run set: its `:wip` claim or the `:completed` label at the end of the run. It is not a hand-off. It also counts as the wake label being removed, so the next re-add of the wake label wakes the agent again. | No. |
+| **held — waiting for CI / conflict-free** | A PR hand-off with a **readiness gate** (Wait for CI / Block on merge conflict): the wake label is set, but the PR's head is not ready yet. The poller re-checks every cycle; the row later shows how the hold ended. | No — that is the gate working. A long hold ends in a timeout. |
+| **delivered · gate cleared → agent** | The held PR passed every enabled gate and the agent was woken with the original event. | No. |
+| **dropped (gate failed)** | A check failed or the PR conflicts. Nobody was woken; the poller removed the wake label, set the failure label (default `revisions-required`) and commented on the PR. | No, if an agent listens on the failure label — it fixes the PR and re-applies the hand-off label. Otherwise a human has to. |
+| **dropped (gate timed out)** | The gate was still pending after its timeout (default 60 minutes). The wake label was removed, `needs-human` set and a comment names what was pending. | Yes — look at the PR's checks (stuck or never started?). Raise the timeout if your CI is slow. |
+| **dropped (gate cancelled)** | The hold ended without a verdict: the PR was closed or merged, the wake label was removed, or the listening trigger was deleted. | No. |
+| **reaped → agent** | Not a GitHub event: the provisioning sweep removed an agent or pool instance whose setup failed and was left half-created. The row's event reads *orphaned instance cleaned up*. | No. |
+| **reap failed → agent** | The sweep tried to remove such an instance, but the removal did not go through. | Only if it repeats — the sweep retries on its next run. |
 | **nobody's listening** | No trigger subscribed to this event **type** at all. | Maybe. If something should have reacted, the wiring is missing — add or fix the `github-event` trigger on the target agent. |
 
 A **dropped (branch-filter)** row comes from a *Push* trigger with a
 **Branches** filter (e.g. `main, feature/*`): `*` matches within one path
 segment, `**` also across `/`, names match exactly, and tag pushes never match.
-Empty means every branch. Widen the trigger's Branches field in Agent Chat →
-Triggers if the push should have woken the agent.
+Empty means every branch.
+
+The three **comment** drops come from an *Issue comment* trigger's filters
+(#2822). **Required label on the item** is checked against the item's labels at
+the moment the poller sees the comment, not when the comment was written.
 
 A `delivered` or `digested` outcome may carry the **wake label** in brackets: the
 label that actually satisfied the subscriber's filter. No bracket means the
 listener takes any label.
 
-*One caveat about digests as currently recorded:* the fold itself is real and
-lossless, but a folded event is written to the log as **`delivered`** with a
-separate digest marker rather than as a `digest` status — so today a digested
-burst reads as a run of ordinary `delivered` outcomes, and following one of those
-outcomes to "the session it started" can land on nothing, because a digest posts a
-single plain message instead of starting one session per event. If a burst looks
-like several deliveries but you only find one summary message, that is what you
-are looking at.
+For a pooled role, `delivered` names and opens the ticket's instance
+(*Developer · #2562*); once it is removed, the click says so. **held (role
+paused)**: fires when the role resumes.
+
+A `digested` outcome does not open a session: a digest posts one summary
+message, not one session per event.
+
+The table's filter box also matches the Outcomes column — agent or instance
+name or id, and drop reason (e.g. `label-filter`).
 
 **There is no source filtering** (one exception below). Every agent shares one GitHub token, so an
 event caused by an agent looks exactly like an event caused by a human, and a

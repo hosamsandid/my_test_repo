@@ -8,6 +8,7 @@ import {
   buildTeamMenu,
   isChatOpenable,
   deleteDialogCopy,
+  lastMemberDeleteNote,
   cascadeResidueNotice,
   NO_RIGHTS_HINT,
   TEAM_LOCKED_HINT,
@@ -108,6 +109,15 @@ test('a stub is not exportable and its clone/template/reset entries are inert', 
   assert.equal(byKey(items, 'reset-to-stub').disabled, true);
   // Enabling (activating) a stub stays available.
   assert.equal(byKey(items, 'toggle-enabled').disabled, false);
+});
+
+test('#2705 AC3 — a stub\'s inert entries name the action the menu offers: Materialize', () => {
+  const items = buildAgentMenu({ agent: { role: 'agent', token: null, enabled: false } });
+  assert.equal(byKey(items, 'toggle-enabled').label, 'Materialize');
+  for (const key of ['clone', 'extract-template']) {
+    assert.match(byKey(items, key).title, /^Materialize the agent before /, key);
+    assert.doesNotMatch(byKey(items, key).title, /Activate/, key);
+  }
 });
 
 test('#2232 — the retired convert-to-team entry no longer appears on any role', () => {
@@ -334,6 +344,29 @@ test('#1964 — a team is the only cascading delete confirm', () => {
   });
   assert.deepEqual(orch, { title: 'Delete agent?', confirmLabel: 'Delete', maxWidth: 440 });
   assert.doesNotMatch(orch.confirmLabel, /mission/i);
+});
+
+test('#2685 — the last member\'s delete confirm names what happens to its team', () => {
+  const last = {
+    role: 'team-member', id: 'ada', displayName: 'Ada',
+    lastMemberOf: { id: 'ada-team', displayName: 'Ada Team', canManage: true },
+  };
+  assert.match(lastMemberDeleteNote(last, true), /last member of the team "Ada Team"/);
+  assert.match(lastMemberDeleteNote(last, true), /team is deleted with it/);
+  assert.match(lastMemberDeleteNote(last, false), /team stays, with no members/);
+  assert.deepEqual(deleteDialogCopy(last, { deleteTeamToo: true }),
+    { title: 'Delete agent?', confirmLabel: 'Delete agent and team', maxWidth: 440 });
+  assert.equal(deleteDialogCopy(last, { deleteTeamToo: false }).confirmLabel, 'Delete');
+
+  // Without the right to delete the team it always stays — and the button
+  // never promises otherwise.
+  const locked = { ...last, lastMemberOf: { ...last.lastMemberOf, canManage: false } };
+  assert.match(lastMemberDeleteNote(locked, true), /team stays, with no members/);
+  assert.equal(deleteDialogCopy(locked, { deleteTeamToo: true }).confirmLabel, 'Delete');
+
+  // Any other target keeps the plain confirm.
+  assert.equal(lastMemberDeleteNote({ role: 'team-member', id: 'x' }, true), null);
+  assert.equal(deleteDialogCopy({ role: 'team-member', id: 'x' }, { deleteTeamToo: true }).confirmLabel, 'Delete');
 });
 
 /* ── cascadeResidueNotice (#1960) ────────────────────────────────────────── */

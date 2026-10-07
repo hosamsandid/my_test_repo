@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { rehypeShikiSync } from '../../components/shiki-rehype';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { Bot, User, Zap } from 'lucide-react';
-import { Link as LinkIcon } from 'lucide-react';
+import { Link as LinkIcon, ScrollText } from 'lucide-react';
 import LoopRecordCard from './LoopRecordCard';
 import AskQuestionCard from './AskQuestionCard';
 import { normalizeAskQuestion } from './ask-question-view.js';
@@ -18,6 +18,8 @@ import {
 } from './message-author.js';
 import { parseMessageSegments, hasImageRef } from './chat-image-refs.js';
 import ChatImageThumbnail from './chat-image-thumbnail.jsx';
+import { sessionJumpRef, SHOW_IN_SESSION_LABEL } from './session-jump.js';
+import { isStatusNote, statusNoteMarkdown } from './status-note.js';
 
 /**
  * The actual react-markdown render. Memoized on `body` alone (#1676): the
@@ -127,6 +129,9 @@ export function SafeMarkdown({ body }) {
  * @param {string} props.agentUserId      The agent's userId — anything else is "user".
  * @param {boolean} [props.thinking]      Show typing-dots placeholder.
  * @param {string} [props.agentId]        This agent's id, for the inline-image-thumbnail fetch.
+ * @param {(ref:{correlationId?:string, eventId?:string})=>void} [props.onShowInSession]
+ *   Stable callback behind the "Show in session log" button (#2603); the
+ *   button is shown only when it is set and `sessionJumpRef` finds a run.
  */
 
 /**
@@ -298,10 +303,57 @@ function countCodeLines(children) {
   return n;
 }
 
-function NoticeMessage({ message }) {
-  const time = formatMessageTime(message.ts);
+/**
+ * "Show in session log" (#2603): opens the Sessions tab on the run behind a
+ * message and scrolls to it. Sits next to "Copy link" and shares its reveal —
+ * faded out until the row is hovered or holds keyboard focus.
+ */
+function ShowInSessionButton({ onClick, revealed }) {
   return (
-    <div style={{
+    <button
+      type="button"
+      onClick={onClick}
+      title={SHOW_IN_SESSION_LABEL}
+      aria-label={SHOW_IN_SESSION_LABEL}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        padding: 0,
+        border: 'none',
+        background: 'none',
+        color: 'inherit',
+        cursor: 'pointer',
+        opacity: revealed ? 1 : 0,
+        transition: 'opacity 0.1s',
+      }}
+    >
+      <ScrollText size={10} />
+    </button>
+  );
+}
+
+// Hover + keyboard-focus reveal for a row's hover actions. Focus counts while
+// it stays anywhere inside the row, so Tab can move from one action to the
+// next without the row fading out between them.
+function useRowReveal() {
+  const [hovering, setHovering] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const handlers = {
+    onMouseEnter: () => setHovering(true),
+    onMouseLeave: () => setHovering(false),
+    onFocus: () => setFocused(true),
+    onBlur: (e) => {
+      if (!e.currentTarget.contains(e.relatedTarget)) setFocused(false);
+    },
+  };
+  return [hovering || focused, handlers];
+}
+
+function NoticeMessage({ message, onShowInSession }) {
+  const time = formatMessageTime(message.ts);
+  const [revealed, revealHandlers] = useRowReveal();
+  return (
+    <div {...revealHandlers} style={{
       display: 'flex',
       alignItems: 'flex-start',
       gap: 'var(--eb-space-2)',
@@ -334,10 +386,14 @@ function NoticeMessage({ message }) {
             compact so inline code renders formatted without literal backticks
             while block-level markdown can't blow up the card. */}
         <div className="agent-chat-md">
-          <SafeMarkdown body={message.body || ''} />
+          <SafeMarkdown body={isStatusNote(message) ? statusNoteMarkdown(message) : (message.body || '')} />
         </div>
-        <div style={{ fontSize: 'var(--eb-text-xs)', marginTop: 'var(--eb-space-0-5)', opacity: 0.7 }}>
-          {message.sender} · {time}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 4,
+          fontSize: 'var(--eb-text-xs)', marginTop: 'var(--eb-space-0-5)',
+        }}>
+          <span style={{ opacity: 0.7 }}>{message.sender} · {time}</span>
+          {onShowInSession && <ShowInSessionButton onClick={onShowInSession} revealed={revealed} />}
         </div>
       </div>
     </div>
@@ -346,8 +402,8 @@ function NoticeMessage({ message }) {
 
 function Message({
   message, agentUserId, thinking, onRelaunchLoop,
-  onAnswerQuestion, questionAnswerable, questionAnswer,
-  viewer, authorDirectory, agentId,
+  onAnswerQuestion, questionAnswerable, questionAnswer, questionProgress,
+  viewer, authorDirectory, agentId, onShowInSession,
 }) {
   // "Copy link" (#2310 AC7, nice-to-have): builds a `/chats/:agentId?msg=<event_id>`
   // deep-link and copies it, reusing the copy → clipboard → brief "Copied" idiom
@@ -356,7 +412,7 @@ function Message({
   // regardless of which message-kind branch a given row takes (rules-of-hooks) —
   // even though in practice a given `event_id`'s branch never changes between
   // renders of the same row.
-  const [hovering, setHovering] = useState(false);
+  const [revealed, revealHandlers] = useRowReveal();
   const [linkCopied, setLinkCopied] = useState(false);
   const copyMessageLink = useCallback(() => {
     if (!agentId || !message?.event_id || !navigator.clipboard) return;
@@ -368,6 +424,15 @@ function Message({
       })
       .catch(() => { /* clipboard unavailable — no-op */ });
   }, [agentId, message?.event_id]);
+
+  // "Show in session log" (#2603). `onShowInSession` is the parent's stable
+  // callback (so the memo below holds); it gets the pure `sessionJumpRef` —
+  // the run's correlationId, or the reply's event id for the server to resolve.
+  const jumpRef = onShowInSession ? sessionJumpRef(message, agentUserId) : null;
+  const showInSession = useCallback(() => {
+    const ref = sessionJumpRef(message, agentUserId);
+    if (ref && onShowInSession) onShowInSession(ref);
+  }, [message, agentUserId, onShowInSession]);
 
   // Quick-reply question (#1663): an agent message that paused on AskUserQuestion
   // carries a structured `io.aee.ask-question` payload — render it as clickable
@@ -384,6 +449,8 @@ function Message({
           answeredLabel={questionAnswer?.answeredLabel ?? null}
           answeredOptionIds={questionAnswer?.answeredOptionIds ?? null}
           answeredMulti={questionAnswer?.multiAnswers ?? null}
+          progress={questionProgress ?? null}
+          superseded={!!questionAnswer?.superseded}
           onAnswer={(opt) => onAnswerQuestion?.(message.event_id, opt, q)}
           time={formatMessageTime(message.ts)}
         />
@@ -407,8 +474,9 @@ function Message({
       />
     );
   }
-  if (message.msgtype === 'm.notice' && message['io.aee.trigger']) {
-    return <NoticeMessage message={message} />;
+  // A runner status note (#2841) shares the compact notice card.
+  if (message.msgtype === 'm.notice' && (message['io.aee.trigger'] || isStatusNote(message))) {
+    return <NoticeMessage message={message} onShowInSession={jumpRef ? showInSession : null} />;
   }
   // Who wrote this, and which side it belongs on (#2065). The two answers come
   // from different inputs on purpose — the side depends on who is *looking*,
@@ -439,8 +507,7 @@ function Message({
 
   return (
     <div
-      onMouseEnter={() => setHovering(true)}
-      onMouseLeave={() => setHovering(false)}
+      {...revealHandlers}
       style={{
         display: 'flex',
         flexDirection: onRight ? 'row-reverse' : 'row',
@@ -521,13 +588,16 @@ function Message({
                 fontSize: 'inherit',
                 fontFamily: 'inherit',
                 cursor: 'pointer',
-                opacity: hovering || linkCopied ? 1 : 0,
+                opacity: revealed || linkCopied ? 1 : 0,
                 transition: 'opacity 0.1s',
               }}
             >
               <LinkIcon size={10} />
               {linkCopied ? 'Copied' : ''}
             </button>
+          )}
+          {!thinking && jumpRef && (
+            <ShowInSessionButton onClick={showInSession} revealed={revealed} />
           )}
         </div>
       </div>

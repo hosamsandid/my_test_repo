@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { useLocation } from 'react-router';
 import { assistHeaders, notifyAssistError } from './assist-transport.js';
-import { UNAUTHORIZED_EVENT } from '../auth/AuthContext';
+import { UNAUTHORIZED_EVENT, useAuth } from '../auth/AuthContext';
 import { BREADCRUMBS } from '../components/breadcrumbs';
 import {
   appendUserMessage,
@@ -9,6 +9,9 @@ import {
   applyDelta,
   finishStreaming,
   failStreaming,
+  stopStreaming,
+  errorMessageFromBody,
+  errorMessageFromEvent,
   buildRequestBody,
   splitNdjson,
 } from './helper-chat-model.js';
@@ -38,7 +41,7 @@ export function useHelperChat() {
   // (e.g. an isolated component test) from crashing.
   return useContext(HelperChatContext) || {
     isOpen: false, toggle: () => {}, messages: [],
-    sendMessage: () => {}, isStreaming: false, clearHistory: () => {},
+    sendMessage: () => {}, stopMessage: () => {}, isStreaming: false, clearHistory: () => {},
     mode: 'chat', setMode: () => {}, openTour: () => {}, openHelpFor: () => {},
     pageHelp: EMPTY_PAGE_HELP, currentRoute: '/',
     helpSection: { slug: '', nonce: 0 },
@@ -118,7 +121,12 @@ export function HelperChatProvider({ children }) {
     [currentRoute, subjects],
   );
 
+  // Only fetched once a session exists (#2616): the provider is mounted above
+  // the auth gate, so an unconditional mount-time fetch hit the protected
+  // endpoint from the login screen and logged a 401 there. Re-runs on login.
+  const { authenticated } = useAuth();
   useEffect(() => {
+    if (!authenticated) return undefined;
     let alive = true;
     (async () => {
       try {
@@ -131,7 +139,7 @@ export function HelperChatProvider({ children }) {
       }
     })();
     return () => { alive = false; };
-  }, []);
+  }, [authenticated]);
 
   // A synchronous mirror of the list so sendMessage builds the request from the
   // just-appended user turn without waiting for a state flush.
@@ -139,6 +147,13 @@ export function HelperChatProvider({ children }) {
   const setBoth = useCallback((next) => {
     messagesRef.current = next;
     setMessages(next);
+  }, []);
+
+  // The in-flight Ask turn's AbortController (#2700), so the composer's Stop can
+  // cancel a hanging provider instead of waiting out the 180 s upstream timeout.
+  const abortRef = useRef(null);
+  const stopMessage = useCallback(() => {
+    if (abortRef.current) abortRef.current.abort();
   }, []);
 
   const toggle = useCallback(() => setIsOpen(o => !o), []);
@@ -193,18 +208,24 @@ export function HelperChatProvider({ children }) {
       currentRouteLabel: currentRouteLabel(route),
     });
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
       const res = await fetch('/api/helper/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...assistHeaders() },
         body: JSON.stringify(body),
+        signal: controller.signal,
       });
       if (!res.ok) {
         // Request-shape/provider errors arrive as plain JSON before any stream.
         if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
         const errBody = await res.json().catch(() => null);
         if (errBody && errBody.code) notifyAssistError(errBody.code);
-        setBoth(failStreaming(messagesRef.current, placeholderId));
+        // Show the server's reason (e.g. "No LLM endpoint configured…", #2700);
+        // failStreaming falls back to the generic text when there is none.
+        setBoth(failStreaming(messagesRef.current, placeholderId, errorMessageFromBody(errBody)));
         return;
       }
 
@@ -214,6 +235,7 @@ export function HelperChatProvider({ children }) {
       const decoder = new TextDecoder('utf-8');
       let buf = '';
       let sawError = false;
+      let errorText = '';
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -225,6 +247,7 @@ export function HelperChatProvider({ children }) {
             setBoth(applyDelta(messagesRef.current, placeholderId, ev.text));
           } else if (ev.type === 'error') {
             sawError = true;
+            errorText = errorMessageFromEvent(ev) || errorText;
           }
           // `assist` (metadata) and `done` need no client action beyond ending.
         }
@@ -238,28 +261,35 @@ export function HelperChatProvider({ children }) {
             setBoth(applyDelta(messagesRef.current, placeholderId, ev.text));
           } else if (ev.type === 'error') {
             sawError = true;
+            errorText = errorMessageFromEvent(ev) || errorText;
           }
         }
       }
 
       if (sawError) {
-        setBoth(failStreaming(messagesRef.current, placeholderId));
+        setBoth(failStreaming(messagesRef.current, placeholderId, errorText));
       } else {
         setBoth(finishStreaming(messagesRef.current, placeholderId));
       }
     } catch {
-      // Network failure or a dropped connection mid-stream.
-      setBoth(failStreaming(messagesRef.current, placeholderId));
+      if (controller.signal.aborted) {
+        // The user pressed Stop (#2700) — keep any partial answer, no error.
+        setBoth(stopStreaming(messagesRef.current, placeholderId));
+      } else {
+        // Network failure or a dropped connection mid-stream.
+        setBoth(failStreaming(messagesRef.current, placeholderId));
+      }
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setIsStreaming(false);
     }
   }, [isStreaming, setBoth]);
 
   const value = useMemo(() => ({
-    isOpen, toggle, messages, sendMessage, isStreaming, clearHistory,
+    isOpen, toggle, messages, sendMessage, stopMessage, isStreaming, clearHistory,
     mode, setMode, openTour, openHelpFor, pageHelp, currentRoute, helpSection,
     helpContext, publishHelpSubject, retractHelpSubject,
-  }), [isOpen, toggle, messages, sendMessage, isStreaming, clearHistory, mode, openTour, openHelpFor, pageHelp, currentRoute, helpSection, helpContext, publishHelpSubject, retractHelpSubject]);
+  }), [isOpen, toggle, messages, sendMessage, stopMessage, isStreaming, clearHistory, mode, openTour, openHelpFor, pageHelp, currentRoute, helpSection, helpContext, publishHelpSubject, retractHelpSubject]);
 
   return (
     <HelperChatContext.Provider value={value}>

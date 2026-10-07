@@ -14,7 +14,7 @@ export function chLabelKey(label) {
 // same (artifact, from, label) edits in place (updates the gate/wake-prompt); a
 // new label adds a sibling channel. The whole port is rebuilt from the known
 // fields, so a legacy `transport` key (removed in #2578) is dropped on write.
-export function upsertChannel(list, { artifact, from, label, gate, wakePrompt, autoClaim }) {
+export function upsertChannel(list, { artifact, from, label, gate, wakePrompt, autoClaim, readiness }) {
   const art = artifact === 'issue' ? 'issue' : 'pr';
   const lbl = chLabelKey(label);
   const wp = typeof wakePrompt === 'string' && wakePrompt.trim() ? wakePrompt.trim() : '';
@@ -29,11 +29,23 @@ export function upsertChannel(list, { artifact, from, label, gate, wakePrompt, a
     // derived listener itself is regenerated on every reconcile. Only the
     // non-default (`false`) is persisted; anything else means "auto-claim on".
     ...(autoClaim === false ? { autoClaim: false } : {}),
+    // Readiness gate (#2795) — PR channels only; absent = no gate.
+    ...(art === 'pr' && readiness && (readiness.ci || readiness.conflict) ? { readiness } : {}),
   };
   const out = (Array.isArray(list) ? list : []).slice();
   const i = out.findIndex(c => c.artifact === art && c.from === from && chLabelKey(c.label) === lbl);
   if (i >= 0) out[i] = next; else out.push(next);
   return out;
+}
+
+// Whether `list` already holds the channel keyed (artifact, from, label) — the
+// create dialog marks it as existing instead of offering to create it again
+// (#2665); saving would only upsert it in place.
+export function hasChannel(list, { artifact, from, label }) {
+  const art = artifact === 'issue' ? 'issue' : 'pr';
+  const lbl = chLabelKey(label);
+  return (Array.isArray(list) ? list : []).some(c =>
+    c && c.artifact === art && c.from === from && chLabelKey(c.label) === lbl);
 }
 
 // Remove a channel from a list. When a `label` is supplied (present in the spec,
@@ -46,4 +58,41 @@ export function removeChannelFrom(list, { artifact, from, label }) {
   const lbl = chLabelKey(label);
   return (Array.isArray(list) ? list : []).filter(c =>
     !(c.artifact === art && c.from === from && (!hasLabel || chLabelKey(c.label) === lbl)));
+}
+
+// Edit an existing channel (#2717). `prevLabel` is the label the channel had
+// when the editor opened, so a routing-label change RENAMES that port instead of
+// upserting a sibling under the new key (which left the old port behind). The
+// port is rebuilt from the known fields, like upsertChannel; `label` and `gate`
+// come from the edit, while `autoClaim` (#958), `wakePrompt` (#868) and the
+// readiness gate (#2795) are kept
+// from the existing port unless the spec carries the key — the channel editor
+// does not edit the claim opt-out, so a Save must not reset it. Renaming onto a
+// label another channel of the same (artifact, from) already uses throws and
+// leaves the list unchanged. A missing original port falls back to an upsert.
+export function editChannel(list, prevLabel, spec) {
+  const { artifact, from } = spec;
+  const art = artifact === 'issue' ? 'issue' : 'pr';
+  const oldLbl = chLabelKey(prevLabel);
+  const newLbl = chLabelKey(spec.label);
+  const src = Array.isArray(list) ? list : [];
+  const keyIs = (lbl) => (c) => c && c.artifact === art && c.from === from && chLabelKey(c.label) === lbl;
+  const i = src.findIndex(keyIs(oldLbl));
+  if (i < 0) return upsertChannel(src, spec);
+  if (newLbl !== oldLbl && src.some(keyIs(newLbl))) {
+    const noun = art === 'pr' ? 'pull request' : 'issue';
+    throw new Error(newLbl
+      ? `A ${noun} channel from ${from} with routing label "${newLbl}" already exists. Edit or remove that channel instead.`
+      : `A ${noun} channel from ${from} without a routing label already exists. Edit or remove that channel instead.`);
+  }
+  const old = src[i];
+  const [next] = upsertChannel([], {
+    artifact: art, from, label: newLbl, gate: spec.gate,
+    wakePrompt: 'wakePrompt' in spec ? spec.wakePrompt : old.wakePrompt,
+    autoClaim: 'autoClaim' in spec ? spec.autoClaim : old.autoClaim,
+    readiness: 'readiness' in spec ? spec.readiness : old.readiness,
+  });
+  const out = src.slice();
+  out[i] = next;
+  return out;
 }

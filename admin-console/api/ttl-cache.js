@@ -22,7 +22,11 @@
 function createTtlCache({ ttlMs = 5000, now = Date.now, maxEntries = 500 } = {}) {
   // key -> { value, expiresAt }
   const store = new Map();
-  // key -> Promise (compute in flight); never expires on its own, cleared on settle
+  // key -> Promise (compute in flight); never expires on its own, cleared on settle.
+  // A compute only owns its key while it is still the entry here: one detached
+  // by clear()/deleteWhere() settles into a world that has moved on, so it must
+  // neither cache its (possibly pre-mutation) value nor delete a newer
+  // in-flight entry for the same key.
   const inflight = new Map();
 
   function get(key) {
@@ -60,12 +64,14 @@ function createTtlCache({ ttlMs = 5000, now = Date.now, maxEntries = 500 } = {})
       .then(compute)
       .then(
         (value) => {
-          inflight.delete(key);
-          set(key, value);
+          if (inflight.get(key) === p) {
+            inflight.delete(key);
+            set(key, value);
+          }
           return value;
         },
         (err) => {
-          inflight.delete(key);
+          if (inflight.get(key) === p) inflight.delete(key);
           throw err;
         },
       );
@@ -73,12 +79,31 @@ function createTtlCache({ ttlMs = 5000, now = Date.now, maxEntries = 500 } = {})
     return p;
   }
 
+  // Drop every cached value and detach in-flight computes: callers already
+  // awaiting one still get its result, but it is not cached, and the next
+  // getOrCompute starts a fresh compute.
   function clear() {
     store.clear();
     inflight.clear();
   }
 
-  return { get, set, getOrCompute, clear, get size() { return store.size; } };
+  // clear(), narrowed to the keys `predicate(key)` accepts (#571): the same
+  // drop-and-detach, every other entry and compute untouched.
+  function deleteWhere(predicate) {
+    for (const key of [...store.keys()]) if (predicate(key)) store.delete(key);
+    for (const key of [...inflight.keys()]) if (predicate(key)) inflight.delete(key);
+  }
+
+  return { get, set, getOrCompute, clear, deleteWhere, get size() { return store.size; } };
 }
 
-module.exports = { createTtlCache };
+// A cache TTL from an env var. Unset, blank or invalid ⇒ `fallback`; an
+// explicit `0` is honoured (caching off) instead of collapsing to the fallback
+// the way `Number(raw) || fallback` does.
+function ttlMsFromEnv(raw, fallback) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+module.exports = { createTtlCache, ttlMsFromEnv };

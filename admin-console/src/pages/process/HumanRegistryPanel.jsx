@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { Plus, Trash2, User, X } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
+import { useLabelSuffix, LabelSuffixChip } from '../../components/SuffixedLabelInput';
+import { labelListToText, labelListFromText } from './label-suffix-view.js';
 import PageHelpButton from '../../components/PageHelpButton';
 import { useHelpSubject } from '../../context/HelperChatContext';
 import { OVERLAY_FLOW_HUMANS } from '../../context/page-help-view.js';
@@ -30,18 +32,19 @@ function consumeLabel(c) {
 }
 
 function HumanRow({ human, stages, onSave, onRemove, onUnwireConsume, busy }) {
+  const suffixCtx = useLabelSuffix();
   const [name, setName] = useState(human.name || human.id);
   const [description, setDescription] = useState(human.description || '');
   const [stage, setStage] = useState(human.stage || '');
-  const [emitsText, setEmitsText] = useState((human.emits || []).join(', '));
+  const [emitsText, setEmitsText] = useState(labelListToText(human.emits, suffixCtx));
 
   const dirty = name !== (human.name || human.id)
     || description !== (human.description || '')
     || stage !== (human.stage || '')
-    || emitsText !== (human.emits || []).join(', ');
+    || emitsText !== labelListToText(human.emits, suffixCtx);
 
   const save = () => {
-    const emits = emitsText.split(',').map(s => s.trim()).filter(Boolean);
+    const emits = labelListFromText(emitsText, suffixCtx, human.emits);
     onSave({ ...human, id: human.id, name: name.trim() || human.id, description, stage, emits });
   };
 
@@ -69,6 +72,11 @@ function HumanRow({ human, stages, onSave, onRemove, onUnwireConsume, busy }) {
         Labels this person applies (gates), comma-separated
         <input style={{ ...inputStyle, marginTop: 3 }} value={emitsText} placeholder="e.g. dispatch, approved" disabled={busy}
           onChange={e => setEmitsText(e.target.value)} />
+          {suffixCtx && (
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 3 }}>
+              Team labels get <LabelSuffixChip suffix={suffixCtx.suffix} /> appended; labels without it are kept as they are.
+            </span>
+          )}
       </label>
       {(human.consumes || []).length > 0 && (
         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
@@ -85,7 +93,7 @@ function HumanRow({ human, stages, onSave, onRemove, onUnwireConsume, busy }) {
       )}
       {dirty && (
         <button disabled={busy} onClick={save}
-          style={{ alignSelf: 'flex-start', background: 'var(--eb-accent-primary)', color: '#fff', border: 'none', borderRadius: 'var(--eb-radius-md)', padding: '4px 10px', fontSize: 'var(--eb-text-xs)', cursor: busy ? 'wait' : 'pointer' }}
+          style={{ alignSelf: 'flex-start', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', padding: '4px 10px', fontSize: 'var(--eb-text-xs)', cursor: busy ? 'wait' : 'pointer' }}
         >Save</button>
       )}
     </div>
@@ -146,7 +154,7 @@ export default function HumanRegistryPanel({ humans = [], stages = [], ops, onCl
           onKeyDown={e => { if (e.key === 'Enter') add(); }}
         />
         <button onClick={add} disabled={busy || !newName.trim()}
-          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'var(--eb-accent-primary)', color: '#fff', border: 'none', borderRadius: 'var(--eb-radius-md)', padding: '4px 10px', fontSize: 'var(--eb-text-xs)', cursor: busy ? 'wait' : 'pointer', whiteSpace: 'nowrap' }}>
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', padding: '4px 10px', fontSize: 'var(--eb-text-xs)', cursor: busy ? 'wait' : 'pointer', whiteSpace: 'nowrap' }}>
           <Plus size={13} /> Add
         </button>
       </div>

@@ -159,7 +159,7 @@ function bootRefusal(config) {
   if (config.mode === "enforce" && !config.configured) {
     return "INTERNAL_AUTH_MODE=enforce requires INTERNAL_API_TOKEN (or "
       + "INTERNAL_AGENT_TOKEN_SECRET) to be set — without a token every caller, "
-      + "including the admin console, would be rejected.";
+      + "including the admin-console service, would be rejected.";
   }
   return null;
 }
@@ -253,6 +253,7 @@ const AGENT_ROUTES = [
   // Session + telemetry push (agent-entrypoint.py)
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/status$/, scope: "own" },
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/running-sessions$/, scope: "own" },
+  { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/trigger-status$/, scope: "own" },
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/session-events$/, scope: "own" },
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/session-pointer$/, scope: "own" },
 

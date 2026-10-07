@@ -9,16 +9,17 @@
 import { apiCall } from '../../hooks/useApi';
 import { PROMPT_MODES } from '../prompt-mode-view.js';
 import { wouldCreateCycle } from './hierarchy-utils';
-import { upsertChannel, removeChannelFrom } from './channel-ops';
+import { upsertChannel, removeChannelFrom, editChannel } from './channel-ops';
 import {
   stagesAfterAdd, stagesAfterRename, stagesAfterRemove, stagesAfterReorder, membersToCascade,
 } from './stage-list-ops';
-import { labelsAfterSet } from './label-registry-ops';
+import { labelsAfterSet, labelsAfterRemove, assertLabelsUnused } from './label-registry-ops';
 import {
   humansAfterUpsert, humansAfterRemove,
   humanAfterConsumeAdd, humanAfterConsumeRemove, humanAfterEmitAdd, humanAfterEmitRemove,
 } from './humans-registry-ops';
 import { parseGitHubUrl } from '../../components/repository-url-view.js';
+import { triggerPath } from '../agent-chat/trigger-issues.js';
 
 // owner/repo from a repository URL, for a canvas-created github-event trigger.
 // Delegates to the shared `parseGitHubUrl` (#2345) rather than keep a partial
@@ -117,8 +118,10 @@ export const liveOps = {
     }
     return apiCall('POST', `/api/agents/${roleId}/triggers`, b);
   },
-  updateTrigger: (roleId, tid, body) => apiCall('PUT', `/api/agents/${roleId}/triggers/${tid}`, body),
-  deleteTrigger: (roleId, tid) => apiCall('DELETE', `/api/agents/${roleId}/triggers/${tid}`),
+  // `position` (optional, #2626) addresses one row of a legacy duplicated id —
+  // the index the GET annotates on such rows; without it the first match.
+  updateTrigger: (roleId, tid, body, position) => apiCall('PUT', triggerPath(roleId, tid, position), body),
+  deleteTrigger: (roleId, tid, position) => apiCall('DELETE', triggerPath(roleId, tid, position)),
   // Trigger-level `emits` was removed (#783) — label hand-offs live on the agent
   // level (setRoleEmits below), so there is no per-trigger setEmits any more.
   // Display name (#692) — safe on a live agent: it is display-only and does not
@@ -260,6 +263,15 @@ export const liveOps = {
     const cur = await liveOps.listLabels(teamId);
     await apiCall('PUT', `/api/agents/${teamId}`, { labels: labelsAfterSet(cur, name, flags) });
   },
+  // Delete UNUSED registry entries (#2716) in one PUT of the team's `labels[]`
+  // only — no agent/trigger/channel config is touched. Re-checks usage against
+  // a fresh server graph first so a label referenced meanwhile is never dropped.
+  removeLabels: async (teamId, names) => {
+    const g = await apiCall('GET', `/api/flows/graph?team=${encodeURIComponent(teamId)}`);
+    assertLabelsUnused(names, g?.unusedLabels);
+    const cur = await liveOps.listLabels(teamId);
+    await apiCall('PUT', `/api/agents/${teamId}`, { labels: labelsAfterRemove(cur, names) });
+  },
 
   // ── named human roles (#987): first-class human flow nodes, TEAM-agent only ──
   // Same binding pattern as stages/labels: teamId first, ProcessCanvas wraps.
@@ -317,15 +329,24 @@ export const liveOps = {
   },
   // Channels live on the *consumer*; the backend re-derives the github-event
   // triggers from them (reconcileTeamGithubChannels). Upsert keyed on (artifact, from).
-  addChannel: async (roleId, { artifact, from, label, gate, wakePrompt, autoClaim }) => {
+  addChannel: async (roleId, { artifact, from, label, gate, wakePrompt, autoClaim, readiness }) => {
     if (!from || from === roleId) return;
     const a = await apiCall('GET', `/api/agents/${roleId}`);
     // `autoClaim` (#958) rides along so the claim opt-out survives the live port
     // write — otherwise the reconciler re-stamps the claim.
-    const channels = upsertChannel(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label, gate, wakePrompt, autoClaim });
+    const channels = upsertChannel(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label, gate, wakePrompt, autoClaim, readiness });
     await apiCall('PUT', `/api/agents/${roleId}`, { channels });
   },
-  updateChannel: async (roleId, spec) => liveOps.addChannel(roleId, spec),
+  // Edit an existing channel (#2717): `prevLabel` is its label when the editor
+  // opened, so a label change renames that port instead of adding a sibling.
+  // Omitted = edit in place on the spec's own key (e.g. the claim toggle).
+  updateChannel: async (roleId, spec, { prevLabel } = {}) => {
+    if (!spec.from || spec.from === roleId) return;
+    const a = await apiCall('GET', `/api/agents/${roleId}`);
+    const channels = editChannel(Array.isArray(a?.channels) ? a.channels : [],
+      prevLabel !== undefined ? prevLabel : spec.label, spec);
+    await apiCall('PUT', `/api/agents/${roleId}`, { channels });
+  },
   removeChannel: async (roleId, { artifact, from, label }) => {
     const a = await apiCall('GET', `/api/agents/${roleId}`);
     const channels = removeChannelFrom(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label });
@@ -445,6 +466,9 @@ export function makeDraftOps(getBundle, persist) {
       const b = clone(getBundle());
       const t = (role(b, roleId)?.triggers || []).find(x => x.id === tid);
       if (t) Object.assign(t, patch);
+      // A switched-off readiness gate (#2795) is sent as null — drop the key,
+      // as the live trigger PUT does.
+      if (t && t.readinessGate === null) delete t.readinessGate;
       await persist(b);
     },
     deleteTrigger: async (roleId, tid) => {
@@ -591,6 +615,16 @@ export function makeDraftOps(getBundle, persist) {
     setLabelFlags: async (name, flags) => {
       const b = clone(getBundle());
       const next = labelsAfterSet(b.labels, name, flags);
+      if (next.length) b.labels = next; else delete b.labels;
+      await persist(b);
+    },
+    // Delete UNUSED entries from the bundle's `labels[]` (#2716) — same
+    // server-side usage re-check as the live op, against the current bundle.
+    removeLabels: async (names) => {
+      const b = clone(getBundle());
+      const g = await apiCall('POST', '/api/flows/graph', { processTemplate: b });
+      assertLabelsUnused(names, g?.unusedLabels);
+      const next = labelsAfterRemove(b.labels, names);
       if (next.length) b.labels = next; else delete b.labels;
       await persist(b);
     },
@@ -753,9 +787,16 @@ export function makeDraftOps(getBundle, persist) {
       r.channels = upsertChannel(r.channels, spec);
       await persist(b);
     },
-    // Upsert keyed on (artifact, from, label) (#828), so editing a channel's
-    // gate reuses it while a new label adds a switch fan-in sibling.
-    updateChannel: async (roleId, spec) => makeDraftOps(getBundle, persist).addChannel(roleId, spec),
+    // Edit keyed on the channel's ORIGINAL (artifact, from, label) (#2717), so a
+    // label change renames the port rather than adding a switch fan-in sibling.
+    updateChannel: async (roleId, spec, { prevLabel } = {}) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (!r) throw new Error(`role ${roleId} not found`);
+      if (!spec.from || spec.from === roleId) return;
+      r.channels = editChannel(r.channels, prevLabel !== undefined ? prevLabel : spec.label, spec);
+      await persist(b);
+    },
     removeChannel: async (roleId, { artifact, from, label }) => {
       const b = clone(getBundle());
       const r = role(b, roleId);

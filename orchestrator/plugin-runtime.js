@@ -192,6 +192,18 @@ async function listLiveSidecars() {
   return splitByRunning(await listSidecarContainers()).running;
 }
 
+// The libpod inspect body of a sidecar image in the local store, or null when
+// it is absent or the runtime cannot say (#2646 AC8: the image a recreated
+// sidecar would run). On Kubernetes the image lives in a node's cache, out of
+// reach from here — null, which the console shows as "unknown". The reference
+// is path-escaped the way podman's own client does; libpod unescapes it.
+async function inspectSidecarImage(image) {
+  if (IS_K8S || !PLUGIN_SIDECARS_SUPPORTED || typeof image !== 'string' || !image) return null;
+  const r = await libpodRequest('GET', `/images/${encodeURIComponent(image)}/json`);
+  if (r.status >= 300 || !r.body || typeof r.body !== 'object') return null;
+  return r.body;
+}
+
 async function ensureAuditVolume(pluginId) {
   const name = auditVolumeName(pluginId);
   const r = await libpodRequest('POST', '/volumes/create', { name });
@@ -501,6 +513,27 @@ async function pushScopeCredentials(manifest, scopesMap, dir = REGISTRY_DIR) {
   return { pluginId: manifest.id, ok: !!res.ok, error: res.error, body: res.body };
 }
 
+// Ask a plugin's broker whether one scope's saved credential works (#2640):
+// `POST /internal/test-scope-credential { scopeId }`, authenticated like the
+// push (the orchestrator's own `_internal` token). The broker makes one cheap
+// read with the credential it already holds and answers a status — the value
+// itself never travels. Optional for a broker: a 404 means "cannot test".
+// Longer timeout than the push: the broker waits on the vendor (Jira's own
+// request timeout is 20 s).
+const CREDENTIAL_TEST_TIMEOUT_MS = Number(process.env.PLUGIN_CREDENTIAL_TEST_TIMEOUT_MS) || 30000;
+async function testScopeCredential(manifest, scopeId, dir = REGISTRY_DIR) {
+  if (!PLUGIN_SIDECARS_SUPPORTED) return { pluginId: manifest.id, ok: false, ...UNSUPPORTED };
+  const token = mintInternalToken(manifest.id, dir);
+  if (!token) return { pluginId: manifest.id, ok: false, error: 'no token' };
+  const res = await postJson(
+    `${brokerBaseUrl(manifest)}/internal/test-scope-credential`,
+    { scopeId },
+    token,
+    CREDENTIAL_TEST_TIMEOUT_MS,
+  );
+  return { pluginId: manifest.id, ok: !!res.ok, status: res.status, error: res.error, body: res.body };
+}
+
 module.exports = {
   auditVolumeName,
   AUDIT_MOUNT,
@@ -515,6 +548,7 @@ module.exports = {
   listSidecarContainers,
   splitByRunning,
   listLiveSidecars,
+  inspectSidecarImage,
   startSidecar,
   stopSidecar,
   reconcilePluginSidecars,
@@ -524,4 +558,5 @@ module.exports = {
   reconcilePluginAttachments,
   teardownScope,
   pushScopeCredentials,
+  testScopeCredential,
 };

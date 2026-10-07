@@ -152,3 +152,10 @@ test('a stored draft of null reads back as "no draft", not as a crash', () => {
   assert.equal(getDraft(store, 'a1'), null);
   assert.deepEqual(dropDraft(store, 'a1'), {});
 });
+
+test('#2858: a label suffix change says when running sessions pick it up', () => {
+  const notice = restartNoticeText({ kind: 'label-suffix' });
+  assert.match(notice, /Label suffix updated/);
+  assert.match(notice, /next run/);
+  assert.doesNotMatch(notice, /re-provisioned|context folder/i);
+});

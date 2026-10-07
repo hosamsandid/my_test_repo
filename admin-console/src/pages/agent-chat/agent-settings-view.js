@@ -88,6 +88,12 @@ export function restartNoticeText(info) {
     return 'Repositories updated. The workspace changed immediately; the agent is told about it '
       + 'from its next run on. The conversation above is unaffected.';
   }
+  if (info && info.kind === 'label-suffix') {
+    // #2858: configs, triggers and prompts are rewritten on disk right away;
+    // a running session keeps its prompt until its next run.
+    return 'Label suffix updated for every agent of the team. Running sessions '
+      + 'pick up the new labels and prompts on their next run.';
+  }
   if (info && info.kind === 'parallelism') {
     // wipLimit / Flow-Supervisor changes are control-plane only — the admission
     // tick reads them live, so nothing respawns and no session is interrupted.

@@ -2,7 +2,7 @@
 
 A **process template** is a portable, git-committable JSON description of a
 modeled agent orchestration — the export/import format of the **Process Canvas**
-(Admin Console → *Process Canvas*). It captures *what the roles are and how they
+(Agent Studio → *Process Canvas*). It captures *what the roles are and how they
 are wired*, deliberately **not** secrets, repos, or Matrix identities (those are
 supplied when the bundle is materialised into a real team).
 
@@ -26,7 +26,7 @@ that still carry `emits` are lifted transparently on read.)
 env → team → members pipeline (with rollback) the Team-Setup wizard uses; each
 role's `{{vars}}` and the target repositories are applied per member.
 
-**`labelSuffix` (optional, 1–8 chars of `[a-z0-9]` with single inner hyphens — `k3f9`, `team-1`, `pre-prod`; a leading/trailing/doubled hyphen is rejected because it would yield `ready--x` / `ready-x-`).** When two or more teams share one GitHub repository, their label-based hand-offs would collide. Pass a short suffix (e.g. `"abc1"`) to stamp every label token — trigger `labelFilter`, channel `label`, `setLabel` outcome actions, bundle label registry, and prompt text — before any agents are created. `GET /api/teams/suggest-suffix` returns a random 4-char suggestion. In extend mode the suffix must match the stored one (400 on mismatch). Warnings are returned for any label mention in prompt text that could not be stamped automatically (`suffixWarnings` in the stream response). Omit when the team is the sole tenant on its repository.
+**`labelSuffix` (optional, 1–8 chars of `[a-z0-9]` with single inner hyphens — `k3f9`, `team-1`, `pre-prod`; a leading/trailing/doubled hyphen is rejected because it would yield `ready--x` / `ready-x-`).** When two or more teams share one GitHub repository, their label-based hand-offs would collide. Pass a short suffix (e.g. `"abc1"`) to stamp every label token — trigger `labelFilter`, `requireLabel` and `claim` (`ready` → `ready-abc1`, `ready:wip` → `ready-abc1:wip`), channel `label`, `setLabel` outcome actions, bundle label registry, the `humans` registry's `emits` / `consumes[].label`, and prompt text — before any agents are created. Each label is stamped once: a mention inside a longer label name (`foo` in `foo-abc`) is left alone, and a name already ending in `-<suffix>` is kept as is. Later edits to the live team (agent PUT, trigger POST/PUT, Add member) are stamped with the stored suffix the same way. Labels that already ended in `-<suffix>` at creation are recorded on the team as `labelSuffixExempt`, and a live team's labels without its suffix (foreign labels) are left unstamped on those edits. The suffix itself is changed, added or removed after creation with `POST /api/agents/:teamId/label-suffix` `{ suffix, dryRun? }` (Team Settings → General → Label suffix): it rewrites every stamped occurrence with the same token rules, renames the GitHub labels in place, refuses (409) a resulting name another team on the same repository or one of the team's own foreign labels already uses, and records failed GitHub renames as `labelSuffixPendingRenames` for `{ retry: true }`. `GET /api/teams/suggest-suffix` returns a random 4-char suggestion. In extend mode the suffix must match the stored one (400 on mismatch). Warnings are returned for any label mention in prompt text that could not be stamped automatically (`suffixWarnings` in the stream response). Omit when the team is the sole tenant on its repository.
 
 **`materializeMembers` (optional, default `true`).** How far each new member is taken. `true` (or omitted) provisions every member immediately — Matrix user, workspace seed, repository clone, running container — and pre-creates its DM room. `false` creates each member as a **stub** instead: its config and `triggers.json` are written, but there is no Matrix user, no workspace and no clone, so it appears as *Not initialised* and is fully provisioned when it is enabled. Only the members are affected; the shared environment and the team agent are created either way, and label-suffix stamping plus custom-role resolution happen before the member loop, so they apply to stubs identically. In `mode: "extend"` the flag applies to the newly created members only. Read as `!== false`, so any other value means materialize-now. The same field is accepted by `POST /api/teams/stream`, which is the endpoint both launch surfaces actually submit to, and both echo the mode they ran in back as `materialized`.
 
@@ -58,7 +58,8 @@ role's `{{vars}}` and the target repositories are applied per member.
         { "artifact": "pr", "from": "developer", "label": "approved", "gate": "human",
           "wakePrompt": "…",               // optional authored wake-prompt override (#868)
           "autoClaim": false,              // opt out of auto-derived claim (#958); default ON for labelled channels
-          "postcondition": "merged" }      // optional (#2113): 'merged' | 'review-submitted' | 'pr-exists'
+          "postcondition": "merged",       // optional (#2113): 'merged' | 'review-submitted' | 'pr-exists'
+          "readiness": { "ci": true, "conflict": true } } // optional (#2795): PR channels only — hold the wake until green / conflict-free
       ],
       "triggers": [
         {
@@ -69,6 +70,11 @@ role's `{{vars}}` and the target repositories are applied per member.
           "labelFilter": "assigned:{{agentId}}",
           "claim": { "remove": "assigned:{{agentId}}", "add": "assigned:{{agentId}}:wip",
                      "postcondition": "merged" }, // optional; add MUST be <labelFilter>:wip (#958); postcondition (#2113) gates the :completed swap
+          "readinessGate": { "ci": true, "conflict": true, // optional (#2795); PR hand-off events only
+                             "failureLabel": "revisions-required", "timeoutMinutes": 60 },
+          "requireLabel": "needs-clarification", // optional (#2822); issue_comment.* only — item must carry the label
+          "skipAgentComments": true,      // optional (#2822); issue_comment.* only — ignore gh-as-agent comments
+          "target": "issue",              // optional (#2822); issue_comment.* only — 'issue' | 'pr'
           "cron": "5 3 * * 1",            // cron
           "at": "2026-01-01T00:00:00Z",   // once
           "description": "…",
@@ -172,7 +178,8 @@ vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
 }
 ```
 
-- **Action types.** `setLabel` (apply a GitHub label — `label` required),
+- **Action types.** `setLabel` (apply a GitHub label — `label` required;
+  optional `target: 'issue' | 'pr'` says where it lands, see below),
   `openPr`, `openIssue` (absorb `github.producesPr/producesIssue`),
   `wakeAgent` (hand off directly to another role — see below), `none`
   (terminal, no outbound signal). An option may carry several actions.
@@ -182,6 +189,15 @@ vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
   `gate: 'human'`) — same rule as `gate-violation`. A `brake` label *is* allowed:
   a brake pauses the loop and is agent-applied (#928).
   `exactlyOne` with fewer than two options is valid (a phase-5 lint, not an error).
+- **`setLabel` target (#2629).** GitHub reports a label on a pull request only
+  as `pull_request.labeled` and on an issue only as `issues.labeled`, so a
+  consumer listening on the other event never wakes. Without an explicit
+  `target` the target is implied by an `openPr`/`openIssue` in the same option,
+  else by the producer's own github-event triggers when they react to only one
+  kind (all `pull_request*` or all `issues.*`); otherwise it is unknown. Any
+  other `target` value is a validation error. A consumer whose `labelFilter`
+  matches but whose `*.labeled` events miss the resolved target is flagged by
+  the `label-target-mismatch` warning lint.
 - **`{{var}}` substitution** applies to `label`, `when` and a `wakeAgent`'s
   `note` at materialise time, exactly like trigger fields. A `wakeAgent`'s `to`
   is **not** substituted — it is a role reference, remapped instead (below).
@@ -382,11 +398,27 @@ the same option.
   prose (#957): an agent *asked* to verify its own outcome just moves "the agent
   forgot" one step earlier.
 
+- **Optional hand-off readiness gate (#2795).** A PR channel's `readiness`
+  (`{ci, conflict, failureLabel?, timeoutMinutes?}`) is carried onto the derived
+  listener as `readinessGate`; a hand-authored `github-event` trigger on
+  `pull_request.labeled` / `opened` / `reopened` may set `readinessGate`
+  directly. The poller then holds the wake until the PR's head is green and/or
+  mergeable; a failure swaps the wake label for `failureLabel` (default
+  `revisions-required`, must differ from the wake label), a timeout (default
+  60, 1–10080 minutes) for `needs-human`. Absent, or both toggles off, means no
+  gate; defaults are not written. When several channels consolidate onto one
+  listener their gates are OR-merged (first explicit failure label / timeout
+  wins). The bundle validator rejects a gate on an issue channel or on a
+  trigger without a PR hand-off event. Runtime semantics: [triggers.md](triggers.md#hand-off-readiness-gate-wait-for-ci-block-on-merge-conflict).
+
 - **Preset conventions are enforced (#1008).** Shipped presets (the registry
   bundles here and the agent-template catalog) carry the same wiring conventions
   the engine writes: every `github-event` trigger has exactly **one** event
   (`rawTriggerError` — the strict bundle validator now rejects multi-event
   triggers at materialise; drafts stay saveable for the migration flow), every
+  `cron` trigger has a schedule the agent can run (`cronExpressionError` in
+  `trigger-validate.js`, #2626; the Flow graph lints an invalid one as *never
+  fires*), every
   label listener **claims** its wake label (`{ remove: <label>, add:
   "<label>:wip" }`, optionally with a `postcondition` — see below), and every
   produced artifact either has an in-flow consumer

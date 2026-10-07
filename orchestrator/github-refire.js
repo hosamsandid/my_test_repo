@@ -21,10 +21,22 @@
 // fs-free so it is unit-testable (`node --test`); the event-log read, the
 // GitHub fetch, the in-flight lock and the enqueue live in orchestrator.js.
 
-// The only drop reasons a human may override (#2525 resolved decision). Every
-// other reason is a routing decision (label-filter, self-claim-label, horizon,
-// push-duplicate), not a protection that may have swallowed a real wake.
+// The drop reasons a human may always override (#2525 resolved decision).
+// The other reasons are routing decisions (label-filter, self-claim-label,
+// push-duplicate), not protections that may have swallowed a real wake. The
+// exception, horizon, is overridable only while its label is still present
+// (below).
 const REFIRABLE_REASONS = Object.freeze(['wake-already-armed', 'throttle', 'internal-dedup']);
+
+// Drops a human may override only while the wake label is STILL on the open
+// item (#2874). `history-horizon` (#320/#525) rightly keeps the poller from
+// replaying pre-activation backlog on its own; but after a flow re-apply or an
+// instance move, a label applied just before the trigger existed is a live
+// hand-off nobody received. Only a label event whose label is the trigger's
+// wake label qualifies — a horizon drop happens before the label filter runs,
+// so the logged event may be about some other label entirely. The label check
+// itself is `checkItemState`, which runs on every re-fire with a wake label.
+const LABEL_PRESENT_REASONS = Object.freeze(['history-horizon']);
 
 // `source` stamped on the re-fire's pending entry and its event-log row.
 const REFIRE_SOURCE = 'manual-refire';
@@ -34,6 +46,10 @@ const TRIGGER_ID_RE = /^[A-Za-z0-9:_.-]{1,128}$/;
 
 function isRefirableReason(reason) {
   return REFIRABLE_REASONS.includes(reason);
+}
+
+function isRefirableWhileLabelPresent(reason) {
+  return LABEL_PRESENT_REASONS.includes(reason);
 }
 
 // `{ok, value: {eventId, triggerId}}` or `{ok: false, error}`. The actor is
@@ -79,7 +95,10 @@ function findPriorRefire(entries, { eventId, agentId, triggerId }) {
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (!entry || entry.source !== REFIRE_SOURCE || !entry.refireOf) continue;
     if (entry.refireOf.eventId !== eventId) continue;
-    if ((entry.outcomes || []).some((o) => o && o.agentId === agentId && o.triggerId === triggerId)) {
+    // #2875: a pool instance's drop re-fires through its template, so the
+    // outcome names the template; `refireOf.agentId` keeps the drop's agent.
+    const byAgent = (o) => o.agentId === agentId || entry.refireOf.agentId === agentId;
+    if ((entry.outcomes || []).some((o) => o && byAgent(o) && o.triggerId === triggerId)) {
       return entry;
     }
   }
@@ -130,10 +149,11 @@ function planRefire({ found, prior, trigger, agentEnabled, retentionCutoffMs }) 
   if (Number.isFinite(retentionCutoffMs) && Number.isFinite(ts) && ts < retentionCutoffMs) {
     return { ok: false, status: 404, code: 'not-found', error: 'That event is past the event-log retention window.' };
   }
-  if (outcome.status !== 'dropped' || !isRefirableReason(outcome.reason)) {
+  const labelBound = outcome.status === 'dropped' && isRefirableWhileLabelPresent(outcome.reason);
+  if (outcome.status !== 'dropped' || !(isRefirableReason(outcome.reason) || labelBound)) {
     return {
       ok: false, status: 409, code: 'not-refirable',
-      error: `Only drops for ${REFIRABLE_REASONS.join(', ')} can be fired again (this one was ${outcome.status}${outcome.reason ? ` / ${outcome.reason}` : ''}).`,
+      error: `Only drops for ${REFIRABLE_REASONS.join(', ')} — or ${LABEL_PRESENT_REASONS.join(', ')} while the wake label is still on the item — can be fired again (this one was ${outcome.status}${outcome.reason ? ` / ${outcome.reason}` : ''}).`,
     };
   }
   if (prior) {
@@ -153,9 +173,27 @@ function planRefire({ found, prior, trigger, agentEnabled, retentionCutoffMs }) 
   if (agentEnabled === false) {
     return { ok: false, status: 409, code: 'agent-disabled', error: 'The agent is disabled — enable it before firing again.' };
   }
-  const wakeLabel = typeof outcome.wakeLabel === 'string' && outcome.wakeLabel
-    ? outcome.wakeLabel
-    : (typeof trigger.labelFilter === 'string' && trigger.labelFilter.trim() ? trigger.labelFilter.trim() : null);
+  const filter = typeof trigger.labelFilter === 'string' && trigger.labelFilter.trim() ? trigger.labelFilter.trim() : null;
+  if (labelBound) {
+    // The event must have been this trigger's own wake: a label add whose
+    // label is the trigger's filter (or, for an any-label listener, a label).
+    const label = typeof entry.label === 'string' && entry.label ? entry.label : null;
+    if (typeof entry.event !== 'string' || !entry.event.endsWith('.labeled') || !label) {
+      return {
+        ok: false, status: 409, code: 'not-refirable',
+        error: 'This event predates the trigger and is not a label being added — only a wake label that is still on the item can be fired again.',
+      };
+    }
+    if (filter && label !== filter) {
+      return {
+        ok: false, status: 409, code: 'not-refirable',
+        error: `This event added '${label}', not '${filter}', the label this trigger wakes on.`,
+      };
+    }
+    // `checkItemState` then refuses unless this label is on the open item now.
+    return { ok: true, wakeLabel: filter || label, workItem, labelRequired: true };
+  }
+  const wakeLabel = typeof outcome.wakeLabel === 'string' && outcome.wakeLabel ? outcome.wakeLabel : filter;
   return { ok: true, wakeLabel, workItem };
 }
 
@@ -163,7 +201,11 @@ function planRefire({ found, prior, trigger, agentEnabled, retentionCutoffMs }) 
 // from the REST API (`state`, `merged`/`merged_at`, `labels`). A missing detail
 // (fetch failed) refuses rather than guesses: waking an agent on a merged PR is
 // the one outcome this check exists to prevent.
-function checkItemState(detail, { kind, wakeLabel }) {
+//
+// `requireLabel` (#2822): a comment listener's label condition, re-checked on the
+// live labels — a comment wake re-fired after the label was removed would wake
+// the agent for a conversation it no longer owns.
+function checkItemState(detail, { kind, wakeLabel, requireLabel = null }) {
   if (!detail || typeof detail !== 'object') {
     return { ok: false, status: 502, code: 'github-unavailable', error: 'Could not read the item\'s current state from GitHub — try again in a moment.' };
   }
@@ -174,10 +216,16 @@ function checkItemState(detail, { kind, wakeLabel }) {
   if (detail.state && detail.state !== 'open') {
     return { ok: false, status: 409, code: 'item-closed', error: `The ${noun} is closed — reopen it before firing again.` };
   }
+  const labels = Array.isArray(detail.labels)
+    ? detail.labels.map((l) => (typeof l === 'string' ? l : l && l.name)).filter(Boolean)
+    : [];
+  if (requireLabel && !labels.includes(requireLabel)) {
+    return {
+      ok: false, status: 409, code: 'label-gone',
+      error: `The ${noun} no longer carries the label '${requireLabel}' this trigger requires — re-apply it to wake the agent.`,
+    };
+  }
   if (wakeLabel) {
-    const labels = Array.isArray(detail.labels)
-      ? detail.labels.map((l) => (typeof l === 'string' ? l : l && l.name)).filter(Boolean)
-      : [];
     if (!labels.includes(wakeLabel)) {
       const wip = labels.includes(`${wakeLabel}:wip`);
       return {
@@ -259,6 +307,9 @@ function buildRefireLogFields({ entry, outcome, actor }) {
       eventId: String(entry.eventId),
       reason: outcome.reason,
       ts: entry.ts || null,
+      // The agent the drop was logged for (#2875) — a pool instance's drop is
+      // delivered to its template, so the outcome alone no longer says it.
+      ...(outcome && typeof outcome.agentId === 'string' ? { agentId: outcome.agentId } : {}),
     },
   };
 }
@@ -275,6 +326,8 @@ function refireSummary(refireEntry) {
 
 module.exports = {
   REFIRABLE_REASONS,
+  LABEL_PRESENT_REASONS,
+  isRefirableWhileLabelPresent,
   REFIRE_SOURCE,
   isRefirableReason,
   validateRefireRequest,

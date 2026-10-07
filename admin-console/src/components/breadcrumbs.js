@@ -36,16 +36,45 @@ export const BREADCRUMBS = {
   '/about':        'About',
 };
 
-// Resolve a pathname to its breadcrumb label, handling the two dynamic route
-// shapes (Agent-Chat room, plugin viewer). Falls back to the raw pathname.
-export function breadcrumbFor(pathname) {
-  if (BREADCRUMBS[pathname]) return BREADCRUMBS[pathname];
+// Label for a path that matches no route (#2615). App.jsx renders the NotFound
+// page for the same paths via its `path="*"` catch-all, so the header and the
+// content area agree instead of the header echoing the raw pathname.
+export const NOT_FOUND_LABEL = 'Page not found';
+
+// React Router matches case-insensitively and ignores a trailing slash, so
+// `/SSH-Keys/` renders the SSH Keys page — resolve the label the same way or
+// such a URL would show the right page under a "Page not found" header.
+function normalize(pathname) {
+  const p = String(pathname || '/').replace(/\/+$/, '') || '/';
+  return p.toLowerCase();
+}
+
+// Own keys only: a plain-object map would resolve ids like `constructor` or
+// `toString` to built-in functions and print their source (#2650).
+function pluginTitleOf(pluginTitles, id) {
+  return (pluginTitles && Object.hasOwn(pluginTitles, id) && pluginTitles[id]) || id;
+}
+
+// Resolve a pathname to its breadcrumb label, handling the dynamic route
+// shapes (Agent-Chat room, plugin viewer). A path that matches no route
+// reads NOT_FOUND_LABEL — never the raw pathname (#2615). `pluginTitles`
+// ({ [pluginId]: displayName }, #2650) names a plugin viewer by its display
+// name; an id without an entry still reads as the raw id.
+export function breadcrumbFor(pathname, pluginTitles = {}) {
+  const p = normalize(pathname);
+  if (BREADCRUMBS[p]) return BREADCRUMBS[p];
+  // "/" redirects to /chats — label it for the destination (as route-title.js
+  // does) so the landing frame never reads "Page not found". Other redirect-only
+  // aliases stay unnamed here on purpose (the removal guards forbid it); they
+  // render for a single frame before <Navigate> fires.
+  if (p === '/') return BREADCRUMBS['/chats'];
   // `/chats/:agentId` reads plainly "Agent Chat" (#1921): which agent is
   // selected is already shown — highlighted — in the page's own left-rail list,
   // so repeating the id in the header only added noise. Reuse the static label
   // so the two forms of the route can never drift apart.
-  if (pathname.startsWith('/chats/')) return BREADCRUMBS['/chats'];
-  const pluginView = pathname.match(/^\/plugins\/([^/]+)\/view$/);
-  if (pluginView) return `Plugins / ${pluginView[1]}`;
-  return pathname;
+  if (/^\/chats\/[^/]+$/.test(p)) return BREADCRUMBS['/chats'];
+  // Match on the original casing so the plugin id is shown as typed.
+  const pluginView = String(pathname || '').replace(/\/+$/, '').match(/^\/plugins\/([^/]+)\/view$/i);
+  if (pluginView) return `Plugins / ${pluginTitleOf(pluginTitles, pluginView[1])}`;
+  return NOT_FOUND_LABEL;
 }

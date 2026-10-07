@@ -76,7 +76,8 @@ test('AC1 — exactly one button in the toolbar is primary, and it is the create
 
 test('AC4 — the import banner renders the same component, not a raw button', () => {
   // Two call sites, one component: the toolbar and the import-preview banner.
-  assert.equal((canvas.match(/<CreateTeamButton/g) || []).length, 2);
+  // Three since #2870: the read-only draft toolbar has its own instance.
+  assert.equal((canvas.match(/<CreateTeamButton/g) || []).length, 3);
   // The banner's own hardcoded string and its native `title=` (which skipped
   // the #1999 tooltip migration) are gone.
   assert.doesNotMatch(canvas, /title="Create a real team and its agents from this imported design"/);
@@ -108,7 +109,7 @@ test('AC3 — the create action is fenced off and sits ahead of Export', () => {
 // ─── B2: the draft says its next step (AC6, AC7) ────────────────────────────
 
 test('AC6 — the draft carries a persistent status line, guarded like the live strip', () => {
-  assert.match(canvas, /\{isDraft && draftBundle && !imported && !proposal && \(/);
+  assert.match(canvas, /\{isDraft && draftBundle && (?:!draftReadOnly && )?!imported && !proposal && \(/);
   assert.match(canvas, /draftStatusText\(draftBundle\?\.roles\?\.length \|\| 0\)/);
   // Not a Tooltip: the whole point is that it is readable without hovering.
   assert.doesNotMatch(canvas, /<Tooltip[^>]*draftStatusText/);
@@ -162,7 +163,9 @@ test('#2521 AC4 — onDone still runs, before navigating', () => {
 
 test('AC12 — the notice is derived from the created team, in the shared copy module', () => {
   assert.match(canvas, /createdTeamNotice\(createdTeam, \{ fromImport: !!imported \}\)/);
-  assert.match(canvas, /onCreated=\{\(result\) => setCreatedTeam\(result\?\.teamName \|\| null\)\}/);
+  // #2737 turned the body into a block (it also refreshes the rail); the
+  // notice still derives from the created team's name.
+  assert.match(canvas, /onCreated=\{\(result\) => \{ setCreatedTeam\(result\?\.teamName \|\| null\);/);
   assert.match(dialog, /completionNotice=\{createdNotice\}/);
 });
 
@@ -194,7 +197,7 @@ test('AC8 — both row kinds report a menu request, with their own target shape'
   // per-row affordance at all before this ticket.
   assert.equal((briefings.match(/onRequestMenu=\{\(anchor\) => handleRequestMenu\(/g) || []).length, 2);
   assert.match(briefings, /\{ kind: 'team', id: t\.id, name: t\.displayName \|\| t\.id \}/);
-  assert.match(briefings, /\{ kind: 'draft', id: d\.id, name: d\.name, roleCount: d\.roleCount \}/);
+  assert.match(briefings, /\{ kind: 'draft', id: d\.id, name: d\.name, roleCount: d\.roleCount, canEdit: d\.canEdit \}/);
   // The draft target carries roleCount because that is what makes the menu's
   // create entry inert on an empty design; dropping it would silently enable it.
   assert.match(buildFlowsRailMenu({ kind: 'draft', name: 'x', roleCount: 0 }).items[0].title, /agent/);
@@ -327,7 +330,7 @@ test('the draft status strip waits for the bundle before stating a reason', () =
   // Without the guard a six-agent draft reads "add at least one agent" for the
   // duration of the GET — a strip that replaces a hover-only reason must not
   // state a false one.
-  assert.match(canvas, /\{isDraft && draftBundle && !imported && !proposal && \(/);
+  assert.match(canvas, /\{isDraft && draftBundle && (?:!draftReadOnly && )?!imported && !proposal && \(/);
 });
 
 test('a rename that does NOT re-key still reaches the open canvas', () => {
@@ -346,7 +349,7 @@ test('a rename that does NOT re-key still reaches the open canvas', () => {
 });
 
 test('the rename cannot be forked by key-repeat, and the field really gets focus', () => {
-  assert.match(briefings, /if \(!d \|\| !name \|\| renameBusy\) return;/);
+  assert.match(briefings, /if \(!d \|\| !canSubmitRename\(name\) \|\| renameBusy\) return;/);
   // `autoFocus` and a child effect both lose to ConfirmDialog's own focus
   // effect, so the caret would not be in the field and Enter would activate
   // the confirm button with the value unchanged.
@@ -438,4 +441,41 @@ test('#2168 A2 — no dangling "create a working environment" affordance, and an
   assert.doesNotMatch(launch, /onCreateEnvironment/);
   assert.doesNotMatch(dialog, /onCreateEnvironment/);
   assert.doesNotMatch(dialog, /navigate\('\/environments'\)/);
+});
+
+// ─── #2737: import → Create team ─────────────────────────────────────────────
+
+test('#2737 — no environment is pre-selected without a source team', () => {
+  // The old `|| list[0]` fallback pre-picked whichever environment sorted
+  // first (on a real stack, the product repository) for every import.
+  assert.doesNotMatch(dialog, /\|\|\s*list\[0\]/);
+  assert.match(dialog, /const preferred = sourceTeamId \? list\.find\(e => e\.id === sourceTeamId\) : null;/);
+  // …and Create team stays blocked until the user makes an explicit choice.
+  assert.match(dialog, /<LaunchStep[\s\S]*?\brequireEnvironmentChoice\b[\s\S]*?\/>/);
+});
+
+test('#2737 — LaunchStep wires the explicit choice into the picker AND the gate', () => {
+  assert.match(launch, /<option value=\{NEW_REPO_LESS_ENV\}>\{NEW_REPO_LESS_ENV_LABEL\}<\/option>/);
+  // Both the disabled-state reason and submit's own validation see it, so the
+  // button and the submit path cannot disagree.
+  assert.match(launch, /launchBlockReason\(\{ \.\.\.values, requireEnvironment, environmentsPending, hasProvider \}\)/);
+  assert.match(launch, /validateLaunch\(\{ \.\.\.settled, requireEnvironment, environmentsPending, hasProvider \}\)/);
+  // The gate is the pure helper (lifted only on a confirmed-empty platform,
+  // #2168 A2; held while loading / after a failed fetch — review B1), fed the
+  // raw load state rather than a pre-filtered `envsLoaded && !noEnvs`.
+  assert.match(launch, /const requireEnvironment = environmentChoiceRequired\(\{\s*requireEnvironmentChoice, hasEnvironmentField: has\('environment'\), envsLoaded, envCount: envList\.length,\s*\}\);/);
+  assert.match(launch, /const environmentsPending = !envsLoaded;/);
+  // Opt-in — the Team-Setup wizard keeps its behaviour.
+  assert.match(launch, /requireEnvironmentChoice = false,/);
+});
+
+test('#2737 — the import banner counts agents from the bundle, not graph nodes', () => {
+  assert.doesNotMatch(canvas, /imported\.graph\?\.nodes\?\.length/);
+  assert.match(canvas, /\(\{importedBlueprintCounts\(imported\.bundle\)\}\) — read-only preview\./);
+});
+
+test('#2737 — a created team refreshes the Flows rail', () => {
+  assert.match(canvas, /onCreated=\{\(result\) => \{[^}]*refetchAgents\(\);[^}]*onTeamsChanged\?\.\(\);/);
+  assert.match(briefings, /const \{ data: agents,[^}]*\brefetch: refetchAgents \} = useApi\('\/api\/agents'\);/);
+  assert.match(briefings, /<ProcessGraphPanel[\s\S]*?onTeamsChanged=\{refetchAgents\}[\s\S]*?\/>/);
 });

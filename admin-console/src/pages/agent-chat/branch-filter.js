@@ -58,3 +58,24 @@ export const BRANCH_FILTER_PLACEHOLDER = 'e.g. main, feature/* (leave empty for 
 export const BRANCH_FILTER_HELP = 'Empty = all branches. Comma-separated; * matches within one path segment '
   + '(feature/*), ** also across / (feature/**). Names match exactly and case-sensitively; '
   + 'tag pushes never match a filter.';
+
+// #2602: pushes to a knowledge-base branch never wake a push trigger — built
+// in, not configurable. The form shows this read-only note under Branches.
+// `branches` are the repo's KB branches from the poller's repo status
+// (`knowledgeBranches`); unknown / empty falls back to the default name.
+export function knowledgeBranchNote(branches) {
+  const list = Array.isArray(branches) ? branches.filter(b => typeof b === 'string' && b) : [];
+  const named = list.length
+    ? `on this repository: ${list.map(b => `'${b}'`).join(', ')}`
+    : "e.g. 'agent-knowledge'";
+  return `Pushes to knowledge-base branches (${named}) never wake push triggers. This can't be changed.`;
+}
+
+// The KB branches the poller knows for `repo` (`owner/name`), from the
+// `/api/github-events/repo-status` rows; [] when unknown.
+export function knowledgeBranchesForRepo(rows, repo) {
+  if (!Array.isArray(rows) || typeof repo !== 'string' || !repo) return [];
+  const want = repo.toLowerCase();
+  const row = rows.find(r => r && typeof r.repo === 'string' && r.repo.toLowerCase() === want);
+  return row && Array.isArray(row.knowledgeBranches) ? row.knowledgeBranches : [];
+}

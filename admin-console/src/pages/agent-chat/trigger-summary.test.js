@@ -313,3 +313,18 @@ test('summarizePushSchedule: names the producers when a filter is set (AC9)', ()
   assert.equal(summarizePushSchedule({ repo: 'o/r', pushedBy: ['t1-spec', 't1-x'] }, nameOf), 'wakes on push from Specifier, t1-x to o/r');
   assert.equal(summarizePushSchedule({ pushedBy: [] }), 'wakes on push to the team repo');
 });
+
+test('INTERNAL_EVENT_LABELS names a Flow Control claim release, byte-identical to the orchestrator key (#2754)', async () => {
+  const fs = await import('node:fs');
+  const src = fs.readFileSync(new URL('../../../../orchestrator/flow-claim-release.js', import.meta.url), 'utf8');
+  assert.match(src, /const CLAIM_RELEASED_EVENT = 'flow-control\.claim-released';/);
+  assert.equal(INTERNAL_EVENT_LABELS.get('flow-control.claim-released'), 'claim released (Flow Control)');
+  assert.equal(eventLabel('flow-control.claim-released'), 'claim released (Flow Control)');
+});
+
+test('INTERNAL_EVENT_LABELS names a provisioning-sweep reap, byte-identical to the orchestrator key (#2693)', async () => {
+  const fs = await import('node:fs');
+  const src = fs.readFileSync(new URL('../../../../orchestrator/provisioning-sweep.js', import.meta.url), 'utf8');
+  assert.match(src, /const PROVISIONING_SWEEP_KEY = 'provisioning\.reaped';/);
+  assert.equal(eventLabel('provisioning.reaped'), 'orphaned instance cleaned up');
+});

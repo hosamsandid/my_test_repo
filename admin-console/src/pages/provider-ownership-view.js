@@ -112,6 +112,18 @@ export function providerOwnershipFromRecord(rec) {
   return { scope: 'global', teamIds: [] };
 }
 
+// Display name of one team in a provider's set (#2691), shared by the table and
+// the edit dialog. A known name wins (agent teams + the legacy human-team space,
+// e.g. 'default' → "Default Team"). An id the server reports in the provider's
+// `deletedTeamIds` (it names no current Agent Team) reads "<id> (deleted team)";
+// any other unknown id — an existing team this caller cannot see — stays raw.
+export function providerTeamName(id, names = {}, deletedTeamIds = []) {
+  const key = String(id);
+  if (names && names[key]) return names[key];
+  if (Array.isArray(deletedTeamIds) && deletedTeamIds.map(String).includes(key)) return `${key} (deleted team)`;
+  return key;
+}
+
 // The table's "Ownership" descriptor for a provider row — the SAME taxonomy as
 // the edit dialog (Personal / Team(s) / Global), derived from the record through
 // `providerOwnershipFromRecord` so the row and the dialog can never disagree
@@ -126,7 +138,7 @@ export function providerScopeLabel(rec, names = {}) {
   if (scope === 'personal') {
     return { scope: 'personal', label: 'Personal', detail: 'Only you and the agents you own' };
   }
-  const teamNames = (teamIds || []).map(id => (names && names[id]) || id);
+  const teamNames = (teamIds || []).map(id => providerTeamName(id, names, rec && rec.deletedTeamIds));
   return {
     scope: 'team',
     label: teamNames.length > 1 ? 'Teams' : 'Team',

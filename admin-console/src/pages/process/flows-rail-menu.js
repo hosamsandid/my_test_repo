@@ -69,6 +69,9 @@ export function intentForMenuKey(key) {
  */
 export const NO_ROLES_MENU_HINT = 'Add at least one agent first.';
 
+/** #2870 AC10 — why a global-only reader cannot rename, share or delete. */
+export const READ_ONLY_MENU_HINT = 'Visible to everyone, read-only for you. Duplicate it to make changes.';
+
 /**
  * The menu for one Flows rail row.
  *
@@ -103,15 +106,36 @@ export function buildFlowsRailMenu(target) {
   // has one stable shape and the reason is readable instead of the entry being
   // mysteriously absent — the `gate()` doctrine of `buildAgentMenu`.
   const roleCount = Number.isFinite(target.roleCount) ? target.roleCount : 0;
+  const createTeam = {
+    key: 'create-team',
+    label: CREATE_TEAM_LABEL,
+    disabled: roleCount <= 0,
+    title: roleCount <= 0 ? NO_ROLES_MENU_HINT : undefined,
+  };
+
+  // #2870 AC10 — a reader who sees the draft only because it is "Visible to
+  // everyone" may open, export, create a team from and duplicate it. The write
+  // entries stay in the menu, inert with the reason (the same gate() doctrine
+  // as Create team above); the server refuses them either way.
+  if (target.canEdit === false) {
+    const readOnly = { disabled: true, title: READ_ONLY_MENU_HINT };
+    return {
+      label,
+      items: [
+        createTeam,
+        { key: 'duplicate', label: 'Duplicate to my drafts', separated: true },
+        { key: 'export', label: 'Export…' },
+        { key: 'rename', label: 'Rename…', ...readOnly },
+        { key: 'share', label: 'Share…', ...readOnly },
+        { key: 'delete', label: 'Delete draft', danger: true, ...readOnly },
+      ],
+    };
+  }
+
   return {
     label,
     items: [
-      {
-        key: 'create-team',
-        label: CREATE_TEAM_LABEL,
-        disabled: roleCount <= 0,
-        title: roleCount <= 0 ? NO_ROLES_MENU_HINT : undefined,
-      },
+      createTeam,
       { key: 'rename', label: 'Rename…', separated: true },
       // Share (#2068). Under DD2 it is enabled for EVERYONE who can see the
       // draft — there is no non-owner variant to disable or hint at, because

@@ -118,7 +118,7 @@ guessing. Open pull requests with `gh-as-agent pr` (above), never a raw
 
 ## Parent ticket (`ticket.json`)
 
-A conversation may be bound to a **parent GitHub issue** by a human in the Admin Console. When it is, a `ticket.json` file is present at your workspace root:
+A conversation may be bound to a **parent GitHub issue** by a human in Agent Studio. When it is, a `ticket.json` file is present at your workspace root:
 
 ```json
 { "repo": "owner/name", "number": 1383, "url": "https://github.com/owner/name/issues/1383", "title": "…", "children": [1401, 1402] }
@@ -183,6 +183,37 @@ arguments (exit 2), nothing was asked — fix them and call it again.
 The runner ends the whole turn the moment a question is queued, so call
 `aee-ask` from your own session, never from a Task sub-agent.
 
+## Waiting for CI in this turn (`aee-wait-ci`)
+
+When you need to know, before you continue, whether a pull request's CI is green
+or it has a merge conflict, run `aee-wait-ci` in the **foreground**:
+
+```
+aee-wait-ci 123                      # PR in the current / only clone
+aee-wait-ci 123 --repo my-clone      # a clone that is not the default
+aee-wait-ci 123 --timeout 10 --no-conflict-check
+```
+
+It waits (default 20 minutes, always capped to your run's time) using the
+platform's own CI rules — every check counts, one failure settles at once, no
+check after a grace period means no CI — and prints one JSON object plus an exit
+code: `0` passed / no CI, `4` failed (`failingChecks`), `5` conflict, `6`
+timeout, `1`/`3` error. **Always give this Bash call an explicit `timeout`**:
+`1500000` (25 minutes) for the default wait, or the `--timeout` minutes plus 5
+(up to 55 minutes). The Bash tool's default stays at 2 minutes and would move
+the wait to the background. For any other command that might block (e.g. a CLI
+that could read stdin), pass `</dev/null` rather than a long timeout.
+Run it right after `gh-as-agent push` from your clone of the PR's branch: it
+waits until GitHub shows your pushed commit as the PR's head and never reports
+the previous head's result (`--head <sha>` names the commit explicitly).
+While it waits, the platform posts one short *waiting for CI* note to the chat
+for you (`AEE_STATUS_FILE`) — do not post your own; your final reply still
+reports the verdict.
+Never wait for CI in a background shell or `Task`, and
+do not hand-roll `gh pr checks` loops. On timeout, end your turn; unattended
+flows continue through the gated PR hand-off or a `pull_request.checks_*`
+trigger.
+
 ## Shared team knowledge (`knowledge`)
 
 `aee-artifact` hands **one deliverable** to **one downstream agent**. The
@@ -245,7 +276,7 @@ knowledge promote <id> --to agent
 knowledge promote <id> --to agent --name my-private-skill
 ```
 
-A human can later lift it to the whole team (agent→team) from the Admin Console
+A human can later lift it to the whole team (agent→team) from Agent Studio
 when it proves broadly useful.
 
 ## Token usage (`usage`)

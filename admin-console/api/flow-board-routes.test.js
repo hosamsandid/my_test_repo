@@ -40,3 +40,53 @@ test('POST /api/teams/:teamId/flow-board-config is gated on canManageTeam', () =
   assert.match(body, /if \(!canManageTeam\(scope, teamId\)\) return denyAdmin\(res, 'You may not manage this team'\)/);
   assert.match(body, /\/flow-board-config`/);
 });
+
+test('POST /api/teams/:teamId/flow-board-removed is gated on canManageTeam and validates its body (#2637)', () => {
+  const body = routeBody("app.post('/api/teams/:teamId/flow-board-removed'", 'app.');
+  assert.match(body, /AGENT_ID_RE\.test\(teamId\)/);
+  assert.match(body, /if \(!canManageTeam\(scope, teamId\)\) return denyAdmin\(res, 'You may not manage this team'\)/);
+  assert.match(body, /action !== 'remove' && action !== 'restore'/);
+  assert.match(body, /\/flow-board-removed`/);
+});
+
+test('POST /api/teams/:teamId/flow-board-release is gated on canManageTeam and stamps the session user (#2754)', () => {
+  const body = routeBody("app.post('/api/teams/:teamId/flow-board-release'", 'app.');
+  assert.match(body, /AGENT_ID_RE\.test\(teamId\)/);
+  assert.match(body, /if \(!canManageTeam\(scope, teamId\)\) return denyAdmin\(res, 'You may not manage this team'\)/);
+  assert.match(body, /rowId\.length > 300/);
+  assert.match(body, /const actor = \(req\.user && \(req\.user\.username \|\| req\.user\.email \|\| req\.user\.sub\)\) \|\| null;/);
+  // The actor never comes from the request body.
+  assert.doesNotMatch(body, /req\.body\.actor|req\.body && req\.body\.actor/);
+  assert.match(body, /body: JSON\.stringify\(\{ rowId, actor \}\)/);
+  assert.match(body, /\/flow-board-release`/);
+});
+
+test('POST /api/teams/:teamId/flow-board-wake is gated on canManageTeam and stamps the session user (#2873)', () => {
+  const body = routeBody("app.post('/api/teams/:teamId/flow-board-wake'", 'app.');
+  assert.match(body, /AGENT_ID_RE\.test\(teamId\)/);
+  assert.match(body, /if \(!canManageTeam\(scope, teamId\)\) return denyAdmin\(res, 'You may not manage this team'\)/);
+  assert.match(body, /rowId\.length > 300/);
+  assert.match(body, /const actor = \(req\.user && \(req\.user\.username \|\| req\.user\.email \|\| req\.user\.sub\)\) \|\| null;/);
+  assert.doesNotMatch(body, /req\.body\.actor|req\.body && req\.body\.actor/);
+  assert.match(body, /body: JSON\.stringify\(\{ rowId, actor \}\)/);
+  assert.match(body, /\/flow-board-wake`/);
+});
+
+test('POST /api/teams/:teamId/flow-board-adopt is gated on canManageTeam, bounds rowIds and stamps the session user (#2877)', () => {
+  const body = routeBody("app.post('/api/teams/:teamId/flow-board-adopt'", 'app.');
+  assert.match(body, /AGENT_ID_RE\.test\(teamId\)/);
+  assert.match(body, /if \(!canManageTeam\(scope, teamId\)\) return denyAdmin\(res, 'You may not manage this team'\)/);
+  assert.match(body, /raw\.length > 200/);
+  assert.match(body, /const actor = \(req\.user && \(req\.user\.username \|\| req\.user\.email \|\| req\.user\.sub\)\) \|\| null;/);
+  assert.doesNotMatch(body, /req\.body\.actor|req\.body && req\.body\.actor/);
+  assert.match(body, /body: JSON\.stringify\(\{ rowIds: raw \|\| null, actor \}\)/);
+  assert.match(body, /\/flow-board-adopt`/);
+});
+
+test('both live graph endpoints pass a switched-off agent through as enabled: false (#2754)', () => {
+  // Without it the `wake-label-no-live-consumer` lint never fires on a live team.
+  for (const marker of ["app.get('/api/process/graph'", "app.get('/api/flows/graph'"]) {
+    const route = routeBody(marker, '\napp.');
+    assert.match(route, /\.\.\.\(cfg\.enabled === false \? \{ enabled: false \} : \{\}\),/, marker);
+  }
+});

@@ -170,6 +170,21 @@
                     "prompt": "A review was submitted on a PR in `{{repoFullName}}` (payload above). If it is not one of YOUR design PRs, reply `[PASS]`.\n\n1. `git pull`, check out the PR branch, read every review comment.\n2. Address each point: fix the design doc, or reply explaining why not.\n3. Commit via `gh-as-agent commit`, push, and summarise what changed in a PR comment.\n\nReply `[PASS]` if there is nothing to do."
                 },
                 {
+                    "id": "design-fix-on-design-revisions-required",
+                    "type": "github-event",
+                    "enabled": true,
+                    "events": [
+                        "pull_request.labeled"
+                    ],
+                    "labelFilter": "design-revisions-required",
+                    "claim": {
+                        "remove": "design-revisions-required",
+                        "add": "design-revisions-required:wip"
+                    },
+                    "description": "Fix the design PR after the hand-off gate held it back",
+                    "prompt": "A pull request in `{{repoFullName}}` was labelled `design-revisions-required` by the hand-off gate (payload above): CI failed or the PR has a merge conflict — the gate's PR comment names the failing checks or the base branch. If it is not one of YOUR design PRs, reply `[PASS]`.\n\n1. Remove the `design-revisions-required` label, `git pull`, check out the PR branch and read the gate's comment.\n2. Fix the failing checks, or merge the base branch and resolve the conflict. Keep the change scoped to that.\n3. Commit via `gh-as-agent commit`, push to the same branch, and summarise the fix in a PR comment so a human can re-request the review.\n\nReply `[PASS]` if there is nothing to do."
+                },
+                {
                     "id": "self-curation",
                     "type": "cron",
                     "enabled": true,
@@ -214,7 +229,12 @@
             "channels": [
                 {
                     "artifact": "pr",
-                    "from": "design-author"
+                    "from": "design-author",
+                    "readiness": {
+                        "ci": true,
+                        "conflict": true,
+                        "failureLabel": "design-revisions-required"
+                    }
                 }
             ],
             "systemPrompt": "You are the **Design Companion** on team **{{teamName}}**, working on `{{repoFullName}}`. You are the Design stage's counterpart to the Design Author: reviewer, feedback router and escalation broker in one. Your job is that no design leaves the stage unexamined and nobody is silently stuck in it.\n\n**1. Design review.** Review every design PR the Design Author opens (the PR wakes you). Judge it as the implementation contract it will become:\n- **Complete** — does it cover every acceptance criterion of the requirement? Is a credible test strategy present?\n- **Consistent** — internally, and with the repository's existing architecture and conventions?\n- **Feasible** — can this actually be built as described against the current codebase?\n- **Decided** — does it commit to one option with reasoning, or does it quietly defer decisions the Build stage would then have to make?\nSubmit via `gh-as-agent` + `gh pr review`: request changes with concrete, actionable comments — each says *what* to change and *why*; your review wakes the Author — or approve.\n\n**2. Feedback routing.** When humans comment on design issues or PRs, translate it into process action: if the design must change, distil the feedback into concrete work items in a comment and re-apply `design-author-go` (`gh issue edit <n> --add-label \"design-author-go\"`); if it is a question, answer it; if it is informational, acknowledge briefly.\n\n**3. Escalation brokering.** When an issue is labelled `design-escalation`, read the Author's blocker, then drive it to a decision: ask the humans precise, answerable questions on the issue and lay out the options with a recommendation. Once decided, write a decision summary on the issue — the reasoning must be preserved where the Author's fresh session will find it — then remove `design-escalation` and re-apply `design-author-go` (`gh issue edit <n> --add-label \"design-author-go\"`).\n\n**Stage exit.** When a design PR is approved and merged, open a hand-over issue titled 'Implement: <requirement>' linking the requirement issue and the merged design doc, summarising scope and acceptance criteria. Then ask a human to release it into Build via the `design-approved` label — you never apply that label yourself; that judgement is deliberately reserved for a person.\n\n**Boundaries.** You judge, route and record — you never author designs and never write code. Use `gh-as-agent` for all GitHub actions.",
@@ -344,6 +364,21 @@
                     "prompt": "A review was submitted on a PR in `{{repoFullName}}` (payload above). If it is not one of YOUR implementation PRs, reply `[PASS]`.\n\n1. `git pull`, check out the PR branch, read every review comment.\n2. Address each point: fix the code/tests, or reply explaining why not.\n3. Run the tests, commit via `gh-as-agent commit`, push, summarise the changes in a PR comment.\n\nReply `[PASS]` if there is nothing to do."
                 },
                 {
+                    "id": "dev-fix-on-revisions-required",
+                    "type": "github-event",
+                    "enabled": true,
+                    "events": [
+                        "pull_request.labeled"
+                    ],
+                    "labelFilter": "revisions-required",
+                    "claim": {
+                        "remove": "revisions-required",
+                        "add": "revisions-required:wip"
+                    },
+                    "description": "Fix the implementation PR after the hand-off gate held it back",
+                    "prompt": "A pull request in `{{repoFullName}}` was labelled `revisions-required` by the hand-off gate (payload above): CI failed or the PR has a merge conflict — the gate's PR comment names the failing checks or the base branch. If it is not one of YOUR implementation PRs, reply `[PASS]`.\n\n1. Remove the `revisions-required` label, `git pull`, check out the PR branch and read the gate's comment.\n2. Fix the failing checks, or merge the base branch and resolve the conflict. Keep the change scoped to that.\n3. Commit via `gh-as-agent commit`, push to the same branch, and summarise the fix in a PR comment so a human can re-request the review.\n\nReply `[PASS]` if there is nothing to do."
+                },
+                {
                     "id": "self-curation",
                     "type": "cron",
                     "enabled": true,
@@ -388,10 +423,14 @@
             "channels": [
                 {
                     "artifact": "pr",
-                    "from": "developer"
+                    "from": "developer",
+                    "readiness": {
+                        "ci": true,
+                        "conflict": true
+                    }
                 }
             ],
-            "systemPrompt": "You are the **Code Reviewer** on team **{{teamName}}**, working on `{{repoFullName}}`. You review every implementation PR the Developer opens — the Build stage's quality gate before a human decides on the merge.\n\n**What you check, in priority order:**\n1. **Correctness against the contract** — does the change do what the linked design doc says, and does it satisfy every acceptance criterion of the requirement? Read the design doc and the issue first; a beautifully written PR that implements the wrong thing must not pass.\n2. **Tests** — is every acceptance criterion covered by a test? Do the tests assert real behaviour, or only that the code runs? Check out the branch and run the suite when feasible instead of trusting the PR description.\n3. **Security and robustness** — input handling, auth-sensitive spots, error paths, resource handling, anything that fails silently.\n4. **Maintainability** — readability and fit with the repository's existing conventions and structure. Style points are the lowest priority and never on their own a reason to block.\n\n**How you deliver the verdict.** Submit via `gh-as-agent` + `gh pr review`: request changes with concrete, actionable inline comments — every blocking comment says *what* to change and *why*, anchored to the code it concerns (your review wakes the Developer for rework automatically) — or approve when all blocking points are resolved. Approval is a recommendation: a **human** performs the merge. Separate blocking findings from optional suggestions explicitly.\n\n**Discipline.** Verify, don't assume: `git pull`, check out the branch, read the diff in context — not just the PR page. You review — you never push commits to the PR and never implement fixes yourself. Scope creep beyond the hand-over issue is a finding. If the implementation reveals a flaw in the design itself, say so explicitly and reference the design doc, so the Build Companion can route it back to the Design stage.\n\n**Continuity.** Each run starts with a fresh session. Skim `memory/log.md` for recurring patterns from past reviews; record new ones when you finish. Reply `[PASS]` when a run has nothing to do.",
+            "systemPrompt": "You are the **Code Reviewer** on team **{{teamName}}**, working on `{{repoFullName}}`. You review every implementation PR the Developer opens — the Build stage's quality gate before a human decides on the merge.\n\n**CI and merge state — never wait for a later wake.** Your wake is gated: the platform only wakes you once the PR's head commit has passed CI and merges cleanly. If `gh pr checks <n>` or the PR's mergeability says otherwise at the start of the run (a push landed after the gate released): on **failed checks or a merge conflict**, request changes naming the failing checks or the conflict — that wakes the Developer; on **pending checks**, run `aee-wait-ci <n>` in the foreground (bounded by your run's time) and review once it reports green — if it times out, post a short status comment on the PR and end the run instead of waiting longer.\n\n**What you check, in priority order:**\n1. **Correctness against the contract** — does the change do what the linked design doc says, and does it satisfy every acceptance criterion of the requirement? Read the design doc and the issue first; a beautifully written PR that implements the wrong thing must not pass.\n2. **Tests** — is every acceptance criterion covered by a test? Do the tests assert real behaviour, or only that the code runs? Check out the branch and run the suite when feasible instead of trusting the PR description.\n3. **Security and robustness** — input handling, auth-sensitive spots, error paths, resource handling, anything that fails silently.\n4. **Maintainability** — readability and fit with the repository's existing conventions and structure. Style points are the lowest priority and never on their own a reason to block.\n\n**How you deliver the verdict.** Submit via `gh-as-agent` + `gh pr review`: request changes with concrete, actionable inline comments — every blocking comment says *what* to change and *why*, anchored to the code it concerns (your review wakes the Developer for rework automatically) — or approve when all blocking points are resolved. Approval is a recommendation: a **human** performs the merge. Separate blocking findings from optional suggestions explicitly.\n\n**Discipline.** Verify, don't assume: `git pull`, check out the branch, read the diff in context — not just the PR page. You review — you never push commits to the PR and never implement fixes yourself. Scope creep beyond the hand-over issue is a finding. If the implementation reveals a flaw in the design itself, say so explicitly and reference the design doc, so the Build Companion can route it back to the Design stage.\n\n**Continuity.** Each run starts with a fresh session. Skim `memory/log.md` for recurring patterns from past reviews; record new ones when you finish. Reply `[PASS]` when a run has nothing to do.",
             "triggers": [
                 {
                     "id": "self-curation",
@@ -624,6 +663,16 @@
         },
         {
             "name": "build-escalation",
+            "humanGate": false,
+            "brake": false
+        },
+        {
+            "name": "revisions-required",
+            "humanGate": false,
+            "brake": false
+        },
+        {
+            "name": "design-revisions-required",
             "humanGate": false,
             "brake": false
         }

@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { Bot, Check } from 'lucide-react';
 import {
-  toggleSelection, buildSelectionAnswer, answerChoosesOption,
+  toggleSelection, buildSelectionAnswer, answerChoosesOption, answerForQuestion,
+  EMPTY_ASK_PROGRESS,
 } from './ask-question-view.js';
 
 /**
@@ -11,10 +12,15 @@ import {
  *
  * Multi-question payloads (#1799 AC2–AC6): questions are answered one at a
  * time. Only the current question is shown with interactive options; earlier
- * questions' choices are held in component state. When the last question is
- * answered, all choices are sent together in one consolidated reply (AC4).
- * Progress is shown as "Question X of N" (AC5). Intermediate clicks never
- * post a message and never resume the session (AC3).
+ * questions' choices are held as step `progress` by ChatPanel (#2821 — it owns
+ * the state so a text typed in the composer can answer the open question too).
+ * The card reports each completed step as `onAnswer({ isStep, questionIndex,
+ * value })`; after the last one ChatPanel sends all answers together in one
+ * consolidated reply (AC4). Progress is shown as "Question X of N" (AC5).
+ * Intermediate steps never post a message and never resume the session (AC3).
+ * "Skip remaining questions" (#2821 AC8) calls `onAnswer({ isSkipRemaining })`.
+ * A typed answer renders under its question as the user's own text (AC5); a
+ * superseded card shows only the questions reached so far (AC9).
  *
  * multiSelect questions (#2523): options toggle on click and an explicit
  * Submit commits the selection (disabled until one is picked). A lone
@@ -31,15 +37,17 @@ import {
  * @param {?string} props.answeredLabel           chosen label (single-q fallback match)
  * @param {?string[]} props.answeredOptionIds     chosen option ids (single multi-select q answered)
  * @param {?Array}  props.answeredMulti           [{questionId,optionId,label}] (multi-q answered)
+ * @param {?{openIdx:number, answers:object}} props.progress  step progress (multi-q, #2821)
+ * @param {boolean} props.superseded              something else came after the unanswered card
  * @param {(arg: object|{isMulti:boolean,answers:Array}) => void} props.onAnswer
  * @param {?string} props.time                    formatted timestamp
  */
 export default function AskQuestionCard({
   question, answerable, answeredOptionId = null, answeredLabel = null,
-  answeredOptionIds = null, answeredMulti = null, onAnswer, time = null,
+  answeredOptionIds = null, answeredMulti = null, progress = null, superseded = false,
+  onAnswer, time = null,
 }) {
-  const [openIdx, setOpenIdx] = useState(0);
-  const [pendingAnswers, setPendingAnswers] = useState({});
+  const { openIdx, answers: pendingAnswers } = progress || EMPTY_ASK_PROGRESS;
   // Draft selections of multi-select questions, keyed by questionId (#2523).
   const [drafts, setDrafts] = useState({});
 
@@ -60,6 +68,11 @@ export default function AskQuestionCard({
       return answerChoosesOption({ answers: answeredMulti }, q.questionId, opt.optionId);
     }
     if (answeredOptionIds) return answeredOptionIds.includes(opt.optionId);
+    // A completed step wins over its draft — a typed answer replaces any
+    // unsubmitted multi-select selection (#2821 AC10).
+    if (isMulti && pendingAnswers[q.questionId]) {
+      return answerChoosesOption(pendingAnswers[q.questionId], q.questionId, opt.optionId);
+    }
     if (q.multiSelect && !answered) return (drafts[q.questionId] || []).includes(opt.optionId);
     if (isMulti) {
       return answerChoosesOption(pendingAnswers[q.questionId], q.questionId, opt.optionId);
@@ -70,24 +83,10 @@ export default function AskQuestionCard({
 
   // Complete one step of a multi-question card with `value` — a clicked
   // option, or a submitted multi-select answer (`optionIds`/`labels`).
+  // ChatPanel advances the progress (AC3) or, after the last question, sends
+  // the consolidated reply (AC4) — the same path a typed answer takes (#2821).
   const commitStep = (q, qi, value) => {
-    const updated = { ...pendingAnswers, [q.questionId]: value };
-    const isLast = qi === question.questions.length - 1;
-    if (!isLast) {
-      // Intermediate question — hold locally, advance to the next (AC3).
-      setPendingAnswers(updated);
-      setOpenIdx(qi + 1);
-    } else {
-      // Last question — build and send the consolidated reply (AC4).
-      const answers = question.questions.map(qItem => {
-        const a = updated[qItem.questionId];
-        if (!a) return null;
-        return Array.isArray(a.optionIds)
-          ? { questionId: qItem.questionId, optionIds: a.optionIds, labels: a.labels, label: a.label }
-          : { questionId: qItem.questionId, optionId: a.optionId, label: a.label };
-      }).filter(Boolean);
-      onAnswer?.({ isMulti: true, answers });
-    }
+    onAnswer?.({ isStep: true, questionIndex: qi, value });
   };
 
   // Handle an option click.
@@ -117,20 +116,34 @@ export default function AskQuestionCard({
     }
   };
 
-  // In active multi-question mode show only the open question; in all other
-  // states (answered, superseded, single) show every question.
-  const showCurrentOnly = isMulti && answerable && !answered;
-  const visibleQuestions = showCurrentOnly
+  // In active multi-question mode show only the open question (also while
+  // the composer is merely disabled). A superseded multi-question card shows
+  // the questions the user reached, with the answers given so far (#2821 AC9);
+  // answered and single-question cards show every question.
+  const stepping = isMulti && !answered && !superseded;
+  const allQuestions = question.questions.map((q, qi) => ({ q, qi }));
+  const visibleQuestions = stepping
     ? [{ q: question.questions[openIdx], qi: openIdx }]
-    : question.questions.map((q, qi) => ({ q, qi }));
+    : isMulti && superseded && !answered
+      ? allQuestions.slice(0, openIdx + 1)
+      : allQuestions;
+
+  // The typed / skipped answer of one question, if any — from the sent
+  // record, or from the step progress of an unfinished card.
+  const ownAnswerOf = (q) => (answeredMulti
+    ? answerForQuestion(answeredMulti, q.questionId)
+    : (isMulti ? pendingAnswers[q.questionId] || null : null));
 
   const footerText = answered
     ? 'answered'
-    : isMulti && answerable
-      ? `Question ${openIdx + 1} of ${question.questions.length} · awaiting your choice`
-      : answerable
-        ? 'awaiting your choice'
-        : 'question';
+    : stepping
+      ? `Question ${openIdx + 1} of ${question.questions.length} · choose an option or type your answer`
+      : isMulti && superseded
+        ? 'not completed'
+        : answerable
+          ? 'awaiting your choice'
+          : 'question';
+  const canSkip = stepping && answerable;
 
   return (
     <div style={{
@@ -178,14 +191,20 @@ export default function AskQuestionCard({
             <QuestionBlock
               key={q.questionId || qi}
               q={q}
-              answerable={answerable && (!isMulti || qi === openIdx)}
-              answered={answered}
+              answerable={answerable && !superseded && (!isMulti || qi === openIdx)}
+              answered={answered || !!ownAnswerOf(q)}
+              ownAnswer={ownAnswerOf(q)}
               isChosen={(opt) => isChosen(q, opt)}
               onAnswer={(opt) => handleOptionClick(q, qi, opt)}
               canSubmit={(drafts[q.questionId] || []).length > 0}
               onSubmit={() => handleSubmit(q, qi)}
             />
           ))}
+          {isMulti && superseded && !answered && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+              Not completed — the conversation moved on before all questions were answered.
+            </div>
+          )}
         </div>
 
         <div style={{
@@ -196,13 +215,29 @@ export default function AskQuestionCard({
         }}>
           {footerText}
           {time ? ` · ${time}` : ''}
+          {canSkip && (
+            <>
+              {' · '}
+              <button
+                type="button"
+                onClick={() => onAnswer?.({ isSkipRemaining: true })}
+                style={{
+                  background: 'none', border: 'none', padding: 0,
+                  font: 'inherit', color: 'var(--eb-accent-primary)',
+                  textDecoration: 'underline', cursor: 'pointer',
+                }}
+              >
+                Skip remaining questions
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>
   );
 }
 
-function QuestionBlock({ q, answerable, answered, isChosen, onAnswer, canSubmit, onSubmit }) {
+function QuestionBlock({ q, answerable, answered, ownAnswer, isChosen, onAnswer, canSubmit, onSubmit }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
       {q.header && (
@@ -276,6 +311,31 @@ function QuestionBlock({ q, answerable, answered, isChosen, onAnswer, canSubmit,
           );
         })}
       </div>
+      {/* A typed answer (#2821 AC5) reads as the user's own text; a skipped
+          question (AC8) says so. */}
+      {ownAnswer?.custom && (
+        <div style={{
+          alignSelf: 'flex-start',
+          maxWidth: '100%',
+          padding: 'var(--eb-space-1) var(--eb-space-3)',
+          borderRadius: 'var(--eb-radius-md)',
+          border: '1px solid var(--eb-accent-primary)',
+          background: 'var(--eb-accent-muted)',
+          fontSize: 'var(--eb-text-sm)',
+          whiteSpace: 'pre-wrap',
+          overflowWrap: 'anywhere',
+        }}>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+            Your own answer
+          </div>
+          {ownAnswer.text ?? ownAnswer.label}
+        </div>
+      )}
+      {ownAnswer?.skipped && (
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+          Skipped
+        </div>
+      )}
       {q.multiSelect && answerable && (
         <div>
           <button

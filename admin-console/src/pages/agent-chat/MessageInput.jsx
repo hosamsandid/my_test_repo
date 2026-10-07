@@ -12,10 +12,12 @@ import {
   placeholderSendHint,
   SEND_KEYBINDING_CHANGED_EVENT,
 } from './message-send-keybinding.js';
-import { loadDraft, saveDraft, clearDraft } from './message-draft.js';
+import { loadDraft, saveDraft, clearDraft, restoreUnsentText } from './message-draft.js';
 import { decideComposerAction } from './composer-action.js';
+import { CHAT_READ_ONLY_PLACEHOLDER } from './chat-read-only.js';
 import { commandQuery, filterCommands, commandInsertion, nextIndex } from './command-palette.js';
 import { apiCall } from '../../hooks/useApi.js';
+import { composerAnswersCard } from './ask-question-view.js';
 import ComposerAttachments from './ComposerAttachments.jsx';
 import {
   partitionFiles,
@@ -67,7 +69,7 @@ const IS_MAC = isMacPlatform();
  * per agent under `agentChat.draft.<agentId>` (see message-draft.js) — restored
  * on mount, cleared on a successful send.
  *
- * @param {(text:string)=>void} onSend
+ * @param {(text:string)=>(void|boolean|Promise<void|boolean>)} onSend  resolves false when the text was not sent
  * @param {boolean} [disabled]
  * @param {?string} [agentId]            persists the composer draft per agent
  * @param {string}  [agentDisplayName]   used in placeholder
@@ -93,6 +95,11 @@ const IS_MAC = isMacPlatform();
  * @param {boolean} [stopBusy]            true while a stop request is in flight
  *        (disables the Stop button so a double-press can't fire two aborts).
  * @param {()=>void} [onStartMeeting]      Start a persistent meeting transcription (#1296)
+ * @param {boolean} [readOnly]             The caller may read but not write here (#2713): a
+ *                                         System Admin outside the team. The host also passes
+ *                                         `disabled`; this additionally locks the meeting menu
+ *                                         (which `disabled` alone leaves open) and swaps the
+ *                                         placeholder. Stop is unaffected.
  *        for this agent. When provided, a chevron next to the mic opens a
  *        "Record meeting" menu; quick dictation stays the plain mic tap.
  * @param {boolean} [meetingActive]        true while a meeting session is running
@@ -105,8 +112,14 @@ const IS_MAC = isMacPlatform();
  *        `ts` re-fires the effect on repeat clicks (request-object pattern,
  *        mirrors `resumeRequest`); the leading `@` is added here, so `ref` is a
  *        bare workspace-relative path with no `@`.
+ * @param {?string} [askPlaceholder]      Placeholder while a multi-question card
+ *        is active (#2821 AC4), e.g. "Answer question 2 of 5…".
+ * @param {?(text:string)=>(boolean|Promise<boolean>)} [onAnswerCard]  While set, a
+ *        plain-text send answers the active card's open question instead of
+ *        posting a chat message (#2821 AC1); a draft with an attachment or a
+ *        dictated transcript still goes to `onSend` and supersedes the card.
  */
-export default function MessageInput({ onSend, disabled = false, agentId = null, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false, loopTrigger = null, loopProgress = null, busy = false, onStop, stopBusy = false, onStartMeeting, meetingActive = false, insertRefRequest = null }) {
+export default function MessageInput({ onSend, disabled = false, agentId = null, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false, loopTrigger = null, loopProgress = null, busy = false, onStop, stopBusy = false, onStartMeeting, meetingActive = false, askPlaceholder = null, onAnswerCard = null, insertRefRequest = null, readOnly = false }) {
   // Seed the composer from any persisted draft for this agent (#1388). The
   // component remounts per agent (key={agent.id}) so this initialiser runs
   // fresh with the right agentId on every switch.
@@ -214,7 +227,13 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
     setAttachments(next);
   }, [value, attachments]);
 
+  // Whether the draft holds dictated text (#2821): a voice message keeps
+  // superseding a question card instead of answering it.
+  const dictatedRef = useRef(false);
+  useEffect(() => { if (!value.trim()) dictatedRef.current = false; }, [value]);
+
   const handleTranscription = React.useCallback((text) => {
+    dictatedRef.current = true;
     setValue(prev => {
       if (!prev.trim()) return text;
       return prev + ' ' + text;
@@ -256,7 +275,16 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
   function submit() {
     const text = value.trim();
     if (!text || disabled || attachmentsUploading) return;
-    onSend(text);
+    // A refused send (onSend resolves false — e.g. the chat identity is not
+    // ready yet, #2721 AC5) gives the typed text back instead of losing it.
+    // While a multi-question card is active, plain text answers it (#2821).
+    const toCard = !!onAnswerCard && composerAnswersCard({
+      text, hasAttachments: attachments.length > 0, dictated: dictatedRef.current,
+    });
+    dictatedRef.current = false;
+    Promise.resolve(toCard ? onAnswerCard(text) : onSend(text)).then((sent) => {
+      if (sent === false) setValue(v => restoreUnsentText(v, text));
+    }, () => {});
     setValue('');
     // The sent draft's attachment previews go with it (AC9).
     for (const a of attachments) releaseAttachment(a.id);
@@ -436,9 +464,13 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
   // OS- and preset-aware send hint, e.g. '⌘↩ to send' (Mac/IDE),
   // 'Ctrl+↩ to send' (Windows/IDE) or '↩ to send' (chat style).
   const sendHint = placeholderSendHint(sendKeybinding, IS_MAC);
-  const placeholder = agentDisplayName
-    ? `Message ${agentDisplayName}…  (${sendHint})`
-    : `Message…  (${sendHint})`;
+  const placeholder = readOnly
+    ? CHAT_READ_ONLY_PLACEHOLDER
+    : askPlaceholder
+      ? `${askPlaceholder}  (${sendHint})`
+      : agentDisplayName
+        ? `Message ${agentDisplayName}…  (${sendHint})`
+        : `Message…  (${sendHint})`;
   const canAttach = !!onUpload && !disabled && !uploading;
   // AC11: no send while any attachment (batch or image card) is uploading.
   const attachmentsUploading = uploading || anyUploading(attachments);
@@ -686,7 +718,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
           {voiceState === 'recording' && (
             <span style={{
               fontSize: 'var(--eb-text-xs)',
-              color: 'var(--eb-status-error-text, #dc2626)',
+              color: 'var(--eb-status-error-text)',
               whiteSpace: 'nowrap',
               fontVariantNumeric: 'tabular-nums',
             }}>
@@ -713,7 +745,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
                 width: 32, height: 32,
                 background: voiceState === 'recording' ? 'var(--eb-status-error-bg, #fef2f2)' : 'transparent',
                 color: voiceState === 'recording'
-                  ? 'var(--eb-status-error-text, #dc2626)'
+                  ? 'var(--eb-status-error-text)'
                   : (voiceState === 'transcribing' || meetingActive)
                     ? 'var(--eb-text-muted)'
                     : 'var(--eb-text-secondary)',
@@ -735,7 +767,8 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
             {/* Meeting-mode chevron (#1296). Only when the host wires meetings. */}
             {onStartMeeting && (
               <button
-                onClick={() => setMeetingMenuOpen(o => !o)}
+                onClick={() => !readOnly && setMeetingMenuOpen(o => !o)}
+                disabled={readOnly}
                 aria-label="Transcription options"
                 aria-haspopup="menu"
                 aria-expanded={meetingMenuOpen}
@@ -743,9 +776,9 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
                 style={{
                   width: 16, height: 32,
                   background: 'transparent',
-                  color: 'var(--eb-text-secondary)',
+                  color: readOnly ? 'var(--eb-text-muted)' : 'var(--eb-text-secondary)',
                   border: 'none', borderRadius: 'var(--eb-radius-md)',
-                  cursor: 'pointer',
+                  cursor: readOnly ? 'not-allowed' : 'pointer',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   flexShrink: 0, padding: 0,
                 }}
@@ -753,7 +786,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
                 <ChevronDown size={12} />
               </button>
             )}
-            {meetingMenuOpen && onStartMeeting && (
+            {meetingMenuOpen && onStartMeeting && !readOnly && (
               <div
                 role="menu"
                 style={{
@@ -820,7 +853,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
                 ? 'var(--eb-status-error-bg, #fef2f2)'
                 : primary.enabled ? 'var(--eb-accent-primary)' : 'var(--eb-bg-active)',
               color: showStop
-                ? 'var(--eb-status-error-text, #dc2626)'
+                ? 'var(--eb-status-error-text)'
                 : primary.enabled ? 'var(--eb-text-inverted)' : 'var(--eb-text-muted)',
               border: 'none',
               borderRadius: 'var(--eb-radius-md)',
@@ -845,7 +878,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
         alignItems: 'center',
         gap: 'var(--eb-space-2)',
         fontSize: 'var(--eb-text-xs)',
-        color: voiceError ? 'var(--eb-status-error-text, #dc2626)' : 'var(--eb-text-muted)',
+        color: voiceError ? 'var(--eb-status-error-text)' : 'var(--eb-text-muted)',
         marginTop: 'var(--eb-space-1)',
         paddingLeft: 'var(--eb-space-1)',
         transition: 'color var(--eb-transition-fast)',

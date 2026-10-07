@@ -13,6 +13,17 @@ export const TOKEN_CLASSES = [
   { key: 'cacheReadInput', label: 'Cache read' },
 ];
 
+// One stable colour per token class (shared by cards, chart, legend). Uses
+// design tokens so it tracks the light/dark/high-contrast theme. Every value
+// must be a token defined in theme/tokens.css — an undefined token silently
+// falls back and can collapse two stacked series into one block (#2618).
+export const CLASS_COLOR = {
+  input: 'var(--eb-status-info)',
+  output: 'var(--eb-status-success)',
+  cacheCreationInput: 'var(--eb-status-warning)',
+  cacheReadInput: 'var(--eb-accent-primary)',
+};
+
 // Groupings offered by GET /api/usage/summary. `day` is the time-series axis
 // and also a valid table grouping. Kept in step with GROUP_BY in
 // admin-console/api/usage-summary.js — a key the server does not know silently
@@ -76,6 +87,23 @@ export function userLabelIndex(directory) {
     }
   }
   return byId;
+}
+
+// Options for the page-level Team filter (#2694). Usage records carry the
+// AGENT TEAM id (a role:'team' agent from GET /api/agents) as `teamId`, so the
+// filter lists Agent Teams — not the legacy human access-scope "Team" collection
+// (GET /api/admin/teams, only `default`), whose ids never match a record and
+// therefore always narrowed to 0. Same re-key as the Skills Registry pickers
+// (#2393/#2360). Label shows display name + id so two teams with the same name
+// stay distinguishable; sorted by label, case-insensitively.
+export function agentTeamFilterOptions(agents) {
+  const byId = new Map();
+  for (const a of Array.isArray(agents) ? agents : []) {
+    if (!a || a.role !== 'team' || typeof a.id !== 'string' || !a.id) continue;
+    const name = typeof a.displayName === 'string' ? a.displayName.trim() : '';
+    byId.set(a.id, { id: a.id, label: name && name !== a.id ? `${name} (${a.id})` : a.id });
+  }
+  return [...byId.values()].sort((x, y) => x.label.localeCompare(y.label, undefined, { sensitivity: 'base' }));
 }
 
 // How one `groupBy=user` key reads. `unknown` is NOT a person: it is the

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useParams, useNavigate, useSearchParams, useLocation } from 'react-router';
 import { MessageCircle, Loader2, Plus, Upload, Eye, EyeOff, Users } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
@@ -8,6 +8,12 @@ import { computeAgentStatusMap } from '../context/agent-statuses';
 import { loadManuallyMessagedIds } from './agent-chat/agent-back-notification.js';
 import { AgentRosterProvider, useAgentRoster } from '../context/AgentRosterContext.jsx';
 import AgentList, { buildGroups } from './agent-chat/AgentList';
+import ListFilterControl from './agent-chat/ListFilterControl.jsx';
+import {
+  normalizeSelection, selectionEntries, applySelectionAction, migrateLegacyFilter,
+  parseLegacyFilter, quickFiltersDisabledReason,
+} from './agent-chat/list-selection.js';
+import { apiCall } from '../hooks/useApi.js';
 import RailLifecycleHost from './agent-chat/RailLifecycleHost.jsx';
 import { loadShowDisabled, saveShowDisabled, matrixAgentsUrl } from './agent-chat/rail-lifecycle.js';
 import { isChatOpenable, agentState } from './agent-lifecycle/agent-lifecycle-menu.js';
@@ -24,6 +30,9 @@ import { useTeamMemberships } from '../hooks/useTeamMemberships.js';
 import { resolveTeamConfigTab } from './agent-lifecycle/team-config-tabs-view.js';
 import PageHelpButton from '../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat/agent-chat-help-sections.js';
+import { buildSessionJumpRequest } from './agent-chat/session-jump.js';
+import { agentNotFoundState, agentNotFoundFrom, agentNotFoundCopy } from './agent-chat/agent-not-found.js';
+import { teamIdOfAgent, writeCurrentTeam } from './current-team.js';
 
 // Page-action header buttons (#1956). Copied from the convention the other
 // #1847/#1912-migrated pages share (`Briefings.jsx`): accent for the page's
@@ -105,27 +114,23 @@ function ResizeDivider({ onMouseDown, disabled = false }) {
 
 const LAST_AGENT_KEY = 'agentChat.lastAgentId';
 const LAST_VIEWED_KEY = 'agentChat.lastViewed';
-const FILTER_KEY = 'agentChat.listFilter';
+const FILTER_KEY = 'agentChat.listFilter'; // legacy, migrated once (#2740)
 
 /** Stable empty set, so the idle rail never hands its memoized rows a new one. */
 const EMPTY_BUSY_IDS = new Set();
 
-function loadFilter() {
-  try {
-    const raw = localStorage.getItem(FILTER_KEY);
-    if (!raw) return { kind: 'all' };
-    const parsed = JSON.parse(raw);
-    // A stored `orchestrator` filter from before #1964 falls through to the
-    // `{ kind: 'all' }` default rather than narrowing to a kind nothing builds.
-    if (parsed && ['all', 'team', 'agent'].includes(parsed.kind)) {
-      return parsed;
-    }
-  } catch { /* ignore */ }
-  return { kind: 'all' };
+// The pre-#2740 browser-local single-choice filter. Read once to migrate it
+// into the per-user server-side selection, then removed.
+function loadLegacyFilter() {
+  try { return parseLegacyFilter(localStorage.getItem(FILTER_KEY)); }
+  catch { return null; }
 }
-function saveFilter(filter) {
-  try { localStorage.setItem(FILTER_KEY, JSON.stringify(filter)); } catch { /* ignore */ }
+function clearLegacyFilter() {
+  try { localStorage.removeItem(FILTER_KEY); } catch { /* ignore */ }
 }
+
+/** How long a burst of filter clicks is coalesced into one preference write. */
+const FILTER_SAVE_DEBOUNCE_MS = 400;
 
 function loadLastViewed() {
   try { return JSON.parse(localStorage.getItem(LAST_VIEWED_KEY) || '{}'); }
@@ -205,6 +210,12 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   const handleBusyIdsChange = useCallback((ids) => {
     setRailBusyIds(prev => (prev.size === 0 && ids.size === 0 ? prev : ids));
   }, []);
+  // The Materialize subset of those (#2705 AC2): the routed agent's pane shows
+  // "Materializing…" until the host has re-read the roster with it enabled.
+  const [railMaterializingIds, setRailMaterializingIds] = useState(EMPTY_BUSY_IDS);
+  const handleMaterializingIdsChange = useCallback((ids) => {
+    setRailMaterializingIds(prev => (prev.size === 0 && ids.size === 0 ? prev : ids));
+  }, []);
 
   // The list-level create/import actions live in the Shell's page-action header
   // like every other page's (#1956) — Agent Chat used to be the one route with
@@ -213,7 +224,7 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   // host (the file input + the shared `ImportAgentForm`) through its imperative
   // handle, so there is exactly one import implementation in the chat.
   const railHostRef = useRef(null);
-  const { user } = useAuth();
+  const { user, patchUser } = useAuth();
   const createAccess = describeAgentCreateAccess(user);
 
   // Team-header membership indicator (#2381): who is behind each team. Polled on
@@ -221,7 +232,7 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   // the rest of the rail refreshes on roster changes (AC6). `viewerId` is what
   // lets a team-of-one read as "Own" for its owner but as that person's name for
   // anyone else (AC2 vs the AC3 edge).
-  const { memberships, directory } = useTeamMemberships();
+  const { memberships, directory, loaded: membershipsLoaded } = useTeamMemberships();
   const viewerId = user?.userId || null;
 
   // Local map agentId -> roomId, for rooms we created during this session
@@ -267,25 +278,59 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
     );
   }, [statuses]);
 
-  // Sidebar filter: All | a specific team | a specific agent. Persisted in
-  // localStorage so the user's narrowed view survives reloads.
-  const [listFilter, setListFilter] = useState(loadFilter);
-  useEffect(() => { saveFilter(listFilter); }, [listFilter]);
+  // Rail team selection (#2740): which teams (and whether the Individual agents
+  // block) the list shows. Stored as the hidden entries, per user, on the
+  // server (`chatListFilter`, via PUT /api/me/preferences) so it follows the
+  // user across browsers; see list-selection.js for every decision.
+  const [listFilter, setListFilter] = useState(() => normalizeSelection(user?.chatListFilter));
+  const { groups: railGroups, singles: railSingles } = useMemo(() => buildGroups(agents || []), [agents]);
+  const filterEntries = useMemo(
+    () => selectionEntries(railGroups, railSingles, { memberships, directory, viewerId }),
+    [railGroups, railSingles, memberships, directory, viewerId],
+  );
 
-  // Drop the filter if its target disappeared (group deleted, agent removed).
+  const saveTimerRef = useRef(null);
+  const pendingSaveRef = useRef(null);
+  const flushFilterSave = useCallback(() => {
+    clearTimeout(saveTimerRef.current);
+    const next = pendingSaveRef.current;
+    if (!next) return;
+    pendingSaveRef.current = null;
+    apiCall('PUT', '/api/me/preferences', { chatListFilter: next }).catch(() => {});
+  }, []);
+  useEffect(() => flushFilterSave, [flushFilterSave]);
+  const persistFilter = useCallback((next) => {
+    setListFilter(next);
+    // Keep the session copy current so a remount restores what was just picked.
+    patchUser({ chatListFilter: next });
+    pendingSaveRef.current = next;
+    clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(flushFilterSave, FILTER_SAVE_DEBOUNCE_MS);
+  }, [patchUser, flushFilterSave]);
+
+  const entriesRef = useRef(filterEntries);
+  entriesRef.current = filterEntries;
+  const listFilterRef = useRef(listFilter);
+  listFilterRef.current = listFilter;
+  const membershipCtxRef = useRef(null);
+  membershipCtxRef.current = { memberships, directory, viewerId };
+  const handleFilterAction = useCallback((action) => {
+    persistFilter(applySelectionAction(listFilterRef.current, action, entriesRef.current, membershipCtxRef.current));
+  }, [persistFilter]);
+
+  // One-time migration of the old browser-local filter (AC9): only when the
+  // server has no saved selection yet, and only once the roster is known (a
+  // `team:<id>` / `agent:<id>` spec is resolved against it).
+  const migratedRef = useRef(false);
   useEffect(() => {
-    if (!agents) return;
-    if (listFilter.kind === 'agent' && !agents.find(a => a.id === listFilter.id)) {
-      setListFilter({ kind: 'all' });
-    }
-    if (listFilter.kind === 'team') {
-      const { groups } = buildGroups(agents);
-      const stillThere = groups.some(
-        g => g.kind === listFilter.kind && g.id === listFilter.id,
-      );
-      if (!stillThere) setListFilter({ kind: 'all' });
-    }
-  }, [agents, listFilter]);
+    if (migratedRef.current || !agents) return;
+    migratedRef.current = true;
+    const legacy = loadLegacyFilter();
+    if (!legacy) return;
+    clearLegacyFilter();
+    if (user?.chatListFilter) return;
+    persistFilter(migrateLegacyFilter(legacy, filterEntries, railSingles));
+  }, [agents, user, filterEntries, railSingles, persistFilter]);
 
   // Right-rail (session log panel) toggle, persisted in localStorage so the
   // user's preference survives reload. Declared early so the drag handler
@@ -506,6 +551,18 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   // Cold-nav safe (AC7): the effect waits for the async agent list. SessionsPanel
   // owns the active-vs-finished match + the graceful "not found" notice (AC6).
   const [sessionSelectRequest, setSessionSelectRequest] = useState(null);
+
+  // "Show in session log" on a chat message (#2603): the same Sessions-tab
+  // selection as `?session=` below, plus `reveal` so the log scrolls to the
+  // run and flashes it. Id-taking and stable, so the memoized Message rows
+  // don't re-render (#1676).
+  const handleShowInSession = useCallback((ref) => {
+    const request = buildSessionJumpRequest(ref, Date.now());
+    if (!request) return;
+    setLogOpen(true);
+    setRailTabRequest({ tab: 'sessions', ts: request.ts });
+    setSessionSelectRequest(request);
+  }, []);
   const consumedSessionRef = useRef(null);
   const requestedSession = searchParams.get('session');
   useEffect(() => {
@@ -574,6 +631,14 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   // never attempts `ChatPanel` against a null room.
   const routedAgent = (agents ?? []).find(a => a.id === agentId) || null;
 
+  // #2850: the team of the routed subject (a member, a pool instance or the
+  // team entry itself) becomes the current team Flow Control opens on. An
+  // agent outside any team leaves the current team as it was.
+  const routedTeamId = teamIdOfAgent(routedAgent);
+  useEffect(() => {
+    if (routedTeamId) writeCurrentTeam(user?.username, routedTeamId);
+  }, [routedTeamId, user?.username]);
+
   // #2311 D2: the roster now refreshes in the background, so the currently
   // open chat's agent can vanish (pool reap, deletion elsewhere) while the
   // user is looking at it. `seenAgentIdRef`/`lastSeenAgentRef` remember the
@@ -611,12 +676,12 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   const [revealRequest, setRevealRequest] = useState(null);
   useEffect(() => {
     if (!revealId || !routedAgent) return;
-    const { resetFilter } = revealPlan(routedAgent, listFilter);
-    if (resetFilter) setListFilter({ kind: 'all' });
+    const { showKey } = revealPlan(routedAgent, listFilter);
+    if (showKey) handleFilterAction({ type: 'reveal', key: showKey });
     setRevealRequest({ id: revealId, ts: Date.now() });
     // Consume the state so a reload/back does not reveal (or wait) again.
     navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
-  }, [revealId, routedAgent, listFilter, navigate, location.pathname, location.search]);
+  }, [revealId, routedAgent, listFilter, handleFilterAction, navigate, location.pathname, location.search]);
   // A reveal is for the arrival only — moving to another chat drops it, so a
   // later re-expand of the same group does not scroll back to that row.
   useEffect(() => {
@@ -628,7 +693,13 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   // the transcript/room/scroll position are all untouched since `ChatPanel`
   // never remounts (same `key={selectedAgent.id}` below).
   const effectiveRoutedAgent = routedAgent || (agentRemoved ? lastSeenAgentRef.current : null);
-  const selectedAgent = effectiveRoutedAgent && isChatOpenable(effectiveRoutedAgent) ? effectiveRoutedAgent : null;
+  // #2705 AC2: while a Materialize is in flight the pane holds its in-progress
+  // card even if a roster read already shows the agent enabled — the chat opens
+  // once, after the host has confirmed the enabled record, instead of flipping
+  // between the stub card, a half-provisioned chat and the disabled banner.
+  const materializingAgent = routedAgent && railMaterializingIds.has(routedAgent.id) ? routedAgent : null;
+  const selectedAgent = effectiveRoutedAgent && !materializingAgent && isChatOpenable(effectiveRoutedAgent)
+    ? effectiveRoutedAgent : null;
   // #2235: a routed `role: 'team'` subject gets the whole area right of the
   // agent list as one full-width configuration surface — see
   // `TeamConfigSurface` below — rather than the ordinary chat + right-rail
@@ -695,15 +766,17 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   // user has open, and D2 wants the chat to stay put with an inline notice,
   // not an auto-navigate away. A route that never named a real agent (bad
   // deep link, or the initial load for one) still bounces to /chats exactly
-  // as before.
+  // as before — carrying the requested id so the empty state can say it was
+  // not found instead of silently showing "pick an agent" (#2619).
   useEffect(() => {
     if (!loading && agentId && agents && !agents.find(a => a.id === agentId)) {
       if (seenAgentIdRef.current === agentId) return;
       // #2521: a just-created agent the roster has not picked up yet.
       if (awaitingReveal) return;
-      navigate('/chats', { replace: true });
+      navigate('/chats', { replace: true, state: agentNotFoundState(agentId) });
     }
   }, [agentId, agents, loading, navigate, awaitingReveal]);
+  const notFoundAgentId = agentId ? null : agentNotFoundFrom(location.state);
 
   // Restore last-opened agent on mount when no `:agentId` is in the URL and
   // a stored value still exists in the loaded agent list. We use `replace`
@@ -711,12 +784,14 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   useEffect(() => {
     if (loading || agentId) return;
     if (!agents || agents.length === 0) return;
+    // #2619: stay on the "not found" notice rather than hopping to another chat.
+    if (notFoundAgentId) return;
     let stored = null;
     try { stored = localStorage.getItem(LAST_AGENT_KEY); } catch { /* ignore */ }
     if (stored && agents.find(a => a.id === stored)) {
       navigate(`/chats/${stored}`, { replace: true });
     }
-  }, [loading, agentId, agents, navigate]);
+  }, [loading, agentId, agents, navigate, notFoundAgentId]);
 
   // Track the active agent so we can update localStorage even when the user
   // arrived via a deep link (e.g. /chats/<id> bookmarked).
@@ -819,13 +894,16 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
             display: 'flex',
             alignItems: 'center',
             gap: 'var(--eb-space-2)',
+            // Anchors the filter panel (#2740) to the header row.
+            position: 'relative',
           }}>
             {agents.length > 0 && (
               <div style={{ flex: 1, minWidth: 0 }}>
-                <FilterSelect
-                  agents={agents}
-                  filter={listFilter}
-                  onChange={setListFilter}
+                <ListFilterControl
+                  entries={filterEntries}
+                  selection={listFilter}
+                  onAction={handleFilterAction}
+                  quickFiltersDisabledReason={quickFiltersDisabledReason({ membershipsLoaded, viewerId })}
                 />
               </div>
             )}
@@ -970,6 +1048,7 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
                 onOpenKnowledge={handleOpenKnowledge}
                 resumeRequest={resumeRequest}
                 msgTargetRequest={msgTargetRequest}
+                onShowInSession={handleShowInSession}
                 insertRefRequest={composerRefRequest}
                 removedFromRoster={agentRemoved}
               />
@@ -979,7 +1058,9 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
                 // a just-created agent is awaited, or when the routed agent is
                 // a not-yet-provisioned stub (it has no chat to open).
                 waitingForNewAgent={awaitingReveal}
+                materializingAgent={materializingAgent}
                 stubAgent={routedAgent && agentState(routedAgent) === 'stub' ? routedAgent : null}
+                notFoundAgentId={notFoundAgentId}
               />
             )}
           </div>
@@ -1053,6 +1134,7 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
         statuses={agentStatuses}
         listFilter={listFilter}
         onBusyIdsChange={handleBusyIdsChange}
+        onMaterializingIdsChange={handleMaterializingIdsChange}
       />
     </div>
     </>
@@ -1097,89 +1179,17 @@ function RailHeaderToggle({ on, onToggle }) {
 }
 
 /**
- * Native <select> bound to the agent-list filter spec. Lists every visible
- * team (with member count), then every agent that belongs to none
- * ("Individual agents" — team members are already reachable via their group
- * entry), so the user can narrow down to a whole team or a single standalone
- * chat.
- */
-function FilterSelect({ agents, filter, onChange }) {
-  const { groups, singles } = buildGroups(agents);
-  const teams = groups.filter(g => g.kind === 'team');
-
-  // "Individual agents" = agents with no team membership at all — `singles`
-  // already excludes anyone captured by a `groups` entry (see `buildGroups` in
-  // agent-list-model.js), so team members must not be re-added here.
-  const individualAgents = singles;
-
-  const value =
-    filter.kind === 'team'  ? `team:${filter.id}`  :
-    filter.kind === 'agent' ? `agent:${filter.id}` :
-    'all';
-
-  function handleChange(e) {
-    const v = e.target.value;
-    if (v === 'all') return onChange({ kind: 'all' });
-    const [kind, ...rest] = v.split(':');
-    const id = rest.join(':');
-    if (kind === 'team' || kind === 'agent') {
-      return onChange({ kind, id });
-    }
-  }
-
-  return (
-    <select
-      value={value}
-      onChange={handleChange}
-      title="Filter agent list"
-      style={{
-        // No top margin: since #1921 removed the "Agents (N)" heading above it,
-        // the select is the row's only child and its own padding does the work.
-        width: '100%',
-        padding: '4px 6px',
-        fontSize: 'var(--eb-text-xs)',
-        background: 'var(--eb-bg-app)',
-        color: 'var(--eb-text-primary)',
-        border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-sm)',
-        fontFamily: 'inherit',
-        cursor: 'pointer',
-      }}
-    >
-      <option value="all">All agents</option>
-
-      {teams.length > 0 && (
-        <optgroup label="Teams">
-          {teams.map(t => (
-            <option key={t.id} value={`team:${t.id}`}>
-              {t.displayName} ({t.children.length + (t.header ? 1 : 0)})
-            </option>
-          ))}
-        </optgroup>
-      )}
-
-      {individualAgents.length > 0 && (
-        <optgroup label="Individual agents">
-          {individualAgents.map(a => (
-            <option key={a.id} value={`agent:${a.id}`}>
-              {a.displayName || a.id}
-            </option>
-          ))}
-        </optgroup>
-      )}
-    </select>
-  );
-}
-
-/**
  * Centered "pick an agent" card shown when no `:agentId` is in the route.
  * Mirrors the empty-state design of other admin-console pages: lucide icon,
  * primary line, secondary help text, all on a soft surface with a subtle
  * border so it doesn't feel like a 404 page. #2521 swaps the copy while a
- * just-created agent is awaited, or when the routed agent is a stub.
+ * just-created agent is awaited, or when the routed agent is a stub; #2619
+ * when a deep link named an agent that isn't in the viewer's roster; #2705
+ * while the routed agent is being materialized (spinner instead of the icon).
  */
-function EmptyState({ waitingForNewAgent = false, stubAgent = null }) {
-  const copy = revealEmptyStateCopy({ waiting: waitingForNewAgent, stubAgent });
+function EmptyState({ waitingForNewAgent = false, stubAgent = null, materializingAgent = null, notFoundAgentId = null }) {
+  const copy = revealEmptyStateCopy({ waiting: waitingForNewAgent, stubAgent, materializingAgent })
+    || (notFoundAgentId ? agentNotFoundCopy(notFoundAgentId) : null);
   return (
     <div style={{
       flex: 1,
@@ -1209,7 +1219,9 @@ function EmptyState({ waitingForNewAgent = false, stubAgent = null }) {
           color: 'var(--eb-accent-primary)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>
-          <MessageCircle size={22} />
+          {copy?.busy
+            ? <Loader2 size={22} style={{ animation: 'spin 1s linear infinite' }} aria-hidden="true" />
+            : <MessageCircle size={22} />}
         </div>
         <div style={{
           fontSize: 'var(--eb-text-md)',

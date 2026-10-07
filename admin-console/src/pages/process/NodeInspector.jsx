@@ -4,7 +4,7 @@ import SidePanel from '../../components/SidePanel';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import { useHelpSubject } from '../../context/HelperChatContext';
 import { OVERLAY_FLOW_NODE } from '../../context/page-help-view.js';
-import { apiCall } from '../../hooks/useApi';
+import { apiCall, useApi } from '../../hooks/useApi';
 import RoutingSection from './RoutingSection';
 import { resolveInheritedStage } from './hierarchy-utils';
 import { applyDetailsSave, parseSaveError, savedSummary } from './node-inspector-save';
@@ -12,7 +12,10 @@ import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
 import { ID_FORMAT_HINT } from '../../components/id-field-view';
 import PromptHistory from '../agent-chat/PromptHistory';
 import ScalingSection from './ScalingSection';
+import { poolControlUrl, livePoolCount } from './pool-cap-view.js';
+import { poolInstanceHint } from './pool-instance-hint.js';
 import { poolBadgeText, scalingDraftFromPool, scalingDraftDirty, scalingSaveDecision } from './scaling-view.js';
+import { ROUTING_SAVE_HINT, leaveGuard, discardMessage, roleDeleteImpact, deleteRoleSummary } from './node-inspector-view.js';
 import {
   PROMPT_MODES,
   PROMPT_MODE_LABELS,
@@ -87,7 +90,14 @@ export default function NodeInspector({
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState('');            // savedSummary() text, '' when not shown
   const [saveError, setSaveError] = useState(null);   // {label, message} | null, from parseSaveError
-  const [confirmClose, setConfirmClose] = useState(false);
+  // #2660: a pending guarded leave — { action: 'close' | 'tab', toTab?, parts }
+  // — or null. `outcomesDirty` mirrors RoutingSection's own "Save outcomes"
+  // draft, which would otherwise vanish silently on close or tab switch.
+  const [pendingLeave, setPendingLeave] = useState(null);
+  const [outcomesDirty, setOutcomesDirty] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState(null);
 
   // Live prompt editor state, lifted here (out of LivePromptEditor) so it can
   // batch into this tab's one Save (#2295) instead of owning its own. `null`
@@ -107,6 +117,11 @@ export default function NodeInspector({
   const isPooledRoleNode = isLive && memberCfg?.role === 'team-member';
   const parentCfg = isPooledRoleNode && memberCfg.parentTeamId
     ? agents.find(a => a.id === memberCfg.parentTeamId) : null;
+
+  // #2760 AC5: the role's live instance count against its cap, for Scaling.
+  const { data: poolControl } = useApi(isPooledRoleNode ? poolControlUrl(memberCfg) : null);
+  // #2814 AC5: the role's live instances — no longer canvas nodes of their own.
+  const poolHint = isPooledRoleNode ? poolInstanceHint(poolControl, memberCfg.id) : null;
 
   // Scaling draft (#2295), only meaningful for a pooled role node — declared
   // unconditionally (hooks can't be conditional) with a harmless blank/
@@ -199,10 +214,46 @@ export default function NodeInspector({
 
   // #2295 AC9: closing with unsaved edits is confirmed rather than silently
   // discarding them — the panel's only "cancel" is the X/Escape, so that is
-  // where the guard has to sit.
+  // where the guard has to sit. #2660 extends it to the Routing tab's unsaved
+  // outcomes, and to leaving that tab (its outcomes draft unmounts with it).
   function requestClose() {
-    if (dirty) setConfirmClose(true);
+    const parts = leaveGuard({ action: 'close', detailsDirty: dirty, outcomesDirty });
+    if (parts.length) setPendingLeave({ action: 'close', parts });
     else onClose?.();
+  }
+
+  function requestTab(next) {
+    const parts = leaveGuard({ action: 'tab', fromTab: tab, toTab: next, detailsDirty: dirty, outcomesDirty });
+    if (parts.length) setPendingLeave({ action: 'tab', toTab: next, parts });
+    else setTab(next);
+  }
+
+  function confirmLeave() {
+    const leave = pendingLeave;
+    setPendingLeave(null);
+    if (!leave) return;
+    if (leave.action === 'tab') {
+      setOutcomesDirty(false);
+      setTab(leave.toTab);
+    } else {
+      onClose?.();
+    }
+  }
+
+  // #2660: Delete agent is confirmed (naming the connections it cuts) and a
+  // failed delete is reported inside the dialog instead of becoming an
+  // unhandled rejection.
+  const deleteImpact = !isLive && confirmDelete ? roleDeleteImpact(node.id, roles) : null;
+  async function deleteAgent() {
+    if (deleting) return;
+    setDeleting(true); setDeleteError(null);
+    try {
+      await ops.deleteRole(node.id);
+      setConfirmDelete(false);
+      onDeleted?.();
+    } catch (e) {
+      setDeleteError(e?.message || String(e));
+    } finally { setDeleting(false); }
   }
 
   return (
@@ -217,19 +268,31 @@ export default function NodeInspector({
                 operator looking at one agent sees its scaling at a glance"),
                 visible regardless of which tab is active. */}
             {isPooledRoleNode && poolBadgeText(memberCfg.pool) && <span style={badge}>{poolBadgeText(memberCfg.pool)}</span>}
+            {poolHint && <span style={badge} title={poolHint.title}>{poolHint.text}</span>}
           </>
         ) : (
           <span style={badge}>draft agent</span>
         )}
       </div>
+      {/* #2814 AC5: one line per live pool instance of this role, from the
+          same pool-control read as the Scaling count. */}
+      {poolHint && (
+        <ul aria-label="Live instances" style={{ listStyle: 'none', margin: '0 0 var(--eb-space-4)', padding: 0, display: 'flex', flexDirection: 'column', gap: 2, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+          {poolHint.instances.map((i) => (
+            <li key={i.instanceId} title={i.instanceId}>
+              <span style={{ fontWeight: 'var(--eb-font-medium)' }}>{i.label}</span> · {i.statusText}
+            </li>
+          ))}
+        </ul>
+      )}
 
       {isTemplate ? (
         <TemplateReadonly node={node} />
       ) : (
         <>
           <div style={{ display: 'flex', borderBottom: '1px solid var(--eb-border-default)', marginBottom: 'var(--eb-space-4)' }}>
-            <TabButton active={tab === 'details'} onClick={() => setTab('details')}>Details</TabButton>
-            <TabButton active={tab === 'routing'} onClick={() => setTab('routing')} dot={routingHasLint}>Routing</TabButton>
+            <TabButton active={tab === 'details'} onClick={() => requestTab('details')}>Details</TabButton>
+            <TabButton active={tab === 'routing'} onClick={() => requestTab('routing')} dot={routingHasLint}>Routing</TabButton>
           </div>
 
           {tab === 'details' && (
@@ -326,6 +389,7 @@ export default function NodeInspector({
                     onChange={(next) => { setPoolDraft(next); markDirty(); }}
                     parentWipLimit={parentCfg?.wipLimit}
                     error={saveError?.label === 'Scaling' ? saveError.message : null}
+                    live={livePoolCount(poolControl, memberCfg.id)}
                   />
                 </div>
               )}
@@ -353,7 +417,7 @@ export default function NodeInspector({
 
               {!isLive && (
                 <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)' }}>
-                  <button onClick={async () => { await ops.deleteRole(node.id); onDeleted?.(); }}
+                  <button onClick={() => { setDeleteError(null); setConfirmDelete(true); }}
                     style={{ ...ghost, color: 'var(--eb-status-error)', borderColor: 'var(--eb-status-error)' }}>
                     <Trash2 size={14} /> Delete agent
                   </button>
@@ -364,12 +428,13 @@ export default function NodeInspector({
 
           {tab === 'routing' && (
             <>
-              {/* #2295 AC13: the Details tab now batches everything behind
-                  one Save, so it matters that Routing evidently does not —
-                  each action here (wiring an input, an outcome, a channel)
-                  is a graph edit that has to show on the canvas at once. */}
+              {/* #2295 AC13: the Details tab batches everything behind one
+                  Save; Routing's wiring (inputs, hand-offs, artifacts) is a
+                  graph edit that shows on the canvas at once. #2660: the
+                  Outcomes block is the exception with its own Save, so the
+                  hint says so instead of claiming there is no Save. */}
               <div style={{ ...hint, marginBottom: 'var(--eb-space-3)' }}>
-                Routing changes apply immediately — there is no Save on this tab.
+                {ROUTING_SAVE_HINT}
               </div>
               <RoutingSection
                 node={node}
@@ -383,6 +448,7 @@ export default function NodeInspector({
                 focusOutcome={focus?.tab === 'routing' ? focus?.outcome : null}
                 focusSection={focus?.tab === 'routing' ? focus?.section : null}
                 onChanged={onChanged}
+                onOutcomesDirtyChange={setOutcomesDirty}
               />
             </>
           )}
@@ -390,13 +456,40 @@ export default function NodeInspector({
       )}
 
       <ConfirmDialog
-        open={confirmClose}
+        open={!!pendingLeave}
         title="Discard unsaved changes?"
-        message="This agent's Details tab has unsaved edits. Closing now discards them."
+        message={pendingLeave ? discardMessage(pendingLeave.parts, pendingLeave.action) : ''}
         variant="warning"
         confirmLabel="Discard"
-        onConfirm={() => { setConfirmClose(false); onClose?.(); }}
-        onCancel={() => setConfirmClose(false)}
+        onConfirm={confirmLeave}
+        onCancel={() => setPendingLeave(null)}
+      />
+
+      <ConfirmDialog
+        open={!!deleteImpact}
+        title="Delete agent?"
+        message={deleteImpact ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)' }}>
+            <p style={{ margin: 0 }}>{deleteRoleSummary(node.displayName || node.id, deleteImpact)}</p>
+            {[['Hand-offs into this agent', deleteImpact.incoming],
+              ['Hand-offs from this agent', deleteImpact.outgoing],
+              ['Nested agents', deleteImpact.children]].filter(([, rows]) => rows.length).map(([heading, rows]) => (
+              <div key={heading}>
+                <div style={{ fontWeight: 'var(--eb-font-medium)' }}>{heading}</div>
+                <ul style={{ margin: '2px 0 0', paddingLeft: 18 }}>
+                  {rows.map(r => <li key={r}>{r}</li>)}
+                </ul>
+              </div>
+            ))}
+            {deleteError && <p style={{ margin: 0, color: 'var(--eb-status-error)' }}>Delete failed: {deleteError}</p>}
+          </div>
+        ) : null}
+        variant="danger"
+        confirmLabel="Delete agent"
+        busy={deleting}
+        maxWidth={520}
+        onConfirm={deleteAgent}
+        onCancel={() => { if (!deleting) setConfirmDelete(false); }}
       />
     </SidePanel>
   );

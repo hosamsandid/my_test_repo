@@ -430,12 +430,18 @@ test('the shipped jira manifest (plugins/jira) is valid', () => {
   // is a per-scope plugin credential (§5), so unlike github-issues the declared
   // credentials are NOT empty:
   assert.deepEqual(manifest.sidecar.capabilities, ['egress']);
-  // The three connection credentials are required; `readable-custom-fields` (#2416)
-  // and `writable-custom-fields` (#2417) are optional admin allow-lists.
+  // Only the connection (`site-url`) is hard-required (`requiredFor` both modes);
+  // the service account (`email`, `api-token`) is `requiredFor: ['automated']`
+  // only; `readable-/writable-custom-fields` (#2416/#2417) are optional allow-lists.
   const OPTIONAL_CREDS = ['readable-custom-fields', 'writable-custom-fields'];
   assert.deepEqual(manifest.credentials.map((c) => c.key), ['site-url', 'email', 'api-token', ...OPTIONAL_CREDS]);
-  assert.ok(manifest.credentials.filter((c) => !OPTIONAL_CREDS.includes(c.key)).every((c) => c.required === true));
-  assert.ok(OPTIONAL_CREDS.every((k) => manifest.credentials.find((c) => c.key === k).required === false));
+  const cred = (k) => manifest.credentials.find((c) => c.key === k);
+  assert.equal(cred('site-url').required, true);
+  assert.deepEqual(cred('site-url').requiredFor, ['interactive', 'automated']);
+  assert.equal(cred('email').required, false);
+  assert.equal(cred('api-token').required, false);
+  assert.deepEqual(cred('email').requiredFor, ['automated']);
+  assert.ok(OPTIONAL_CREDS.every((k) => cred(k).required === false));
   // #2449: everything but the api-token is non-secret (its real value is editable
   // in the console); only `api-token` keeps the default write-only masking.
   const NON_SECRET_CREDS = ['site-url', 'email', ...OPTIONAL_CREDS];
@@ -459,7 +465,7 @@ test('the shipped jira manifest (plugins/jira) is valid', () => {
     { path: '/admin', minRole: 'team-admin' },
   ]);
   assert.notEqual(manifest.ui.global, true);
-  assert.deepEqual(Object.keys(manifest.policy).sort(), ['attach', 'comment', 'create', 'set-field', 'sprint-advance', 'sprint-bulk-create', 'sprint-close', 'sprint-create', 'sprint-start', 'transition', 'update']);
+  assert.deepEqual(Object.keys(manifest.policy).sort(), ['attach', 'comment', 'create', 'edit', 'link', 'set-epic', 'set-field', 'sprint-advance', 'sprint-bulk-create', 'sprint-close', 'sprint-create', 'sprint-start', 'transition', 'unlink', 'update']);
   assert.deepEqual(manifest.requiresApproval, []);
 });
 

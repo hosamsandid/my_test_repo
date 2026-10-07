@@ -24,6 +24,9 @@ import { outcomeCardMinHeight, OUTCOME_COL_BOTTOM, OUTCOME_GROW_MIN } from './ou
 import { previewStrokeColor, portRectAnchor, screenPointToCanvas } from './drag-preview-anchor';
 import { summarizeLoopEdge, summarizeClaimEdge, claimTooltip } from '../agent-chat/trigger-summary';
 import { clampPan } from './pan-clamp';
+import {
+  OUTCOME_EDGE_COLOR, OUTCOME_EDGE_LEGEND, WEBHOOK_EDGE_COLOR, legendReserve, fitTransform,
+} from './flow-legend';
 import { attachTooltip } from '../../components/tooltip-dom';
 import { CANVAS_TITLES, orientationTitle, archivedTitle, stagesTitle } from './flow-canvas-hints';
 import {
@@ -41,6 +44,9 @@ export const EDGE_STYLES = {
   dependency: { color: '#ef4444', label: 'depends-on', dashed: true },
   artifact:   { color: '#22c55e', label: 'data flow' },
   label:      { color: '#3b82f6', label: 'label hand-off' },
+  // A label edge set by a structured outcome (#828): amber like the ◇ switch
+  // badge. Its own legend key (#2707) — before, only webhooks showed amber.
+  outcome:    { color: OUTCOME_EDGE_COLOR, label: OUTCOME_EDGE_LEGEND },
   issue:      { color: '#14b8a6', label: 'issue' },
   pr:         { color: '#8b5cf6', label: 'pull request' },
   review:     { color: '#f59e0b', label: 'review' },
@@ -48,7 +54,7 @@ export const EDGE_STYLES = {
   // Actor-sourced edges (#410): raw GitHub events, schedules, webhooks.
   event:      { color: '#f97316', label: 'GitHub event', dashed: true },
   timer:      { color: '#0ea5e9', label: 'schedule', dashed: true },
-  webhook:    { color: '#eab308', label: 'webhook', dashed: true },
+  webhook:    { color: WEBHOOK_EDGE_COLOR, label: 'webhook', dashed: true },
   // A loop self-edge (#936): an agent re-arming itself. Distinct fuchsia so
   // the stop-contract badge never reads as a schedule (⏰) or a PR edge.
   loop:       { color: '#d946ef', label: 'loop' },
@@ -322,7 +328,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     // here draws with no legend entry at all. `wake` (#2031) sits next to
     // `label`: they are the two agent→agent hand-off mechanisms and read as a
     // pair (one carries a label a human can see, the other does not).
-    const keys = ['label', 'wake', 'issue', 'pr', 'review', 'gate', 'handoff', 'event', 'webhook', 'artifact', 'dependency', 'hierarchy'];
+    // `outcome` (#2707) follows: a label hand-off set by an outcome, in amber.
+    const keys = ['label', 'wake', 'outcome', 'issue', 'pr', 'review', 'gate', 'handoff', 'event', 'webhook', 'artifact', 'dependency', 'hierarchy'];
     const actorToggles = ['github', 'external'].map(kind => {
       const off = state.hiddenActorKinds.has(kind);
       return `<button data-actor-toggle="${kind}" title="Show/hide edges from this source" style="`
@@ -348,6 +355,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       state.legendCollapsed = !state.legendCollapsed;
       localStorage.setItem('flow-graph-legend-collapsed', state.legendCollapsed);
       renderLegend();
+      // The legend's height just changed; re-fit unless the user has panned
+      // or zoomed, so it never ends up on top of nodes (#2707).
+      if (!state.userTransform) fitToView();
       return;
     }
     const btn = e.target.closest('[data-actor-toggle]');
@@ -1930,7 +1940,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     // lanes, side gutters for long/backward edges, labels on the edge.
     const EXTRA_COLOR = { label: EDGE_STYLES.label.color, review: EDGE_STYLES.review.color, manual: EDGE_STYLES.label.color };
     const GH_COLOR = { pr: EDGE_STYLES.pr.color, issue: EDGE_STYLES.issue.color };
-    const OUTCOME_EDGE_COLOR = '#eab308';  // amber — matches the ◇ switch badge (#828)
 
     function drawRoutedProcessEdges() {
       // `layout()` only builds `state.layeredInfo` when there is at least one
@@ -2648,18 +2657,14 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     if (!bounds) return;
     const { minX, minY, maxX, maxY } = bounds;
 
-    const vw       = viewport.clientWidth;
-    const vh       = viewport.clientHeight;
-    const contentW = maxX - minX + 100;
-    const contentH = maxY - minY + 100;
-
-    const scaleX = vw / contentW;
-    const scaleY = vh / contentH;
-    state.zoom = Math.min(scaleX, scaleY, 1.5);
-    state.zoom = Math.max(state.zoom, 0.1);
-
-    state.pan.x = (vw - contentW * state.zoom) / 2 - minX * state.zoom + 50 * state.zoom;
-    state.pan.y = (vh - contentH * state.zoom) / 2 - minY * state.zoom + 50 * state.zoom;
+    const vw = viewport.clientWidth;
+    const vh = viewport.clientHeight;
+    // Keep the bottom band the legend floats over free (#2707).
+    const reserveBottom = legendReserve(legendEl.offsetHeight, vh);
+    const t = fitTransform({ bounds: { minX, minY, maxX, maxY }, vw, vh, reserveBottom });
+    state.zoom  = t.zoom;
+    state.pan.x = t.panX;
+    state.pan.y = t.panY;
 
     applyTransform();
   }

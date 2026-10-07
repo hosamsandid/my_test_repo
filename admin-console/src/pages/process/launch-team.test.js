@@ -15,6 +15,7 @@ import {
   buildLaunchBody,
   launchSubmitLabel,
   launchResultMessage,
+  launchFailure,
   agentChatTargetFor,
   splitNdjson,
   runLaunchStream,
@@ -23,6 +24,11 @@ import {
   TEAM_ID_HINT,
   SUFFIX_HINT,
   NO_PROVIDER_ERROR,
+  NEW_REPO_LESS_ENV,
+  NEW_REPO_LESS_ENV_LABEL,
+  PICK_ENVIRONMENT_ERROR,
+  ENVIRONMENTS_PENDING_ERROR,
+  environmentChoiceRequired,
 } from './launch-team.js';
 
 test('slugify: lowercase, dash runs, trim dashes, 40-char cap', () => {
@@ -486,4 +492,75 @@ test('agentChatTargetFor: the path segment is URL-encoded, the state id is not',
   const r = agentChatTargetFor({ roles: [{ id: 'a b' }] }, 'acme');
   assert.equal(r.path, '/chats/acme-a%20b');
   assert.equal(r.state.revealAgentId, 'acme-a b');
+});
+
+// ─── launchFailure (#2658) ───────────────────────────────────────────────────
+
+test('launchFailure: a refusal before the plan created nothing — no rollback claim', () => {
+  const f = launchFailure({ message: 'Team name required', steps: null });
+  assert.deepEqual(f, { message: 'Team name required', rolledBack: false });
+  // A plan that never started a step is the same case.
+  assert.equal(launchFailure({ message: 'x', steps: [{ id: 'env', status: 'pending' }] }).rolledBack, false);
+});
+
+test('launchFailure: once a step ran, the rollback sentence applies', () => {
+  const steps = [{ id: 'env', status: 'done' }, { id: 'team', status: 'error' }];
+  assert.equal(launchFailure({ message: 'boom', steps }).rolledBack, true);
+  assert.equal(launchFailure({ message: 'boom', steps: [{ id: 'env', status: 'running' }] }).rolledBack, true);
+});
+
+test('launchFailure: the extend-missing-team API refusal is translated into UI terms', () => {
+  const f = launchFailure({ message: `Cannot extend: team 'acme' does not exist yet. Use mode: "create" first.` });
+  assert.equal(f.message, 'There is no team \'acme\' to add agents to yet — untick “Add to an existing team” to create it instead.');
+  assert.doesNotMatch(f.message, /mode:/);
+  assert.equal(launchFailure({}).message, '');
+});
+
+// #2737 — the Create-team dialog must not launch onto an environment the user
+// never chose. `requireEnvironment` blocks an empty pick; the explicit
+// "New repo-less environment" choice keeps the #2168 A2 path reachable.
+test('validateLaunch: requireEnvironment blocks an empty pick, accepts any explicit one', () => {
+  const base = { teamId: 'team', teamName: 'Team' };
+  assert.equal(validateLaunch({ ...base, environmentId: '', requireEnvironment: true }), PICK_ENVIRONMENT_ERROR);
+  assert.equal(validateLaunch({ ...base, requireEnvironment: true }), PICK_ENVIRONMENT_ERROR);
+  assert.equal(validateLaunch({ ...base, environmentId: 'env', requireEnvironment: true }), null);
+  assert.equal(validateLaunch({ ...base, environmentId: NEW_REPO_LESS_ENV, requireEnvironment: true }), null);
+  // Opt-in: every other caller keeps the #2168 A2 behaviour.
+  assert.equal(validateLaunch({ ...base, environmentId: '' }), null);
+  // The reason names the way out, so a blocked button is never a dead end.
+  assert.ok(PICK_ENVIRONMENT_ERROR.includes(NEW_REPO_LESS_ENV_LABEL));
+});
+
+test('launchBlockReason: carries requireEnvironment through to the shown reason', () => {
+  const values = { teamId: 'team', teamName: 'Team', environmentId: '' };
+  assert.equal(launchBlockReason({ ...values, requireEnvironment: true }), PICK_ENVIRONMENT_ERROR);
+  assert.equal(launchBlockReason(values), null);
+});
+
+test('buildLaunchBody: the explicit repo-less choice sends the same body as no environment', () => {
+  const chosen = buildLaunchBody({ teamId: 't', teamName: 'T', environmentId: NEW_REPO_LESS_ENV });
+  const none = buildLaunchBody({ teamId: 't', teamName: 'T', environmentId: '' });
+  assert.equal('environmentId' in chosen, false);
+  assert.deepEqual(chosen, none);
+  assert.equal(buildLaunchBody({ teamId: 't', teamName: 'T', environmentId: 'env' }).environmentId, 'env');
+});
+
+// #2737 review B1 — the gate must hold while the environment list is loading or
+// failed to load (MaterializeDialog keeps envsLoaded false on a failed fetch,
+// #2157 AC6); only a confirmed-empty platform lifts it (#2168 A2).
+test('environmentChoiceRequired: lifted only for a loaded, empty environment list', () => {
+  const on = { requireEnvironmentChoice: true, hasEnvironmentField: true };
+  assert.equal(environmentChoiceRequired({ ...on, envsLoaded: false, envCount: 0 }), true, 'loading / fetch failed');
+  assert.equal(environmentChoiceRequired({ ...on, envsLoaded: true, envCount: 2 }), true, 'list to pick from');
+  assert.equal(environmentChoiceRequired({ ...on, envsLoaded: true, envCount: 0 }), false, 'empty platform');
+  assert.equal(environmentChoiceRequired({ ...on, hasEnvironmentField: false, envsLoaded: true, envCount: 2 }), false);
+  assert.equal(environmentChoiceRequired({ hasEnvironmentField: true, envsLoaded: false, envCount: 0 }), false, 'opt-in');
+});
+
+test('launchBlockReason: blocks with a loading-specific reason while environments are pending', () => {
+  const values = { teamId: 'team', teamName: 'Team', environmentId: '' };
+  assert.equal(launchBlockReason({ ...values, requireEnvironment: true, environmentsPending: true }), ENVIRONMENTS_PENDING_ERROR);
+  assert.equal(validateLaunch({ ...values, requireEnvironment: true, environmentsPending: true }), ENVIRONMENTS_PENDING_ERROR);
+  // Pending alone never blocks a caller that does not require a choice.
+  assert.equal(launchBlockReason({ ...values, environmentsPending: true }), null);
 });

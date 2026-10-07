@@ -26,10 +26,21 @@ const LINT_INFO = {
   'duplicate-listener': { title: 'Redundant inputs', fix: 'Remove the duplicate trigger so the agent wakes once per event.' },
   'raw-trigger-nonconformant': { title: 'Trigger bends the wiring rules', fix: 'Edit the trigger to match the wiring rules — it still runs meanwhile.' },
   'unclaimed-listener': { title: 'Listener without a claim', fix: 'Add a claim so a stalled run stays distinguishable from a wake that never arrived.' },
+  // Outcome-switch shape checks (#2711).
+  'human-label-as-outcome': { title: 'Agent outcome sets a human-only gate', fix: 'Remove the label from the outcome, or make it a brake/agent label in Labels.' },
+  'same-label-multiple-outcomes': { title: 'Branches set the same label', fix: 'Give each switch option its own label so consumers can tell the branches apart.' },
+  'switch-with-one-option': { title: 'Switch with a single option', fix: 'Add a second option to make it a real branch, or set the outcomes to “any of”.' },
+  // Issue vs PR label hand-off (#2629).
+  'label-target-mismatch': { title: 'Label lands on the wrong kind of item', fix: "Make the consumer's input listen on the event for where the label lands (PR labeled vs issue labeled), or set the outcome's “on:” to match." },
   // Direct hand-off (#2032, docs/direct-agent-handoff-concept.md §12 P3).
   'wake-target-unresolved': { title: 'Hand-off names no reachable agent', fix: 'Point the hand-off at another agent on this team — a person has no queue, and an agent cannot hand off to itself.' },
   'wake-target-disabled': { title: 'Hand-off target cannot receive it', fix: "Re-enable the target's hand-off input, or the wake is queued and then dropped." },
   'wake-without-note': { title: 'Hand-off carries no context', fix: 'Add a sentence of context — it is what the target and the event log get instead of a label.' },
+  // Wake label whose every consumer is switched off (#2754).
+  'wake-label-no-live-consumer': { title: 'Nobody picks this label up', fix: 'Switch the consuming agent (or its trigger on this label) back on, or route the label to an agent that is running.' },
+  // Wake label that does not exist on its repository (#2878).
+  'wake-label-missing': { title: 'Wake label does not exist on GitHub', fix: 'Create the label on the repository (Create label), or point the trigger at a label that exists.' },
+  'gate-failure-label-unheard': { title: 'Failed hand-offs go unnoticed', fix: 'Wire a consumer for the failure label (e.g. a reworker on `revisions-required`), or choose a failure label an agent already listens on in the hand-off dialog.' },
 };
 
 const SEVERITY_WORD = { error: 'Error', warning: 'Warning', info: 'Info' };
@@ -57,4 +68,11 @@ function lintView(l) {
   };
 }
 
-export { LINT_INFO, lintView, severityColor };
+// The one-click fix a lint offers, or null (#2878): a missing wake label can
+// be created on its repository from the panel.
+function lintAction(l) {
+  if (!l || l.code !== 'wake-label-missing' || typeof l.repo !== 'string' || typeof l.label !== 'string') return null;
+  return { kind: 'create-label', repo: l.repo, label: l.label, text: 'Create label', title: `Create '${l.label}' on ${l.repo}` };
+}
+
+export { LINT_INFO, lintView, lintAction, severityColor };

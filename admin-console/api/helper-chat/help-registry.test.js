@@ -393,6 +393,20 @@ test('groundingContexts covers the routes only a plugin topic names, so the budg
   assert.ok(groundingContexts(reg).includes('/plugins/jira/view'));
 });
 
+test('a plugin-only route (no built-in topic) grounds on the plugin topic + Overview, not the Overview neighbours', () => {
+  // /plugins/jira/view is claimed by the Jira plugin but by no built-in topic.
+  // Without the slim it would inherit the Overview fallback's seeAlso fold — in
+  // production that is ~every page (~141k chars). With it, the fold is just the
+  // plugin's own topic plus the Overview topic itself (general orientation).
+  const reg = buildRegistry(scopedRegistry().all, [JIRA_TOPIC]);
+  assert.deepEqual(contextTopics(reg, '/plugins/jira/view').map((t) => t.id), [OVERVIEW_ID, 'jira']);
+  // The Overview neighbour `a` rides along on the generic no-route fallback (see
+  // the 'unresolvable context' test) but must NOT here — that is the saving.
+  assert.ok(!contextTopics(reg, '/plugins/jira/view').some((t) => t.id === 'a'));
+  // A route NO plugin names still takes the full Overview-plus-neighbours fallback.
+  assert.deepEqual(contextTopics(reg, '/not-a-route').map((t) => t.id), [OVERVIEW_ID, 'a']);
+});
+
 test('loadPluginTopics reads <dir>/<plugin>/help/*.md, tags the plugin id, and is fail-soft', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aee-plugin-help-'));
   fs.mkdirSync(path.join(dir, 'jira', 'help'), { recursive: true });

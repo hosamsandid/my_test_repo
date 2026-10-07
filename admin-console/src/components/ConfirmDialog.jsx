@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { AlertTriangle, Info, Loader2 } from 'lucide-react';
 import { resolveDismissHandler, backdropDismisses, escapeDismisses } from './confirm-dialog-view.js';
 
@@ -18,6 +19,8 @@ import { resolveDismissHandler, backdropDismisses, escapeDismisses } from './con
  *   alertOnly  - boolean, if true shows only an OK button (replaces window.alert)
  *   busy       - boolean (default: false), shows a spinner on the confirm button and
  *                disables both buttons while a caller's async action is in flight
+ *   confirmDisabled - boolean (default: false), disables only the confirm button,
+ *                e.g. while a form in `message` is not valid yet
  */
 export default function ConfirmDialog({
   open,
@@ -31,6 +34,7 @@ export default function ConfirmDialog({
   alertOnly = false,
   maxWidth = 440,
   busy = false,
+  confirmDisabled = false,
 }) {
   const dialogRef = useRef(null);
   const confirmRef = useRef(null);
@@ -81,7 +85,11 @@ export default function ConfirmDialog({
 
   const Icon = variant === 'info' ? Info : AlertTriangle;
 
-  return (
+  // Portaled to <body> so the dialog's zIndex ranks at the document root.
+  // Rendered inline it is trapped in its host's stacking context — e.g. a
+  // SidePanel (z 61) — and paints BEHIND a portaled modal such as the
+  // SkillEditorModal (z 1000) that opened it.
+  const overlay = (
     <div
       ref={dialogRef}
       role="dialog"
@@ -127,8 +135,8 @@ export default function ConfirmDialog({
           <button
             ref={confirmRef}
             onClick={onConfirm}
-            disabled={busy}
-            style={{ ...confirmBtnStyle, background: confirmBtnBg, ...(busy ? disabledStyle : null) }}
+            disabled={busy || confirmDisabled}
+            style={{ ...confirmBtnStyle, background: confirmBtnBg, ...(busy || confirmDisabled ? disabledStyle : null) }}
           >
             {busy ? (
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
@@ -144,6 +152,7 @@ export default function ConfirmDialog({
       {busy && <style>{'@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }'}</style>}
     </div>
   );
+  return typeof document === 'undefined' ? overlay : createPortal(overlay, document.body);
 }
 
 const overlayStyle = {

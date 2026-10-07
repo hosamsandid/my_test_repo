@@ -14,6 +14,12 @@
 // Health is stored in a SEPARATE file (/workspace/llm-endpoints/health.json),
 // never inside the config index.json, so a frequent status rewrite never races
 // the CRUD read-modify-write of the endpoint list.
+//
+// #2732 adds the provider's spending budget (llm-budget.js): the record carries
+// the last budget lookup, and the view derives a 'warning' (orange) state when
+// the effective budget is ≥ the warn threshold, 'error' at ≥ 100 %.
+
+const llmBudget = require('./llm-budget');
 
 // ~5 min baseline probe cadence (AC1: default ~5 min, configurable).
 const DEFAULT_INTERVAL_MS = 5 * 60_000;
@@ -45,7 +51,10 @@ function backoffMs(consecutiveFailures, opts = {}) {
 
 // Fold a probe result ({ ok, status, error } from probeLlmEndpointTest) into the
 // new persisted health record. `prev` is the prior record (or null/undefined).
-function applyProbeResult(prev, probe, nowMs = Date.now()) {
+// `budget` is the llm-budget.js lookup taken alongside the probe (#2732); it
+// never affects ok/consecutiveFailures, so a budget Warning never makes the
+// poller back off (AC10) and a failed budget read never fails the probe (AC5).
+function applyProbeResult(prev, probe, nowMs = Date.now(), budget = undefined) {
   const ok = Boolean(probe && probe.ok);
   const priorFailures = prev && Number.isFinite(prev.consecutiveFailures)
     ? prev.consecutiveFailures
@@ -58,6 +67,7 @@ function applyProbeResult(prev, probe, nowMs = Date.now()) {
     reason: ok ? null : (probe && probe.error ? String(probe.error) : 'request failed'),
     checkedAt: new Date(nowMs).toISOString(),
     consecutiveFailures: ok ? 0 : priorFailures + 1,
+    ...(budget ? { budget } : {}),
   };
 }
 
@@ -98,15 +108,29 @@ function selectDueEndpointIds(endpoints, healthMap = {}, nowMs = Date.now(), opt
 // The client-facing view merged onto an endpoint (AC3/AC6). No record → 'unknown'
 // (honest; never a guessed green — mirrors the sidecarRunning:null precedent
 // called out in AC6).
-function healthView(record) {
+//
+// #2732: a reachable provider whose effective budget is ≥ warnPct shows
+// 'warning'; ≥ 100 % shows 'error' (the proxy rejects requests from there on).
+// The reason names the budget either way. `budget` is the Budget-column view.
+function healthView(record, opts = {}) {
   if (!record || !record.checkedAt) {
-    return { status: 'unknown', reason: null, checkedAt: null, httpStatus: null };
+    return { status: 'unknown', reason: null, checkedAt: null, httpStatus: null, budget: null };
+  }
+  const budget = llmBudget.budgetView(record.budget);
+  let status = record.ok ? 'ok' : 'error';
+  let reason = record.ok ? null : (record.reason || 'request failed');
+  if (record.ok && budget && budget.status === 'ok') {
+    const warnPct = llmBudget.coercePct(opts.warnPct);
+    if (budget.pct >= 100) status = 'error';
+    else if (budget.pct >= warnPct) status = 'warning';
+    if (status !== 'ok') reason = llmBudget.budgetReason(record.budget.budget);
   }
   return {
-    status: record.ok ? 'ok' : 'error',
-    reason: record.ok ? null : (record.reason || 'request failed'),
+    status,
+    reason,
     checkedAt: record.checkedAt,
     httpStatus: Number.isFinite(record.status) ? record.status : null,
+    budget,
   };
 }
 

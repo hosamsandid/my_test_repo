@@ -41,6 +41,7 @@ import { notifyPluginsChanged } from '../../components/plugin-nav';
 import FormInput from '../../components/FormInput';
 import SkillPicker from '../../components/SkillPicker';
 import PluginGrantPicker from '../../components/PluginGrantPicker';
+import PluginCredentials from '../../components/PluginCredentials';
 import SyncReposPanel from '../../components/SyncReposPanel';
 import AgentRepositoriesPanel from '../agent-chat/AgentRepositoriesPanel';
 import TeamEnvironmentPanel from '../agent-chat/TeamEnvironmentPanel';
@@ -48,18 +49,22 @@ import ShareTeamPanel from '../agent-chat/ShareTeamPanel.jsx';
 import McpServerRows from '../../components/McpServerRows';
 import PageHelpButton from '../../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from '../agent-chat/agent-chat-help-sections.js';
-import { effectiveGrantFor } from '../plugin-grant-view.js';
+import { effectiveGrantFor, uninstalledGrantRows, UNINSTALLED_GRANT_HINT } from '../plugin-grant-view.js';
+import { pluginRegistryRow } from '../plugin-registry-view.js';
 import {
   labelStyle, inputStyle, helpTextStyle, PrimaryBtn, SecondaryBtn,
 } from './form-kit.jsx';
 import {
-  buildInitialForm, buildEditSubmit, hasOwnSkills, poolSectionError,
+  buildInitialForm, buildEditSubmit, hasOwnSkills, poolSectionError, skillsListUrl,
 } from './agent-edit-form-model.js';
 import { inheritedMcpPreview, switchMcpMode, memberMcpBlockers } from './member-mcp-view.js';
 import { TEAM_CONFIG_TABS, ENV_TAB_IDS, resolveTeamConfigTab } from './team-config-tabs-view.js';
 import { parallelismSummary, hasPooledMember } from '../process/parallelism-view.js';
 import ScalingSection from '../process/ScalingSection';
+import { poolControlUrl, livePoolCount } from '../process/pool-cap-view.js';
 import ParallelismPanel from '../process/ParallelismPanel';
+import LabelSuffixSection from './LabelSuffixSection';
+import MissingWakeLabelsSection from './MissingWakeLabelsSection';
 
 // #2236: which help chapter each tab's "?" opens, and the tab's own label for
 // the button's title. General/Skills/Plugins point at the same field-by-field
@@ -101,6 +106,11 @@ export function PluginGrantSection({ agent, parentTeam, alwaysVisible = false })
   React.useEffect(() => { setGrant(serverGrant); }, [serverGrant]);
 
   const installed = (data && data.installed) || [];
+  // Grants left behind by an uninstall (#2651): the picker lists installed
+  // plugins only, so these get their own rows with a Revoke. Only once the
+  // installed list is known — null while loading or after a failed fetch.
+  const knownInstalled = data && Array.isArray(data.installed) ? data.installed : null;
+  const orphans = React.useMemo(() => uninstalledGrantRows(grant, knownInstalled), [grant, knownInstalled]);
 
   // The quota ceiling for "per agent" granularity is only honest if it counts
   // the members that would actually carry the grant, so a team's members are
@@ -152,7 +162,36 @@ export function PluginGrantSection({ agent, parentTeam, alwaysVisible = false })
   // disappears depending on installation state is itself a puzzle, and a
   // Team Admin cannot resolve "nothing installed" anyway (System-Admin-only).
   // Every other caller keeps the pre-#2236 self-hide.
-  if (installed.length === 0) {
+  const orphanList = orphans.length > 0 && (
+    <div style={{ marginTop: 'var(--eb-space-3)' }}>
+      <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>{UNINSTALLED_GRANT_HINT}</div>
+      {orphans.map((row) => (
+        <div
+          key={row.id}
+          style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) 0', fontSize: 'var(--eb-text-sm)' }}
+        >
+          <span style={{ fontWeight: 600 }}>{row.id}</span>
+          <span style={{ color: 'var(--eb-status-warning)', fontSize: 'var(--eb-text-xs)' }}>{row.status}</span>
+          <button
+            type="button"
+            aria-label={row.revokeLabel}
+            title={row.revokeLabel}
+            disabled={busy}
+            onClick={() => onToggle(row.id, false, row.granularity)}
+            style={{
+              marginLeft: 'auto', padding: '2px var(--eb-space-3)', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+              background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)', cursor: busy ? 'default' : 'pointer',
+            }}
+          >
+            Revoke
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+
+  if (installed.length === 0 && !orphanList) {
     if (!alwaysVisible) return null;
     return (
       <div>
@@ -189,6 +228,48 @@ export function PluginGrantSection({ agent, parentTeam, alwaysVisible = false })
         memberCount={memberCount}
         disabled={busy}
       />
+      {orphanList}
+    </div>
+  );
+}
+
+// The team-wide service account for a credential-declaring plugin (Jira),
+// #2608, set here in Team Settings so a Team Admin owns it without needing the
+// System-Admin-only Plugins registry page. This account is used only for
+// AUTOMATED runs (schedules, loops, GitHub events, hand-offs) and background
+// polling; a chat turn uses the sender's own Plugin Token instead. The write
+// API is `canManageTeam`-gated, so a Team Admin of this team (or a System
+// Admin) may save. Team-only: a member inherits the team's account and has no
+// service account of its own. `onlyScopeId={agent.id}` pins the shared
+// PluginCredentials component to this team's own (team-granularity) scope.
+export function PluginServiceAccountSection({ agent }) {
+  const { data } = useApi('/api/plugins');
+  if (agent.role !== 'team') return null;
+  const installed = (data && data.installed) || [];
+  const granted = new Set(effectiveGrantFor(agent, null).map((g) => g.id));
+  const rows = installed
+    .map((e) => pluginRegistryRow(e, { canManage: true }))
+    .filter((r) => r.installed && r.credentialKeys.length > 0 && granted.has(r.id));
+  if (rows.length === 0) return null;
+
+  return (
+    <div style={{ marginTop: 'var(--eb-space-4)' }}>
+      <div style={labelStyle}>Plugin service accounts</div>
+      <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
+        The team-wide account a granted plugin uses for automated runs (schedules,
+        loops, GitHub events, hand-offs) and background polling. Chat turns never
+        use it — each member acts under their own Plugin Token. Changes apply
+        immediately; the account is stored server-side and never read back.
+      </div>
+      {rows.map((row) => (
+        <PluginCredentials
+          key={row.id}
+          row={row}
+          onlyScopeId={agent.id}
+          defaultOpen
+          label={`Set the ${row.name || row.id} service account (${row.credentialKeys.join(' / ')})`}
+        />
+      ))}
     </div>
   );
 }
@@ -430,10 +511,9 @@ export default function AgentEditForm({
   const ownSkills = hasOwnSkills(agent.role);
   // Grant-aware picker (#633): scope the pool to the agent's own team so its
   // team-tier skills are grantable, not just the global pool. Team-first
-  // resolution and shadowing markers are rendered by the picker.
-  const skillsUrl = agent.teamId
-    ? `/api/skills?teamId=${encodeURIComponent(agent.teamId)}`
-    : '/api/skills';
+  // resolution and shadowing markers are rendered by the picker. The pool is
+  // keyed by the Agent Team id, as seeding reads it (#2689).
+  const skillsUrl = skillsListUrl(agent);
   const { data: skillsData } = useApi(skillsUrl);
   const grantSkills = (skillsData || []).filter(s => s.source === 'pool' || s.source === 'team');
 
@@ -443,6 +523,8 @@ export default function AgentEditForm({
     ? `/api/agents/${encodeURIComponent(agent.parentTeamId)}`
     : null;
   const { data: parentTeam } = useApi(parentTeamUrl || '/api/agents');
+  // #2760 AC5: the role's live instance count against its cap, for Scaling.
+  const { data: poolControl } = useApi(poolControlUrl(agent));
   const parentTeamPrompt = parentTeamUrl && parentTeam?.role === 'team'
     ? (parentTeam.systemPromptTemplate || '')
     : '';
@@ -629,6 +711,18 @@ export default function AgentEditForm({
         </div>
       )}
 
+      {/* #2858: the team's label suffix, changed centrally — applies
+          immediately through its own route (it rewrites every member and
+          renames the labels on GitHub), never batched into this form's Save. */}
+      {isTeam && activeTab === 'general' && (
+        <LabelSuffixSection key={agent.labelSuffix || ''} team={agent} onApplied={onImmediateApply} />
+      )}
+
+      {/* #2878: wake labels the team listens on that are missing on GitHub. */}
+      {isTeam && activeTab === 'general' && (
+        <MissingWakeLabelsSection teamId={agent.id} />
+      )}
+
       {/* #2167/#2236: the team's environment fields, re-hosted as five of the
           flat row's own top-level tabs rather than a nested sub-strip.
           Applies immediately through its own PUT to the environment record —
@@ -671,6 +765,9 @@ export default function AgentEditForm({
       {(!isTeam || activeTab === 'plugins') && (
         <PluginGrantSection agent={agent} parentTeam={parentTeam} alwaysVisible={isTeam} />
       )}
+      {isTeam && activeTab === 'plugins' && (
+        <PluginServiceAccountSection agent={agent} />
+      )}
 
       {/* Sharing (formerly the rail's "Share…" SidePanel, relocated here as a
           tab): who may open the team and chat with it, and who may administer
@@ -700,6 +797,7 @@ export default function AgentEditForm({
               onChange={v => update('poolDraft', v)}
               parentWipLimit={parentTeam?.wipLimit}
               error={scalingError}
+              live={livePoolCount(poolControl, agent.id)}
             />
           </div>
 

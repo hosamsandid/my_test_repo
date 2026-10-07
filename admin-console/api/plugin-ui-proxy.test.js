@@ -9,6 +9,7 @@ const {
   signViewerHeaders,
   verifyViewerHeaders,
   HEADER_NAMES,
+  labelTargetKindFromHeaders,
 } = require('./plugin-ui-proxy');
 
 // ── scope discovery (derived from the resolved grant) ───────────────────────
@@ -224,4 +225,69 @@ test('a legacy v1-only request (no v2, no role-map header) still verifies, with 
   };
   const v = verifyViewerHeaders(legacy, secret);
   assert.deepEqual(v, { sub, role, teamIds: ['a', 'b'], teamRoles: {} });
+});
+
+// ── bodyWasParsed: re-serialise a consumed JSON body (Express 4 and 5) ───────
+
+test('bodyWasParsed: Express 4 flags a parsed body with req._body', () => {
+  const { bodyWasParsed } = require('./plugin-ui-proxy');
+  assert.equal(bodyWasParsed({ _body: true, body: { a: 1 }, readableEnded: true }), true);
+});
+
+test('bodyWasParsed: Express 5 has no _body flag — a read-to-end stream with a body counts', async () => {
+  const { bodyWasParsed } = require('./plugin-ui-proxy');
+  const { Readable } = require('node:stream');
+  const req = Readable.from([Buffer.from('{"watches":[{"projectKey":"KAN"}]}')]);
+  for await (const _chunk of req) { /* what express.json() does */ }
+  req.body = { watches: [{ projectKey: 'KAN' }] };
+  assert.equal(req._body, undefined);
+  assert.equal(bodyWasParsed(req), true);
+});
+
+test('bodyWasParsed: an unread stream is streamed through, even with body-parser 1\'s default {}', () => {
+  const { bodyWasParsed } = require('./plugin-ui-proxy');
+  const { Readable } = require('node:stream');
+  const req = Readable.from([Buffer.from('raw bytes')]);
+  req.body = {}; // body-parser 1 sets this for a content type it skipped
+  assert.equal(bodyWasParsed(req), false);
+  assert.equal(bodyWasParsed({ body: undefined, readableEnded: true }), false); // Express 5, no parser ran
+  assert.equal(bodyWasParsed(null), false);
+});
+
+// Source guard: pluginUiProxy (api.js) must decide re-serialisation with
+// bodyWasParsed — a bare `req._body === true` is false under Express 5, the
+// proxy then streams an already-read request and the sidecar gets an empty body
+// (saving the Jira Watch config page wiped the team's watches).
+test('pluginUiProxy re-serialises the body via bodyWasParsed(req), not req._body', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, 'api.js'), 'utf8');
+  const start = src.indexOf('function pluginUiProxy(req, res)');
+  assert.ok(start > 0, 'pluginUiProxy not found in api.js');
+  const end = src.indexOf('\nfunction ', start + 1);
+  const body = src.slice(start, end > start ? end : undefined);
+  assert.match(body, /const parsedBody = bodyWasParsed\(req\);/);
+  assert.doesNotMatch(body, /req\._body\s*===/);
+});
+
+// ── label fast-path kind (#2746) ────────────────────────────────────────────
+
+test('labelTargetKindFromHeaders: the broker\'s pr report wakes pull_request.labeled listeners', () => {
+  assert.equal(labelTargetKindFromHeaders({ 'x-aee-label-target-kind': 'pr' }), 'pr');
+  assert.equal(labelTargetKindFromHeaders({ 'x-aee-label-target-kind': ' PR ' }), 'pr');
+  assert.equal(labelTargetKindFromHeaders({ 'x-aee-label-target-kind': ['pr'] }), 'pr');
+});
+
+test('labelTargetKindFromHeaders: issue, a missing header (older broker) or junk degrade to issue', () => {
+  assert.equal(labelTargetKindFromHeaders({ 'x-aee-label-target-kind': 'issue' }), 'issue');
+  assert.equal(labelTargetKindFromHeaders({}), 'issue');
+  assert.equal(labelTargetKindFromHeaders(undefined), 'issue');
+  assert.equal(labelTargetKindFromHeaders({ 'x-aee-label-target-kind': 'pull_request' }), 'issue');
+});
+
+test('api.js passes the broker-reported kind to the fast path, never a hard-coded issue (#2746)', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'api.js'), 'utf8');
+  const call = src.slice(src.indexOf('notifyGithubLabelApplied({\n'), src.indexOf('res.status(up.statusCode || 502)'));
+  assert.match(call, /kind: labelTargetKindFromHeaders\(up\.headers\)/);
+  assert.doesNotMatch(call, /kind: 'issue'/);
 });

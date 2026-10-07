@@ -20,21 +20,42 @@ function fakeRes() {
 
 const reqWith = (token) => ({ headers: token ? { authorization: `Bearer ${token}` } : {} });
 
+const NO_BUILD = { commit: 'unknown', dirty: '', commitTime: '' };
+
 test('health: answers ok with no auth', async () => {
   const res = fakeRes();
-  await healthEndpoint()({}, res);
+  await healthEndpoint(null, { env: {} })({}, res);
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.body, { ok: true });
+  assert.deepEqual(res.body, { ok: true, build: NO_BUILD });
 });
 
 test('health: merges extra detail, degrades to bare ok on failure', async () => {
   const okRes = fakeRes();
-  await healthEndpoint(() => ({ backend: 'reachable' }))({}, okRes);
-  assert.deepEqual(okRes.body, { ok: true, backend: 'reachable' });
+  await healthEndpoint(() => ({ backend: 'reachable' }), { env: {} })({}, okRes);
+  assert.deepEqual(okRes.body, { ok: true, build: NO_BUILD, backend: 'reachable' });
 
   const failRes = fakeRes();
-  await healthEndpoint(() => { throw new Error('probe blew up'); })({}, failRes);
-  assert.deepEqual(failRes.body, { ok: true });
+  await healthEndpoint(() => { throw new Error('probe blew up'); }, { env: {} })({}, failRes);
+  assert.deepEqual(failRes.body, { ok: true, build: NO_BUILD });
+});
+
+// #2646 AC2: the running sidecar reports the build it was started from — read
+// from its own environment (baked into the image), not from the image store.
+test('health: reports the image build identity from the environment', async () => {
+  const env = { AEE_BUILD_COMMIT: 'abc1234', AEE_BUILD_DIRTY: 'dirty', AEE_BUILD_COMMIT_TIME: '2026-09-30T21:08:25+02:00' };
+  const res = fakeRes();
+  await healthEndpoint(() => ({ backend: 'reachable' }), { env })({}, res);
+  assert.deepEqual(res.body.build, { commit: 'abc1234', dirty: 'dirty', commitTime: '2026-09-30T21:08:25+02:00' });
+  assert.equal(res.body.backend, 'reachable');
+});
+
+// #2893: the release tag + distance travel along on /healthz.
+test('health: reports the release tag and distance when the image recorded one', async () => {
+  const env = { AEE_BUILD_COMMIT: 'abc1234', AEE_BUILD_TAG: 'v0.4.0', AEE_BUILD_TAG_DISTANCE: '12' };
+  const res = fakeRes();
+  await healthEndpoint(null, { env })({}, res);
+  assert.equal(res.body.build.tag, 'v0.4.0');
+  assert.equal(res.body.build.tagDistance, 12);
 });
 
 test('teardown: 401 on a forged/missing token, reap never runs', async () => {

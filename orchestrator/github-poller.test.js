@@ -610,6 +610,20 @@ test("_enrichPullRequestPayload: a fetch failure still parses closes from the br
   assert.equal(out.pull_request.html_url, "https://github.com/o/r/pull/500");
 });
 
+test("_enrichPullRequestPayload: a closesIssues already on the payload is kept, not narrowed to the branch (#2799)", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => { throw new Error("must not fetch"); };
+  const payload = {
+    pull_request: {
+      number: 12, title: "T", html_url: "https://github.com/o/r/pull/12",
+      head: { ref: "issue-40-x" }, closesIssues: [7, 40],
+    },
+  };
+  const out = await poller._enrichPullRequestPayload("pull_request.checks_passed", payload, "tok");
+  assert.equal(out, payload, "nothing to add → identity");
+  assert.deepEqual(out.pull_request.closesIssues, [7, 40]);
+});
+
 // ── pollerSubscribes ─────────────────────────────────────────────────────────
 //
 // Every well-formed, enabled github-event trigger is poller-subscribed. The
@@ -759,6 +773,57 @@ test("_fanOutBatch: a dispatch the WIP lane HOLDS is recorded 'held', not 'deliv
   } finally {
     githubEventLog.record = origRecord;
   }
+});
+
+// ── #2596: a pooled role's delivery records the instance that ran it ──────
+async function fanOutOneReady(fillDecision) {
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    poller._enqueuePending = (agentId, entry, decision) => { if (decision) fillDecision(decision); };
+    const ghEvent = {
+      id: "pool-1",
+      actor: { login: "human" },
+      created_at: new Date().toISOString(),
+      type: "IssuesEvent",
+      repo: { name: "org/repo" },
+      payload: {
+        action: "labeled",
+        label: { name: "ready" },
+        issue: { number: 2562, title: "T", html_url: "https://github.com/org/repo/issues/2562" },
+      },
+    };
+    const subscribers = [{
+      agentId: "team-developer", triggerId: "trigger-ready",
+      events: new Set(["issues.labeled"]), labelFilter: "ready", horizon: null,
+    }];
+    await poller._fanOutBatch("org/repo", [ghEvent], subscribers, "tok");
+    return recorded[0].outcomes[0];
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+}
+
+test("_fanOutBatch: a pooled delivery records the pool instance id alongside the role (#2596)", async () => {
+  const o = await fanOutOneReady((d) => { d.held = false; d.instanceId = "team-developer-i2562"; });
+  assert.equal(o.status, "delivered");
+  assert.equal(o.agentId, "team-developer", "the pooled role stays the recorded subscriber");
+  assert.equal(o.instanceId, "team-developer-i2562");
+});
+
+test("_fanOutBatch: a non-pooled delivery carries no instanceId key at all (#2596 AC7)", async () => {
+  const o = await fanOutOneReady((d) => { d.held = false; });
+  assert.equal(o.status, "delivered");
+  assert.equal("instanceId" in o, false);
+});
+
+test("_fanOutBatch: a pool pause/drain hold is recorded held with its own reason (#2596 AC6)", async () => {
+  const o = await fanOutOneReady((d) => { d.held = true; d.reason = "pool-draining"; });
+  assert.equal(o.status, "held");
+  assert.equal(o.reason, "pool-draining");
+  assert.equal("instanceId" in o, false, "a held dispatch never links an instance");
 });
 
 // ── #2151: the pending entry itself carries the stamp, not just the event-log
@@ -978,6 +1043,86 @@ test("_fanOutBatch (#2152 follow-up): the disarm does not re-open the double-fir
   } finally {
     githubEventLog.record = origRecord;
   }
+});
+
+test("_fanOutBatch (#2776): a collapsed claim swap is recovered by the <wake>:completed add, so a human re-add re-fires", async () => {
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    // The observed sandbox sequence (wake `converge` there, `ready-for-review`
+    // here):
+    // 1. the human hand-off, collapsed onto another label — delivered + armed.
+    const ev1 = labeledIssueEvent("cc-1", "needs-human", ["ready-for-review"], 2776);
+    // 2. the claim swap `<wake>` -> `<wake>:wip` was collapsed away: no event.
+    //    The run then completes (`<wake>:wip` -> `<wake>:completed`), and that
+    //    add's stale snapshot still names the wake.
+    const ev2 = labeledIssueEvent(
+      "cc-2", "ready-for-review:completed",
+      ["ready-for-review", "ready-for-review:completed"], 2776,
+    );
+    // 3. the human removes `<wake>:completed` and re-adds the wake.
+    const ev3 = labeledIssueEvent("cc-3", "ready-for-review", ["ready-for-review"], 2776);
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2, ev3], reviewerSub(), "tok");
+
+    assert.deepEqual(
+      enqueued.map((e) => e.entry.github.eventId),
+      ["cc-1", "cc-3"],
+      "the re-added wake must fire, not be dropped as wake-already-armed",
+    );
+    assert.equal(recorded[1].outcomes[0].status, "dropped");
+    assert.equal(recorded[1].outcomes[0].reason, "self-claim-label");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch (#2776): the <wake>:completed add never re-fires the trigger itself (stale snapshot still names the wake)", async () => {
+  const origRecord = githubEventLog.record;
+  const recorded = [];
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const ev1 = labeledIssueEvent("cc2-1", "ready-for-review", ["ready-for-review"], 2777);
+    const ev2 = labeledIssueEvent(
+      "cc2-2", "ready-for-review:completed",
+      ["ready-for-review", "ready-for-review:completed"], 2777,
+    );
+    // unrelated churn after completion, current snapshot without the wake.
+    const ev3 = labeledIssueEvent("cc2-3", "bug", ["ready-for-review:completed", "bug"], 2777);
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2, ev3], reviewerSub(), "tok");
+
+    assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["cc2-1"]);
+    // The :completed add must be dropped as self-claim-label, not merely as
+    // wake-already-armed (which also held before the fix).
+    const completed = recorded.find((r) => r.label === "ready-for-review:completed");
+    assert.ok(completed, "the :completed event is recorded");
+    assert.equal(completed.outcomes[0].status, "dropped");
+    assert.equal(completed.outcomes[0].reason, "self-claim-label");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("isSelfClaimLabel (#2776): claim label and completion mirror only, and only for a trigger that declares a claim", () => {
+  const { isSelfClaimLabel } = require("./github-poller");
+  const sub = { labelFilter: "converge", claimAdd: "converge:wip" };
+  assert.equal(isSelfClaimLabel(sub, "converge:wip"), true);
+  assert.equal(isSelfClaimLabel(sub, "converge:completed"), true);
+  assert.equal(isSelfClaimLabel(sub, "converge"), false, "the wake label itself is a genuine wake");
+  assert.equal(isSelfClaimLabel(sub, "other:completed"), false);
+  assert.equal(isSelfClaimLabel(sub, undefined), false);
+  assert.equal(isSelfClaimLabel({ labelFilter: "converge", claimAdd: null }, "converge:completed"), false,
+    "no claim declared -> the runner never swaps, so the label is not ours");
 });
 
 test("_fanOutBatch (#2152 follow-up): presence-based disarm re-opens the edge with NO unlabeled and NO claim swap (human web-UI removal)", async () => {
@@ -1589,7 +1734,7 @@ const pushSub = (over = {}) => ({
   ...over,
 });
 
-async function runBatch(poller, batches, subscribers) {
+async function runBatch(poller, batches, subscribers, knowledgeBranches) {
   const recorded = [];
   const enqueued = [];
   const origRecord = githubEventLog.record;
@@ -1599,7 +1744,9 @@ async function runBatch(poller, batches, subscribers) {
   poller._checkAndIncThrottle = () => ({ drop: false });
   poller._saveThrottleState = () => {};
   try {
-    for (const batch of batches) await poller._fanOutBatch("org/repo", batch, subscribers, "tok");
+    for (const batch of batches) {
+      await poller._fanOutBatch("org/repo", batch, subscribers, "tok", undefined, knowledgeBranches);
+    }
   } finally {
     githubEventLog.record = origRecord;
   }
@@ -1834,6 +1981,44 @@ test("armWake (#2525): no-op without a wake label or with the edge dedup switche
   assert.equal(poller.armWake({ repo: "org/repo", triggerId: "t", kind: "issue", number: 1, label: "ready" }), false);
 });
 
+test("disarmWake (#2754): after a released claim the re-added wake fires even with no unlabeled event seen (PR shape)", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    poller._saveState = () => {};
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+    poller.armWake({ repo: "org/repo", triggerId: "t1785499525109689", kind: "issue", number: 2754, label: "ready" });
+    poller.armWake({ repo: "org/repo", triggerId: "t1785499525109689", kind: "pr", number: 2754, label: "ready" });
+    poller.armWake({ repo: "org/repo", triggerId: "t1785499525109689", kind: "issue", number: 2754, label: "other" });
+
+    // Without the disarm, the re-add's snapshot still names `ready`: dropped.
+    const before = labeledIssueEvent("2754-a", "ready", ["ready", "other"], 2754);
+    await poller._fanOutBatch("org/repo", [before], readyDeveloperSub(), "tok");
+    assert.equal(enqueued.length, 0);
+
+    assert.equal(poller.disarmWake({ repo: "org/repo", number: 2754, label: "ready" }), true);
+    const armedKeys = Object.keys(poller.state["org/repo"].armed).map((k) => JSON.parse(k));
+    assert.deepEqual(armedKeys.map((k) => k[3]), ["other"]);
+
+    const readded = labeledIssueEvent("2754-b", "ready", ["ready", "other"], 2754);
+    await poller._fanOutBatch("org/repo", [readded], readyDeveloperSub(), "tok");
+    assert.equal(enqueued.length, 1);
+    assert.equal(enqueued[0].entry.github.eventId, "2754-b");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("disarmWake (#2754): no-op with the edge dedup off or nothing armed for the repo", () => {
+  const poller = new GitHubPoller();
+  poller._saveState = () => { throw new Error("must not save"); };
+  assert.equal(poller.disarmWake({ repo: "org/none", number: 1, label: "ready" }), false);
+  poller._wakeEdgeDedup = false;
+  assert.equal(poller.disarmWake({ repo: "org/repo", number: 1, label: "ready" }), false);
+});
+
 // ── #2571: optional "pushed by agent" producer filter on push triggers ──────
 
 const { computePollPlan } = require("./github-poller");
@@ -1985,4 +2170,422 @@ test("_fanOutBatch (#2570 edge case): the synthetic PR-open push is matched on i
   const poller2 = new GitHubPoller();
   const r2 = await runBatch(poller2, [[prOpenedEvent("pr-2")]], [pushSub({ branchFilter: ["**"] })]);
   assert.equal(r2.enqueued.length, 1);
+});
+
+// ── Knowledge-base branch exclusion (#2602) ──────────────────────────────────
+
+test("computePollPlan (#2602 AC1): each bucket carries the KB branches of every team whose KB lives in that repo", () => {
+  const { computePollPlan } = require("./github-poller");
+  const trig = (id, repo) => ({ id, type: "github-event", enabled: true, repo, events: ["push"] });
+  const plan = computePollPlan({
+    allowNonGithubHost: false,
+    environments: [{
+      id: "env", githubTokenId: "tok",
+      repositories: [{ url: "git@github.com:acme/team.git" }, { url: "git@github.com:acme/other.git" }],
+    }],
+    agents: [{ id: "dev", config: { environmentId: "env" }, triggersMtime: null, triggers: [trig("a", "acme/team"), trig("b", "acme/other")] }],
+    knowledgeLocations: [
+      { url: "git@github.com:acme/team.git", branch: "agent-knowledge" },
+      { url: "https://github.com/acme/team.git", branch: "team-b-kb" },
+      { url: "git@github.com:acme/kb-store.git", branch: "agent-knowledge" },
+    ],
+  });
+  assert.deepEqual(plan.get("acme/team").knowledgeBranches, ["agent-knowledge", "team-b-kb"]);
+  // acme/other holds no KB (the separate KB repo is not the team repo).
+  assert.deepEqual(plan.get("acme/other").knowledgeBranches, []);
+});
+
+test("_fanOutBatch (#2602 AC1/AC10): a push to the default KB branch never wakes an unfiltered push trigger", async () => {
+  const poller = new GitHubPoller();
+  const { recorded, enqueued } = await runBatch(poller, [[
+    pushEvent("kb", { ref: "refs/heads/agent-knowledge", head: "h1" }),
+    pushEvent("feat", { ref: "refs/heads/feat/x", head: "h2" }),
+  ]], [pushSub()], ["agent-knowledge"]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["feat"]);
+  const kb = recorded.find((r) => r.eventId === "kb");
+  assert.deepEqual([kb.outcomes[0].status, kb.outcomes[0].reason], ["dropped", "knowledge-branch"]);
+  assert.equal(kb.ref, "refs/heads/agent-knowledge");
+});
+
+test("_fanOutBatch (#2602 AC1/AC10): a configured custom KB branch and another team's KB branch are both excluded", async () => {
+  const poller = new GitHubPoller();
+  const mine = pushSub({ agentId: "t1-dev", triggerId: "p1", teamId: "t1" });
+  const theirs = pushSub({ agentId: "t2-dev", triggerId: "p2", teamId: "t2" });
+  const { recorded, enqueued } = await runBatch(poller, [[
+    pushEvent("kb-t1", { ref: "refs/heads/kb/team-one", head: "h1" }),
+    pushEvent("kb-t2", { ref: "refs/heads/team-two-knowledge", head: "h2" }),
+    pushEvent("default", { ref: "refs/heads/agent-knowledge", head: "h3" }),
+  ]], [mine, theirs], ["kb/team-one", "team-two-knowledge"]);
+  // `agent-knowledge` is not in this repo's set (no team uses the default here).
+  assert.deepEqual(enqueued.map((e) => [e.agentId, e.entry.github.eventId]), [["t1-dev", "default"], ["t2-dev", "default"]]);
+  for (const id of ["kb-t1", "kb-t2"]) {
+    const row = recorded.find((r) => r.eventId === id);
+    assert.deepEqual(row.outcomes.map((o) => [o.agentId, o.reason]), [["t1-dev", "knowledge-branch"], ["t2-dev", "knowledge-branch"]]);
+  }
+});
+
+test("_fanOutBatch (#2602 AC10): a KB kept in a separate repo excludes nothing on the team repo", async () => {
+  // The poller hands each repo only its own KB branches: none for a team repo
+  // whose KB lives elsewhere, so a same-named branch there still wakes.
+  const poller = new GitHubPoller();
+  const { enqueued } = await runBatch(poller, [[
+    pushEvent("kb-named", { ref: "refs/heads/agent-knowledge", head: "h1" }),
+  ]], [pushSub()], []);
+  assert.equal(enqueued.length, 1);
+});
+
+test("_fanOutBatch (#2602 AC2): an explicit or wildcard branchFilter and a pushedBy filter do not opt out", async () => {
+  for (const branchFilter of [["agent-knowledge"], ["*"], ["**"], null]) {
+    for (const pushedBy of [null, ["t1-spec"]]) {
+      const poller = new GitHubPoller({ lookupPushProducer: () => ({ agentId: "t1-spec", teamId: "t1" }) });
+      const sub = pushSub({ branchFilter, pushedBy, teamId: "t1" });
+      const { recorded, enqueued } = await runBatch(poller, [[
+        pushEvent("kb", { ref: "refs/heads/agent-knowledge", head: "h1" }),
+      ]], [sub], ["agent-knowledge"]);
+      assert.equal(enqueued.length, 0, `filter=${JSON.stringify(branchFilter)} pushedBy=${JSON.stringify(pushedBy)}`);
+      assert.equal(recorded[0].outcomes[0].reason, "knowledge-branch");
+    }
+  }
+});
+
+test("_fanOutBatch (#2602 AC3): KB pushes never reach the burst cap or produce a digest", async () => {
+  const poller = new GitHubPoller();
+  const batch = [];
+  for (let i = 0; i < BURST_CAP + 3; i++) {
+    batch.push(pushEvent(`kb-${i}`, { ref: "refs/heads/agent-knowledge", head: `h${i}` }));
+  }
+  const { recorded, enqueued } = await runBatch(poller, [batch], [pushSub()], ["agent-knowledge"]);
+  assert.equal(enqueued.length, 0);
+  const outcomes = recorded.flatMap((r) => r.outcomes);
+  assert.equal(outcomes.length, BURST_CAP + 3);
+  assert.ok(outcomes.every((o) => o.status === "dropped" && o.reason === "knowledge-branch" && !o.digest));
+});
+
+test("_fanOutBatch (#2602 AC5): a synthetic PR-open push whose head is the KB branch is excluded", async () => {
+  const poller = new GitHubPoller();
+  const { recorded, enqueued } = await runBatch(poller, [[
+    prOpenedEvent("pr-kb", { ref: "agent-knowledge" }),
+  ]], [pushSub()], ["agent-knowledge"]);
+  assert.equal(enqueued.length, 0);
+  const row = recorded.find((r) => r.eventId === "prpush:pr-kb");
+  assert.equal(row.outcomes[0].reason, "knowledge-branch");
+});
+
+test("_fanOutBatch (#2602 AC6 / edge case): other branches and a tag named like the KB branch behave as before", async () => {
+  const poller = new GitHubPoller();
+  const { enqueued } = await runBatch(poller, [[
+    pushEvent("tag", { ref: "refs/tags/agent-knowledge", head: "h1" }),
+    pushEvent("near", { ref: "refs/heads/agent-knowledge-old", head: "h2" }),
+    pushEvent("main", { ref: "refs/heads/main", head: "h3" }),
+  ]], [pushSub()], ["agent-knowledge"]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["tag", "near", "main"]);
+  const filtered = await runBatch(new GitHubPoller(), [[
+    pushEvent("main", { ref: "refs/heads/main", head: "h4" }),
+    pushEvent("dev", { ref: "refs/heads/dev", head: "h5" }),
+  ]], [pushSub({ branchFilter: ["main"] })], ["agent-knowledge"]);
+  assert.deepEqual(filtered.enqueued.map((e) => e.entry.github.eventId), ["main"]);
+  assert.equal(filtered.recorded.find((r) => r.eventId === "dev").outcomes[0].reason, "branch-filter");
+});
+
+test("_fanOutBatch (#2602 scope): only push is affected — other events of a push trigger still wake", async () => {
+  const poller = new GitHubPoller();
+  const sub = pushSub({ events: new Set(["push", "issues.opened"]) });
+  const issueOpened = {
+    id: "io-kb", actor: { login: "dev" }, created_at: new Date().toISOString(), type: "IssuesEvent",
+    repo: { name: "org/repo" },
+    payload: { action: "opened", issue: { number: 9, title: "x", html_url: "https://github.com/org/repo/issues/9" } },
+  };
+  const { enqueued } = await runBatch(poller, [[
+    issueOpened, pushEvent("kb", { ref: "refs/heads/agent-knowledge", head: "h1" }),
+  ]], [sub], ["agent-knowledge"]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["io-kb"]);
+});
+
+// ── #2799 AC7: the burst digest carries the PR conversation's linked issue(s).
+
+test("_fanOutBatch (#2799 AC7): a PR burst digest carries closesIssues from the shared enrichment cache", async () => {
+  const run = async (linked) => {
+    const poller = new GitHubPoller();
+    const prSub = { agentId: "reviewer", triggerId: "t-pr", events: new Set(["pull_request.opened", "pull_request.reopened"]), labelFilter: null, horizon: null };
+    const enrichCalls = [];
+    const prs = [];
+    for (let i = 0; i < BURST_CAP + 1; i++) {
+      prs.push(prOpenedEvent(`pr-d${i}`, { number: 2798, sha: `sha${i}`, action: i % 2 ? "reopened" : "opened" }));
+    }
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+    poller._checkAndIncThrottle = () => ({ drop: false });
+    poller._saveThrottleState = () => {};
+    poller._enrichPullRequestPayload = async (key, payload) => {
+      enrichCalls.push(key);
+      if (!key.startsWith("pull_request") || !linked) return payload;
+      return { ...payload, pull_request: { ...payload.pull_request, closesIssues: linked } };
+    };
+    const origRecord = githubEventLog.record;
+    githubEventLog.record = () => {};
+    try {
+      await poller._fanOutBatch("org/repo", prs, [prSub], "tok");
+    } finally {
+      githubEventLog.record = origRecord;
+    }
+    const digest = enqueued.find((e) => e.entry.kind === "github-digest");
+    assert.ok(digest, "the burst collapses into a digest");
+    assert.equal(digest.entry.convKey, "pr:2798");
+    // No extra request: each PR event is enriched exactly once (digest + log share the cache).
+    assert.equal(enrichCalls.filter((k) => k.startsWith("pull_request")).length, BURST_CAP + 1);
+    return digest.entry;
+  };
+  assert.deepEqual((await run([2794, 12])).closesIssues, [12, 2794]);
+  assert.equal("closesIssues" in (await run(null)), false, "no known link → entry unchanged");
+});
+
+// ── Comment filters (#2822) ──────────────────────────────────────────────────
+
+function commentEvent(id, { number = 4, pr = false, body = "Option B, please.", labels = [] } = {}) {
+  return {
+    id,
+    actor: { login: "human" },
+    created_at: new Date().toISOString(),
+    type: "IssueCommentEvent",
+    repo: { name: "org/repo" },
+    payload: {
+      action: "created",
+      issue: {
+        number, title: "Spec", url: `https://api.github.com/repos/org/repo/issues/${number}`,
+        labels: labels.map((name) => ({ name })),
+        ...(pr ? { pull_request: { url: `https://api.github.com/repos/org/repo/pulls/${number}` } } : {}),
+      },
+      comment: { body },
+    },
+  };
+}
+
+const commentSub = (filter, over = {}) => ({
+  agentId: "spec", triggerId: "t-answer",
+  events: new Set(["issue_comment.created"]), labelFilter: null, horizon: null,
+  commentFilter: filter, ...over,
+});
+
+test("computePollPlan (#2822): carries the parsed comment filter, null when none is set", () => {
+  const { computePollPlan } = require("./github-poller");
+  const trig = (id, extra) => ({ id, type: "github-event", enabled: true, repo: "acme/r", events: ["issue_comment.created"], ...extra });
+  const plan = computePollPlan({
+    allowNonGithubHost: false,
+    environments: [{ id: "env", githubTokenId: "tok", repositories: [{ url: "git@github.com:acme/r.git" }] }],
+    agents: [{
+      id: "spec", config: { environmentId: "env" }, triggersMtime: null,
+      triggers: [
+        trig("full", { requireLabel: " clarifying ", skipAgentComments: true, target: "issue" }),
+        trig("none"),
+      ],
+    }],
+  });
+  const byId = new Map(plan.get("acme/r").subscribers.map((s) => [s.triggerId, s.commentFilter]));
+  assert.deepEqual(byId.get("full"), { requireLabel: "clarifying", skipAgentComments: true, target: "issue" });
+  assert.equal(byId.get("none"), null);
+});
+
+test("_fanOutBatch (#2822 AC1): requireLabel reads the item's CURRENT labels, once per item, and drops the rest with a reason", async () => {
+  const poller = new GitHubPoller();
+  const fetched = [];
+  // Item 4 carries the label NOW although the event snapshot does not; item 5
+  // lost it since the event.
+  const current = { 4: ["clarifying"], 5: ["bug"] };
+  poller._fetchJson = async (url) => {
+    fetched.push(url);
+    return { labels: current[url.split("/").pop()].map((name) => ({ name })) };
+  };
+  const { recorded, enqueued } = await runBatch(poller, [[
+    commentEvent("c1", { number: 4 }),
+    commentEvent("c2", { number: 4 }),
+    commentEvent("c3", { number: 5, labels: ["clarifying"] }),
+  ]], [commentSub({ requireLabel: "clarifying", skipAgentComments: false, target: null })]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["c1", "c2"]);
+  const drop = recorded.find((r) => r.eventId === "c3").outcomes[0];
+  assert.equal(drop.status, "dropped");
+  assert.equal(drop.reason, "comment-label");
+  assert.equal(drop.requireLabel, "clarifying");
+  assert.deepEqual(fetched, [
+    "https://api.github.com/repos/org/repo/issues/4",
+    "https://api.github.com/repos/org/repo/issues/5",
+  ], "one GET per item per batch");
+});
+
+test("_fanOutBatch (#2822): a failed label read falls back to the event's label set", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => { throw new Error("HTTP 502"); };
+  const { enqueued } = await runBatch(poller, [[
+    commentEvent("c1", { labels: ["clarifying"] }),
+    commentEvent("c2", { number: 9 }),
+  ]], [commentSub({ requireLabel: "clarifying", skipAgentComments: false, target: null })]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["c1"]);
+});
+
+test("_fanOutBatch (#2822 AC2): skipAgentComments drops marker comments, human comments still wake", async () => {
+  const poller = new GitHubPoller();
+  const { recorded, enqueued } = await runBatch(poller, [[
+    commentEvent("agent", { body: "Which option?\n\n<!-- agent: team-x-spec -->\n" }),
+    commentEvent("human", { body: "Option B." }),
+  ]], [commentSub({ requireLabel: null, skipAgentComments: true, target: null })]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["human"]);
+  assert.equal(recorded.find((r) => r.eventId === "agent").outcomes[0].reason, "agent-comment");
+});
+
+test("_fanOutBatch (#2822 AC3): target drops comments on the other kind of item", async () => {
+  const poller = new GitHubPoller();
+  const both = [commentEvent("on-issue", { number: 4 }), commentEvent("on-pr", { number: 8, pr: true })];
+  const r1 = await runBatch(poller, [both], [commentSub({ requireLabel: null, skipAgentComments: false, target: "issue" })]);
+  assert.deepEqual(r1.enqueued.map((e) => e.entry.github.eventId), ["on-issue"]);
+  assert.equal(r1.recorded.find((r) => r.eventId === "on-pr").outcomes[0].reason, "comment-target");
+  const poller2 = new GitHubPoller();
+  const r2 = await runBatch(poller2, [both], [commentSub({ requireLabel: null, skipAgentComments: false, target: "pr" }, { triggerId: "t-pr" })]);
+  assert.deepEqual(r2.enqueued.map((e) => e.entry.github.eventId), ["on-pr"]);
+});
+
+test("_fanOutBatch (#2822 AC4): without filter fields every comment wakes and nothing is fetched", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => { throw new Error("must not fetch"); };
+  const { enqueued } = await runBatch(poller, [[
+    commentEvent("a", { body: "q <!-- agent: x -->" }), commentEvent("b", { number: 8, pr: true }),
+  ]], [commentSub(null)]);
+  assert.equal(enqueued.length, 2);
+});
+
+test("_fanOutBatch (#2822): the comment filter never gates the trigger's other events", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => { throw new Error("must not fetch"); };
+  const issueOpened = {
+    id: "io-1", actor: { login: "dev" }, created_at: new Date().toISOString(), type: "IssuesEvent",
+    repo: { name: "org/repo" },
+    payload: { action: "opened", issue: { number: 7, title: "x", labels: [] } },
+  };
+  const sub = commentSub({ requireLabel: "clarifying", skipAgentComments: true, target: "pr" }, { events: new Set(["issues.opened"]) });
+  const { enqueued } = await runBatch(poller, [[issueOpened]], [sub]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["io-1"]);
+});
+
+// ── #2876: remove + re-add of a wake label on a PR, whose `unlabeled` events
+// arrive without the label's name, re-fires exactly once.
+
+function prLabelEvent(id, action, label, fullSet, number = 2863) {
+  return {
+    id,
+    actor: { login: "thorsten" },
+    created_at: new Date().toISOString(),
+    type: "PullRequestEvent",
+    repo: { name: "org/repo" },
+    payload: {
+      action,
+      ...(label ? { label: { name: label } } : {}),
+      ...(fullSet ? { labels: fullSet.map((name) => ({ name })) } : {}),
+      pull_request: { number, title: "Flows rail filter", html_url: `https://github.com/org/repo/pull/${number}` },
+    },
+  };
+}
+
+const prReviewerSub = () => [{
+  agentId: "code-reviewer",
+  triggerId: "code-reviewer-on-pr-ready-for-review",
+  events: new Set(["pull_request.labeled"]),
+  labelFilter: "ready-for-review",
+  claimAdd: "ready-for-review:wip",
+  horizon: null,
+}];
+
+async function runPrBatches(batches) {
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+    poller._enrichPullRequestPayload = async (_key, payload) => payload;
+    for (const batch of batches) await poller._fanOutBatch("org/repo", batch, prReviewerSub(), "tok");
+    return { fired: enqueued.map((e) => e.entry.github.eventId), recorded, poller };
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+}
+
+test("_fanOutBatch (#2876): the #2863 sequence — nameless unlabeled events, then the re-add — re-fires once", async () => {
+  const { fired, recorded } = await runPrBatches([
+    [prLabelEvent("p-1", "labeled", "ready-for-review", ["ready-for-review"])],
+    [
+      // 07:22:45 — four `unlabeled` events, no label name, no snapshot.
+      prLabelEvent("p-2", "unlabeled", null, null),
+      prLabelEvent("p-3", "unlabeled", null, null),
+      prLabelEvent("p-4", "unlabeled", null, null),
+      prLabelEvent("p-5", "unlabeled", null, null),
+      // 07:23:24 — the re-add; its snapshot names the wake again.
+      prLabelEvent("p-6", "labeled", "ready-for-review", ["ready-for-review"]),
+    ],
+  ]);
+  assert.deepEqual(fired, ["p-1", "p-6"]);
+  const readd = recorded.find((r) => r.eventId === "p-6");
+  assert.equal(readd.outcomes[0].status, "delivered");
+});
+
+test("_fanOutBatch (#2876): after the re-add fires, a duplicate add and later churn are dropped again", async () => {
+  const { fired, recorded } = await runPrBatches([[
+    prLabelEvent("q-1", "labeled", "ready-for-review", ["ready-for-review"]),
+    prLabelEvent("q-2", "unlabeled", null, null),
+    prLabelEvent("q-3", "labeled", "ready-for-review", ["ready-for-review"]),
+    // A second event naming the same add (the Events API repeats itself).
+    prLabelEvent("q-4", "labeled", "ready-for-review", ["ready-for-review"]),
+    // Unrelated churn while the wake still hangs on.
+    prLabelEvent("q-5", "labeled", "bug", ["ready-for-review", "bug"]),
+  ]]);
+  assert.deepEqual(fired, ["q-1", "q-3"]);
+  for (const id of ["q-4", "q-5"]) {
+    const r = recorded.find((x) => x.eventId === id);
+    assert.equal(r.outcomes[0].reason, "wake-already-armed", id);
+  }
+});
+
+test("_fanOutBatch (#2876): a nameless unlabeled with a snapshot disarms by presence, so the re-add fires", async () => {
+  const { fired } = await runPrBatches([[
+    prLabelEvent("s-1", "labeled", "ready-for-review", ["ready-for-review"]),
+    prLabelEvent("s-2", "unlabeled", null, ["bug"]),
+    // Even a collapsed re-add that names another label recovers the wake.
+    prLabelEvent("s-3", "labeled", "bug", ["ready-for-review", "bug"]),
+  ]]);
+  assert.deepEqual(fired, ["s-1", "s-3"]);
+});
+
+test("_fanOutBatch (#2876): unrelated churn after a nameless removal never re-fires (the add must name the wake)", async () => {
+  const { fired } = await runPrBatches([[
+    prLabelEvent("c-1", "labeled", "ready-for-review", ["ready-for-review"]),
+    prLabelEvent("c-2", "unlabeled", null, null), // some other label went
+    prLabelEvent("c-3", "labeled", "bug", ["ready-for-review", "bug"]),
+  ]]);
+  assert.deepEqual(fired, ["c-1"]);
+});
+
+test("_fanOutBatch (#2876): the agent's claim and completion swaps still never double-fire (#2776 stays green)", async () => {
+  const { fired, recorded } = await runPrBatches([[
+    prLabelEvent("w-1", "labeled", "ready-for-review", ["ready-for-review"]),
+    // The claim swap: a nameless removal of the wake plus the `:wip` add, whose
+    // stale snapshot still lists the wake.
+    prLabelEvent("w-2", "unlabeled", null, null),
+    prLabelEvent("w-3", "labeled", "ready-for-review:wip", ["ready-for-review", "ready-for-review:wip"]),
+    // The completion swap, same shape.
+    prLabelEvent("w-4", "unlabeled", null, null),
+    prLabelEvent("w-5", "labeled", "ready-for-review:completed", ["ready-for-review:completed"]),
+  ]]);
+  assert.deepEqual(fired, ["w-1"]);
+  for (const id of ["w-3", "w-5"]) {
+    assert.equal(recorded.find((x) => x.eventId === id).outcomes[0].reason, "self-claim-label", id);
+  }
+});
+
+test("_fanOutBatch (#2876): the removal mark is persisted beside the armed set and cleared on re-arm", async () => {
+  const { poller } = await runPrBatches([
+    [prLabelEvent("m-1", "labeled", "ready-for-review", ["ready-for-review"]), prLabelEvent("m-2", "unlabeled", null, null)],
+  ]);
+  const st = poller.state["org/repo"];
+  const key = Object.keys(st.armed)[0];
+  assert.ok(Object.prototype.hasOwnProperty.call(st.removedSince, key), "the mark survives the batch (state.json)");
+  await poller._fanOutBatch("org/repo", [prLabelEvent("m-3", "labeled", "ready-for-review", ["ready-for-review"])], prReviewerSub(), "tok");
+  assert.deepEqual(st.removedSince, {});
 });

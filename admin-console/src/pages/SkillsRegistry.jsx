@@ -9,6 +9,10 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import IconButton from '../components/IconButton';
 import PageHelpButton from '../components/PageHelpButton';
 import SkillMarkdown from '../components/SkillMarkdown';
+import SkillEditorModal, { MarkdownWithFrontmatter } from './SkillEditorModal.jsx';
+import { skillEditPermission } from './skill-editor-model.js';
+import SkillVersionDiffModal from './SkillVersionDiffModal.jsx';
+import { versionRows, toggleCompareSelection, normalizeComparePair, versionActionPermission } from './skill-version-view.js';
 import PublishSkillAction from '../components/PublishSkillAction';
 import { usePageActions } from '../context/PageActionsContext';
 import { useHelpSubject } from '../context/HelperChatContext';
@@ -18,8 +22,10 @@ import { isPublishEligible } from './skill-publish-view.js';
 import { useAuth } from '../auth/AuthContext';
 import { adminTeamIdsOf, teamsById } from './credential-scope-view.js';
 import { writableSkillTargets, defaultSkillTarget } from './skill-target-view.js';
+import { groupInstallTargets } from './skill-install-target-view.js';
 import { planLineageResync, copyResyncKind, summarizeResyncResults } from './skill-lineage-resync.js';
-import { warningRows, transferPreviewRequiresAck, warningsSummaryLabel } from './skill-transfer-preview-view.js';
+import { buildCopiesView, filterCopyGroups, shouldOfferCopyFilter, describeOrigin, driftTooltip, copiesSummaryText, resolveViewerTab, DRIFT_LEGEND_ORDER, COPIES_TAB_ID } from './skill-copies-view.js';
+import { warningRows, transferPreviewRequiresAck, warningsSummaryLabel, transferActivationNotice } from './skill-transfer-preview-view.js';
 
 /* ─── Skill name validation (mirrors SKILL_NAME_RE in api.js) ─────────── */
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
@@ -40,7 +46,7 @@ const primaryBtnStyle = (disabled) => ({
   border: 'none',
   cursor: disabled ? 'not-allowed' : 'pointer',
   background: disabled ? 'var(--eb-border-default)' : 'var(--eb-accent-primary)',
-  color: disabled ? 'var(--eb-text-muted)' : '#fff',
+  color: disabled ? 'var(--eb-text-muted)' : 'var(--eb-text-inverted)',
 });
 
 const secondaryBtnStyle = {
@@ -117,7 +123,7 @@ function previewConfirmBtnStyle(requiresAck, canConfirm) {
   return {
     padding: 'var(--eb-space-2) var(--eb-space-4)',
     background: requiresAck ? 'var(--eb-status-warning)' : 'var(--eb-accent-primary)',
-    color: '#fff', border: 'none', borderRadius: 'var(--eb-radius-md)',
+    color: requiresAck ? 'var(--eb-text-on-warning)' : 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)',
     fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', fontFamily: 'inherit',
     cursor: canConfirm ? 'pointer' : 'not-allowed', opacity: canConfirm ? 1 : 0.5,
   };
@@ -332,7 +338,7 @@ function Chip({ label, color, bg, title, mono }) {
 function DriftBadge({ state }) {
   const m = DRIFT_META[state];
   if (!m) return null;
-  return <Chip label={m.label} color={m.color} bg={m.bg} title={`Drift vs. source: ${state}`} />;
+  return <Chip label={m.label} color={m.color} bg={m.bg} title={driftTooltip(state) || `Drift vs. source: ${state}`} />;
 }
 
 // Ordered worst-first so a mixed-state label reads "2 outdated, 1 diverged",
@@ -343,7 +349,7 @@ const DOWNSTREAM_ORDER = ['conflict', 'diverged', 'orphaned', 'outdated', 'unkno
 // The Skills Registry list's per-row "N copies need an update" indicator
 // (#2317) — a pool/team row whose downstream copies aren't all in-sync. Colored
 // by the worst state present; clicking opens that skill's detail view on the
-// Usage tab (AC4), mirroring the existing deep-link tab convention.
+// Copies & origin tab (AC4, #2840), mirroring the existing deep-link tab convention.
 function DownstreamBadge({ downstream, onClick }) {
   if (!downstream) return null;
   const m = DRIFT_META[downstream.worst] || DRIFT_META.unknown;
@@ -354,7 +360,7 @@ function DownstreamBadge({ downstream, onClick }) {
   return (
     <button
       onClick={e => { e.stopPropagation(); onClick?.(); }}
-      title={`${downstream.total} downstream cop${downstream.total === 1 ? 'y' : 'ies'} out of sync — click to open Usage`}
+      title={`${downstream.total} downstream cop${downstream.total === 1 ? 'y' : 'ies'} out of sync — click to open Copies & origin`}
       style={{
         padding: '1px 7px', borderRadius: 'var(--eb-radius-sm)',
         fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)',
@@ -400,41 +406,87 @@ function copyToRow(copy, name) {
   return { name, source, teamId: copy.teamId, agentId: copy.agentId };
 }
 
-/* ─── Versions tab — skill.json history timeline (#632, AC2) ───────────── */
-function VersionsTab({ lineage, loading, error }) {
+/* ─── Versions tab — skill.json history timeline (#632, AC2; #2839) ─────── */
+// Every entry with a stored snapshot can be opened (read-only, in the editor) or
+// compared with the current content; ticking two rows compares any pair. A copy
+// whose content drifted from every recorded version gets a "Working copy" row.
+function VersionsTab({ lineage, loading, error, onOpen, onCompare }) {
+  const [picked, setPicked] = useState([]);
   if (loading) return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading version history…</div>;
   if (error) return <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load lineage: {error}</div>;
-  const versions = lineage?.versions;
-  const history = Array.isArray(versions?.history) ? versions.history : [];
-  if (!history.length) {
+  const rows = versionRows(lineage?.versions);
+  if (!rows.length) {
     return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', fontStyle: 'italic' }}>No version history recorded yet.</div>;
   }
+  const pair = picked.length === 2 ? normalizeComparePair(rows, picked[0], picked[1]) : null;
+  const linkBtn = (disabled) => ({
+    background: 'none', border: 'none', padding: 0, fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+    color: disabled ? 'var(--eb-text-muted)' : 'var(--eb-accent-primary)', cursor: disabled ? 'not-allowed' : 'pointer',
+  });
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-      {history.map((h, i) => (
-        <div key={`${h.version}-${h.hash}-${i}`} style={{
-          display: 'flex', flexDirection: 'column', gap: 2,
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+        <span style={{ flex: 1 }}>Tick two versions to compare them.</span>
+        <button
+          type="button"
+          disabled={!pair}
+          onClick={() => pair && onCompare(pair.from, pair.to)}
+          style={{
+            padding: '3px 10px', borderRadius: 'var(--eb-radius-sm)', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+            border: '1px solid var(--eb-border-default)', background: 'var(--eb-bg-surface)',
+            color: pair ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)', cursor: pair ? 'pointer' : 'not-allowed',
+          }}
+        >
+          Compare{picked.length ? ` (${picked.length}/2)` : ''}
+        </button>
+      </div>
+      {rows.map(r => (
+        <div key={r.key} style={{
+          display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
           padding: 'var(--eb-space-2) var(--eb-space-3)',
-          border: `1px solid ${h.current ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
-          background: h.current ? 'var(--eb-accent-muted)' : 'var(--eb-bg-surface)',
+          border: `1px solid ${r.current ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+          background: r.current ? 'var(--eb-accent-muted)' : 'var(--eb-bg-surface)',
           borderRadius: 'var(--eb-radius-sm)',
         }}>
-          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
-            <VersionChip version={h.version} contentHash={h.hash} />
-            {h.action && <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)' }}>{h.action}</span>}
-            {h.current && <Chip label="current" color="var(--eb-accent-primary)" bg="var(--eb-accent-muted)" title="The live revision on disk" />}
+          <input
+            type="checkbox"
+            aria-label={`Select ${r.kind === 'working' ? 'the working copy' : `version ${r.version ?? ''}`} for comparison`}
+            checked={picked.includes(r.key)}
+            disabled={!r.available}
+            onChange={() => setPicked(sel => toggleCompareSelection(sel, r.key))}
+            style={{ marginTop: 3 }}
+          />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+              {r.kind === 'working'
+                ? <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>Working copy (unversioned changes)</span>
+                : <VersionChip version={r.version} contentHash={r.hash} />}
+              {r.action && <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)' }}>{r.action}</span>}
+              {Number.isInteger(r.restoredFrom) && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>from v{r.restoredFrom}</span>}
+              {r.current && <Chip label="current" color="var(--eb-accent-primary)" bg="var(--eb-accent-muted)" title="The content on disk right now" />}
+            </div>
+            {r.kind !== 'working' && (
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                {[r.by, formatTs(r.at)].filter(Boolean).join(' · ')}
+              </div>
+            )}
+            {r.note && <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', fontStyle: 'italic' }}>{r.note}</div>}
+            {r.available ? (
+              <div style={{ display: 'flex', gap: 'var(--eb-space-3)' }}>
+                {r.kind !== 'working' && <button type="button" style={linkBtn(false)} onClick={() => onOpen(r)}>Open</button>}
+                {!r.current && <button type="button" style={linkBtn(false)} onClick={() => onCompare(r.ref, 'working')}>Compare with current</button>}
+              </div>
+            ) : (
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>Content not available</div>
+            )}
           </div>
-          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-            {[h.by, formatTs(h.at)].filter(Boolean).join(' · ')}
-          </div>
-          {h.note && <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', fontStyle: 'italic' }}>{h.note}</div>}
         </div>
       ))}
     </div>
   );
 }
 
-/* ─── Lineage tab — provenance + origin + every known copy (#632, AC2) ── */
+/* ─── Copies & origin tab — origin + provenance + every known copy (#632, #2840) ── */
 
 // Compact per-copy resync action button (Update / Overwrite…) + the bulk
 // variants. Transparent, accent-outlined; the destructive overwrite is error-
@@ -447,7 +499,7 @@ const resyncActionBtn = (disabled, danger) => ({
   background: 'transparent', color: danger ? 'var(--eb-status-error)' : 'var(--eb-accent-primary)',
 });
 
-// One agent copy's resync control (shared by the Lineage + Usage tabs). Only
+// One agent copy's resync control (Copies & origin tab). Only
 // agent copies are pushed into — the global/team rows are sources. `update` is
 // the safe drift-gated resync; `overwrite` force-discards local edits (the caller
 // confirms first); `blocked` (orphaned source — nothing to push) offers nothing.
@@ -483,7 +535,7 @@ function CopyResyncAction({ copy, busy, resyncBusy, onUpdate, onRequestOverwrite
 }
 
 // The bulk "update all outdated" / "overwrite all edited" pair + the last-run
-// status line, shared by the Lineage + Usage tabs. `plan` is planLineageResync's
+// status line (Copies & origin tab). `plan` is planLineageResync's
 // result over the tab's copies.
 function BulkResyncActions({ plan, busy, resyncBusy, resyncMsg, onUpdate, onRequestOverwrite }) {
   return (
@@ -513,49 +565,95 @@ function BulkResyncActions({ plan, busy, resyncBusy, resyncMsg, onUpdate, onRequ
   );
 }
 
-function LineageTab({ lineage, loading, error, name, onOpenCopy, resyncBusy, resyncMsg, onUpdate, onRequestOverwrite }) {
-  if (loading) return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading lineage…</div>;
+// "Copies & origin" tab (#2840) — merges the former Lineage + Usage tabs: where
+// this copy came from, its knowledge provenance, a summary, then every known
+// copy (global, team, agent) grouped by team, each with version, drift badge,
+// click-to-open and the per-copy / bulk resync actions (once). The grouping,
+// labels, origin sentence and drift explanations live in skill-copies-view.js.
+function CopiesTab({ lineage, loading, error, name, onOpenCopy, agents, teamNames, resyncBusy, resyncMsg, onUpdate, onRequestOverwrite }) {
+  const [query, setQuery] = useState('');
+  const [legendOpen, setLegendOpen] = useState(false);
+  if (loading) return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading copies…</div>;
   if (error) return <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load lineage: {error}</div>;
   if (!lineage) return null;
 
   const origin = lineage.origin;
   const prov = lineage.provenance;
   const copies = Array.isArray(lineage.copies) ? lineage.copies : [];
+  const summary = lineage.summary;
   const plan = planLineageResync(copies);
   const busy = !!resyncBusy;
   const entryIds = Array.isArray(prov?.entryIds) ? prov.entryIds : [];
   const knowledgeHref = prov?.originTeamId ? `/knowledge?team=${encodeURIComponent(prov.originTeamId)}` : '/knowledge';
+  const view = buildCopiesView(copies, { agents, teamNames });
+  const offerFilter = shouldOfferCopyFilter(view.total);
+  const groups = offerFilter ? filterCopyGroups(view.groups, query) : view.groups;
+  const sourceGone = view.viewed?.copy?.drift === 'orphaned';
+  const originParts = describeOrigin(origin, { agents, teamNames, sourceGone });
+  const summaryText = copiesSummaryText(summary);
 
   const sectionTitle = { fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', textTransform: 'uppercase', letterSpacing: '0.04em' };
+  const groupTitle = { fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-secondary)', marginTop: 'var(--eb-space-2)' };
+
+  const renderEntry = (e) => {
+    const c = e.copy;
+    return (
+      <div
+        key={e.key}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          border: `1px solid ${c.viewed ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+          background: c.viewed ? 'var(--eb-accent-muted)' : 'var(--eb-bg-surface)',
+          borderRadius: 'var(--eb-radius-sm)',
+        }}
+      >
+        <button
+          onClick={() => onOpenCopy?.(copyToRow(c, name))}
+          style={{
+            display: 'flex', alignItems: 'baseline', gap: 'var(--eb-space-2)',
+            flex: 1, minWidth: 0, textAlign: 'left',
+            background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'inherit',
+          }}
+          title={`Open this copy — ${e.title}`}
+        >
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.label}</span>
+          {e.secondary && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.secondary}</span>}
+        </button>
+        {/* Version, drift badge, status note and action stay together on one line (AC18). */}
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexShrink: 0, whiteSpace: 'nowrap' }}>
+          {c.viewed && <Chip label="viewing" color="var(--eb-accent-primary)" bg="var(--eb-accent-muted)" title="The copy open in this panel" />}
+          {Number.isInteger(c.version) && <VersionChip version={c.version} contentHash={c.contentHash} />}
+          {c.drift && <DriftBadge state={c.drift} />}
+          <CopyResyncAction copy={c} busy={busy} resyncBusy={resyncBusy} onUpdate={onUpdate} onRequestOverwrite={onRequestOverwrite} />
+        </span>
+      </div>
+    );
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       {/* Origin (content lineage — where THIS copy descends from) */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
         <span style={sectionTitle}>Origin</span>
-        {origin ? (
-          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
-            {[TIER_LABEL[origin.tier] || origin.tier, origin.teamId, origin.action].filter(Boolean).join(' · ')}
-            {origin.sourceHash ? <span style={{ fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}> ({String(origin.sourceHash).slice(0, 6)})</span> : null}
-          </span>
-        ) : (
-          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>Hand-authored — no recorded origin.</span>
-        )}
-      </div>
-
-      {/* Provenance (knowledge lineage — entryIds that drove a promotion) */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-        <span style={sectionTitle}>Knowledge provenance</span>
+        <span style={{ fontSize: 'var(--eb-text-sm)', color: origin ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)', fontStyle: origin ? 'normal' : 'italic' }}>
+          {originParts.map((p, i) => (
+            p.strong ? <strong key={i}>{p.text}</strong>
+              : p.mono ? <span key={i} style={{ fontFamily: 'var(--eb-font-mono)' }}>{p.text}</span>
+                : <span key={i}>{p.text}</span>
+          ))}
+        </span>
+        {/* Knowledge provenance (entryIds that drove a promotion) — one short line when absent. */}
         {prov ? (
-          <>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 'var(--eb-space-1)' }}>
             {prov.originTeamId && (
               <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
-                Promoted from team <strong>{prov.originTeamId}</strong>
+                Promoted from team <strong>{teamNames?.[prov.originTeamId] || prov.originTeamId}</strong>
               </span>
             )}
             {entryIds.length > 0 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{entryIds.length} knowledge entr{entryIds.length === 1 ? 'y' : 'ies'}:</span>
+                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Based on {entryIds.length} knowledge entr{entryIds.length === 1 ? 'y' : 'ies'}:</span>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                   {entryIds.map(id => (
                     <a key={id} href={knowledgeHref} title={`Open the Knowledge page (entry ${id})`}
@@ -567,52 +665,63 @@ function LineageTab({ lineage, loading, error, name, onOpenCopy, resyncBusy, res
               </div>
             )}
             <a href={knowledgeHref} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)' }}>View in Knowledge →</a>
-          </>
+          </div>
         ) : (
-          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>No knowledge provenance (not a promoted/shared skill).</span>
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>No knowledge provenance.</span>
         )}
       </div>
 
-      {/* All known copies across tiers with drift + per-copy / bulk resync */}
+      {/* Every known copy, grouped by team, with drift + per-copy / bulk resync */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-        <span style={sectionTitle}>Copies ({copies.length})</span>
-        {copies.length === 0 ? (
-          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>No other copies found.</span>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {copies.map((c, i) => {
-              const scopeLabel = c.tier === 'global' ? 'global pool' : c.tier === 'team' ? `team ${c.teamId}` : `agent ${c.agentId}`;
-              return (
-                <div
-                  key={`${c.tier}:${c.teamId ?? ''}:${c.agentId ?? ''}:${i}`}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap',
-                    padding: 'var(--eb-space-2) var(--eb-space-3)',
-                    border: `1px solid ${c.viewed ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
-                    background: c.viewed ? 'var(--eb-accent-muted)' : 'var(--eb-bg-surface)',
-                    borderRadius: 'var(--eb-radius-sm)',
-                  }}
-                >
-                  <button
-                    onClick={() => onOpenCopy?.(copyToRow(c, name))}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap',
-                      flex: 1, minWidth: 0, textAlign: 'left',
-                      background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'inherit',
-                    }}
-                    title={`Open the ${scopeLabel} copy`}
-                  >
-                    <SourceBadge value={c.tier === 'global' ? 'pool' : c.tier} />
-                    <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', fontFamily: 'var(--eb-font-mono)' }}>{scopeLabel}</span>
-                    {Number.isInteger(c.version) && <VersionChip version={c.version} contentHash={c.contentHash} />}
-                    {c.drift && <DriftBadge state={c.drift} />}
-                    {c.viewed && <Chip label="viewing" color="var(--eb-accent-primary)" bg="var(--eb-accent-muted)" />}
-                  </button>
-                  <CopyResyncAction copy={c} busy={busy} resyncBusy={resyncBusy} onUpdate={onUpdate} onRequestOverwrite={onRequestOverwrite} />
-                </div>
-              );
-            })}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+          <span style={{ ...sectionTitle, flex: 1 }}>Copies ({view.total})</span>
+          <button
+            onClick={() => setLegendOpen(o => !o)}
+            aria-expanded={legendOpen}
+            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'inherit', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)' }}
+          >
+            {legendOpen ? 'Hide status legend' : 'What do the statuses mean?'}
+          </button>
+        </div>
+        {summaryText && (
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+            {summaryText}
+            {summary.worstDrift && <> Worst drift: <DriftBadge state={summary.worstDrift} />.</>}
           </div>
+        )}
+        {legendOpen && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: 'var(--eb-space-2) var(--eb-space-3)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)', background: 'var(--eb-bg-elevated)' }}>
+            {DRIFT_LEGEND_ORDER.map(state => (
+              <div key={state} style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'baseline', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+                <DriftBadge state={state} />
+                <span>{driftTooltip(state)}</span>
+              </div>
+            ))}
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>A copy with nothing to compare against (hand-authored) shows no status.</span>
+          </div>
+        )}
+        {offerFilter && (
+          <input
+            type="search"
+            value={query}
+            onChange={ev => setQuery(ev.target.value)}
+            placeholder="Filter by team or agent…"
+            aria-label="Filter copies by team or agent"
+            style={{ padding: '4px 8px', fontSize: 'var(--eb-text-sm)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)', background: 'var(--eb-bg-surface)', color: 'var(--eb-text-primary)', fontFamily: 'inherit' }}
+          />
+        )}
+        {view.viewed && renderEntry(view.viewed)}
+        {view.groups.length === 0 ? (
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>Only this copy exists.</span>
+        ) : groups.length === 0 ? (
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>No copies match the filter.</span>
+        ) : (
+          groups.map(g => (
+            <div key={g.key} role="group" aria-label={g.label} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <span style={groupTitle}>{g.label}</span>
+              {g.entries.map(renderEntry)}
+            </div>
+          ))
         )}
 
         {/* Bulk resync — update all outdated (safe) / overwrite all edited (forced). */}
@@ -622,64 +731,15 @@ function LineageTab({ lineage, loading, error, name, onOpenCopy, resyncBusy, res
   );
 }
 
-/* ─── Usage tab — where the skill is actually seeded (#632, AC2/AC3) ───── */
-function UsageTab({ lineage, loading, error, resyncBusy, resyncMsg, onUpdate, onRequestOverwrite }) {
-  if (loading) return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading usage…</div>;
-  if (error) return <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load lineage: {error}</div>;
-  const copies = Array.isArray(lineage?.copies) ? lineage.copies : [];
-  const agentCopies = copies.filter(c => c.tier === 'agent');
-  const summary = lineage?.summary;
-  // Same bulk plan as the Lineage tab — only agent copies are actionable, and
-  // this list IS the agent copies, so the two tabs act on an identical set.
-  const plan = planLineageResync(copies);
-  const busy = !!resyncBusy;
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
-      {summary && (
-        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-          Lives in <strong>{summary.total}</strong> place{summary.total === 1 ? '' : 's'} — {summary.byTier.global} global, {summary.byTier.team} team, {summary.byTier.agent} agent.
-          {summary.worstDrift && <> Worst drift: <DriftBadge state={summary.worstDrift} />.</>}
-        </div>
-      )}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-        <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)' }}>
-          Seeded into agents ({agentCopies.length})
-        </span>
-        {agentCopies.length === 0 ? (
-          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
-            No agent currently carries this skill in its workspace.
-          </span>
-        ) : (
-          agentCopies.map((c, i) => (
-            <div key={`${c.agentId}:${i}`} style={{
-              display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap',
-              padding: 'var(--eb-space-2) var(--eb-space-3)',
-              border: '1px solid var(--eb-border-default)', background: 'var(--eb-bg-surface)',
-              borderRadius: 'var(--eb-radius-sm)',
-            }}>
-              <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', fontFamily: 'var(--eb-font-mono)', flex: 1, minWidth: 0 }}>{c.agentId}</span>
-              {c.teamId && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>({c.teamId})</span>}
-              {c.drift && <DriftBadge state={c.drift} />}
-              <CopyResyncAction copy={c} busy={busy} resyncBusy={resyncBusy} onUpdate={onUpdate} onRequestOverwrite={onRequestOverwrite} />
-            </div>
-          ))
-        )}
-        {/* Bulk resync — same actions as the Lineage tab (identical agent set). */}
-        <BulkResyncActions plan={plan} busy={busy} resyncBusy={resyncBusy} resyncMsg={resyncMsg} onUpdate={onUpdate} onRequestOverwrite={onRequestOverwrite} />
-      </div>
-    </div>
-  );
-}
-
 const VIEWER_TABS = [
   { id: 'content', label: 'Content' },
   { id: 'versions', label: 'Versions' },
-  { id: 'lineage', label: 'Lineage' },
-  { id: 'usage', label: 'Usage' },
+  { id: COPIES_TAB_ID, label: 'Copies & origin' },
 ];
+const VIEWER_TAB_IDS = VIEWER_TABS.map(t => t.id);
 
 /* ─── Skill viewer / inline editor ────────────────────────────────────── */
-function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgents, agentSkills, teams }) {
+function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgents, agentDirectory, agentSkills, teams, teamNames, caller }) {
   const isPool = skill.source === 'pool';
   const isTeam = skill.source === 'team';
   const isAgent = skill.source === 'agent';
@@ -705,12 +765,17 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState(null);
 
-  // Per-file editing (pool skills only).
-  const [editing, setEditing] = useState(false);
-  const [editContent, setEditContent] = useState('');
-  const [preview, setPreview] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState(null);
+  // Full-screen skill editor (#2837) — replaces the former inline "Edit file"
+  // mode. `reloadKey` refreshes the side panel's read-only preview after a save.
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const editPerm = skillEditPermission(skill, caller);
+  // Skill versions (#2839): an old version opened in the editor, and the pair
+  // the full-screen diff compares ({from, to} — hash or 'working').
+  const [openVersion, setOpenVersion] = useState(null);
+  const [comparePair, setComparePair] = useState(null);
+  const agentTeamId = isAgent ? ((installableAgents ?? []).find(a => a.id === skill.agentId)?.parentTeamId || skill.teamId || null) : null;
+  const versionPerm = versionActionPermission(skill, caller, agentTeamId);
 
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -734,18 +799,19 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
   const [distill, setDistill] = useState(null); // null | {loading} | {old,new,changed,reason} | {error}
   const [distillBusy, setDistillBusy] = useState(false);
 
-  // Detail tabs (#632): Content (files, default) + Versions / Lineage / Usage,
-  // the latter three fed by one lineage fetch. The fetch is lazy — it only fires
+  // Detail tabs (#632, #2840): Content (files, default) + Versions / Copies &
+  // origin, the latter two fed by one lineage fetch. The fetch is lazy — it only fires
   // once the operator leaves the Content tab, so browsing files stays a single
   // round-trip.
   // A deep link may open straight on a detail tab (#1143 — drift chips land on
-  // Lineage). `skill.initialTab` is validated against VIEWER_TABS before use.
-  const initialTab = VIEWER_TABS.some(t => t.id === skill.initialTab) ? skill.initialTab : 'content';
+  // Copies & origin). `skill.initialTab` is validated against VIEWER_TABS before
+  // use; the retired `lineage` / `usage` ids resolve to Copies & origin (#2840).
+  const initialTab = resolveViewerTab(skill.initialTab, VIEWER_TAB_IDS) || 'content';
   const [tab, setTab] = useState(initialTab);
   const [lineage, setLineage] = useState(null);
   const [lineageLoading, setLineageLoading] = useState(false);
   const [lineageError, setLineageError] = useState(null);
-  // Lineage-tab resync (Update / Overwrite). `resyncBusy` is the busy button key
+  // Copies-tab resync (Update / Overwrite). `resyncBusy` is the busy button key
   // (`update:<agentId>` | `update-all` | `overwrite`); `resyncMsg` is the last
   // outcome; `overwriteConfirm` holds the agentIds a pending destructive force
   // targets until the operator confirms it.
@@ -831,7 +897,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
   // Load the file list whenever the selected skill changes.
   useEffect(() => {
     let cancelled = false;
-    setFilesLoading(true); setFilesError(null); setFiles([]); setEditing(false);
+    setFilesLoading(true); setFilesError(null); setFiles([]);
     const params = withScope(new URLSearchParams({ source: skill.source }));
     fetch(`/api/skills/${encodeURIComponent(skill.name)}/files?${params}`)
       .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d; })
@@ -845,13 +911,13 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       .catch(e => { if (!cancelled) setFilesError(e.message); })
       .finally(() => { if (!cancelled) setFilesLoading(false); });
     return () => { cancelled = true; };
-  }, [skillKey]);
+  }, [skillKey, reloadKey]);
 
   // Load the selected file's content.
   useEffect(() => {
     if (!selectedFile) { setFileData(null); return; }
     let cancelled = false;
-    setFileLoading(true); setFileError(null); setFileData(null); setEditing(false);
+    setFileLoading(true); setFileError(null); setFileData(null);
     const params = withScope(new URLSearchParams({ source: skill.source, file: selectedFile }));
     fetch(`/api/skills/${encodeURIComponent(skill.name)}/file?${params}`)
       .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d; })
@@ -859,9 +925,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       .catch(e => { if (!cancelled) setFileError(e.message); })
       .finally(() => { if (!cancelled) setFileLoading(false); });
     return () => { cancelled = true; };
-  }, [skillKey, selectedFile]);
-
-  const fileEditable = isManaged && fileData && !fileData.binary && !fileData.truncated;
+  }, [skillKey, selectedFile, reloadKey]);
 
   function exportSkill() {
     const params = withScope(new URLSearchParams({ source: skill.source }));
@@ -933,7 +997,10 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       setConfirmOverwrite(false);
       setPendingTransfer(null);
       setTransferPreview(null);
-      onPromoted?.({ name: data.name, source: data.to?.tier === 'team' ? 'team' : 'pool', teamId: data.to?.teamId });
+      onPromoted?.({
+        name: data.name, source: data.to?.tier === 'team' ? 'team' : 'pool', teamId: data.to?.teamId,
+        activationNotice: transferActivationNotice(data),
+      });
     } catch (e) {
       setPromoteError(e.message);
     } finally {
@@ -1016,27 +1083,6 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       .map(s => s.agentId),
   );
 
-  async function handleSaveFile() {
-    setSaving(true);
-    setError(null);
-    try {
-      const params = withScope(new URLSearchParams({ source: skill.source, file: selectedFile }));
-      const res = await fetch(`/api/skills/${encodeURIComponent(skill.name)}/file?${params}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: editContent }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      setFileData(fd => ({ ...(fd || {}), content: editContent }));
-      setEditing(false);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setSaving(false);
-    }
-  }
-
   async function handleDelete(cascade = false) {
     setDeleting(true);
     setDeleteError(null);
@@ -1092,19 +1138,20 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
         })}
       </div>
 
-      {tab === 'versions' && <VersionsTab lineage={lineage} loading={lineageLoading} error={lineageError} />}
-      {tab === 'lineage' && (
-        <LineageTab
-          lineage={lineage} loading={lineageLoading} error={lineageError}
-          name={skill.name} onOpenCopy={onOpenCopy}
-          resyncBusy={resyncBusy} resyncMsg={resyncMsg}
-          onUpdate={(agentIds, busyKey) => runResync(agentIds, { force: false, busyKey })}
-          onRequestOverwrite={(agentIds) => { setResyncMsg(null); setOverwriteConfirm({ agentIds }); }}
+      {tab === 'versions' && (
+        <VersionsTab
+          lineage={lineage}
+          loading={lineageLoading}
+          error={lineageError}
+          onOpen={r => { setOpenVersion({ hash: r.hash, entry: r }); setEditorOpen(true); }}
+          onCompare={(from, to) => setComparePair({ from, to })}
         />
       )}
-      {tab === 'usage' && (
-        <UsageTab
+      {tab === COPIES_TAB_ID && (
+        <CopiesTab
           lineage={lineage} loading={lineageLoading} error={lineageError}
+          name={skill.name} onOpenCopy={onOpenCopy}
+          agents={agentDirectory} teamNames={teamNames}
           resyncBusy={resyncBusy} resyncMsg={resyncMsg}
           onUpdate={(agentIds, busyKey) => runResync(agentIds, { force: false, busyKey })}
           onRequestOverwrite={(agentIds) => { setResyncMsg(null); setOverwriteConfirm({ agentIds }); }}
@@ -1114,21 +1161,28 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       {tab === 'content' && (<>
       {/* toolbar */}
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
-        {!editing && (
-          <button onClick={exportSkill} style={secondaryBtnStyle} title="Download the whole skill directory as a ZIP">
-            Export ZIP
+        {editPerm.editable ? (
+          <button
+            onClick={() => { setOpenVersion(null); setEditorOpen(true); }}
+            style={primaryBtnStyle(false)}
+            title="Open the full-screen skill editor: folder tree, preview / edit, file operations, one Save for everything"
+          >
+            Edit skill
+          </button>
+        ) : (
+          <button
+            onClick={() => { setOpenVersion(null); setEditorOpen(true); }}
+            style={secondaryBtnStyle}
+            title={`Open the skill in the full-screen editor, read-only — ${editPerm.reason}`}
+          >
+            Open
           </button>
         )}
-        {isManaged && !editing && (
+        <button onClick={exportSkill} style={secondaryBtnStyle} title="Download the whole skill directory as a ZIP">
+          Export ZIP
+        </button>
+        {isManaged && (
           <>
-            <button
-              onClick={() => { setEditing(true); setEditContent(fileData?.content ?? ''); setPreview(false); setError(null); }}
-              disabled={!fileEditable}
-              title={fileEditable ? undefined : 'This file cannot be edited here (binary or too large)'}
-              style={fileEditable ? secondaryBtnStyle : { ...secondaryBtnStyle, cursor: 'not-allowed', opacity: 0.5 }}
-            >
-              Edit {files.length > 1 ? 'file' : ''}
-            </button>
             {isTeam && (
               <button
                 onClick={() => beginTransfer({ name: skill.name, from: { tier: 'team', teamId: skill.teamId }, to: { tier: 'global' }, mode: 'copy' })}
@@ -1164,25 +1218,6 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
             </button>
           </>
         )}
-        {isManaged && editing && (
-          <>
-            {isMarkdownPath(selectedFile) && (
-              <button
-                type="button"
-                onClick={() => setPreview(p => !p)}
-                style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
-              >
-                {preview ? 'Edit' : 'Preview'}
-              </button>
-            )}
-            <button onClick={handleSaveFile} disabled={saving} style={primaryBtnStyle(saving)}>
-              {saving ? 'Saving…' : 'Save'}
-            </button>
-            <button onClick={() => { setEditing(false); setError(null); }} disabled={saving} style={secondaryBtnStyle}>
-              Cancel
-            </button>
-          </>
-        )}
         {isAgent && isPublishEligible(skill.drift) && (
           <PublishSkillAction
             name={skill.name}
@@ -1206,27 +1241,21 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
         )}
         {/* The action panel's own "?" — opens the Skills topic at the chapter
             that explains promote / move / distill / merge / import-export
-            (#1990). Hidden while editing a file, where none of those buttons
-            are on screen. */}
-        {!editing && (
-          <PageHelpButton
-            label="What these skill actions do"
-            size={14}
-            style={{ padding: 0, marginLeft: 'auto' }}
-            section={SKILLS_HELP_SECTIONS.actions}
-          />
-        )}
+            (#1990). */}
+        <PageHelpButton
+          label="What these skill actions do"
+          size={14}
+          style={{ padding: 0, marginLeft: 'auto' }}
+          section={SKILLS_HELP_SECTIONS.actions}
+        />
       </div>
 
-      {error && (
-        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{error}</div>
-      )}
       {promoteError && (
         <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{promoteError}</div>
       )}
 
       {/* Adopt a global skill into a team pool (#626, global→team transfer) */}
-      {isPool && !editing && (
+      {isPool && (
         <div style={{
           display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)',
           padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)',
@@ -1281,7 +1310,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       )}
 
       {/* Install pool skill into an existing agent (no full workspace reset) */}
-      {isPool && !editing && (
+      {isPool && (
         <div style={{
           display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)',
           padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)',
@@ -1311,10 +1340,16 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
               }}
             >
               <option value="">Select an agent…</option>
-              {(installableAgents ?? []).map(a => (
-                <option key={a.id} value={a.id}>
-                  {a.displayName}{agentsWithSkill.has(a.id) ? ' (already installed)' : ''}
-                </option>
+              {/* Grouped by agent team (#2836) so same-named agents in
+                  different teams can be told apart. */}
+              {groupInstallTargets(installableAgents, teamNames).map(g => (
+                <optgroup key={g.key} label={g.label}>
+                  {g.agents.map(a => (
+                    <option key={a.id} value={a.id}>
+                      {a.displayName}{agentsWithSkill.has(a.id) ? ' (already installed)' : ''}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
             <button onClick={() => install(false)} disabled={!installTarget || installing} style={primaryBtnStyle(!installTarget || installing)}>
@@ -1378,29 +1413,12 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
         <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading {selectedFile}…</div>
       ) : fileError ? (
         <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load file: {fileError}</div>
-      ) : editing && !(preview && isMarkdownPath(selectedFile)) ? (
-        <textarea
-          value={editContent}
-          onChange={e => setEditContent(e.target.value)}
-          style={{
-            flex: 1, minHeight: 300, padding: '8px 10px',
-            border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-sm)',
-            background: 'var(--eb-bg-surface)',
-            color: 'var(--eb-text-primary)',
-            fontFamily: 'var(--eb-font-mono)',
-            fontSize: 'var(--eb-text-sm)',
-            resize: 'vertical',
-            boxSizing: 'border-box',
-            width: '100%',
-          }}
-        />
       ) : fileData?.binary ? (
         <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', fontStyle: 'italic' }}>
           Binary file ({formatBytes(fileData.size)}) — not shown.
         </div>
       ) : isMarkdownPath(selectedFile) ? (
-        <SkillMarkdown content={editing ? editContent : (fileData?.content ?? '')} />
+        <MarkdownWithFrontmatter content={fileData?.content ?? ''} />
       ) : (
         <CodeBlock content={fileData?.content ?? ''} />
       )}
@@ -1409,6 +1427,22 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
           File truncated at 512 KB — shown content is partial and read-only.
         </div>
+      )}
+
+      {editorOpen && (
+        <SkillEditorModal
+          skill={skill}
+          tierLabel={TIER_LABEL[isPool ? 'global' : skill.source] || skill.source}
+          readOnly={!editPerm.editable}
+          readOnlyReason={editPerm.reason}
+          version={openVersion}
+          versionPermission={versionPerm}
+          onClose={() => { setEditorOpen(false); setOpenVersion(null); }}
+          onSaved={() => { setReloadKey(k => k + 1); if (lineage) reloadLineage(); }}
+        />
+      )}
+      {comparePair && (
+        <SkillVersionDiffModal skill={skill} from={comparePair.from} to={comparePair.to} onClose={() => setComparePair(null)} />
       )}
 
       {/* Delete confirmation dialog. A guarded delete (409) surfaces the
@@ -1599,9 +1633,9 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       )}
       </>)}
 
-      {/* Force-overwrite confirmation (Lineage tab). Resyncing a locally-edited
+      {/* Force-overwrite confirmation (Copies & origin tab). Resyncing a locally-edited
           copy discards its local edits, so a force is gated behind an explicit
-          confirm — rendered at viewer top level so it also shows on the Lineage
+          confirm — rendered at viewer top level so it also shows on the Copies
           tab (the content-tab dialogs above are inside the Content block). */}
       <ConfirmDialog
         open={!!overwriteConfirm}
@@ -2088,6 +2122,8 @@ export default function SkillsRegistry() {
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState(null);
   const [importSuccess, setImportSuccess] = useState(null);
+  // #2689: the activation outcome of the last adopt / move into a team pool.
+  const [transferNotice, setTransferNotice] = useState(null);
   const [importTarget, setImportTarget] = useState(() => defaultSkillTarget(caller, teams)); // 'global' or 'team:<id>'
   // #2307 AC11: re-pin the selection if the writable set changes under us
   // (auth/teams load async) and the current value is no longer offered.
@@ -2120,8 +2156,9 @@ export default function SkillsRegistry() {
 
   // Deep link (#774 AC5): `?skill=<name>&tier=<pool|team|agent>&team=<id>`
   // preselects the tier filter and opens the named skill's viewer. An optional
-  // `&tab=<content|versions|lineage|usage>` (#1143) opens straight on that detail
-  // tab — the drift chips in SkillPicker use `tab=lineage`. The param is left on
+  // `&tab=<content|versions|copies>` (#1143) opens straight on that detail
+  // tab — the drift chips in SkillPicker use `tab=copies`; the retired
+  // `lineage` / `usage` values still open Copies & origin (#2840). The param is left on
   // the URL, so a full-page reload of the link restores the same view. A
   // consumed-ref guards against reopening the panel after the user closes it
   // (the URL still carries the param until the next navigation/reload).
@@ -2135,7 +2172,7 @@ export default function SkillsRegistry() {
     const tier = searchParams.get('tier') || 'pool';
     const team = searchParams.get('team') || undefined;
     const tabParam = searchParams.get('tab');
-    const initialTab = VIEWER_TABS.some(t => t.id === tabParam) ? tabParam : undefined;
+    const initialTab = resolveViewerTab(tabParam, VIEWER_TAB_IDS) || undefined;
     const source = TIER_TO_SOURCE[tier] || 'pool';
     if (TIER_TO_FILTER[tier]) setFilter(TIER_TO_FILTER[tier]);
     // Prefer the real row from the loaded list (carries teamId/agentId), else a
@@ -2176,6 +2213,7 @@ export default function SkillsRegistry() {
   }
 
   function handlePromoted(skill) {
+    setTransferNotice(skill?.activationNotice || null);
     refetch?.();
     openSkill({ name: skill.name, source: 'pool' });
   }
@@ -2222,7 +2260,12 @@ export default function SkillsRegistry() {
   // be seen or removed again.
   const installableAgents = (allAgents ?? [])
     .filter(a => a.enabled !== false && a.token && a.role !== 'team' && a.role !== 'agent')
-    .map(a => ({ id: a.id, displayName: a.displayName || a.id }));
+    .map(a => ({ id: a.id, displayName: a.displayName || a.id, parentTeamId: a.parentTeamId || null }));
+
+  // Every agent (any role) for the Copies & origin tab's display names and
+  // agent-team grouping (#2840) — not filtered like the install targets.
+  const agentDirectory = (allAgents ?? [])
+    .map(a => ({ id: a.id, displayName: a.displayName || a.id, role: a.role, parentTeamId: a.parentTeamId || null }));
 
   async function confirmRowDelete(cascade = false) {
     if (!rowDeleteTarget) return;
@@ -2269,8 +2312,8 @@ export default function SkillsRegistry() {
   const columns = makeColumns(
     row => { setRowDeleteError(null); setRowDeleteTarget(row); },
     { isSelected: isRowSelected, onToggle: toggleRow },
-    // #2317 AC4: the Downstream indicator opens straight on the Usage tab.
-    row => openSkill({ ...row, initialTab: 'usage' }),
+    // #2317 AC4: the Downstream indicator opens straight on the copies tab.
+    row => openSkill({ ...row, initialTab: COPIES_TAB_ID }),
     teamNames,
   );
 
@@ -2354,6 +2397,13 @@ export default function SkillsRegistry() {
       {importSuccess && (
         <div role="status" style={{ color: 'var(--eb-status-success)', fontSize: 'var(--eb-text-sm)' }}>
           {importSuccess}
+        </div>
+      )}
+      {transferNotice && (
+        <div role={transferNotice.ok ? 'status' : 'alert'} style={{ color: transferNotice.ok ? 'var(--eb-status-success)' : 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)' }}>
+          {!transferNotice.ok && <span aria-hidden="true" style={{ color: 'var(--eb-status-warning)' }}>⚠ </span>}
+          {transferNotice.text}
+          <button type="button" onClick={() => setTransferNotice(null)} style={{ marginLeft: 'var(--eb-space-3)', background: 'none', border: 'none', color: 'var(--eb-text-secondary)', cursor: 'pointer' }}>Dismiss</button>
         </div>
       )}
 
@@ -2466,8 +2516,11 @@ export default function SkillsRegistry() {
             onPromoted={handlePromoted}
             onOpenCopy={openSkill}
             installableAgents={installableAgents}
+            agentDirectory={agentDirectory}
             agentSkills={allSkills ?? []}
             teams={teams}
+            teamNames={teamNames}
+            caller={caller}
           />
         )}
       </SidePanel>

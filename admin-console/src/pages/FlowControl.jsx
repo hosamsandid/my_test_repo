@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
-  AlertTriangle, RefreshCw, ExternalLink, Info, Pause, Play, Waves, Zap, Power, Columns, UserRound,
+  AlertTriangle, RefreshCw, ExternalLink, Info, Pause, Play, Waves, Zap, Power, Columns, UserRound, EyeOff, RotateCcw, LockOpen, CheckCircle2, BellRing,
 } from 'lucide-react';
+import { Link as RouterLink, useSearchParams } from 'react-router';
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import PageHelpButton from '../components/PageHelpButton';
@@ -9,8 +10,11 @@ import Modal from '../components/Modal';
 import { usePageActions } from '../context/PageActionsContext';
 import {
   boardView, updatedAgo, AUTO_REFRESH_MS, readAutoRefresh, writeAutoRefresh, configFormRows, configFromForm,
+  withoutRows, REMOVE_CONFIRM_TEXT, removeDialogTitle, RELEASE_CONFIRM_TEXT, releaseDialogTitle, releaseNotice, CHAT_LINK_CLASS, CHAT_LINK_CSS,
+  WAKE_CONFIRM_TEXT, wakeDialogTitle, wakeNotice, ADOPT_CONFIRM_TEXT, adoptDialogTitle, adoptNotice,
 } from './process/flow-control-view';
 import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections';
+import { readCurrentTeam, writeCurrentTeam, resolveFlowControlTeam } from './current-team';
 
 // The Flow Control board (#2573, concept `docs/flow-control-concept.md`
 // Amendment 3): who is working on what, where a person is needed, and how far
@@ -22,7 +26,8 @@ import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections';
 // `flow-control-view.js`. The page itself decides nothing.
 //
 // The only writes are the pool controls (pause/drain/switch on, force
-// dispatch) and the optional per-team column configuration.
+// dispatch), the optional per-team column configuration and "Remove from
+// board" / Restore (#2637) — none of them touches a GitHub item.
 
 const PAGE_DESCRIPTION = 'Who is working on what, where you are needed, and how far each item has come.';
 
@@ -40,16 +45,35 @@ export default function FlowControl() {
   const [teamId, setTeamId] = useState('');
   const [state, setState] = useState({ loading: false, error: null, data: null });
   const [actionError, setActionError] = useState(null);
+  const [actionNotice, setActionNotice] = useState(null);
   const [busy, setBusy] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(() => readAutoRefresh(username));
   const [now, setNow] = useState(() => Date.now());
   const [columnsOpen, setColumnsOpen] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState(null);
+  const [releaseTarget, setReleaseTarget] = useState(null);
+  const [wakeTarget, setWakeTarget] = useState(null);
+  const [adoptOpen, setAdoptOpen] = useState(false);
+  const [removedOpen, setRemovedOpen] = useState(false);
   const loadSeq = useRef(0);
 
-  // Default to the first team once the list arrives; never override a choice.
+  const [searchParams] = useSearchParams();
+  const urlTeam = searchParams.get('team') || '';
+
+  // Open on `?team=`, else the team last worked with in Agent Chat or picked
+  // here (#2850), else the first team — once the list arrives, so no other
+  // team's board is fetched first; never override a choice.
   useEffect(() => {
-    if (!teamId && teams.length > 0) setTeamId(teams[0].id);
-  }, [teams, teamId]);
+    if (teamId) return;
+    const resolved = resolveFlowControlTeam({ urlTeam, rememberedTeam: readCurrentTeam(username), teams });
+    if (resolved) setTeamId(resolved);
+  }, [teams, teamId, urlTeam, username]);
+
+  // A pick in the picker becomes the current team for every page.
+  const pickTeam = useCallback((id) => {
+    setTeamId(id);
+    writeCurrentTeam(username, id);
+  }, [username]);
 
   // The preference is per user, and the user record can arrive after mount.
   useEffect(() => { setAutoRefresh(readAutoRefresh(username)); }, [username]);
@@ -97,6 +121,7 @@ export default function FlowControl() {
 
   const mutate = useCallback(async (fn, failText) => {
     setActionError(null);
+    setActionNotice(null);
     setBusy(true);
     try {
       await fn();
@@ -118,12 +143,73 @@ export default function FlowControl() {
     'Failed to force-dispatch',
   ), [teamId, mutate]);
 
+  // "Release claim" (#2754): the server re-checks the row on a fresh board,
+  // swaps the stale claim back to its wake label on GitHub and logs it; a
+  // partial failure comes back as warnings, shown like any action error.
+  const releaseClaim = useCallback((target) => mutate(
+    async () => {
+      const res = await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/flow-board-release`, { rowId: target.id });
+      setReleaseTarget(null);
+      setActionNotice(releaseNotice(res, target.ref));
+      if (res && Array.isArray(res.warnings) && res.warnings.length) setActionError(res.warnings.join(' · '));
+    },
+    'Failed to release the claim',
+  ), [teamId, mutate]);
+
+  // "Wake again" (#2873): the server re-checks the row on a fresh board and the
+  // label on GitHub, then delivers the parked wake to its role again — no label
+  // change. A wake that could not be delivered comes back as a warning.
+  const wakeAgain = useCallback((target) => mutate(
+    async () => {
+      const res = await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/flow-board-wake`, { rowId: target.id });
+      setWakeTarget(null);
+      setActionNotice(wakeNotice(res, target.ref));
+      if (res && Array.isArray(res.warnings) && res.warnings.length) setActionError(res.warnings.join(' · '));
+    },
+    'Failed to wake the agent again',
+  ), [teamId, mutate]);
+
+  // "Adopt all" (#2877): start every row carried over from another instance or
+  // an earlier flow, through the same server-side checks as Wake again.
+  const adoptAll = useCallback((rowIds) => mutate(
+    async () => {
+      const res = await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/flow-board-adopt`, { rowIds });
+      setAdoptOpen(false);
+      setActionNotice(adoptNotice(res));
+      if (res && Array.isArray(res.warnings) && res.warnings.length) setActionError(res.warnings.join(' · '));
+    },
+    'Failed to adopt the carried-over items',
+  ), [teamId, mutate]);
+
   const saveColumns = useCallback((config) => mutate(
     async () => {
       await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/flow-board-config`, { config });
       setColumnsOpen(false);
     },
     'Failed to save the columns',
+  ), [teamId, mutate]);
+
+  // The row leaves the board at once; the reload that follows confirms it (or
+  // brings it back when the orchestrator refused).
+  const removeRow = useCallback((row) => {
+    setRemoveTarget(null);
+    setState((s) => ({ ...s, data: withoutRows(s.data, [row.id]) }));
+    return mutate(
+      async () => {
+        try {
+          await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/flow-board-removed`, { action: 'remove', rowId: row.id });
+        } catch (err) {
+          load(true);
+          throw err;
+        }
+      },
+      'Failed to remove the item from the board',
+    );
+  }, [teamId, mutate, load]);
+
+  const restoreRow = useCallback((entry) => mutate(
+    () => apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/flow-board-removed`, { action: 'restore', rowId: entry.removalId }),
+    'Failed to restore the item',
   ), [teamId, mutate]);
 
   const view = useMemo(() => boardView(state.data, now), [state.data, now]);
@@ -158,6 +244,7 @@ export default function FlowControl() {
   return (
     <>
       {headerAction}
+      <style>{CHAT_LINK_CSS}</style>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
         {/* Title comes from the Shell header (#1847), so the page leads with the
             one-line description plus its "?". */}
@@ -182,9 +269,12 @@ export default function FlowControl() {
         ) : (
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
-              <TeamPicker teams={teams} value={teamId} onChange={setTeamId} />
+              <TeamPicker teams={teams} value={teamId} onChange={pickTeam} />
               {view.canManage && (
-                <span style={{ marginLeft: 'auto' }}>
+                <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 'var(--eb-space-2)' }}>
+                  {view.removed.length > 0 && (
+                    <HeaderButton icon={EyeOff} label={view.removedLabel} title="Items taken off the board — restore them here" onClick={() => setRemovedOpen(true)} />
+                  )}
                   <HeaderButton icon={Columns} label="Columns" title="Rename, merge or hide stages" onClick={() => setColumnsOpen(true)} />
                 </span>
               )}
@@ -208,6 +298,7 @@ export default function FlowControl() {
               </Banner>
             )}
             {actionError && <Banner icon={AlertTriangle} tone="error">{actionError}</Banner>}
+            {actionNotice && <Banner icon={CheckCircle2}>{actionNotice}</Banner>}
 
             {state.loading && !state.data && (
               <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Loading…</p>
@@ -216,8 +307,11 @@ export default function FlowControl() {
             {state.data && !view.maintenance && (
               <>
                 <WorkingNow view={view} busy={busy} onSetState={setRoleState} onForceDispatch={forceDispatch} />
-                {view.needsYou && <NeedsYou items={view.needsYou} />}
-                <InProgress view={view} />
+                {view.needsYou && <NeedsYou items={view.needsYou} canManage={view.canManage} busy={busy} onRelease={setReleaseTarget} onWake={setWakeTarget} carriedOver={view.carriedOver} onAdoptAll={() => setAdoptOpen(true)} />}
+                <InProgress view={view} busy={busy} onRemove={setRemoveTarget} />
+                {view.doneRows.length > 0 && (
+                  <RecentlyCompleted rows={view.doneRows} hint={view.retentionHint} canManage={view.canManage} busy={busy} onRemove={setRemoveTarget} />
+                )}
               </>
             )}
           </>
@@ -230,6 +324,96 @@ export default function FlowControl() {
           busy={busy}
           onClose={() => setColumnsOpen(false)}
           onSave={saveColumns}
+        />
+      )}
+      {removeTarget && (
+        <Modal
+          open
+          onClose={() => setRemoveTarget(null)}
+          title={removeDialogTitle(removeTarget.ref)}
+          maxWidth={480}
+          footer={(
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
+              <HeaderButton icon={EyeOff} label="Remove from board" title="Take this item off the board" disabled={busy} onClick={() => removeRow(removeTarget)} />
+            </div>
+          )}
+        >
+          <p style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>{removeTarget.title}</p>
+          <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+            {REMOVE_CONFIRM_TEXT}
+          </p>
+        </Modal>
+      )}
+      {releaseTarget && (
+        <Modal
+          open
+          onClose={() => setReleaseTarget(null)}
+          title={releaseDialogTitle(releaseTarget.ref)}
+          maxWidth={480}
+          footer={(
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
+              <HeaderButton icon={LockOpen} label="Release claim" title="Put the wake label back so the flow picks the item up again" disabled={busy} onClick={() => releaseClaim(releaseTarget)} />
+            </div>
+          )}
+        >
+          <p style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>{releaseTarget.title}</p>
+          <ul style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-primary)' }}>
+            {releaseTarget.release.map((c) => <li key={`${c.ref}:${c.claim}`}>{c.ref}: {c.text}</li>)}
+          </ul>
+          <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+            {RELEASE_CONFIRM_TEXT}
+          </p>
+        </Modal>
+      )}
+      {wakeTarget && (
+        <Modal
+          open
+          onClose={() => setWakeTarget(null)}
+          title={wakeDialogTitle(wakeTarget.ref)}
+          maxWidth={480}
+          footer={(
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
+              <HeaderButton icon={BellRing} label="Wake again" title="Deliver the wake label to its agent again" disabled={busy} onClick={() => wakeAgain(wakeTarget)} />
+            </div>
+          )}
+        >
+          <p style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>{wakeTarget.title}</p>
+          <ul style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+            {wakeTarget.wakes.filter((w) => w.roles.length > 0).map((w) => <li key={`${w.ref}:${w.label}`}>{w.target}</li>)}
+          </ul>
+          <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+            {WAKE_CONFIRM_TEXT}
+          </p>
+        </Modal>
+      )}
+      {adoptOpen && (
+        <Modal
+          open
+          onClose={() => setAdoptOpen(false)}
+          title={adoptDialogTitle(view.carriedOver.length)}
+          maxWidth={480}
+          footer={(
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
+              <HeaderButton icon={BellRing} label="Adopt all" title="Deliver each carried-over wake label to its agent once" disabled={busy || view.carriedOver.length === 0} onClick={() => adoptAll(view.carriedOver)} />
+            </div>
+          )}
+        >
+          <ul style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+            {(view.needsYou || []).filter((n) => view.carriedOver.includes(n.id)).flatMap((n) => n.wakes.filter((w) => w.roles.length > 0).map((w) => (
+              <li key={`${n.id}:${w.ref}:${w.label}`}>{w.target}</li>
+            )))}
+          </ul>
+          <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+            {ADOPT_CONFIRM_TEXT}
+          </p>
+        </Modal>
+      )}
+      {removedOpen && (
+        <RemovedDialog
+          items={view.removed}
+          busy={busy}
+          onClose={() => setRemovedOpen(false)}
+          onRestore={restoreRow}
         />
       )}
     </>
@@ -314,7 +498,25 @@ const lineStyle = {
   fontSize: 'var(--eb-text-sm)',
 };
 
+const nestedLineStyle = {
+  ...lineStyle,
+  marginLeft: 'var(--eb-space-6)',
+  borderLeft: '3px solid var(--eb-border-default)',
+};
+
 const mutedStyle = { color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' };
+
+// In-console link to the chat of the agent working right now (#2723): a real
+// anchor, so Ctrl/Cmd- and middle-click open a new tab. `chat` is the view's
+// `chatLink` result; without one the content renders exactly as before.
+function ChatLink({ chat, children }) {
+  if (!chat) return children;
+  return (
+    <RouterLink to={chat.to} title={chat.label} aria-label={chat.label} className={CHAT_LINK_CLASS} style={{ display: 'block' }}>
+      {children}
+    </RouterLink>
+  );
+}
 
 function Link({ href, children }) {
   if (!href) return <span>{children}</span>;
@@ -332,24 +534,32 @@ function Link({ href, children }) {
 
 /* ── area ①: working now ───────────────────────────────────────────── */
 
+// One running run. `nested` (#2848): an instance listed beneath its pool line.
+function SessionLine({ s, nested = false }) {
+  return (
+    <div style={nested ? nestedLineStyle : lineStyle}>
+      <span style={{ color: 'var(--eb-text-primary)', fontWeight: 500 }}>
+        <ChatLink chat={s.chat}>
+          {s.role}{s.instance && <span style={mutedStyle}> {s.instance}</span>}
+        </ChatLink>
+      </span>
+      <span style={{ fontFamily: 'var(--eb-font-mono)', ...mutedStyle }}>{s.item}</span>
+      {s.title && <span style={{ color: 'var(--eb-text-primary)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.title}</span>}
+      <span style={{ marginLeft: 'auto', ...mutedStyle }} title="Running for">{s.running}</span>
+    </div>
+  );
+}
+
 function WorkingNow({ view, busy, onSetState, onForceDispatch }) {
   const nothing = view.sessions.length === 0 && view.pools.length === 0 && view.held.length === 0;
   return (
     <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
       <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.working} helpLabel="What Working now shows">Working now</AreaHeading>
       {nothing && <p style={{ margin: 0, ...mutedStyle }}>No agent is running.</p>}
-      {view.sessions.map((s) => (
-        <div key={s.id} style={lineStyle}>
-          <span style={{ color: 'var(--eb-text-primary)', fontWeight: 500 }}>
-            {s.role}{s.instance && <span style={mutedStyle}> {s.instance}</span>}
-          </span>
-          <span style={{ fontFamily: 'var(--eb-font-mono)', ...mutedStyle }}>{s.item}</span>
-          {s.title && <span style={{ color: 'var(--eb-text-primary)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.title}</span>}
-          <span style={{ marginLeft: 'auto', ...mutedStyle }} title="Running for">{s.running}</span>
-        </div>
-      ))}
+      {view.sessions.map((s) => <SessionLine key={s.id} s={s} />)}
       {view.pools.map((p) => (
-        <div key={p.key} style={lineStyle}>
+        <React.Fragment key={p.key}>
+        <div style={lineStyle}>
           <span style={{ color: 'var(--eb-text-primary)', fontWeight: 500 }}>{p.label}</span>
           <span style={mutedStyle}>{p.occupancy}</span>
           {p.stateText && (
@@ -374,6 +584,8 @@ function WorkingNow({ view, busy, onSetState, onForceDispatch }) {
             <PageHelpButton label="Pause, Drain and Switch on" size={12} section={FLOW_CONTROL_HELP_SECTIONS.poolControls} style={{ padding: 0 }} />
           </span>
         </div>
+        {p.instances.map((s) => <SessionLine key={s.id} s={s} nested />)}
+        </React.Fragment>
       ))}
       {view.held.map((h) => (
         <div key={h.id} style={lineStyle}>
@@ -396,19 +608,44 @@ function WorkingNow({ view, busy, onSetState, onForceDispatch }) {
 
 /* ── area ②: needs you ─────────────────────────────────────────────── */
 
-function NeedsYou({ items }) {
+function NeedsYou({ items, canManage, busy, onRelease, onWake, carriedOver = [], onAdoptAll }) {
   return (
     <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
       <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.needsYou} helpLabel="What to do about each reason">
         Needs you ({items.length})
       </AreaHeading>
+      {canManage && carriedOver.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', ...mutedStyle }}>
+          <span>{carriedOver.length === 1 ? '1 item was' : `${carriedOver.length} items were`} carried over from before this team&rsquo;s triggers started here.</span>
+          <SmallButton icon={BellRing} label={`Adopt all (${carriedOver.length})`} title="Start every carried-over item here" disabled={busy} onClick={onAdoptAll} />
+        </div>
+      )}
       {items.map((n) => (
-        <div key={n.id} style={{ ...lineStyle, borderLeft: '3px solid var(--eb-status-warning, #d97706)' }}>
+        <div key={n.id} style={{ ...lineStyle, flexWrap: 'wrap', borderLeft: '3px solid var(--eb-status-warning, #d97706)' }}>
           <UserRound size={13} style={{ flexShrink: 0, color: 'var(--eb-text-secondary)' }} />
           <span style={{ fontFamily: 'var(--eb-font-mono)', ...mutedStyle }}>{n.ref}</span>
           <Link href={n.url}>{n.title}</Link>
           <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>{n.reason}</span>
           <span style={{ marginLeft: 'auto', ...mutedStyle }} title="Waiting for">{n.waiting}</span>
+          {canManage && n.release.length > 0 && (
+            <SmallButton icon={LockOpen} label="Release claim" title={`Release the stale claim (${n.release.map((c) => c.text).join(', ')})`} disabled={busy} onClick={() => onRelease(n)} />
+          )}
+          {canManage && n.canWake && (
+            <SmallButton icon={BellRing} label={n.carriedOver ? 'Adopt' : 'Wake again'} title={n.wakes.filter((w) => w.roles.length > 0).map((w) => w.target).join(', ')} disabled={busy} onClick={() => onWake(n)} />
+          )}
+          {/* #2872: which wake label never reached its agent, and why — the
+              cause links to the GitHub Event Log row that recorded it. */}
+          {n.wakes.length > 0 && (
+            <ul style={{ flexBasis: '100%', margin: 0, paddingLeft: 'calc(13px + var(--eb-space-3))', listStyle: 'none', ...mutedStyle }}>
+              {n.wakes.map((w) => (
+                <li key={`${w.ref}:${w.label}`}>
+                  {w.ref}: <code>{w.label}</code> — {w.href
+                    ? <RouterLink to={w.href} className={CHAT_LINK_CLASS} style={{ textDecoration: 'underline' }} title="Open this event in the GitHub Event Log">{w.text}</RouterLink>
+                    : w.text}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       ))}
     </section>
@@ -417,7 +654,7 @@ function NeedsYou({ items }) {
 
 /* ── area ③: in progress ───────────────────────────────────────────── */
 
-function InProgress({ view }) {
+function InProgress({ view, busy, onRemove }) {
   return (
     <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
       <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.states} helpLabel="Where the stages come from">
@@ -426,50 +663,108 @@ function InProgress({ view }) {
       {view.empty ? (
         <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>{view.emptyText}</p>
       ) : (
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-sm)' }}>
-            <thead>
-              <tr style={{ textAlign: 'left', ...mutedStyle }}>
-                <th style={cellStyle}>Work item</th>
-                <th style={cellStyle}>Progress</th>
-                <th style={cellStyle}>Stage</th>
-                <th style={cellStyle}>In stage</th>
-              </tr>
-            </thead>
-            <tbody>
-              {view.rows.map((r) => <BoardRow key={r.id} row={r} />)}
-            </tbody>
-          </table>
-        </div>
+        <BoardTable rows={view.activeRows} canManage={view.canManage} busy={busy} onRemove={onRemove} />
       )}
     </section>
   );
 }
 
-const cellStyle = { padding: 'var(--eb-space-2) var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)', verticalAlign: 'top' };
+/* ── recently completed (#2607) ────────────────────────────────────── */
 
-function BoardRow({ row }) {
+// Closed issues and merged PRs, kept for the team's retention window. Only
+// mounted when there is something to show.
+function RecentlyCompleted({ rows, hint, canManage, busy, onRemove }) {
+  return (
+    <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+      <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.states} helpLabel="Where the stages come from">
+        Recently completed ({rows.length})
+      </AreaHeading>
+      <p style={{ margin: 0, ...mutedStyle }}>{hint}</p>
+      <BoardTable rows={rows} canManage={canManage} busy={busy} onRemove={onRemove} />
+    </section>
+  );
+}
+
+function BoardTable({ rows, canManage, busy, onRemove }) {
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-sm)' }}>
+        <thead>
+          <tr style={{ textAlign: 'left', ...mutedStyle }}>
+            <th style={numberCellStyle}>Issue</th>
+            <th style={numberCellStyle}>Pull request</th>
+            <th style={cellStyle}>Work item</th>
+            <th style={cellStyle}>Progress</th>
+            <th style={cellStyle}>Stage</th>
+            <th style={cellStyle}>In stage</th>
+            {canManage && <th style={cellStyle} aria-label="Actions" />}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => <BoardRow key={r.id} row={r} canManage={canManage} busy={busy} onRemove={onRemove} />)}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+const cellStyle = { padding: 'var(--eb-space-2) var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)', verticalAlign: 'top' };
+// The leading Issue / Pull request columns (#2800): never wrapped and shrunk
+// to their content (`width: 1%`), so the title column takes the remaining width.
+const numberCellStyle = { ...cellStyle, whiteSpace: 'nowrap', width: '1%' };
+const numberTextStyle = { fontFamily: 'var(--eb-font-mono)' };
+
+// An empty Issue/Pull request cell: neutral when the work has no PR yet,
+// warning-toned when a PR has no linked issue (the view sets `empty`).
+function EmptyCell({ cell }) {
+  const style = cell.empty === 'missing'
+    ? { color: 'var(--eb-status-warning, #d97706)', fontWeight: 600 }
+    : mutedStyle;
+  return <span role="img" title={cell.title} aria-label={cell.title} style={style}>{cell.text}</span>;
+}
+
+function BoardRow({ row, canManage, busy, onRemove }) {
   return (
     <tr style={{ opacity: row.done ? 0.65 : 1 }}>
+      <td style={{ ...numberCellStyle, ...numberTextStyle }}>
+        {row.issue.empty ? <EmptyCell cell={row.issue} /> : <Link href={row.issue.url}>{row.issue.text}</Link>}
+      </td>
+      <td style={{ ...numberCellStyle, ...numberTextStyle }}>
+        {row.prEmpty ? <EmptyCell cell={row.prEmpty} /> : row.prs.map((p) => (
+          <div key={p.key}>
+            <Link href={p.url}><span style={p.struck ? { textDecoration: 'line-through' } : undefined}>{p.text}</span></Link>
+          </div>
+        ))}
+      </td>
       <td style={cellStyle}>
         <div style={{ color: 'var(--eb-text-primary)', lineHeight: 1.35 }}>
           <Link href={row.url}>{row.title}</Link>
         </div>
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap', ...mutedStyle }}>
-          {row.ref && <Link href={row.issueUrl}>{row.ref}</Link>}
-          {row.prs.map((p) => (
-            <span key={p.key} style={p.state !== 'open' ? { textDecoration: p.state === 'closed' ? 'line-through' : 'none' } : undefined}>
-              <Link href={p.url}>{p.label}{p.state === 'merged' ? ' (merged)' : ''}</Link>
-            </span>
-          ))}
-        </div>
       </td>
       <td style={cellStyle}><StageProgress steps={row.steps} blocked={row.blocked} /></td>
       <td style={cellStyle}>
-        <div style={{ color: 'var(--eb-text-primary)' }}>{row.stageLabel}</div>
-        <div style={mutedStyle}>{row.statusText}</div>
+        <ChatLink chat={row.chat}>
+          <div style={{ color: 'var(--eb-text-primary)' }}>{row.stageLabel}</div>
+          <div style={mutedStyle}>{row.statusText}</div>
+        </ChatLink>
+        {row.gateText && <div style={mutedStyle} title={row.gateTitle}>⏳ {row.gateText}</div>}
       </td>
-      <td style={{ ...cellStyle, whiteSpace: 'nowrap', ...mutedStyle }}>{row.done ? '' : row.inStage}</td>
+      <td style={{ ...cellStyle, whiteSpace: 'nowrap', ...mutedStyle }}>
+        {row.inStageTitle ? <span title={row.inStageTitle}>{row.inStage}</span> : row.inStage}
+      </td>
+      {canManage && (
+        <td style={{ ...cellStyle, whiteSpace: 'nowrap', textAlign: 'right' }}>
+          {row.removable && (
+            <SmallButton
+              icon={EyeOff}
+              label="Remove from board"
+              title="Remove from board — the GitHub ticket stays unchanged"
+              disabled={busy}
+              onClick={() => onRemove(row)}
+            />
+          )}
+        </td>
+      )}
     </tr>
   );
 }
@@ -521,7 +816,7 @@ function ColumnsDialog({ roles, config, busy, onClose, onSave }) {
       )}
     >
       <p style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-        The stages come from the team&apos;s flow. Rename, merge or hide them here; Ready and Done are always shown.
+        The stages come from the team&apos;s flow. Rename, merge or hide them here; Draft and Done are always shown.
         <PageHelpButton label="Changing the columns" size={12} section={FLOW_CONTROL_HELP_SECTIONS.columns} style={{ padding: 0, marginLeft: 4 }} />
       </p>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-sm)' }}>
@@ -558,6 +853,32 @@ function ColumnsDialog({ roles, config, busy, onClose, onSave }) {
         <input style={{ ...inputStyle, width: 70 }} type="number" min="0" value={retention} onChange={(e) => setRetention(e.target.value)} />
         hours
       </label>
+    </Modal>
+  );
+}
+
+/* ── removed items (#2637) ──────────────────────────────────────────── */
+
+function RemovedDialog({ items, busy, onClose, onRestore }) {
+  return (
+    <Modal open onClose={onClose} title={`Removed from the board (${items.length})`} maxWidth={640}>
+      <p style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+        These items are hidden from the board; their GitHub tickets are unchanged. Each one comes back on its own
+        as soon as the flow picks it up again, or when you restore it.
+        <PageHelpButton label="Removing items from the board" size={12} section={FLOW_CONTROL_HELP_SECTIONS.remove} style={{ padding: 0, marginLeft: 4 }} />
+      </p>
+      {items.length === 0 ? (
+        <p style={{ margin: 0, ...mutedStyle }}>Nothing is removed.</p>
+      ) : items.map((r) => (
+        <div key={r.removalId} style={{ ...lineStyle, marginBottom: 'var(--eb-space-2)' }}>
+          <span style={{ fontFamily: 'var(--eb-font-mono)', ...mutedStyle }}>{r.ref}</span>
+          <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <Link href={r.url}>{r.title}</Link>
+          </span>
+          <span style={{ marginLeft: 'auto', whiteSpace: 'nowrap', ...mutedStyle }} title="Removed">{r.removedAgo} ago</span>
+          <SmallButton icon={RotateCcw} label="Restore" title="Put this item back on the board" disabled={busy} onClick={() => onRestore(r)} />
+        </div>
+      ))}
     </Modal>
   );
 }

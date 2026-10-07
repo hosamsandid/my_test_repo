@@ -80,9 +80,9 @@ export function rowDetailLines(row) {
   return lines;
 }
 
-// Deep-link a drifted row to its Lineage/Drift view on the Skills page. Mirrors
+// Deep-link a drifted row to its Copies & origin view on the Skills page. Mirrors
 // the SkillsRegistry deep-link contract (#774 AC5, extended with `tab` in #1143):
-// `?skill=<name>&tier=<pool|team>&team=<id>&tab=lineage`. Team rows carry their
+// `?skill=<name>&tier=<pool|team>&team=<id>&tab=copies` (#2840). Team rows carry their
 // teamId so the viewer resolves the right copy; global rows use tier=pool.
 export function driftLineageHref(row) {
   if (!row || !row.name) return null;
@@ -94,6 +94,6 @@ export function driftLineageHref(row) {
   } else {
     params.set('tier', 'pool');
   }
-  params.set('tab', 'lineage');
+  params.set('tab', 'copies');
   return `/skills?${params.toString()}`;
 }

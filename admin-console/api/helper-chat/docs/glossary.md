@@ -16,7 +16,7 @@ newcomer misreads at least one of them.
 
 | Word | Meaning A | Meaning B |
 |---|---|---|
-| **Team** | **Access scope** — the older, coarser tenant every resource is *stamped* with. A System Admin re-assigns it on **Administration → Resources**; no new one can be minted. | **Agent Team** — a squad of *agents* working one repository (agent `role: team` + its members), created by the **Team-Setup wizard**. This is what a person is given access to, and what **Share…** shares. |
+| **Team** | **Access scope** — the older, coarser tenant every resource is *stamped* with. No new one can be minted, and **Administration → Resources** no longer offers it as an owner (#2695) — only Agent Teams. | **Agent Team** — a squad of *agents* working one repository (agent `role: team` + its members), created by the **Team-Setup wizard**. This is what a person is given access to, and what **Share…** shares. |
 | **Orchestrator** | **Orchestrator** (service) — the control-plane container that spawns and supervises every agent container. There is exactly one. | **Orchestrator** (agent role) — an agent bound to a Briefing-Pack directory that spawns one `bp-instance` per pack. |
 | **Memory** | **Memory** (per agent) — the private files an agent reads and writes about *its own* work and *its* user. Never shared. | **Knowledge** (per team) — the curated, shared, searchable knowledge base a whole team draws on. |
 | **Skill** | **Skill** (the files) — a folder of domain know-how in the skill pool. | **Skill grant** (the assignment) — which agent construct is actually allowed to use it. The grant lives on the *team agent*, never on an environment. |
@@ -146,8 +146,8 @@ repository from launching a flood of sessions.
 ### Session policy
 Whether a triggered run continues the previous conversation or starts fresh.
 `persistent` (default) resumes; `per-invocation` starts a clean session each time and
-asks the agent to write down what it learned first. Chats with a human always keep
-continuity, regardless of this setting.
+asks the agent to write down what it learned first. Chats always keep continuity;
+a pool instance keeps one session for its triggers and chat (#2595).
 
 ### Label
 A GitHub label used as a coordination signal. An agent **emits** a label to announce it
@@ -292,7 +292,7 @@ deliberately *not* the configuration audit log.
 
 ## Infrastructure
 
-### Admin Console
+### Agent Studio (web UI)
 The browser UI on port `4000`. Everything is done here: agents, credentials,
 environments, flows, knowledge, chats, logs. Sits behind a login.
 
@@ -328,6 +328,7 @@ and knowing which is which saves confusion:
 | Name | What it names | Where you see it |
 |---|---|---|
 | **Agent Studio** | the **product** | the UI, the browser tab, the login screen, the README |
+| **`admin-console`** | the **internal service name** of the Agent Studio web UI | container, image and directory names, operator docs |
 | **agent-studio** | the **compose project** (default container and volume name prefix) | `podman ps`, volume names, `COMPOSE_PROJECT_NAME` in `.env` |
 | **`.agent-studio/`** | the **per-agent workspace state directory** | every agent's file tree (`bin/`, `plugins/`, `seeded-skills.json`, `prompt-history.json`, `artifacts.jsonl`, …) |
 | **AEE** / `AEE_*` | the **internal runtime/env-var namespace** ("Agent Execution Environment") | environment variables, container labels (`aee.*`), the `io.aee.*` wire protocol, operator docs |

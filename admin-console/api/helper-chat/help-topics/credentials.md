@@ -73,16 +73,22 @@ and **Used by**, plus a rename/reassign pencil and a delete bin per row.
 
 - **Generate new keypair** — the server creates a fresh ed25519 pair, keeps the
   private half, and shows you the **public** key exactly once, with a *Copy public
-  key* button and a link straight to GitHub's *Add new SSH key* form. There is no
+  key* button and a link straight to GitHub's *Add new SSH key* form. If the
+  browser cannot copy (for example on plain `http`), the key is left selected and
+  the panel asks you to press Ctrl+C. There is no
   second chance to read it here; if you lose it, generate a new pair.
 - **Paste existing key** — you supply a private key you already have. The panel
   keeps a step-by-step guide for producing one
   (`ssh-keygen -t ed25519 -C "agent-studio-deploy-key"`) and for registering the
   public half under GitHub → *Settings* → *SSH and GPG keys* → *New SSH key*.
+  The key is parsed when you save it (OpenSSH or PEM format; passphrase-protected
+  keys are accepted), so a truncated or garbled paste is refused right away
+  instead of failing later when an agent clones.
 
 Either way the key gets a **Name** (a human label) and an **ID** (auto-derived
-from the name, editable), and you pick its ownership tier — see *Ownership tiers
-and privacy* below.
+from the name, editable: lowercase letters, digits and single hyphens, not
+starting or ending with a hyphen), and you pick its ownership tier — see
+*Ownership tiers and privacy* below.
 
 **Prefer a deploy key where you can.** A key registered on a single repository as
 a read-only deploy key is the narrowest useful credential in the system, and it is
@@ -145,8 +151,9 @@ and exactly which permissions to tick.
   **Pull requests** read & write, **Workflows** read & write, plus organisation
   **Members** read-only (the equivalent of `read:org`).
 
-Then give the token a **Name** and an **ID**, choose its ownership tier, and paste
-the value — fine-grained tokens start with `github_pat_`, classic ones with
+Then give the token a **Name** and an **ID** (same rules as for SSH keys),
+choose its ownership tier, and paste the value into the masked field (the eye
+button shows it) — fine-grained tokens start with `github_pat_`, classic ones with
 `ghp_`.
 
 **Two things happen exactly once.** GitHub shows a token value only at creation,
@@ -187,6 +194,10 @@ from the team's current Team Admin instead (see the last chapter).
 Its owner may rename, **replace** (rotate) and delete it. Delete is permanent and
 affects only you: agents relying on it fail to authenticate until you add a
 replacement.
+
+You may add several personal GitHub tokens or SSH keys, but only **one of each
+kind is used — the one you added first**. Its **Used by** cell reads *Active
+(personal)*; any further one reads *Not in use*. To switch, delete the active one.
 
 When you create one, the owner is always you — forced server-side, never
 somebody else. Personal SSH keys are **account-wide**: one key covers all of your
@@ -236,8 +247,9 @@ between tiers, because a personal secret is held per owner and a team/system
 secret per Working Environment:
 
 - **Personal** keys and tokens rotate in place using the same **Replace key** /
-  **Replace value** action on their row. Afterwards the owner's affected running agents are restarted; only
-  yours, never anyone else's.
+  **Replace value** action on their row. If it is your active one, your running
+  agents are restarted afterwards — only yours, never anyone else's; replacing a
+  personal credential that is *Not in use* restarts nothing.
 - **Team and system** keys and tokens rotate in place using the **Replace value**
   (GitHub token) / **Replace key** (SSH key) action — the circular-arrows icon on
   the row — of the shared **SSH Keys** / **GitHub Tokens** pages. For an SSH key
@@ -284,9 +296,11 @@ with no edit. So a team whose Team Admin adds a personal GitHub token or SSH key
 starts acting on GitHub **as that Team Admin** for its automatic work — the team
 credential stays configured but is **not in use** while it is overridden.
 
-The change takes effect at the agents' **next start** (the next enable or
-respawn): the token and key are baked into a container when it starts, so a
-running agent keeps the old one until then.
+The token and key are baked into a container when it starts. Adding your
+**first** personal token or key therefore restarts your running agents right
+away (the create dialog warns you; a running loop or trigger run is cut off),
+while a further one is not used and restarts nothing. Deleting one takes effect
+at the agents' **next start** (the next enable or respawn).
 
 **Seeing it in the console.** Agent Chat → **Settings** → **Repositories** shows an
 **Effective GitHub identity** box for the team: for the GitHub token and the SSH

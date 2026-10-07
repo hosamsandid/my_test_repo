@@ -492,8 +492,15 @@ function skillsSection(baseSkillsText, skills, skillDescriptions = {}) {
 // outlives the turn is silently killed — the "I'll wait in the background and
 // continue" dangling promise. This section tells the agent that up front. The
 // wait-for-an-external-event advice is autonomous-only, since only an autonomous
-// agent has the triggers/loops that are the real answer.
-function backgroundTasksSection(autonomous) {
+// agent has the triggers/loops that are the real answer. With a repository the
+// section also steers an in-turn CI wait to the foreground `aee-wait-ci` CLI
+// (#2796) instead of a background shell or a hand-rolled `gh pr checks` loop,
+// with an explicit Bash tool timeout: the runtime raises only the tool's
+// maximum, never its 2-minute default (#2815).
+// Only events the platform can actually deliver may be named here (#2797): the
+// Events API never emits check_suite / check_run / workflow_run / status, so a
+// trigger on those keys never fires — steering-dead-events.test.js guards that.
+function backgroundTasksSection(autonomous, hasRepository = false) {
   const base =
     '## Background tasks\n\n' +
     'Your run is a **single turn**: it ends the moment you produce your reply, and ' +
@@ -508,10 +515,30 @@ function backgroundTasksSection(autonomous) {
     '\n\nTo wait for something that happens **outside** this turn — CI finishing, ' +
     "another agent's pull request, a long external job — do **not** poll it in a " +
     'background task. End your turn and let an event re-wake you: add a ' +
-    '`github-event` trigger (e.g. on `check_suite.completed` or the pull-request ' +
-    'status) or use a `loop`. That is the only reliable way to continue after an ' +
-    'external event.';
-  return autonomous ? base + waitAdvice : base;
+    '`github-event` trigger (e.g. on `pull_request.checks_passed` / ' +
+    '`pull_request.checks_failed` for CI, or `pull_request.merge_conflict`) or ' +
+    'use a `loop`. That is the only reliable way to continue after an ' +
+    'external event. For unattended flows, rely on the hand-off gate: a PR ' +
+    'hand-off with a `readinessGate` holds the next agent\'s wake until CI is ' +
+    'green and the PR merges cleanly, so you never have to block a run on CI. ' +
+    'If a PR you were handed is still pending, end your turn with a short ' +
+    'status and re-apply its hand-off label: the gate holds that wake until CI ' +
+    'settles. Never count on a later wake that nothing schedules.';
+  const ciWait =
+    '\n\nTo know **within this turn** whether a pull request\'s CI is green or ' +
+    'it has a merge conflict, run `aee-wait-ci <pr>` in the **foreground** ' +
+    '(`--repo <clone-dir>` for a non-default clone). It waits up to 20 minutes ' +
+    '(always capped to your run\'s time), applies the platform\'s own CI rules ' +
+    'and prints JSON plus an exit code: `0` passed / no CI, `4` failed, ' +
+    '`5` conflict, `6` timeout, `1`/`3` error. Always pass the Bash tool ' +
+    '`timeout` explicitly — `1500000` (25 min) for the default wait, or the ' +
+    '`--timeout` minutes plus 5 — because the tool\'s 2-minute default would ' +
+    'move the wait to the background. Never wait for CI in a ' +
+    'background shell, `Monitor` or `Task`, and never hand-roll a ' +
+    '`gh pr checks` polling loop. On timeout, end your turn and continue via ' +
+    'the hand-off gate or a trigger instead of waiting longer.';
+  const core = hasRepository ? base + ciWait : base;
+  return autonomous ? core + waitAdvice : core;
 }
 
 // Human decision prompts (#2523) — ALWAYS emitted, because `aee-ask` is baked
@@ -681,7 +708,7 @@ function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDesc
   // 10b. Background tasks — ALWAYS, because Task(*)/Monitor are in every agent's
   //      allowedTools. Warns that a background wait outliving the turn is killed
   //      (the dangling-promise bug); the external-event advice is autonomous-only.
-  blocks.push(backgroundTasksSection(autonomous));
+  blocks.push(backgroundTasksSection(autonomous, envHasRepository(env, agentRepositories)));
 
   // 10c. Asking the human — ALWAYS, because `aee-ask` ships in every agent
   //      image (#2523); without it agents ask in prose the UI cannot surface.

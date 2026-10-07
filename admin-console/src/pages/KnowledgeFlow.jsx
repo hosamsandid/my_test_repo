@@ -36,6 +36,7 @@ import {
 } from './consolidation-view';
 import { hasFrontmatterMeta, syncFrontmatterName, suggestFreeName } from './promotion-frontmatter';
 import { lastUsedLabel, compareLastUsed } from './knowledge-retrieval-view';
+import { createFeedReloadThrottle } from './knowledge-reload-throttle.js';
 
 /*
  * Knowledge Flow — team-scoped (#560).
@@ -303,15 +304,39 @@ export default function KnowledgeFlow() {
   }, [selectedTeam, loadSelectedTeam]);
 
   // Live feed → pulse the matching card + refresh the selected team's slice.
-  const reloadTimers = useRef({});
+  // #571: throttled to one graph reload per team per ~8 s while events stream
+  // (always with a trailing reload), none while the tab is hidden and one
+  // catch-up when it is visible again (knowledge-reload-throttle.js). Reloads
+  // after the user's own mutations call loadTeamData directly and stay immediate.
+  const feedReloadRef = useRef(null);
+  feedReloadRef.current = (teamId) => {
+    const t = (teams || []).find(x => x.id === teamId);
+    loadTeamData(teamId, t ? t.members : [], { withPrivate: false });
+  };
+  const feedThrottleRef = useRef(null);
+  useEffect(() => {
+    const throttle = createFeedReloadThrottle({
+      reload: (teamId) => feedReloadRef.current(teamId),
+      isHidden: () => document.hidden === true,
+    });
+    feedThrottleRef.current = throttle;
+    let prevHidden = document.hidden === true;
+    const onVisibility = () => {
+      const nextHidden = document.hidden === true;
+      throttle.visibilityChanged(prevHidden, nextHidden);
+      prevHidden = nextHidden;
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      throttle.dispose();
+      feedThrottleRef.current = null;
+    };
+  }, []);
   const scheduleTeamReload = useCallback((teamId) => {
-    if (!teamId) return;
-    clearTimeout(reloadTimers.current[teamId]);
-    reloadTimers.current[teamId] = setTimeout(() => {
-      const t = (teams || []).find(x => x.id === teamId);
-      loadTeamData(teamId, t ? t.members : [], { withPrivate: false });
-    }, 400);
-  }, [teams, loadTeamData]);
+    if (!teamId || !feedThrottleRef.current) return;
+    feedThrottleRef.current.request(teamId);
+  }, []);
 
   const onFeedEvent = useCallback((ev) => {
     if (!ev || !ev.teamId) return;
@@ -2614,7 +2639,7 @@ function ColHeader({ label, hint, tip, trailing }) {
 function FlowArrow() {
   return (
     <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'center', paddingTop: 26 }}>
-      <ArrowRight size={14} style={{ color: 'var(--eb-border-strong, var(--eb-border-default))' }} />
+      <ArrowRight size={14} style={{ color: 'var(--eb-border-default)' }} />
     </div>
   );
 }
@@ -3202,7 +3227,7 @@ function SkillInspector({ open, onClose, skill, teamId, status, busy, installedC
                     borderRadius: 'var(--eb-radius-full)', fontSize: 'var(--eb-text-xs)', cursor: 'pointer',
                     border: `1px solid ${selectedFile === f.path ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
                     background: selectedFile === f.path ? 'var(--eb-accent-primary)' : 'var(--eb-bg-elevated)',
-                    color: selectedFile === f.path ? 'var(--eb-text-on-accent, #fff)' : 'var(--eb-text-secondary)',
+                    color: selectedFile === f.path ? 'var(--eb-text-inverted)' : 'var(--eb-text-secondary)',
                   }}>
                   <FileText size={11} />{f.path}
                 </button>
@@ -3268,7 +3293,7 @@ function SkillInspector({ open, onClose, skill, teamId, status, busy, installedC
           {members.map(m => {
             const chip = MEMBER_STATE_CHIPS[m.state] || { label: m.state, color: 'var(--eb-text-muted)', tip: '' };
             return (
-              <div key={m.agentId} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0', borderBottom: '1px solid var(--eb-border-subtle, var(--eb-border-default))' }}>
+              <div key={m.agentId} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0', borderBottom: '1px solid var(--eb-border-default)' }}>
                 <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {m.displayName || m.agentId}
                 </span>
@@ -3767,7 +3792,7 @@ function PrivateSkillsBlock({ teamId, skills, onLifted }) {
               <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
                 {sk.name}
                 {sk.granted && (
-                  <span style={{ marginLeft: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-regular, normal)' }}>
+                  <span style={{ marginLeft: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-normal)' }}>
                     (edited copy of a granted skill)
                   </span>
                 )}
@@ -5207,7 +5232,7 @@ const primaryBtn = {
   display: 'inline-flex', alignItems: 'center', gap: 6,
   padding: '4px var(--eb-space-3)', borderRadius: 'var(--eb-radius-md)',
   border: '1px solid var(--eb-accent-primary)', background: 'var(--eb-accent-primary)',
-  color: 'var(--eb-text-on-accent, #fff)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer',
+  color: 'var(--eb-text-inverted)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer',
 };
 
 // Inline keyboard-hint pill shown on review-mode action buttons (#776 §1).

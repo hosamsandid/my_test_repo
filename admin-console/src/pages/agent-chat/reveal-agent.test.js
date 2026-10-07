@@ -37,21 +37,21 @@ test('the wait is bounded and retried several times within the bound', () => {
   assert.ok(REVEAL_WAIT_MS / REVEAL_RETRY_MS >= 3);
 });
 
-test('revealPlan: a filter that hides the target is dropped', () => {
+test('revealPlan (#2740): a selection that hides the target ticks only its entry back in', () => {
   const agent = { id: 'acme-dev', role: 'team-member', parentTeamId: 'acme' };
-  assert.equal(revealPlan(agent, { kind: 'all' }).resetFilter, false);
-  assert.equal(revealPlan(agent, { kind: 'team', id: 'acme' }).resetFilter, false);
-  assert.equal(revealPlan(agent, { kind: 'team', id: 'other' }).resetFilter, true);
-  assert.equal(revealPlan(agent, { kind: 'agent', id: 'someone' }).resetFilter, true);
-  assert.equal(revealPlan(agent, { kind: 'agent', id: 'acme-dev' }).resetFilter, false);
+  assert.equal(revealPlan(agent, { hidden: [] }).showKey, null);
+  assert.equal(revealPlan(agent, { hidden: ['team:other'] }).showKey, null);
+  assert.equal(revealPlan(agent, { hidden: ['team:acme', 'team:other'] }).showKey, 'team:acme');
+  // An ungrouped row is revealed through the Individual agents block.
+  assert.equal(revealPlan({ id: 'solo', role: 'orchestrator' }, { hidden: ['singles'] }).showKey, 'singles');
 });
 
 test('revealPlan: names the team group to expand', () => {
-  assert.equal(revealPlan({ id: 'acme-dev', role: 'team-member', parentTeamId: 'acme' }, { kind: 'all' }).groupKey, 'team:acme');
+  assert.equal(revealPlan({ id: 'acme-dev', role: 'team-member', parentTeamId: 'acme' }, { hidden: [] }).groupKey, 'team:acme');
   // A stub member lives in the same group (its own sub-section is opened by the row).
-  assert.equal(revealPlan({ id: 'acme-qa', role: 'team-member', parentTeamId: 'acme', enabled: false }, { kind: 'all' }).groupKey, 'team:acme');
-  assert.equal(revealPlan({ id: 'solo', role: 'agent' }, { kind: 'all' }).groupKey, null);
-  assert.deepEqual(revealPlan(null, { kind: 'all' }), { resetFilter: false, groupKey: null });
+  assert.equal(revealPlan({ id: 'acme-qa', role: 'team-member', parentTeamId: 'acme', enabled: false }, { hidden: [] }).groupKey, 'team:acme');
+  assert.equal(revealPlan({ id: 'solo', role: 'agent' }, { hidden: [] }).groupKey, null);
+  assert.deepEqual(revealPlan(null, { hidden: [] }), { showKey: null, groupKey: null });
 });
 
 test('revealEmptyStateCopy: waiting, stub, or the ordinary card', () => {
@@ -65,4 +65,18 @@ test('revealEmptyStateCopy: waiting, stub, or the ordinary card', () => {
   assert.match(revealEmptyStateCopy({ waiting: true, stubAgent: { id: 'x' } }).title, /new team/);
   assert.equal(revealEmptyStateCopy({}), null);
   assert.equal(revealEmptyStateCopy(), null);
+});
+
+test('#2705 AC2 — revealEmptyStateCopy: a Materialize in flight replaces the stub prompt', () => {
+  const stub = { id: 'acme-qa', displayName: 'QA' };
+  const copy = revealEmptyStateCopy({ stubAgent: stub, materializingAgent: stub });
+  assert.equal(copy.title, 'Materializing QA…');
+  assert.equal(copy.busy, true);
+  // It must not keep telling the user to choose what is already running.
+  assert.doesNotMatch(`${copy.title} ${copy.hint}`, /choose Materialize|not initialised|disabled/i);
+  assert.match(revealEmptyStateCopy({ materializingAgent: { id: 'acme-qa' } }).title, /^Materializing acme-qa…$/);
+  // The plain stub card carries no busy flag.
+  assert.equal(revealEmptyStateCopy({ stubAgent: stub }).busy, undefined);
+  // Waiting for a new team still wins.
+  assert.match(revealEmptyStateCopy({ waiting: true, materializingAgent: stub }).title, /new team/);
 });

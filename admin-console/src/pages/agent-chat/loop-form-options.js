@@ -90,3 +90,36 @@ export function resolveGapSeconds(preset, raw) {
   const p = GAP_PRESETS.find(x => x.value === preset);
   return p && p.seconds > 0 ? p.seconds : undefined;
 }
+
+// Verifier copy for the loop form's "Who checks the work?" field (#2682). A
+// team agent's blank verifier is filled with a sibling — client-side on roster
+// load and again server-side on save (concept §4.6) — but only when a sibling
+// exists. With no other member in the Agent Team nothing can be assigned and
+// the loop runs self-graded, so the copy must say that instead of promising a
+// teammate. `roster` is the form's loopRoster ({ isTeamAgent, siblings }) or
+// null while loading. Returns { noneLabel, notice, noticeTone, enforced }
+// (notice null = no notice; enforced = a separate verifier will be applied).
+export function loopVerifierCopy(roster) {
+  const isTeamAgent = !!roster?.isTeamAgent;
+  const hasSibling = Array.isArray(roster?.siblings) && roster.siblings.length > 0;
+  if (!isTeamAgent) {
+    return { noneLabel: 'No one (the agent judges itself)', notice: null, noticeTone: null, enforced: false };
+  }
+  if (!hasSibling) {
+    return {
+      noneLabel: 'No one (no teammate available — the agent checks its own work)',
+      notice: 'No teammate available — this Agent Team has no other member, so the agent '
+        + 'checks its own work. For an independent check, choose a command that must pass '
+        + 'each try, or add a reviewer to the team.',
+      noticeTone: 'info',
+      enforced: false,
+    };
+  }
+  return {
+    noneLabel: 'No one (a teammate is assigned automatically)',
+    notice: 'Team agents must not grade their own work — a separate teammate is '
+      + 'assigned automatically and re-applied on save even if left blank.',
+    noticeTone: 'warning',
+    enforced: true,
+  };
+}

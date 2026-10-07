@@ -135,6 +135,15 @@ RUN chmod +x /opt/ace/scripts/aee-wake \
 RUN chmod +x /opt/ace/scripts/aee-ask \
     && ln -sf /opt/ace/scripts/aee-ask /usr/local/bin/aee-ask
 
+# `aee-wait-ci` — bounded, FOREGROUND wait for a pull request's CI and merge
+# status within one turn (#2796): JSON result + an exit code per verdict
+# (passed/no-ci, failed, conflict, timeout, error). The verdict rules are the
+# poller's own (#2794), read from scripts/pr-readiness-rules.json — a
+# byte-identical copy of orchestrator/pr-readiness-rules.json — so the two
+# cannot drift. The wait is capped by the turn's AEE_RUN_DEADLINE.
+RUN chmod +x /opt/ace/scripts/aee-wait-ci \
+    && ln -sf /opt/ace/scripts/aee-wait-ci /usr/local/bin/aee-wait-ci
+
 # `usage` — read-only view of this agent's / its team's token usage (#679). On
 # PATH so agents call it directly: `usage me` / `usage team` query the
 # orchestrator's read-only usage endpoint across the volume-isolation boundary

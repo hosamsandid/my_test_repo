@@ -129,7 +129,7 @@ per-invocation runner; it only adds **re-arm-on-completion + a stop contract**.
   - the backstop trips → **paused** (existing #611 behaviour, now surfaced as a loop state).
 - **Verifier before progress counts.** If `verify` is set, the iteration's work only
   "counts" when `verify` passes; otherwise the failure is fed back into the next
-  iteration's prompt (principle #3). Reuse `_run_pre_check` for the command form;
+  iteration's prompt (principle #3). The command form runs via `_run_loop_command` (#2745);
   the agent form posts the artifact to a second agent and waits — this is exactly
   our existing reviewer-role / `ace:quality-gate` pattern, just wired as loop backpressure.
 - **Flow hand-off (`verify: {flow: true}`).** When the loop is the *start of a wired
@@ -164,7 +164,7 @@ per-invocation runner; it only adds **re-arm-on-completion + a stop contract**.
 |---|---|
 | Run one iteration | `_execute` / `_execute_inner` (unchanged chokepoint) |
 | Fresh context | `sessionPolicy: per-invocation` (existing) |
-| `until` / `verify` command | `_run_pre_check` (existing exit-code runner) |
+| `until` / `verify` command | `_run_loop_command` (`/bin/sh -c` in the agent workspace; #2745 — `_run_pre_check` runs a script path, not a command line) |
 | Anti-runaway | Backstop `try_acquire` (existing #611) — loop budget sits *on top* |
 | Token accounting | usage store / `usage` CLI (existing) |
 | Agent-form verifier | reviewer roles + `ace:quality-gate` (existing) |

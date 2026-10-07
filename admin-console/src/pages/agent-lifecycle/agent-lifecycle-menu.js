@@ -142,7 +142,7 @@ export function buildAgentMenu({ agent, canManage = true, locked = false, busy =
     items.push({
       key: 'clone',
       label: 'Clone…',
-      ...gate(isStub, isStub ? 'Activate the agent before cloning it.' : undefined),
+      ...gate(isStub, isStub ? 'Materialize the agent before cloning it.' : undefined),
     });
   }
 
@@ -161,7 +161,7 @@ export function buildAgentMenu({ agent, canManage = true, locked = false, busy =
     items.push({
       key: 'extract-template',
       label: 'Save as template…',
-      ...gate(isStub, isStub ? 'Activate the agent before saving it as a template.' : undefined),
+      ...gate(isStub, isStub ? 'Materialize the agent before saving it as a template.' : undefined),
     });
   }
 
@@ -286,12 +286,15 @@ export function isChatOpenable(agent) {
  * config gets the plain single-agent confirm, which is honest — `deleteTargetFor`
  * no longer collects bp-instances, so nothing else would go with it here.
  */
-export function deleteDialogCopy(target) {
+export function deleteDialogCopy(target, { deleteTeamToo = false } = {}) {
   const isTeam = target?.role === 'team';
   const count = isTeam ? (target?.children?.length ?? 0) : 0;
 
   if (!isTeam) {
-    return { title: 'Delete agent?', confirmLabel: 'Delete', maxWidth: 440 };
+    // The last member of its team (#2685): the button names the team when the
+    // "also delete the team" choice is on, so the click says what it does.
+    const withTeam = deleteTeamToo && !!target?.lastMemberOf?.canManage;
+    return { title: 'Delete agent?', confirmLabel: withTeam ? 'Delete agent and team' : 'Delete', maxWidth: 440 };
   }
 
   const title = `Delete team "${target.displayName ?? target.id}"?`;
@@ -304,6 +307,29 @@ export function deleteDialogCopy(target) {
     confirmLabel: `Delete team and ${count} member${count !== 1 ? 's' : ''}`,
     maxWidth: 560,
   };
+}
+
+/**
+ * What happens to the team when the agent being deleted is its LAST member
+ * (#2685). Deleting it used to leave "<name> Team" behind in the rail with no
+ * members and no word about it; the confirm now names the team's fate either
+ * way. `null` when the target is not the last member of a team.
+ *
+ * `deleteTeamToo` is the dialog's checkbox; a team the caller cannot manage is
+ * never offered, so it always stays.
+ */
+export function lastMemberDeleteNote(target, deleteTeamToo) {
+  const team = target?.lastMemberOf;
+  if (!team) return null;
+  const name = `"${team.displayName ?? team.id}"`;
+  const lead = `This is the last member of the team ${name}.`;
+  if (!team.canManage) {
+    return `${lead} The team stays, with no members — you do not have the rights to delete it.`;
+  }
+  if (deleteTeamToo) {
+    return `${lead} The team is deleted with it, including its locally cached and curated knowledge.`;
+  }
+  return `${lead} The team stays, with no members — delete it later with "Delete team…".`;
 }
 
 /**

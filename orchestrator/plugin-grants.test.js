@@ -12,6 +12,7 @@ const {
   pluginGrantFor,
   planAgentPluginGrantEdit,
   planPluginSync,
+  uninstalledRevokeGrant,
 } = require('./plugin-grants');
 
 // ---- normalizeGrant ---------------------------------------------------------
@@ -156,4 +157,23 @@ test('planPluginSync: override member skips unless carrying the plugin or opted 
     { agentId: 'm-skip', action: 'skip-override' },
     { agentId: 'm-optin', action: 'sync-override' },
   ]);
+});
+
+// ---- uninstalledRevokeGrant (#2651) -----------------------------------------
+
+test('a deactivate of a still-held grant resolves without a manifest, keeping its granularity', () => {
+  const held = [{ id: 'patterns-catalog', scopeGranularity: 'agent' }, 'dummy-echo'];
+  assert.deepEqual(uninstalledRevokeGrant(false, held, 'patterns-catalog'), { id: 'patterns-catalog', scopeGranularity: 'agent' });
+  assert.deepEqual(uninstalledRevokeGrant(false, held, ' dummy-echo '), { id: 'dummy-echo', scopeGranularity: 'team' });
+});
+
+test('an id the construct does not carry is not revocable (the caller keeps the not-installed error)', () => {
+  assert.equal(uninstalledRevokeGrant(false, ['dummy-echo'], 'nope'), null);
+  assert.equal(uninstalledRevokeGrant(false, [], 'nope'), null);
+  assert.equal(uninstalledRevokeGrant(false, ['dummy-echo'], ''), null);
+  assert.equal(uninstalledRevokeGrant(false, ['dummy-echo'], null), null);
+});
+
+test('an ACTIVATE of an uninstalled plugin never qualifies, even when the grant is held', () => {
+  assert.equal(uninstalledRevokeGrant(true, ['dummy-echo'], 'dummy-echo'), null);
 });

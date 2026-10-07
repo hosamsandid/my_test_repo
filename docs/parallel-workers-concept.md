@@ -205,7 +205,9 @@ from "a human decided" to "the supervisor decided").
    from the resolved base (clean main / PR head / input copy); throwaway Matrix
    account (D7); config `pool-instance: true`, `enabled:true`, per-invocation.
 4. **Run:** the instance executes *R*'s prompt/LoopScript, opens its PR / writes
-   its artifact.
+   its artifact. Every trigger run and chat turn of the instance continues ONE
+   Claude session (its DM room's session pointer, #2595) — only loop iterations
+   start fresh; the pointer is not archived at teardown.
 5. **Reap the container** when the run ends (nothing to keep running).
 6. **Release the slot (D4)** when the reconcile tick sees *I* done.
 7. **Graceful teardown (D8):** commit/push partial work + archive the log, then
@@ -1026,7 +1028,9 @@ up until the user manually reloaded. #2311 makes that sentence true.
   scroll position — with an inline notice banner
   (`agent-removed-notice.js` / `ChatPanel`'s `removedFromRoster` prop) instead
   of the disabled-agent banner. A route that never named a real agent at all
-  (a bad deep link) still bounces to `/chats` exactly as before.
+  (a bad deep link) still bounces to `/chats` — since #2619 with an
+  *Agent "<id>" not found* empty state (`agent-not-found.js`) instead of the
+  generic "pick an agent" card.
 - **Scope**: Agent Chat rail only (D4) — the pure `roster-diff.js` module has
   no Agent Chat import and could back another live list later, but nothing
   else was wired to it. The refresh mechanism is roster-generic and always on;
@@ -1082,3 +1086,129 @@ was filed after exactly that was observed (a developer pool sitting at
   role-stage-scoped reap (freeing an instance when ITS stage hands off rather
   than only when the whole ticket closes) — unchanged, flagged as a
   follow-up rather than guessed at.
+
+## Amendment 13 — the per-role cap counts provisioning instances (#2760)
+
+`planPoolDispatch`'s `maxInstances` check used to count only instances whose
+config was on disk (`_liveInstanceIdsForRole`). `routePooledDispatch` starts the
+spawn without awaiting it, and the spawn (rework-ref lookup + `addTeamMember`)
+takes seconds — concurrent dispatches for other items in that window all passed
+the cap (observed: cap 3, 5 live instances).
+
+- **Provisioning slots** (`orchestrator/pool-spawn-slots.js`, in-memory): both
+  dispatch paths spawn through `startPoolSpawn`, which reserves a slot
+  synchronously — in the same tick as the cap check — and releases it when the
+  spawn settles. The cap counts `_cappedInstanceIdsForRole` = live ∪
+  provisioning; the recurring tick counts provisioning items as taken too.
+- **Same item while provisioning** (D11): the dispatch joins the in-flight spawn
+  and lands on the instance once it exists — no second spawn, no extra slot.
+- **Spawn failure**: the slot frees immediately; the dispatch is re-routed after
+  a bounded backoff (15 s / 1 min / 5 min), re-checking the cap each time.
+- **Restart**: slots are not persisted — nothing is in flight after a restart,
+  so none can leak; a spawn that already wrote its `_provisioning` config is
+  counted on disk and reaped by #2493 if it never finishes.
+- An ordinary `max-instances` refusal is unchanged (it still falls through to
+  the role template, as before #2760). Lowering the cap stops nothing; it only
+  refuses new spawns until the count is below it.
+- **UI**: `GET /internal/teams/:id/pool-control`'s `liveInstanceCount` includes
+  provisioning instances (and, since Amendment 14, leaves out waiting ones); `GET /api/matrix/agents` ships `poolMaxInstances` on
+  pooled role templates. The rail reads *Instances (5 / 3)* and the Scaling
+  section *Live instances: 5 / 3*, both marked when over the cap
+  (`admin-console/src/pages/process/pool-cap-view.js`).
+
+## Amendment 14 — an instance waits while its PR is open (#2789)
+
+The idle reaper (Amendment 12) removed an instance as soon as it had opened its
+PR and gone idle, so review feedback — routed to the same instance id as
+before (`entryTicketRef` → `poolInstanceId`) — found nothing there and spawned
+a fresh instance without the session. An instance now has a persisted
+**waiting** state.
+
+- **Detection**: `poolReapSweepTeam` reads each repo's open PRs once per sweep
+  (`_openPullsForRepo`, `pulls?state=open`, up to 10 pages) and, for every
+  **idle** instance with a `poolRepo`/`poolItem`, computes the linked open PRs
+  (`agent-pool.js#linkedOpenPrs`: a PR that closes the item per `parseCloses`,
+  or whose own number is the item). A busy instance is never waiting; a
+  recurring-pool instance (no repo/item) never waits.
+- **Persistence**: one record per instance in the team's `pool-waiting.json`
+  (sibling of `pool-control.json`): `{spawnedAt, waiting, prs, unknown,
+  waitingSince, waitedMs, checkedAt}`. A record whose `spawnedAt` differs from
+  the instance's is ignored, so a recycled id never inherits it. Records of
+  gone instances are dropped on the next sweep.
+- **Reapers**: neither the idle nor the hard-timeout reaper touches a waiting
+  instance (no `needs-human`); `isInstanceTimedOut` subtracts the time spent
+  waiting (`waitedMsSoFar`). When the last linked PR is merged or closed
+  (`waitJustEnded`), the idle instance is reaped on that sweep without a new
+  idle window. The ticket-release reap is unchanged.
+- **GitHub unreachable**: a failed lookup keeps the instance waiting
+  (`unknown: true`, previous PR list kept); only a successful lookup ends a wait.
+- **Cap**: `planPoolDispatch({ waitingInstanceIds })` leaves waiting instances
+  out of `maxInstances`. Reuse is still checked before the cap, so returning
+  work for a waiting instance is delivered at the cap (it can push the active
+  count above it); `routePooledDispatch` ends the wait at once.
+- **Drain / Off**: `settlePoolDrains` counts waiting instances, so a drain
+  settles to `off` only once none is left; feedback is still delivered while
+  draining, while `off` refuses it as before.
+- **UI**: `GET /internal/teams/:id/pool-control`'s `liveInstanceCount` is now
+  **active** instances only (live ∪ provisioning, minus waiting), plus
+  `waitingInstanceCount` and `waitingInstances: [{instanceId, prs}]`.
+  `GET /api/matrix/agents` adds `poolWaiting`/`poolWaitingPr` (lowest open PR)
+  on an instance row. The rail and the Scaling section read
+  *Instances (2 / 3 active · 4 waiting)*, an instance row *Waiting for PR #N*;
+  the Flow Control board adds *· n waiting on a PR*; pool instance lanes gain a
+  `waiting` tag carrying `prs`.
+- **Cost**: a waiting instance keeps its container for as long as the PR stays
+  open; there is no upper bound on the wait besides merging/closing the PR or
+  a manual delete.
+
+## Amendment 15 — instances are not Flow Editor nodes (#2814)
+
+The live graph builders drew every auto-scaled instance as its own node with a
+copy of its role's inbound edges, so a live pooled team looked as if it had an
+extra role, and the live export carried a phantom role.
+
+- **Server**: `GET /api/process/graph`, `GET /api/flows/graph` and the live
+  export `GET /api/process/template` (also read by *Edit as draft*) share
+  `admin-console/api/live-graph-members.js#isLiveGraphMember`, which leaves out
+  the team holder and any config with `poolInstance: true`. The filter is the
+  config flag, never the id shape — a hand-created member named `…-i3` stays a
+  role. Lints, the human-touchpoint count and Flow Copilot's member list follow.
+- **pool-control**: each `roles[]` row of `GET /internal/teams/:id/pool-control`
+  adds `instances: [{instanceId, item, status}]` — every live instance, sorted
+  by item then id, `item` `null` for an instance without one, `status`
+  `running` / `waiting` / `timed-out`. It is built by
+  `pool-instance-lanes.js#liveInstanceRows` with the same status rule
+  (`instanceStatus`) as the instance lanes and the hard-timeout reaper.
+- **UI**: a pooled role's node carries an **n running** badge (counting all
+  three statuses) and its Node Inspector lists *#item · status* per instance;
+  nothing is shown while the role has no live instance. Flow anomalies
+  attributed to an instance are counted on its role's node (`poolOf`).
+
+## Amendment 16 — instances are never direct GitHub wake listeners (#2875)
+
+A pool instance inherits its role's `github-event` triggers. Delivery paths
+matched listeners by trigger alone, so a label wake also reached every live
+instance of the role — including instances working on another ticket. On
+2026-10-06 the internal label fast-path woke `code-reviewer-i2859` for PR
+#2820 (ticket #2819); it posted the review there. The same family produced the
+duplicate PRs on #2685, #2698 and #2579.
+
+**Rule.** An agent with `poolInstance: true` is never a direct wake listener on
+any path. The wake goes to the role **template**; `enqueuePending` →
+`planPoolDispatch` routes it onto the item's own instance (reusing it, or
+spawning one), so the instance that already holds the item keeps receiving its
+follow-ups through the item key (#2789). One pure helper decides it,
+`orchestrator/pool-wake-target.js`:
+
+- `isDirectWakeListener(config)` — false for a pool instance. Applied in the
+  poller's plan (`computePollPlan`) and the label fast-path's matcher
+  (`matchPollerListeners`, also used by the Flow Supervisor). A parity test
+  pins that both return the same listener set.
+- `wakeTargetAgentId(agentId, config)` — a pool instance's template. "Fire
+  again" on a drop logged for an instance enqueues on the template; the
+  re-fire row records the drop's agent in `refireOf.agentId`, so the instance's
+  Events tab still shows the drop as re-fired and a second re-fire is refused.
+
+Consequence: instance subscribers no longer appear in the poller's fan-out, so
+the Event Log stops showing their per-event `wake-already-armed` drops. A role
+whose template is switched off now wakes none of its instances either.

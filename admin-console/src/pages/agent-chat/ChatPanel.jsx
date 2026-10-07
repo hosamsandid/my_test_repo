@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { useNavigate } from 'react-router';
 import { Loader2, RefreshCw, RotateCcw, Gauge, Trash2, X, AlertTriangle } from 'lucide-react';
 import { apiCall, useApi } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
@@ -14,15 +15,16 @@ import ChatModelSelector from './ChatModelSelector.jsx';
 import HeaderOverflowMenu from './HeaderOverflowMenu.jsx';
 import { chatResetAction } from './chat-model-selector.js';
 import { TriggerForm } from './TriggersPanel';
-import { isLaunchedLoop } from './trigger-summary.js';
 import { isAtBottom, isNearTop } from './chat-scroll.js';
-import { latestLoopProgress } from './loop-run-view.js';
+import { latestLoopProgress, liveLoopSignal, runningLaunchedLoop } from './loop-run-view.js';
 import { useSessionsActive } from './SessionsActiveContext';
 import { hasActiveTriggerSessionForRoom } from './sessions-active';
 import {
   ASK_QUESTION_FIELD, ASK_ANSWER_FIELD,
   buildAnswerContent, buildMultiAnswerContent, buildSelectionAnswerContent,
   multiAnswerText, indexAskAnswers, questionState,
+  advanceAskProgress, consolidateAskAnswers, buildTypedAnswer, activeMultiQuestionCard,
+  askComposerPlaceholder, EMPTY_ASK_PROGRESS,
 } from './ask-question-view.js';
 import LearningBadge from '../../components/LearningBadge';
 import PageHelpButton from '../../components/PageHelpButton';
@@ -35,10 +37,12 @@ import { computeContextNudge, nudgeDismissStorageKey, isNudgeDismissed } from '.
 import SessionInfoPopover from './SessionInfoPopover.jsx';
 import { maintenanceBannerText } from './maintenance-banner';
 import { agentRemovedNoticeText } from './agent-removed-notice.js';
-import { providerWarningText, personalProviderNoticeText } from '../provider-health-view.js';
+import { chatReadOnlyHint } from './chat-read-only.js';
+import { providerWarningText, providerBudgetWarningText, personalProviderNoticeText } from '../provider-health-view.js';
 import { RESUME_MESSAGE } from './resume-session';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
 import { AUTHOR_FIELD, authorStampFor, buildAuthorDirectory } from './message-author.js';
+import { STATUS_NOTE_FIELD, lastTurnMessage } from './status-note.js';
 import {
   resolveInitialFontSize, loadStoredFontSize, FONT_SIZE_CHANGED_EVENT,
 } from './chat-font-size.js';
@@ -102,11 +106,17 @@ const MSG_NOT_FOUND_NOTICE_MS = 4000;
  *        `MAX_MSG_BACKFILL_ATTEMPTS`), scrolls it into view via VirtualList's
  *        `scrollToKey`, then briefly highlights it. Falls back to the normal
  *        default position with a transient notice if the id can't be found.
+ * @param {?(ref:object)=>void} [onShowInSession] "Show in session log" (#2603):
+ *        stable callback passed straight to each Message; receives the
+ *        message's `sessionJumpRef`.
  */
 export default function ChatPanel({
   agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost, contextFill,
   onWorkspaceChanged, onTodoBoundary, onOpenKnowledge, resumeRequest,
   insertRefRequest, msgTargetRequest,
+  // #2603: stable callback behind each message's "Show in session log" button;
+  // AgentChat opens the Sessions tab and hands the request to SessionsPanel.
+  onShowInSession = null,
   // #2311 D2: true once the live roster poll has confirmed this agent is no
   // longer in `/api/matrix/agents` while its chat is still open. `agent` is
   // then the LAST known snapshot (frozen by the caller), not live data — the
@@ -120,6 +130,11 @@ export default function ChatPanel({
   const [creating, setCreating]      = useState(false);
   const [sending, setSending]        = useState(false);
   const [uploading, setUploading]    = useState(false);
+  // Step progress of multi-question cards (#1799), keyed by the question's
+  // event_id: { openIdx, answers: { questionId → answer } }. Held here rather
+  // than in the card so a text typed in the composer can answer the open
+  // question (#2821) and a superseded card still knows how far the user got.
+  const [askProgress, setAskProgress] = useState({});
 
   // Backfill (scroll-up) state. `endToken` is the Matrix `end` field from
   // `dir=b` /messages, which marks the older boundary — pass it back as
@@ -177,11 +192,26 @@ export default function ChatPanel({
   // or null (neutral running state), derived from the numbered `trigger.fired`
   // session-log rows at the same cadence as the trigger poll.
   const [loopProgress, setLoopProgress] = useState(null);
+  // Live loop signals (#2683): ids of launched loops whose finished-loop record
+  // arrived over the live timeline (a lagging trigger list must not revive
+  // their banner), and the handler the SSE callback hands loop signals to —
+  // a ref, because the handler is defined below `handleEvent`.
+  const finishedLoopIdsRef = useRef(new Set());
+  const onLoopSignalRef = useRef(null);
   const [loopBusy, setLoopBusy] = useState(false);
   const [showStopLoopConfirm, setShowStopLoopConfirm] = useState(false);
   // A chat-turn stop request is in flight (#1427). Distinct from `loopBusy`
   // (loop lifecycle) so the unified Stop button reflects either abort path.
   const [stopping, setStopping] = useState(false);
+
+  // #2713: a System Admin outside the agent's team reads this chat but may not
+  // write in it — the server's `canChat` flag on the roster row decides, and the
+  // send/upload routes refuse with 403 either way. Every write entry point
+  // (send, quick-reply, upload, dictation, meeting, loop launch) is gated on
+  // this; Stop, reset, Clear History and the rest are not.
+  const readOnlyHint = chatReadOnlyHint(agent);
+  const readOnly = !!readOnlyHint;
+  const navigate = useNavigate();
 
   // Per-agent model selection. `modelOptions` is the resolved snapshot from
   // /api/agents/:id/model-options: which endpoint the agent is bound to,
@@ -362,6 +392,8 @@ export default function ChatPanel({
             msgtype:  ev.content?.msgtype || 'm.text',
             'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
             'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
+            'io.aee.triggerFailure':  ev.content?.['io.aee.triggerFailure'] || null,
+            [STATUS_NOTE_FIELD]:  ev.content?.[STATUS_NOTE_FIELD] || null,
             [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
             [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
             [AUTHOR_FIELD]:        ev.content?.[AUTHOR_FIELD] || null,
@@ -412,6 +444,8 @@ export default function ChatPanel({
           msgtype:  ev.content?.msgtype || 'm.text',
           'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
           'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
+          'io.aee.triggerFailure':  ev.content?.['io.aee.triggerFailure'] || null,
+          [STATUS_NOTE_FIELD]:  ev.content?.[STATUS_NOTE_FIELD] || null,
           [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
           [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
           [AUTHOR_FIELD]:        ev.content?.[AUTHOR_FIELD] || null,
@@ -530,6 +564,8 @@ export default function ChatPanel({
       msgtype:  ev.content?.msgtype || 'm.text',
       'io.aee.trigger':  triggerMeta,
       'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
+      'io.aee.triggerFailure':  ev.content?.['io.aee.triggerFailure'] || null,
+      [STATUS_NOTE_FIELD]:  ev.content?.[STATUS_NOTE_FIELD] || null,
       [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
       [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
       [AUTHOR_FIELD]:        ev.content?.[AUTHOR_FIELD] || null,
@@ -540,6 +576,11 @@ export default function ChatPanel({
     // earliest observable signal that a new, unrelated session has begun in
     // this room — close any stale To-Do window from the previous run (#273).
     if (triggerMeta) onTodoBoundary?.();
+
+    // A loop iteration notice or the loop's terminal record (#2683): update the
+    // composer's loop banner now instead of on the next 15-s poll.
+    const loopSignal = liveLoopSignal(ev.content);
+    if (loopSignal) onLoopSignalRef.current?.(loopSignal);
 
     setMessages(prev => {
       // Already have the canonical event — skip.
@@ -646,6 +687,8 @@ export default function ChatPanel({
             msgtype:  ev.content?.msgtype || 'm.text',
             'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
             'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
+            'io.aee.triggerFailure':  ev.content?.['io.aee.triggerFailure'] || null,
+            [STATUS_NOTE_FIELD]:  ev.content?.[STATUS_NOTE_FIELD] || null,
             [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
             [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
             [AUTHOR_FIELD]:        ev.content?.[AUTHOR_FIELD] || null,
@@ -901,7 +944,7 @@ export default function ChatPanel({
     if (!agent?.id) { setActiveLoop(null); setLoopProgress(null); return; }
     try {
       const list = await apiCall('GET', `/api/agents/${encodeURIComponent(agent.id)}/triggers`);
-      const running = Array.isArray(list) ? list.find(isLaunchedLoop) : null;
+      const running = runningLaunchedLoop(list, finishedLoopIdsRef.current);
       setActiveLoop(running || null);
       // Live progress (#1155 AC5/AC6): read the tail of THIS room's session log
       // and take the newest numbered loop firing for the running trigger. The
@@ -932,7 +975,21 @@ export default function ChatPanel({
     return () => clearInterval(timer);
   }, [agent?.id, refreshActiveLoop]);
 
+  // Live loop signals (#2683). The runtime removes a launched loop from its
+  // triggers BEFORE posting the finished-loop record, so the record's arrival
+  // means the loop is over: drop its banner and Stop at once, then re-read the
+  // trigger list. An iteration notice just re-reads so the count stays current.
+  // Re-bound every render, so it always sees the current `activeLoop`.
+  onLoopSignalRef.current = (signal) => {
+    if (signal.kind === 'finished' && signal.triggerId) {
+      finishedLoopIdsRef.current.add(signal.triggerId);
+      if (activeLoop?.id === signal.triggerId) { setActiveLoop(null); setLoopProgress(null); }
+    }
+    refreshActiveLoop();
+  };
+
   function handleLoopClick() {
+    if (readOnly) return;
     if (activeLoop) setShowStopLoopConfirm(true);
     else { setRelaunchValues(null); setLoopDialogOpen(true); }
   }
@@ -945,13 +1002,17 @@ export default function ChatPanel({
   // Stable identity (#1676) so the memoized transcript rows don't re-render
   // when this component re-renders for an unrelated reason (e.g. a hover).
   const handleRelaunchLoop = useCallback((values) => {
+    if (readOnly) {
+      setError(readOnlyHint.text);
+      return;
+    }
     if (activeLoop) {
       setError('A loop is already running for this agent — stop it before starting another.');
       return;
     }
     setRelaunchValues(values || null);
     setLoopDialogOpen(true);
-  }, [activeLoop]);
+  }, [activeLoop, readOnly, readOnlyHint]);
 
   function closeLoopDialog() {
     setLoopDialogOpen(false);
@@ -959,7 +1020,7 @@ export default function ChatPanel({
   }
 
   async function handleLaunchLoop(body) {
-    if (!agent?.id) return;
+    if (!agent?.id || readOnly) return;
     setLoopBusy(true);
     setError(null);
     try {
@@ -1037,10 +1098,13 @@ export default function ChatPanel({
     }
   }
 
+  // Resolves false when the message was NOT sent (e.g. the #2721 refusal while
+  // the user's chat identity is not ready), so the composer can give the typed
+  // text back instead of losing it.
   async function handleSend(text, extraContent = null) {
-    if (!roomId) return;
+    if (!roomId || readOnly) return false;
     const body = text.trim();
-    if (!body) return;
+    if (!body) return false;
     // Mark this agent as one the current user manually messaged, so a completion
     // of the turn we just kicked off can notify us if we tab away (#2397).
     if (agent?.id) markManuallyMessaged(agent.id);
@@ -1086,58 +1150,74 @@ export default function ChatPanel({
           );
         });
       }
+      return true;
     } catch (err) {
       setError(`Send failed: ${err.message}`);
       // Roll back the optimistic message so the user can retry.
       setMessages(prev => prev.filter(m => m.event_id !== optimisticId));
+      return false;
     } finally {
       setSending(false);
     }
   }
 
-  /* ─── 5a′. Quick-reply answer (#1663, #1799) ─────────────────────────
+  /* ─── 5a′. Quick-reply answer (#1663, #1799, #2821) ──────────────────
    * Single-question (D1): clicking an option sends its label as the user's
    * reply (unchanged, AC1).
    *
-   * Multi-question (#1799 AC4): the card collects intermediate choices
-   * client-side (no message sent) and calls back here only after the last
-   * question with { isMulti: true, answers: [{questionId,optionId,label}…] }.
-   * We then send one consolidated reply and resume the session. A
-   * multi-select step's entry carries `optionIds`/`labels` instead (#2523).
+   * Multi-question (#1799 AC4): each completed step — a click, a submitted
+   * multi-select, or text typed in the composer (#2821) — arrives as
+   * { isStep, questionIndex, value } and only advances `askProgress` (no
+   * message is sent). The last step sends one consolidated reply and resumes
+   * the session once. { isSkipRemaining } sends the answers given so far with
+   * the remaining questions marked skipped (#2821 AC8). A multi-select step's
+   * entry carries `optionIds`/`labels` (#2523); a typed one `custom`/`text`.
    *
    * Lone multi-select question (#2523): the card toggles options and calls
    * back on Submit with { isMultiSelect: true, answer }.
    *
-   * Selection is final in both cases (AC5/AC6): the optimistic reply lands
+   * Selection is final in every case (AC5/AC6): the optimistic reply lands
    * after the question, so `questionState` immediately marks the card inert.
    * The guard below also rejects a duplicate click once any answer references
    * this question.
    */
-  function handleAnswerQuestion(questionEventId, optOrConsolidated) {
-    if (!questionEventId) return;
-    if (sending) return;
-    const already = messages.some(m => m[ASK_ANSWER_FIELD]?.questionEventId === questionEventId);
-    if (already) return;
+  function sendConsolidatedAnswer(questionEventId, answers) {
+    if (!answers.length) return Promise.resolve(false);
+    return handleSend(multiAnswerText(answers), buildMultiAnswerContent(questionEventId, answers));
+  }
 
-    if (optOrConsolidated?.isMulti && Array.isArray(optOrConsolidated.answers)) {
-      // Multi-question consolidated reply (#1799).
-      const { answers } = optOrConsolidated;
-      const extra = buildMultiAnswerContent(questionEventId, answers);
-      handleSend(multiAnswerText(answers), extra);
-    } else if (optOrConsolidated?.isMultiSelect && optOrConsolidated.answer) {
+  function handleAnswerQuestion(questionEventId, optOrConsolidated, question = null) {
+    if (!questionEventId || readOnly) return false;
+    if (sending) return false;
+    const already = messages.some(m => m[ASK_ANSWER_FIELD]?.questionEventId === questionEventId);
+    if (already) return false;
+
+    const questions = question?.questions;
+    if (optOrConsolidated?.isStep && Array.isArray(questions)) {
+      const { progress, answers } = advanceAskProgress(
+        askProgress[questionEventId], questions,
+        optOrConsolidated.questionIndex, optOrConsolidated.value);
+      setAskProgress(prev => ({ ...prev, [questionEventId]: progress }));
+      return answers ? sendConsolidatedAnswer(questionEventId, answers) : true;
+    }
+    if (optOrConsolidated?.isSkipRemaining && Array.isArray(questions)) {
+      const progress = askProgress[questionEventId] || EMPTY_ASK_PROGRESS;
+      const answers = consolidateAskAnswers(questions, progress.answers, { skipRemaining: true });
+      return sendConsolidatedAnswer(questionEventId, answers);
+    }
+    if (optOrConsolidated?.isMultiSelect && optOrConsolidated.answer) {
       // A lone multi-select question (#2523): every selected option, sent once
       // on Submit. The body joins the labels; the runtime resumes the session
       // from the structured `labels`.
       const { answer } = optOrConsolidated;
-      if (!Array.isArray(answer.labels) || answer.labels.length === 0) return;
-      handleSend(answer.label, buildSelectionAnswerContent(questionEventId, answer));
-    } else {
-      // Single-question (unchanged).
-      const option = optOrConsolidated;
-      if (!option?.label) return;
-      const extra = buildAnswerContent(questionEventId, option);
-      handleSend(option.label, extra);
+      if (!Array.isArray(answer.labels) || answer.labels.length === 0) return false;
+      return handleSend(answer.label, buildSelectionAnswerContent(questionEventId, answer));
     }
+    // Single-question (unchanged).
+    const option = optOrConsolidated;
+    if (!option?.label) return false;
+    const extra = buildAnswerContent(questionEventId, option);
+    return handleSend(option.label, extra);
   }
 
   /* ─── 5b. Attach files ───────────────────────────────────────────────
@@ -1149,7 +1229,7 @@ export default function ChatPanel({
    */
   async function handleUpload(files) {
     const list = Array.from(files || []);
-    if (list.length === 0 || !agent?.id) return [];
+    if (list.length === 0 || !agent?.id || readOnly) return [];
     setUploading(true);
     setError(null);
     try {
@@ -1202,6 +1282,24 @@ export default function ChatPanel({
   // chosen and render its buttons inert (AC5 / AC6).
   const askAnswersByQuestion = useMemo(() => indexAskAnswers(messages), [messages]);
 
+  // The multi-question card a text typed in the composer answers (#2821 AC1):
+  // the newest message, while it is an unanswered card of 2+ questions.
+  const activeAsk = useMemo(
+    () => activeMultiQuestionCard(messages, askAnswersByQuestion),
+    [messages, askAnswersByQuestion],
+  );
+  const activeAskOpenIdx = activeAsk ? (askProgress[activeAsk.eventId] || EMPTY_ASK_PROGRESS).openIdx : 0;
+  // Typed text becomes the answer of the open question; the card advances
+  // exactly like after a click (AC2), and the last one sends the reply (AC3).
+  const handleTypedAnswer = (text) => {
+    if (!activeAsk) return handleSend(text);
+    const q = activeAsk.question.questions[activeAskOpenIdx];
+    const value = buildTypedAnswer(q, text);
+    if (!value) return false;
+    return handleAnswerQuestion(activeAsk.eventId,
+      { isStep: true, questionIndex: activeAskOpenIdx, value }, activeAsk.question);
+  };
+
   /* ─── Thinking indicator: latest message is from user, no agent reply yet */
   // For trigger-initiated runs the last transcript entry is the trigger notice
   // (m.notice, sender = agent.userId), so the original "last-message-is-human"
@@ -1209,7 +1307,9 @@ export default function ChatPanel({
   // signal: when the shared active-sessions poll sees a trigger session for
   // this room we show the same animated indicator (#1852 AC1-3).
   const hasActiveTriggerRun = hasActiveTriggerSessionForRoom(activeSessions, roomId);
-  const lastMsg = messages[messages.length - 1];
+  // A runner status note (#2841, e.g. "waiting for CI") is mid-turn progress,
+  // not the agent's reply — it must not end the thinking indicator.
+  const lastMsg = lastTurnMessage(messages);
   const showThinking =
     !!lastMsg &&
     lastMsg.type !== 'context-reset' &&
@@ -1230,10 +1330,15 @@ export default function ChatPanel({
   const removedNotice = removedFromRoster ? agentRemovedNoticeText(agent.displayName || agent.id) : null;
   const maintenance = useMaintenanceMode();
   const maintenanceBanner = maintenanceBannerText(maintenance);
+  // The composer's write controls and the quick-reply buttons share one gate.
+  const composerDisabled = disabled || readOnly || !roomId || sending || maintenance.active;
   // AC5 (#1843): non-blocking warning when the agent's bound Model Provider is
   // currently red. The GET /model-options fetch (fired on agent selection) also
   // triggers a fresh probe server-side when the status is stale.
   const providerWarning = providerWarningText(modelOptions?.endpointHealth, modelOptions?.endpointName);
+  // #2732 AC9: the orange early warning when that provider has used ≥ the warn
+  // threshold of its budget. Non-blocking, on the same model-options snapshot.
+  const providerBudgetWarning = providerBudgetWarningText(modelOptions?.endpointHealth, modelOptions?.endpointName);
   // §14 / E10: a non-blocking advisory when this team runs on a member's personal
   // provider (a lend). { text, tone } or null; carried on the same model-options
   // snapshot. Only present for a multi-human squad.
@@ -1284,7 +1389,7 @@ export default function ChatPanel({
           index: i,
           messageCount: messages.length,
           answer: askAnswersByQuestion.get(msg.event_id),
-          disabled: disabled || !roomId || sending || maintenance.active,
+          disabled: composerDisabled,
         })
       : null;
     // `?msg=` deep-link flash (#2310 AC2): a plain data attribute, matched by
@@ -1307,8 +1412,10 @@ export default function ChatPanel({
           onAnswerQuestion={handleAnswerQuestion}
           questionAnswerable={qState?.answerable}
           questionAnswer={qState}
+          questionProgress={isQuestion ? askProgress[msg.event_id] : undefined}
           viewer={viewer}
           authorDirectory={authorDirectory}
+          onShowInSession={onShowInSession}
         />
       </div>
     );
@@ -1512,6 +1619,19 @@ export default function ChatPanel({
           flexShrink: 0,
         }}>
           {providerWarning}
+        </div>
+      )}
+
+      {providerBudgetWarning && (
+        <div role="status" style={{
+          padding: 'var(--eb-space-3) var(--eb-space-4)',
+          background: 'var(--eb-status-warning-bg)',
+          borderBottom: '1px solid var(--eb-status-warning)',
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-primary)',
+          flexShrink: 0,
+        }}>
+          {providerBudgetWarning}
         </div>
       )}
 
@@ -1819,10 +1939,55 @@ export default function ChatPanel({
         </button>
       )}
 
+      {/* #2713: read-only hint for a System Admin outside the team, with the
+          way in — the team's Sharing tab (text only for a standalone agent). */}
+      {readOnlyHint && (
+        <div
+          role="note"
+          data-testid="chat-read-only-hint"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+            flexWrap: 'wrap',
+            padding: 'var(--eb-space-2) var(--eb-space-4)',
+            borderTop: '1px solid var(--eb-border-default)',
+            background: 'var(--eb-bg-elevated)',
+            color: 'var(--eb-text-secondary)',
+            fontSize: 'var(--eb-text-sm)',
+            flexShrink: 0,
+          }}
+        >
+          <span style={{ flex: 1, minWidth: 0 }}>{readOnlyHint.text}</span>
+          {readOnlyHint.shareHref && (
+            <button
+              type="button"
+              onClick={() => navigate(readOnlyHint.shareHref)}
+              style={{
+                background: 'transparent',
+                border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-md)',
+                padding: 'var(--eb-space-1) var(--eb-space-3)',
+                color: 'var(--eb-text-primary)',
+                fontFamily: 'inherit',
+                fontSize: 'var(--eb-text-sm)',
+                cursor: 'pointer',
+                flexShrink: 0,
+              }}
+            >
+              Open team sharing
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Input */}
       <MessageInput
         onSend={handleSend}
-        disabled={disabled || !roomId || sending || maintenance.active}
+        disabled={composerDisabled}
+        readOnly={readOnly}
+        askPlaceholder={activeAsk
+          ? askComposerPlaceholder(activeAskOpenIdx, activeAsk.question.questions.length)
+          : null}
+        onAnswerCard={activeAsk ? handleTypedAnswer : null}
         agentId={agent.id}
         agentDisplayName={agent.displayName || agent.id}
         onUpload={handleUpload}
@@ -1982,20 +2147,20 @@ function UserStopSeparator({ ts }) {
       margin: 'var(--eb-space-2) 0',
       userSelect: 'none',
     }}>
-      <div style={{ flex: 1, height: 1, background: 'var(--eb-status-error-text, #dc2626)' }} />
+      <div style={{ flex: 1, height: 1, background: 'var(--eb-status-error-text)' }} />
       <span style={{
         fontSize: 'var(--eb-text-xs)',
-        color: 'var(--eb-status-error-text, #dc2626)',
+        color: 'var(--eb-status-error-text)',
         fontWeight: 'var(--eb-font-medium)',
         whiteSpace: 'nowrap',
         padding: '2px var(--eb-space-2)',
-        border: '1px solid var(--eb-status-error-text, #dc2626)',
+        border: '1px solid var(--eb-status-error-text)',
         borderRadius: 'var(--eb-radius-sm)',
         background: 'var(--eb-status-error-bg, #fef2f2)',
       }}>
         ⏹ Stopped by user{label ? ` · ${label}` : ''}
       </span>
-      <div style={{ flex: 1, height: 1, background: 'var(--eb-status-error-text, #dc2626)' }} />
+      <div style={{ flex: 1, height: 1, background: 'var(--eb-status-error-text)' }} />
     </div>
   );
 }

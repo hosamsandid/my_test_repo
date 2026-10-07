@@ -25,13 +25,28 @@ const SAFE_ID_CHARS = /[^a-z0-9-]/g;
 export const ID_FORMAT_HINT =
   'Lowercase letters, numbers and hyphens only.';
 
-/** Reduce a name to a slug: lowercase, spaces → hyphens, drop the rest. */
+// German letters with a conventional ASCII spelling; transliterated before the
+// generic diacritic strip so "Übersetzer" derives `uebersetzer`, not `bersetzer`
+// (#2686).
+const TRANSLITERATIONS = { ä: 'ae', ö: 'oe', ü: 'ue', ß: 'ss' };
+
+/**
+ * Reduce a name to a slug: lowercase, transliterate letters (ä → ae, é → e),
+ * spaces → hyphens, drop the rest, then collapse hyphen runs and trim edge
+ * hyphens — a name ending in a dropped symbol ("Gen €!") must not derive a
+ * dangling `gen-` (#2654).
+ */
 export function deriveIdFromName(name) {
   return String(name || '')
     .trim()
     .toLowerCase()
+    .replace(/[äöüß]/g, (c) => TRANSLITERATIONS[c])
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
     .replace(/\s+/g, '-')
-    .replace(SAFE_ID_CHARS, '');
+    .replace(SAFE_ID_CHARS, '')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
 /**

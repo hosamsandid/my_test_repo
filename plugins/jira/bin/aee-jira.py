@@ -11,7 +11,7 @@ every Jira call server-side. This CLI is a privilege-less client that just
 carries the scope token and the agent's caller token.
 
 Whose Jira account a call runs as (#2562): in a CHAT turn, the person who wrote
-the message — their own Jira e-mail + API token, stored in the Admin Console
+the message — their own Jira e-mail + API token, stored in Agent Studio
 under Connections → Plugin Tokens. Without one every subcommand is refused and
 nothing is sent to Jira. In an AUTOMATED run (schedule, event, loop, hand-off)
 the team's service account is used.
@@ -19,15 +19,17 @@ the team's service account is used.
 Reads:
 
     aee-jira whoami                               # the resolved plugin scope
-    aee-jira inbox                                # peek: every queued status-change event in the team's inbox
+    aee-jira inbox                                # peek: every queued event in the team's inbox
     aee-jira inbox --consume KAN-6:10312 [ID…]   # drain exactly the events YOUR wake named (payload `id` / `events[].id`)
     aee-jira projects                             # the projects in this team's scope
     aee-jira statuses --project KAN               # every workflow status the project supports, grouped by issue type
     aee-jira list --project KAN [--status "Ready for Dev"]   # a project's issues
     aee-jira search --jql "<JQL>" [--fields key,summary,status,Team] [--limit N]   # arbitrary JQL, scoped to your team
-    aee-jira show KAN-6 [--fields "Team,Sprint"]   # one issue (summary, status, type, assignee, created/updated, parent/epic key, URL, attachments, availableTransitions; --fields adds custom fields)
+    aee-jira show KAN-6 [--fields "Team,Sprint"] [--comment <id>]   # one issue (summary, status, type, assignee, created/updated, parent/epic key, URL, attachments, availableTransitions; --fields adds custom fields; --comment adds one comment in full)
     aee-jira attachment get KAN-6 10312 [--out path]   # fetch one attachment's content by id
     aee-jira sprint list --board "Team Scrum Board"     # a Scrum board's sprints (resolved by board name)
+    aee-jira link-types                           # the site's issue link types: name, outward + inward phrase
+    aee-jira users "Anna" [--project KAN | --issue KAN-10] [--limit N]   # find people: name / e-mail → accountId
 
 Writes (attributed, role-gated server-side, no human confirmation — moving a
 ticket is routine and reversible):
@@ -38,11 +40,21 @@ ticket is routine and reversible):
     aee-jira set-field KAN-6 --field "Team" --value "42"   # set an allow-listed custom field by its Jira name
     aee-jira attachment add KAN-6 report.pdf part-1.pdf   # upload one or more local files as new attachments
     aee-jira create-epic --project KAN --file plan.json   # create one Epic and its child Stories in one operation
+    aee-jira add-stories --epic KAN-12 --file stories.json   # add new Stories to an EXISTING Epic (no new Epic)
+    aee-jira add-stories --epic KAN-12 --type Bug --file bugs.json   # ... or Bugs, Tasks, any standard type
+    aee-jira create-issue --project KAN --type Bug --summary "Login fails"   # one standalone issue, no Epic
+    aee-jira set-epic KAN-30 KAN-31 --epic KAN-12   # put EXISTING issues under an Epic (or move them to it)
+    aee-jira set-epic KAN-30 --none               # take an existing issue out of its Epic
+    aee-jira edit KAN-10 --summary "New title" --priority High --add-label backend   # change standard fields
+    aee-jira edit KAN-10 --assignee <accountId> --due 2026-10-31    # (--unassign / --clear-due to empty them)
     aee-jira sprint create --board "Team Scrum Board" --name "Sprint 12" --start 2026-10-26 --end 2026-11-01
     aee-jira sprint bulk-create --board "Team Scrum Board" --name-template "Acc2.0 {MMM}_{weekOfMonth}" --until 2026-12-31
     aee-jira sprint close --board "Team Scrum Board"     # complete the board's active sprint
     aee-jira sprint start --board "Team Scrum Board"     # activate the board's next future sprint
     aee-jira sprint advance --board "Team Scrum Board"   # close the active sprint, then start the next future one
+    aee-jira link KAN-1 blocks KAN-2              # link two issues: "KAN-1 blocks KAN-2"
+    aee-jira unlink 10001                         # remove a link by its id (from `show`'s links)
+    aee-jira unlink KAN-1 blocks KAN-2            # …or by the same words that created it
 
 `create-epic` turns one ask into its breakdown: it creates a single Epic and N
 Stories underneath it (each linked to the Epic) in the named project, in one
@@ -74,6 +86,124 @@ an error on failure (the Epic and the other Stories still go through — Jira ha
 no create-transaction). Non-default issue-type names can be overridden with a
 top-level "issueTypes": {"epic": "...", "story": "..."} in the payload.
 
+`add-stories` fills an Epic that already exists: it creates N new Stories under
+the Epic named by --epic (its key, e.g. KAN-12), in the Epic's own project, and
+never creates an Epic. The payload (from --file, or stdin) is a "stories" array
+with the same per-story fields as create-epic:
+
+    {
+      "stories": [
+        { "summary": "Design checkout", "assignee": "<accountId>",
+          "status": "In Progress", "fields": { "Team": "42" } },
+        { "summary": "Wire the API" }
+      ]
+    }
+
+The call is refused before anything is created when the key does not exist or
+is outside the team's Jira scope, when the issue is not an Epic (the error names
+its actual type), when "stories" is empty or a story has no summary, or when a
+named custom field is not on a non-empty writable-custom-fields allow-list. The
+result reports the Epic and, per Story, its key/URL or an error; one failing
+Story does not stop the others, and the CLI exits 1 if any Story failed. Fill
+several Epics with one call each.
+
+Any standard issue type can go under the Epic, not only Stories: --type sets
+the type for every issue in the call, and an issue's own "type" wins over it
+(so one call can add a Bug and a Task). Types are the Epic project's own names,
+matched case-insensitively ("bug", a localised "Fehler"). Each issue may also
+carry "priority" and "labels", like create-issue; "issues" is accepted as the
+array's name instead of "stories":
+
+    {
+      "issues": [
+        { "type": "Bug", "summary": "Login fails", "priority": "High" },
+        { "type": "Task", "summary": "Rotate keys", "labels": ["ops"] }
+      ]
+    }
+
+An unknown type (the error lists the project's types), an Epic or sub-task
+type, or a field the project requires for that type but the issue does not
+set fails only that issue — the others are still created, and each result
+names its "issueType". Without any type the Stories are created as before.
+
+`create-issue` creates ONE standalone issue (no parent Epic) of any standard
+type the project offers — Story, Task, Bug, or a project's own type such as
+"Fehler" — matched case-insensitively by the project's own type names:
+
+    aee-jira create-issue --project KAN --type Bug --summary "Login fails" \
+        [--description "..."] [--assignee <accountId>] [--priority High] \
+        [--label regression --label web] [--status "In Progress"] \
+        [--field "Team=42"] [--file issue.json]
+
+--file (or "-" for stdin) is an optional JSON object with the same keys —
+"summary", "description", "assignee", "priority", "labels" (a list),
+"status", "fields" (custom fields by Jira name; an object value is sent
+verbatim) — and the flags win over it. "status" is applied as a follow-up
+transition; if that transition is not possible the issue still exists, and the
+result reports its key next to "statusError" (exit 1). Refused before anything
+is created: a project outside the team's Jira scope, an unknown type (the error
+lists the project's types), an Epic type (use create-epic), a sub-task type, a
+required field the project needs but the call does not set (named in the
+error), a custom field off a non-empty writable-custom-fields allow-list, or a
+value Jira rejects (e.g. an unknown assignee accountId).
+
+`set-epic` re-parents issues that already exist: every listed issue goes under
+the Epic named by --epic (moved there if it is under another Epic), or with
+--none is taken out of its Epic (no parent afterwards). The target is checked
+first: a key that does not exist or is outside the team's Jira scope, or an
+issue that is not an Epic, is refused and nothing is changed. Then each issue
+gets its own outcome — "added", "moved" (with the old Epic), "removed",
+"unchanged" ("already under KAN-12" / "has no parent Epic", a success) or
+"failed" with the reason (not found / outside the team's scope, an Epic or a
+sub-task — neither is moved —, or Jira's own refusal, e.g. a missing Edit
+permission). One failing key never stops the others; a key listed twice is
+handled once; the CLI exits 1 if any issue failed. `show` then reports the new
+`parent`.
+
+`edit` changes the standard fields of ONE existing issue — several in one call:
+
+    aee-jira edit KAN-10 [--summary "..."] [--assignee <accountId> | --unassign]
+        [--priority High] [--due 2026-10-31 | --clear-due]
+        [--add-label L]... [--remove-label L]... [--set-labels [L ...]]
+        [--add-component C]... [--remove-component C]... [--set-components [C ...]]
+        [--add-fix-version V]... [--remove-fix-version V]... [--set-fix-versions [V ...]]
+
+--add-* / --remove-* change single values and leave the issue's other values
+alone; --set-* replaces the whole list (with no names it empties it), and a
+list is either replaced or edited, not both. Labels are single words (no
+spaces). The assignee is an Atlassian accountId. Priorities are matched by name
+against the site's priorities, components and fix versions by name against the
+issue's project (case-insensitive) — an unknown name is refused with the list
+of what exists; nothing is created. The due date is YYYY-MM-DD. Everything is
+checked first and the changes are applied in ONE Jira edit, so either all of
+them land or none does; Jira's refusal is shown per field (a field that is not
+on the issue's edit screen is named). The result lists each requested field
+with its old and new value and "changed" or "unchanged" (already at that value,
+not written). An issue outside the team's Jira scope is refused. Description
+(`update`) and custom fields (`set-field`) have their own commands.
+
+`users` finds people, so you can assign them: Jira identifies a person by an
+opaque accountId, never by name or e-mail, and every `assignee` (`edit
+--assignee`, `create-issue --assignee`, a create-epic / add-stories payload's
+"assignee") takes that accountId. Search by a name or e-mail fragment:
+
+    aee-jira users "Anna Schmidt"                 # every match: accountId, displayName, email, active, accountType
+    aee-jira users "anna.schmidt@acme.com"        # a full e-mail finds that one person (if your account may see them)
+    aee-jira users "Anna" --project KAN           # only people who can be assigned issues in KAN
+    aee-jira users "Anna" --issue KAN-10          # only people who can be assigned KAN-10
+    aee-jira edit KAN-10 --assignee <accountId>   # then assign with the accountId from the result
+
+`email` is only filled when Jira shows it to the calling account (privacy
+settings often hide it — then it is null; it is never guessed). Without
+--project / --issue a deactivated account is listed with `active: false`; with
+them only active, assignable people come back. `accountType` "app" marks a bot
+or integration, not a person. Several people with the same name are all listed
+and the `note` says so — tell them apart by e-mail or ask, never pick one at
+random. No match is an empty `users` list with a "No user found" note (exit 0).
+At most 50 people are returned (`--limit` lowers it); `truncated: true` means
+there were more — narrow the query. A project or issue outside your team's Jira
+scope is refused.
+
 `sprint` manages a Scrum board's sprints, the board resolved by its
 human-readable name (e.g. "Accessio 2.0 Scrum Board"). `sprint list` reads the
 board's sprints (id, name, state, start/end). `sprint create` makes one future
@@ -102,6 +232,26 @@ dateless sprint (Jira rejects that). `sprint advance` is the roll-over in one
 call: it closes the active sprint, then starts the next future one, reporting each
 half separately so a partial result (e.g. closed but no future sprint to start) is
 visible — the CLI exits 1 on such a partial, while still printing both outcomes.
+
+`link` links two existing issues and reads like the sentence it records:
+`aee-jira link KAN-1 blocks KAN-2` makes KAN-1 block KAN-2. The words between
+the two keys are a link type NAME ("Blocks", "Relates") or one of its phrases
+("blocks", "is blocked by", "relates to"), case-insensitive — quoting is
+optional. The FIRST key is the subject of the phrase: `aee-jira link KAN-2 is
+blocked by KAN-1` records the very same link. A type name means its outward
+phrase ("Blocks" = "blocks"). `aee-jira link-types` lists the types this site
+offers (they are admin-configurable); an unknown type, a phrase two types share,
+or linking an issue to itself is refused before anything is written. Linking two
+issues that are already linked the same way creates no duplicate — the result
+says `created: false` and gives the existing link id. On success the result
+states the relationship in plain words (`statement`) and returns the link `id`.
+`show` lists an issue's links as seen from that issue
+(`links: [{id, type, relationship, otherIssue: {key, summary, status}, statement}]`).
+`unlink` removes a link by that `id`, or by the same words that created it; a
+link that does not exist is a "not found" error and nothing changes. When Jira
+refuses, the error names the cause: the account lacks the "Link Issues"
+permission, an issue is not found or not visible, or linking is disabled on the
+site.
 
 `set-field` sets ONE custom field. Any custom field is writable by default; if an
 admin set a non-empty `writable-custom-fields` allow-list, a field not on that
@@ -395,7 +545,7 @@ def build_parser():
 
     sub.add_parser("whoami", parents=[common], help="show the resolved plugin scope")
 
-    p_inbox = sub.add_parser("inbox", parents=[common], help="the queued status-change events that woke you")
+    p_inbox = sub.add_parser("inbox", parents=[common], help="the queued Jira events (status changes, new issues, comments, field changes) that woke you")
     p_inbox.add_argument(
         "--consume", nargs="+", metavar="EVENT_ID", default=None,
         help="drain exactly these event ids (from your wake payload: `id`, or `events[].id` in a digest); "
@@ -433,6 +583,11 @@ def build_parser():
         "--fields",
         help='comma-separated custom field names to also read, by their Jira name (e.g. "Team,Sprint"); '
              "an empty field comes back as null, distinguishing it from a set one",
+    )
+    p_show.add_argument(
+        "--comment",
+        help="also read one comment in full by its id (a comment_added wake's commentId) — "
+             "the rest of a body cut short (bodyTruncated)",
     )
 
     p_att = sub.add_parser("attachment", parents=[common], help="read an issue's attachments (list them with `show`)")
@@ -484,6 +639,42 @@ def build_parser():
         help="raw JSON value sent to Jira verbatim (escape hatch for an exotic field shape)",
     )
 
+    p_users = sub.add_parser(
+        "users", parents=[common],
+        help='find Jira users by name or e-mail → their accountId, the value every --assignee / "assignee" '
+             'takes, e.g. aee-jira users "Anna" --project KAN, then aee-jira edit KAN-10 --assignee <accountId>',
+        description="Find people so you can assign them. Jira identifies a person by an opaque accountId, never by "
+                    "name or e-mail; `edit --assignee`, `create-issue --assignee` and a create-epic / add-stories "
+                    "payload's \"assignee\" all take that accountId. Each match carries accountId, displayName, "
+                    "email (only when Jira shows it to your account, else null — never guessed), active and "
+                    "accountType (\"app\" = a bot, not a person). --project / --issue return only active people "
+                    "who can be assigned there. Several people with the same name are all listed and the note says "
+                    "so: tell them apart by e-mail or ask — never pick one. No match is an empty list with a "
+                    "\"No user found\" note. At most 50 come back; truncated: true means there were more.",
+    )
+    p_users.add_argument("query", help='a name or e-mail address, or part of one, e.g. "Anna" or "anna@acme.com"')
+    g_users = p_users.add_mutually_exclusive_group()
+    g_users.add_argument("--project", help="only people who can be assigned issues in this project, e.g. KAN")
+    g_users.add_argument("--issue", help="only people who can be assigned this issue, e.g. KAN-10")
+    p_users.add_argument("--limit", type=int, help="return at most N people (1-50, default 50)")
+
+    sub.add_parser("link-types", parents=[common], help="list the site's issue link types (name, outward + inward phrase)")
+
+    p_link = sub.add_parser(
+        "link", parents=[common],
+        help='link two issues, read as a sentence: `link KAN-1 blocks KAN-2` (KAN-1 blocks KAN-2)',
+    )
+    p_link.add_argument(
+        "words", nargs="+", metavar="WORD",
+        help='first issue key, a link type name or phrase ("blocks", "is blocked by", "Relates"), second issue key',
+    )
+
+    p_unlink = sub.add_parser(
+        "unlink", parents=[common],
+        help="remove a link by its id (from `show`), or by the words that created it: `unlink KAN-1 blocks KAN-2`",
+    )
+    p_unlink.add_argument("words", nargs="+", metavar="WORD", help="a link id, or first key, link type, second key")
+
     p_create = sub.add_parser(
         "create-epic", parents=[common],
         help="create one Epic and its child Stories in one operation (payload from --file or stdin)",
@@ -493,6 +684,76 @@ def build_parser():
         "--file", metavar="PATH",
         help='JSON payload describing {"epic": {...}, "stories": [...]}; omit or use "-" to read stdin',
     )
+
+    p_add_stories = sub.add_parser(
+        "add-stories", parents=[common],
+        help="add new Stories to an EXISTING Epic (payload from --file or stdin), e.g. "
+             "aee-jira add-stories --epic KAN-12 --file stories.json; --type Bug (or a per-issue \"type\") "
+             "adds Bugs, Tasks or any standard type instead",
+    )
+    p_add_stories.add_argument("--epic", required=True, help="key of the existing Epic the Stories go under, e.g. KAN-12")
+    p_add_stories.add_argument(
+        "--type",
+        help='issue type for every issue in the call (default Story), e.g. "Bug", "Task"; a per-issue "type" wins',
+    )
+    p_add_stories.add_argument(
+        "--file", metavar="PATH",
+        help='JSON payload describing {"stories": [...]} (or {"issues": [...]}); omit or use "-" to read stdin',
+    )
+
+    p_create_issue = sub.add_parser(
+        "create-issue", parents=[common],
+        help="create ONE standalone issue (Story, Task, Bug, …) without a parent Epic, e.g. "
+             'aee-jira create-issue --project KAN --type Bug --summary "Login fails"',
+    )
+    p_create_issue.add_argument("--project", required=True, help="project key the issue is created in, e.g. KAN")
+    p_create_issue.add_argument("--type", required=True, help='the issue type name as the project calls it, e.g. "Bug", "Task", "Story"')
+    p_create_issue.add_argument("--summary", help="the issue summary (required here or in --file)")
+    p_create_issue.add_argument("--description", help="the description (plain text; blank lines become paragraphs)")
+    p_create_issue.add_argument("--assignee", help="the assignee's Atlassian accountId")
+    p_create_issue.add_argument("--priority", help='the priority name, e.g. "High"')
+    p_create_issue.add_argument("--label", action="append", metavar="LABEL", help="a label (repeatable; Jira labels have no spaces)")
+    p_create_issue.add_argument("--status", help="a status to move the new issue to afterwards (a follow-up transition)")
+    p_create_issue.add_argument(
+        "--field", action="append", metavar="NAME=VALUE",
+        help='a custom field by its Jira name, e.g. --field "Team=42" (repeatable)',
+    )
+    p_create_issue.add_argument(
+        "--file", metavar="PATH",
+        help='optional JSON object with the same keys (summary, description, assignee, priority, labels, status, fields); "-" reads stdin; flags win',
+    )
+
+    p_set_epic = sub.add_parser(
+        "set-epic", parents=[common],
+        help="put EXISTING issues under an Epic, move them to it, or take them out (--none), e.g. "
+             "aee-jira set-epic KAN-30 KAN-31 --epic KAN-12",
+    )
+    p_set_epic.add_argument("issues", nargs="+", metavar="KEY", help="the existing issues to re-parent, e.g. KAN-30 KAN-31")
+    set_epic_target = p_set_epic.add_mutually_exclusive_group(required=True)
+    set_epic_target.add_argument("--epic", help="key of the Epic the issues go under, e.g. KAN-12")
+    set_epic_target.add_argument("--none", action="store_true", help="take the issues out of their Epic (no parent afterwards)")
+
+    p_edit = sub.add_parser(
+        "edit", parents=[common],
+        help="change standard fields of an existing issue (summary, assignee, priority, labels, components, "
+             'fix versions, due date), e.g. aee-jira edit KAN-10 --priority High --add-label backend',
+    )
+    p_edit.add_argument("issue", help="issue key, e.g. KAN-10")
+    p_edit.add_argument("--summary", help="the new one-line title")
+    g_assignee = p_edit.add_mutually_exclusive_group()
+    g_assignee.add_argument("--assignee", metavar="ACCOUNT_ID", help="assign to this Atlassian accountId")
+    g_assignee.add_argument("--unassign", action="store_true", help="remove the assignee")
+    p_edit.add_argument("--priority", help='priority by name, e.g. "High"')
+    g_due = p_edit.add_mutually_exclusive_group()
+    g_due.add_argument("--due", metavar="YYYY-MM-DD", help="set the due date")
+    g_due.add_argument("--clear-due", action="store_true", help="clear the due date")
+    for flag, noun in (("label", "label"), ("component", "component"), ("fix-version", "fix version")):
+        p_edit.add_argument("--add-%s" % flag, action="append", metavar="NAME", help="add a %s (repeatable)" % noun)
+        p_edit.add_argument("--remove-%s" % flag, action="append", metavar="NAME", help="remove a %s (repeatable)" % noun)
+        p_edit.add_argument(
+            "--set-%ss" % flag, nargs="*", metavar="NAME",
+            help="replace all %ss with these (none = empty the list)" % noun,
+        )
 
     p_sprint = sub.add_parser("sprint", parents=[common], help="manage a Scrum board's sprints (list / create / bulk-create / close / start / advance)")
     sprint_sub = p_sprint.add_subparsers(dest="sprint_cmd")
@@ -553,7 +814,7 @@ def build_parser():
 
 
 def _read_payload_text(file_path):
-    """The create-epic payload text: from --file, or stdin when omitted / "-"."""
+    """The create-epic / add-stories payload text: from --file, or stdin when omitted / "-"."""
     if not file_path or file_path == "-":
         return sys.stdin.read()
     with open(file_path, "r", encoding="utf-8") as fh:
@@ -609,6 +870,8 @@ def main(argv=None):
         q = {"issue": args.issue}
         if args.fields:
             q["fields"] = args.fields
+        if args.comment:
+            q["comment"] = args.comment
         path = "/show?" + urllib.parse.urlencode(q)
     elif args.cmd == "attachment":
         att_cmd = getattr(args, "att_cmd", None)
@@ -637,6 +900,29 @@ def main(argv=None):
         else:
             payload["value"] = args.value
         path, method, body = "/set-field", "POST", payload
+    elif args.cmd == "link-types":
+        path = "/link-types"
+    elif args.cmd == "users":
+        q = {"query": args.query}
+        if args.project:
+            q["project"] = args.project
+        if args.issue:
+            q["issue"] = args.issue
+        if args.limit is not None:
+            q["limit"] = args.limit
+        path = "/users?" + urllib.parse.urlencode(q)
+    elif args.cmd in ("link", "unlink"):
+        words = args.words
+        if args.cmd == "unlink" and len(words) == 1:
+            body = {"id": words[0]}
+        elif len(words) >= 3:
+            body = {"from": words[0], "type": " ".join(words[1:-1]), "to": words[-1]}
+        else:
+            emit({"ok": False, "error": "usage",
+                  "message": "usage: aee-jira link <KEY> <link type or phrase> <KEY>   e.g. aee-jira link KAN-1 blocks KAN-2\n"
+                             "       aee-jira unlink <linkId>  |  aee-jira unlink <KEY> <link type or phrase> <KEY>"}, as_json)
+            return EXIT_USAGE
+        path, method = "/" + args.cmd, "POST"
     elif args.cmd == "create-epic":
         try:
             raw = _read_payload_text(args.file)
@@ -656,6 +942,107 @@ def main(argv=None):
         if isinstance(doc.get("issueTypes"), dict):
             body["issueTypes"] = doc["issueTypes"]
         path, method = "/create-epic", "POST"
+    elif args.cmd == "add-stories":
+        try:
+            raw = _read_payload_text(args.file)
+        except OSError as e:
+            emit({"ok": False, "error": "usage", "message": "cannot read payload file: %s" % e}, as_json)
+            return EXIT_USAGE
+        try:
+            doc = json.loads(raw)
+        except ValueError as e:
+            emit({"ok": False, "error": "usage", "message": "payload is not valid JSON: %s" % e}, as_json)
+            return EXIT_USAGE
+        # #2896: "issues" reads better than "stories" for Bugs and Tasks.
+        entries = doc.get("stories", doc.get("issues")) if isinstance(doc, dict) else None
+        if not isinstance(entries, list) or not entries:
+            emit({"ok": False, "error": "usage",
+                  "message": 'payload must be a JSON object with a non-empty "stories" (or "issues") array'}, as_json)
+            return EXIT_USAGE
+        body = {"epic": args.epic, "stories": entries}
+        if args.type:
+            body["type"] = args.type
+        if isinstance(doc.get("issueTypes"), dict):
+            body["issueTypes"] = doc["issueTypes"]
+        path, method = "/add-stories", "POST"
+    elif args.cmd == "create-issue":
+        issue = {}
+        if args.file:
+            try:
+                raw = _read_payload_text(args.file)
+            except OSError as e:
+                emit({"ok": False, "error": "usage", "message": "cannot read payload file: %s" % e}, as_json)
+                return EXIT_USAGE
+            try:
+                doc = json.loads(raw)
+            except ValueError as e:
+                emit({"ok": False, "error": "usage", "message": "payload is not valid JSON: %s" % e}, as_json)
+                return EXIT_USAGE
+            if not isinstance(doc, dict):
+                emit({"ok": False, "error": "usage", "message": "payload must be a JSON object describing the issue"}, as_json)
+                return EXIT_USAGE
+            issue.update(doc)
+        for key in ("summary", "description", "assignee", "priority", "status"):
+            value = getattr(args, key)
+            if value is not None:
+                issue[key] = value
+        if args.label:
+            issue["labels"] = args.label
+        if args.field:
+            fields = dict(issue["fields"]) if isinstance(issue.get("fields"), dict) else {}
+            for pair in args.field:
+                name, sep, value = pair.partition("=")
+                if not sep or not name.strip():
+                    emit({"ok": False, "error": "usage",
+                          "message": '--field takes NAME=VALUE, e.g. --field "Team=42" (got %r)' % pair}, as_json)
+                    return EXIT_USAGE
+                fields[name.strip()] = value
+            issue["fields"] = fields
+        if not str(issue.get("summary") or "").strip():
+            emit({"ok": False, "error": "usage", "message": "a summary is required (--summary, or \"summary\" in --file)"}, as_json)
+            return EXIT_USAGE
+        issue_types = issue.pop("issueTypes", None)
+        body = {"project": args.project, "type": args.type, "issue": issue}
+        if isinstance(issue_types, dict):
+            body["issueTypes"] = issue_types
+        path, method = "/create-issue", "POST"
+    elif args.cmd == "set-epic":
+        body = {"issues": args.issues}
+        if args.none:
+            body["remove"] = True
+        else:
+            body["epic"] = args.epic
+        path, method = "/set-epic", "POST"
+    elif args.cmd == "edit":
+        body = {"issue": args.issue}
+        if args.summary is not None:
+            body["summary"] = args.summary
+        if args.assignee is not None or args.unassign:
+            body["assignee"] = None if args.unassign else args.assignee
+        if args.priority is not None:
+            body["priority"] = args.priority
+        for flag, key in (("label", "labels"), ("component", "components"), ("fix_version", "fixVersions")):
+            adds = getattr(args, "add_%s" % flag) or []
+            removes = getattr(args, "remove_%s" % flag) or []
+            replace = getattr(args, "set_%ss" % flag)
+            if replace is not None and (adds or removes):
+                dash = flag.replace("_", "-")
+                emit({"ok": False, "error": "usage",
+                      "message": "--set-%ss replaces the whole list; do not combine it with --add-%s / --remove-%s" % (dash, dash, dash)}, as_json)
+                return EXIT_USAGE
+            if replace is not None:
+                body[key] = {"set": replace}
+            elif adds or removes:
+                body[key] = {"add": adds, "remove": removes}
+        if args.due is not None or args.clear_due:
+            body["dueDate"] = None if args.clear_due else args.due
+        if len(body) == 1:
+            emit({"ok": False, "error": "usage",
+                  "message": "nothing to change — pass at least one of --summary, --assignee/--unassign, --priority, "
+                             "--add-/--remove-/--set-labels, --add-/--remove-/--set-components, "
+                             "--add-/--remove-/--set-fix-versions, --due/--clear-due"}, as_json)
+            return EXIT_USAGE
+        path, method = "/edit", "POST"
     elif args.cmd == "sprint":
         sprint_cmd = getattr(args, "sprint_cmd", None)
         if sprint_cmd == "list":
@@ -736,7 +1123,13 @@ def main(argv=None):
     # but a story may fail (Jira has no create-transaction). Surface exit 1 so an
     # automated caller notices a partial result, while still printing the Epic
     # key + the per-story map above.
-    if args.cmd == "create-epic" and isinstance(result, dict) and result.get("failed"):
+    # add-stories follows the same convention (#2890).
+    # set-epic likewise reports one outcome per issue (#2895).
+    if args.cmd in ("create-epic", "add-stories", "set-epic") and isinstance(result, dict) and result.get("failed"):
+        return EXIT_DOMAIN_ERROR
+    # create-issue (#2894): the issue exists, but the requested status could not
+    # be reached — exit 1 so the caller notices, while still printing the key.
+    if args.cmd == "create-issue" and isinstance(result, dict) and result.get("statusError"):
         return EXIT_DOMAIN_ERROR
     # sprint bulk-create is likewise one operation with per-sprint outcomes: a
     # per-sprint failure surfaces exit 1 while still printing the per-sprint map.

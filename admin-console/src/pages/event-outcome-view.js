@@ -9,6 +9,8 @@
 // misconfiguration, so every chip now carries an explanation + a "what to do"
 // line, and the page shows the same set as a collapsible legend.
 
+import { outcomeStatus } from './event-outcome-presentation.js';
+
 // The legend, in the order it reads best top-to-bottom: the two success
 // states first, then the drop reasons a protection layer can stamp, then the
 // no-subscriber case. `key` is stable for React lists and tests; `term` is the
@@ -18,7 +20,7 @@ export const OUTCOME_LEGEND = [
   {
     key: 'delivered',
     term: 'delivered → <agent>',
-    meaning: 'The event matched a trigger and woke that agent — a session ran.',
+    meaning: 'The event matched a trigger and woke that agent — a session ran. For an auto-scaled role it names the per-ticket instance that ran it (e.g. "Developer · #2562").',
     whatToDo: 'Nothing to do. Click a delivered chip to open the session it started.',
   },
   {
@@ -43,7 +45,7 @@ export const OUTCOME_LEGEND = [
     key: 'history-horizon',
     term: 'dropped (horizon)',
     meaning: "The event is older than the trigger's subscription window (its activation time plus a short grace).",
-    whatToDo: 'Expected right after wiring or reactivating a trigger; a brand-new agent never reacts to activity that predates it. Persistent drops mean the event is simply older than the subscriber.',
+    whatToDo: 'Expected right after wiring or reactivating a trigger; a brand-new agent never reacts to activity that predates it. Persistent drops mean the event is simply older than the subscriber. If the label is a hand-off that is still on the item (the flow was re-applied or the team moved), an agent manager can Fire again from the agent\u2019s Events tab.',
   },
   {
     key: 'label-filter',
@@ -56,6 +58,30 @@ export const OUTCOME_LEGEND = [
     term: 'dropped (branch-filter)',
     meaning: "A push went to a branch (or tag) the trigger's branch filter does not list.",
     whatToDo: "Normal branch routing — the trigger only wakes on pushes to its configured branches. Widen the trigger's Branches field if this branch should wake the agent.",
+  },
+  {
+    key: 'comment-target',
+    term: 'dropped (comment-target)',
+    meaning: 'A comment on an issue reached a trigger that only listens to comments on pull requests — or the other way round.',
+    whatToDo: "Normal comment routing. Change the trigger's \"Comments on\" field if this kind of item should wake the agent.",
+  },
+  {
+    key: 'agent-comment',
+    term: 'dropped (agent-comment)',
+    meaning: "The comment was written by an agent (its body carries the hidden agent marker), and the trigger ignores comments written by agents.",
+    whatToDo: "Nothing to do — this stops an agent from waking itself or a teammate with its own comments. Untick \"Ignore comments written by agents\" if agent comments should wake it.",
+  },
+  {
+    key: 'comment-label',
+    term: 'dropped (comment-label)',
+    meaning: "The commented issue or PR did not carry the trigger's required label when the comment arrived.",
+    whatToDo: "Normal comment routing — the trigger only wakes on comments on items carrying that label. Add the label to the item, or change the trigger's required label.",
+  },
+  {
+    key: 'knowledge-branch',
+    term: 'dropped (knowledge-base branch)',
+    meaning: "A push to a knowledge-base branch (e.g. agent-knowledge) — the platform's own knowledge sync. Pushes to any team's knowledge-base branch on the repository never wake push triggers.",
+    whatToDo: "Nothing to do — this is built in and can't be changed, not even with the trigger's Branches field.",
   },
   {
     key: 'wake-already-armed',
@@ -72,7 +98,7 @@ export const OUTCOME_LEGEND = [
   {
     key: 'self-claim-label',
     term: 'dropped (self-claim-label)',
-    meaning: "The label is an agent's own ':wip' claim label, not a hand-off.",
+    meaning: "The label is an agent's own claim label (':wip') or end-of-run label (':completed'), not a hand-off.",
     whatToDo: 'Nothing to do.',
   },
   {
@@ -88,6 +114,48 @@ export const OUTCOME_LEGEND = [
     whatToDo: 'Nothing to do if that is intended. Otherwise widen or clear the filter on the trigger.',
   },
   {
+    key: 'reaped',
+    term: 'reaped → <agent>',
+    meaning: 'Not a GitHub event: the provisioning sweep removed an orphaned instance whose setup never finished. Nothing was dropped.',
+    whatToDo: 'Nothing to do — the leftover instance is cleaned up.',
+  },
+  {
+    key: 'reap-failed',
+    term: 'reap failed → <agent>',
+    meaning: 'Not a GitHub event: the provisioning sweep tried to remove an orphaned instance whose setup never finished, but the removal did not go through.',
+    whatToDo: 'The sweep retries on its next run. If the same instance keeps showing up here, check the orchestrator logs or delete the agent by hand.',
+  },
+  {
+    key: 'readiness-gate',
+    term: 'held — waiting for CI / conflict-free → <agent>',
+    meaning: "A PR hand-off's readiness gate is holding the wake until the PR's checks pass and it merges cleanly. A push during the hold is checked again; the timeout counts from the first hold.",
+    whatToDo: 'Nothing to do — the agent is woken once the PR is green (see Flow Control). Fix the checks or the conflict if it takes long.',
+  },
+  {
+    key: 'gate-released',
+    term: 'delivered · gate cleared → <agent>',
+    meaning: 'The PR became green and conflict-free while its hand-off was held, so the agent was woken.',
+    whatToDo: 'Nothing to do.',
+  },
+  {
+    key: 'gate-failed',
+    term: 'not woken (gate failed) → <agent>',
+    meaning: "The PR's checks failed or it has a merge conflict. The hand-off label was removed, the failure label (default revisions-required) set, and a comment lists the failing checks or names the conflict.",
+    whatToDo: 'Nothing to do if an agent listens on the failure label — it fixes the PR and re-applies the hand-off label. Otherwise fix it yourself; the Flows editor warns when nobody listens.',
+  },
+  {
+    key: 'gate-timeout',
+    term: 'not woken (gate timed out) → <agent>',
+    meaning: 'The PR did not become green and conflict-free within the gate timeout (default 60 min). The hand-off label was removed, needs-human set, and a comment explains what was still pending.',
+    whatToDo: 'Check why CI is slow or stuck, then re-apply the hand-off label. Raise the timeout in the hand-off dialog if CI regularly runs longer.',
+  },
+  {
+    key: 'gate-cancelled',
+    term: 'not woken (gate cancelled) → <agent>',
+    meaning: 'A held hand-off was dropped because the PR was closed, the hand-off label was removed, or the listening trigger was removed.',
+    whatToDo: 'Nothing to do — re-apply the label to hand off again.',
+  },
+  {
     key: 'no-match',
     term: "nobody's listening",
     meaning: 'No trigger subscribed to this event type at all, so nobody was woken.',
@@ -97,14 +165,19 @@ export const OUTCOME_LEGEND = [
 
 const LEGEND_BY_KEY = OUTCOME_LEGEND.reduce((m, e) => { m[e.key] = e; return m; }, {});
 
-// Map one recorded outcome to its legend key. `delivered`/`digest` come straight
-// from `status`; every other status is a drop keyed by its `reason`, falling
-// back to a generic drop when the reason is unfamiliar.
+// Map one recorded outcome to its legend key. `delivered`/`digest`/`held` and
+// the provisioning sweep's `reaped`/`reap-failed` come from the shown status
+// (a digest is `delivered` + `digest: true`, see outcomeStatus); every other
+// status is a drop keyed by its `reason`, falling back to a generic drop when
+// the reason is unfamiliar.
 export function outcomeLegendKey(outcome) {
   if (!outcome || typeof outcome !== 'object') return null;
-  if (outcome.status === 'delivered') return 'delivered';
-  if (outcome.status === 'digest') return 'digest';
-  if (outcome.status === 'held') return 'held';
+  const status = outcomeStatus(outcome);
+  if (status === 'delivered') return outcome.reason === 'gate-released' ? 'gate-released' : 'delivered';
+  if (status === 'digest') return 'digest';
+  if (status === 'held') return outcome.reason === 'readiness-gate' ? 'readiness-gate' : 'held';
+  if (status === 'reaped') return 'reaped';
+  if (status === 'reap-failed') return 'reap-failed';
   const reason = outcome.reason || '';
   if (LEGEND_BY_KEY[reason]) return reason;
   return 'drop-unknown';
@@ -118,6 +191,9 @@ export function outcomeTooltip(outcome) {
   if (key === 'drop-unknown') {
     const reason = (outcome && outcome.reason) || 'unknown';
     return `Dropped by a protection layer (${reason}). Not one of the standard reasons — check the orchestrator logs if unexpected.`;
+  }
+  if (key === 'held' && typeof outcome.reason === 'string' && outcome.reason.startsWith('pool-')) {
+    return "The event matched a trigger of an auto-scaled role, but the role is paused, draining or off, so no instance took the work yet. Nothing is lost — it is delivered once the role resumes (Flow Control).";
   }
   const entry = LEGEND_BY_KEY[key];
   return `${entry.meaning} ${entry.whatToDo}`;

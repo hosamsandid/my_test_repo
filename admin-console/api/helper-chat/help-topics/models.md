@@ -238,7 +238,8 @@ on page load and needs no click:
 | Health | Meaning |
 |---|---|
 | **OK** | the last probe reached the endpoint; hover for the HTTP status |
-| **Error** | the last probe failed; the reason is shown under the label and in full on hover |
+| **Warning** (orange) | the endpoint is reachable, but its spending budget is nearly used up — see *Budget and the Warning state* below |
+| **Error** | the last probe failed, or the budget is fully used; the reason is shown under the label and in full on hover |
 | **Unknown** | no probe result is on file for it yet |
 
 **`Unknown` is honest, not a warning.** A provider with no result on file — one
@@ -252,6 +253,39 @@ nothing probes it at all.
 Health is a **signal, not a gate**. Nothing here blocks an agent from starting;
 an agent whose provider is currently red shows a non-blocking warning in its chat
 and is left to try anyway.
+
+### Budget and the Warning state
+
+A LiteLLM proxy can give a key — and the team the key belongs to — a spending
+budget, and stops answering once it is used up. Every health probe (and every
+save or **Test connection**) also reads that budget through LiteLLM's free
+`/key/info` and `/team/info` reads; no billable request is made, and the token is
+never shown or logged.
+
+The **Budget** column shows the spend against the limit in the proxy's currency
+units (e.g. `$291.94 / $2,000`), the share used, and whether it is the **key**
+or the **team** budget. When both carry a budget, the one with the higher share
+used is shown, because it is the one that stops work first. Hover for the budget
+period and the date it resets. The read-only `.env` row gets the same column.
+
+A `—` means there is no budget to show: the provider has no budget API (a
+subscription seat, Anthropic direct, Azure AI Foundry and other proxies), or
+neither the key nor its team has a limit set. That is not a problem and does not
+change Health. `—` with **Budget unavailable** underneath means the budget read
+itself failed (timeout or an HTTP error); Health is unaffected by that too.
+
+Health turns **Warning** (orange) once a reachable provider has used **90 %** or
+more of its budget, with the reason on the detail line, e.g.
+`Budget 92 % used ($1,840 / $2,000, team)`. At **100 %** it shows **Error**, as it
+does when the proxy rejects requests for a used-up budget. The threshold is set
+with the `AEE_LLM_HEALTH_BUDGET_WARN_PCT` environment variable on the admin
+console (default `90`), next to the other `AEE_LLM_HEALTH_*` poller settings. A
+Warning provider keeps the normal poll interval — it is not backed off like a
+failing one — so raising the budget shows up at the next poll. Budgets are read
+only: change them on the proxy.
+
+Agents bound to a Warning provider show a non-blocking orange banner in their
+chat that names the provider and how much of the budget is used.
 
 ## Changing credentials and deleting
 

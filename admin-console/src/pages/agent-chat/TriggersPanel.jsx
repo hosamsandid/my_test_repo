@@ -1,8 +1,10 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Link } from 'react-router';
 import { RefreshCw, Clock, CalendarClock, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch, Repeat, Puzzle } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
+import SuffixedLabelInput, { SuffixedLabelText, LabelSuffixContext, useLabelSuffix } from '../../components/SuffixedLabelInput';
+import { labelSuffixContextFor } from '../process/label-suffix-view.js';
 import ScriptViewerPanel from '../../components/ScriptViewerPanel';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import FormInput from '../../components/FormInput';
@@ -28,8 +30,20 @@ import {
 } from './trigger-summary.js';
 import {
   branchFilterFormError, branchFilterToInput, branchFilterBody, BRANCH_FILTER_PLACEHOLDER, BRANCH_FILTER_HELP,
+  knowledgeBranchNote, knowledgeBranchesForRepo,
 } from './branch-filter.js';
-import { DOW_LABELS, parseCronState, buildCron, describeCron } from './cron-format.js';
+import {
+  COMMENT_TARGET_OPTIONS, REQUIRE_LABEL_PLACEHOLDER, REQUIRE_LABEL_HELP, SKIP_AGENT_COMMENTS_HELP,
+  showsCommentFilter, commentFilterToForm, commentFilterBody, commentFilterFormError,
+} from './comment-filter.js';
+import {
+  DOW_LABELS, parseCronState, buildCron, describeCron, switchCronMode, validateCronState, cronExpressionError, inCronTime,
+} from './cron-format.js';
+import {
+  TRIGGER_TIME_ZONE, browserTimeZone, schedulerTimeZone, cronZoneNote, onceScheduleLabel, triggerTiming, pastOnceHint,
+} from './trigger-timing.js';
+import { triggerIssue, triggerRowKey } from './trigger-issues.js';
+import { webhookCurlExample, WEBHOOK_GITHUB_HINT, WEBHOOK_SECRET_WARNING } from './webhook-hint.js';
 import { triggerRepoOptions, environmentRepoOptions, triggerRepoWarning } from './trigger-repo-status.js';
 import {
   STOP_CONDITIONS,
@@ -40,6 +54,7 @@ import {
   deriveGap,
   resolveTokenBudget,
   resolveGapSeconds,
+  loopVerifierCopy,
 } from './loop-form-options.js';
 
 // preCheckScript paths reference an installed binary inside the orchestrator
@@ -69,12 +84,14 @@ function isDataFlowTrigger(t) {
 // the card summary and the Flow canvas readout share one source of truth (#778).
 
 /* ── Toggle switch ──────────────────────────────────────────────────── */
-function ToggleSwitch({ checked, onChange }) {
+function ToggleSwitch({ checked, onChange, label }) {
   return (
     <button
+      type="button"
       onClick={() => onChange(!checked)}
       role="switch"
       aria-checked={checked}
+      aria-label={label}
       style={{
         width: 28, height: 16,
         borderRadius: 'var(--eb-radius-full)',
@@ -152,26 +169,67 @@ const FIELD_STYLE = {
   outline: 'none',
 };
 
+// Inline field error under the schedule inputs.
+function CronFieldError({ children }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>
+      <AlertCircle size={11} style={{ flexShrink: 0 }} /> {children}
+    </div>
+  );
+}
+
+const ERROR_BORDER = { border: '1px solid var(--eb-status-error)' };
+
+// `onChange(cron, error)` — `error` is the first validation message (or null),
+// so the form can refuse to save an invalid schedule (#2625).
 function CronBuilder({ value, onChange }) {
   const [s, setS] = useState(() => parseCronState(value));
+  // The builder's mode is local UI state: `value` is re-parsed only when it
+  // changes from OUTSIDE (e.g. the form re-seeds). Re-parsing our own
+  // emissions made Custom bounce back to Daily and flipped the mode while an
+  // expression was being typed (#2625).
+  const lastEmitted = useRef(value);
+  useEffect(() => {
+    if (value === lastEmitted.current) return;
+    lastEmitted.current = value;
+    setS(parseCronState(value));
+  }, [value]);
 
-  // Keep internal state in sync when value changes externally (e.g. edit panel reopened)
-  useEffect(() => { setS(parseCronState(value)); }, [value]);
-
-  function upd(patch) {
-    setS(prev => {
-      const next = { ...prev, ...patch };
-      onChange(buildCron(next));
-      return next;
-    });
+  function emit(next) {
+    const cron = buildCron(next);
+    const v = validateCronState(next);
+    lastEmitted.current = cron;
+    onChange(cron, v.ok ? null : Object.values(v.errors)[0]);
   }
 
-  const timeVal = `${String(parseInt(s.hour)||0).padStart(2,'0')}:${String(parseInt(s.minute)||0).padStart(2,'0')}`;
-  const setTime = v => { const [h, m] = (v || '00:00').split(':'); upd({ hour: h || '0', minute: m || '0' }); };
+  function upd(patch) {
+    const next = { ...s, ...patch };
+    setS(next);
+    emit(next);
+  }
+
+  function changeMode(mode) {
+    const next = switchCronMode(s, mode);
+    setS(next);
+    emit(next);
+  }
+
+  const { errors } = validateCronState(s);
+  const timeVal = inCronTime(s) ? `${String(Number(s.hour)).padStart(2, '0')}:${String(Number(s.minute)).padStart(2, '0')}` : '';
+  // A cleared time input stays empty (and is flagged) instead of becoming 00:00.
+  const setTime = v => { const [h = '', m = ''] = (v || '').split(':'); upd({ hour: h, minute: m }); };
+  const timeInput = (
+    <input type="time" value={timeVal} onChange={e => setTime(e.target.value)}
+      aria-invalid={!!errors.time}
+      style={{ ...FIELD_STYLE, ...(errors.time ? ERROR_BORDER : {}) }} />
+  );
 
   const description = describeCron(s);
   const cronStr = buildCron(s);
-  const customEmpty = s.mode === 'custom' && !s.raw.trim();
+  // #2628: the agent evaluates the expression in the scheduler's zone, not the
+  // browser's — say so, and give the viewer's local time when they differ.
+  const zoneNote = cronZoneNote(cronStr, { schedulerZone: TRIGGER_TIME_ZONE });
+  const fieldError = Object.values(errors)[0];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
@@ -180,7 +238,7 @@ function CronBuilder({ value, onChange }) {
       </div>
 
       {/* Frequency */}
-      <select value={s.mode} onChange={e => upd({ mode: e.target.value })} style={{ ...FIELD_STYLE, width: '100%' }}>
+      <select value={s.mode} onChange={e => changeMode(e.target.value)} style={{ ...FIELD_STYLE, width: '100%' }}>
         <option value="minutely">Every N minutes</option>
         <option value="hourly">Hourly</option>
         <option value="daily">Daily</option>
@@ -193,21 +251,23 @@ function CronBuilder({ value, onChange }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', minHeight: 34 }}>
         {s.mode === 'minutely' && (<>
           Every
-          <input type="number" min={1} max={59} value={s.interval}
+          <input type="number" min={1} max={59} step={1} value={s.interval}
             onChange={e => upd({ interval: e.target.value })}
-            style={{ ...FIELD_STYLE, width: 60, textAlign: 'center' }} />
+            aria-invalid={!!errors.interval}
+            style={{ ...FIELD_STYLE, width: 60, textAlign: 'center', ...(errors.interval ? ERROR_BORDER : {}) }} />
           minutes
         </>)}
 
         {s.mode === 'hourly' && (<>
           At minute
-          <input type="number" min={0} max={59} value={s.minute}
+          <input type="number" min={0} max={59} step={1} value={s.minute}
             onChange={e => upd({ minute: e.target.value })}
-            style={{ ...FIELD_STYLE, width: 60, textAlign: 'center' }} />
+            aria-invalid={!!errors.minute}
+            style={{ ...FIELD_STYLE, width: 60, textAlign: 'center', ...(errors.minute ? ERROR_BORDER : {}) }} />
         </>)}
 
         {s.mode === 'daily' && (<>
-          At <input type="time" value={timeVal} onChange={e => setTime(e.target.value)} style={FIELD_STYLE} />
+          At {timeInput}
         </>)}
 
         {s.mode === 'weekly' && (<>
@@ -215,37 +275,40 @@ function CronBuilder({ value, onChange }) {
           <select value={s.dow} onChange={e => upd({ dow: e.target.value })} style={FIELD_STYLE}>
             {DOW_LABELS.map((d, i) => <option key={i} value={String(i)}>{d}</option>)}
           </select>
-          at <input type="time" value={timeVal} onChange={e => setTime(e.target.value)} style={FIELD_STYLE} />
+          at {timeInput}
         </>)}
 
         {s.mode === 'monthly' && (<>
           Day
-          <input type="number" min={1} max={31} value={s.dom}
+          <input type="number" min={1} max={31} step={1} value={s.dom}
             onChange={e => upd({ dom: e.target.value })}
-            style={{ ...FIELD_STYLE, width: 60, textAlign: 'center' }} />
-          of every month at <input type="time" value={timeVal} onChange={e => setTime(e.target.value)} style={FIELD_STYLE} />
+            aria-invalid={!!errors.dom}
+            style={{ ...FIELD_STYLE, width: 60, textAlign: 'center', ...(errors.dom ? ERROR_BORDER : {}) }} />
+          of every month at {timeInput}
         </>)}
 
         {s.mode === 'custom' && (
           <input type="text" value={s.raw} onChange={e => upd({ raw: e.target.value })}
             placeholder="* * * * *  (min  hour  day  month  weekday)"
+            aria-invalid={!!errors.raw}
             style={{
               ...FIELD_STYLE, flex: 1,
               fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)',
-              ...(customEmpty ? { border: '1px solid var(--eb-status-error)' } : {}),
+              ...(errors.raw ? ERROR_BORDER : {}),
             }} />
         )}
       </div>
 
-      {/* Inline error for empty custom expression */}
-      {customEmpty && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>
-          <AlertCircle size={11} style={{ flexShrink: 0 }} /> Cron expression is required.
-        </div>
-      )}
+      {/* Inline validation error — the form refuses to save while one shows */}
+      {fieldError && <CronFieldError>{fieldError}</CronFieldError>}
 
-      {/* Summary */}
-      {s.mode !== 'custom' && cronStr && (
+      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+        Times are in {zoneNote}.
+      </div>
+
+      {/* Summary — a custom expression has no plain-language wording, so it
+          just confirms the expression is valid. */}
+      {!fieldError && cronStr && (
         <div style={{
           display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
           padding: 'var(--eb-space-2) var(--eb-space-3)',
@@ -254,7 +317,7 @@ function CronBuilder({ value, onChange }) {
         }}>
           <Clock size={11} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
           <span style={{ color: 'var(--eb-accent-primary)', fontWeight: 'var(--eb-font-medium)', flex: 1 }}>
-            {description}
+            {description ? `${description} (${zoneNote})` : 'Valid custom schedule'}
           </span>
           <code style={{ color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>
             {cronStr}
@@ -276,11 +339,14 @@ function toDatetimeLocal(iso) {
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 }
 
+// A past time is legal (the scheduler fires it at its next sync and removes
+// it) but never silent: an inline hint says so (#2682).
 function DateTimePicker({ value, onChange }) {
+  const pastHint = pastOnceHint(value);
   return (
     <div>
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
-        Date &amp; Time
+        Date &amp; Time <span style={{ fontWeight: 'normal' }}>(your time, {browserTimeZone()})</span>
       </div>
       <input
         type="datetime-local"
@@ -295,6 +361,11 @@ function DateTimePicker({ value, onChange }) {
           colorScheme: 'dark light',
         }}
       />
+      {pastHint && (
+        <div role="status" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning-text)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+          {pastHint}
+        </div>
+      )}
     </div>
   );
 }
@@ -305,7 +376,7 @@ function DateTimePicker({ value, onChange }) {
 // former EmitsSection/EmitsEditor and their emit-suggestions/emits endpoints are
 // gone; the trigger row no longer renders an emits chip or edit button.
 
-function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onToggled, repoWarning = null, nameOf = undefined }) {
+function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onToggled, repoWarning = null, nameOf = undefined, status = null }) {
   const [toggling, setToggling] = useState(false);
   const [scriptPanelName, setScriptPanelName] = useState(null);
   const preCheckScriptName = scriptNameFromPath(trigger.preCheckScript);
@@ -313,6 +384,7 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
     ? Object.entries(trigger.preCheckEnv)
     : [];
   const isDataFlow = isDataFlowTrigger(trigger);
+  const issue = triggerIssue(trigger);
   // A plain (non-data-flow) github-event trigger gets a dedicated, wrapping
   // event/label summary below the header (AC1–AC5); the header `<code>` then
   // only carries the repo, which may ellipsize without hiding the summary (AC6).
@@ -336,15 +408,23 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
       ? summarizePushSchedule(trigger, nameOf)
       : (trigger.repo || 'any repo');
   } else if (trigger.cron) {
-    schedule = describeCron(parseCronState(trigger.cron)) || trigger.cron;
+    // A flagged row (#2626) shows the raw expression — "Every hour at :75"
+    // would describe a schedule that never runs.
+    schedule = (!triggerIssue(trigger) && describeCron(parseCronState(trigger.cron))) || trigger.cron;
   } else {
-    schedule = trigger.at || '—';
+    schedule = onceScheduleLabel(trigger.at, { schedulerZone: schedulerTimeZone(status) });
   }
+  // #2628: zone, next/last run and "cannot be scheduled" for cron/once rows.
+  const timing = triggerTiming(trigger, status);
+  const zoneNote = trigger.type === 'cron' && trigger.cron
+    ? cronZoneNote(trigger.cron, { schedulerZone: schedulerTimeZone(status) })
+    : null;
+  const toneColor = { success: 'var(--eb-status-success)', error: 'var(--eb-status-error)', muted: 'var(--eb-text-muted)' };
 
   async function handleToggle(val) {
     setToggling(true);
     try {
-      await ops.updateTrigger(agentId, trigger.id, { enabled: val });
+      await ops.updateTrigger(agentId, trigger.id, { enabled: val }, trigger.position);
       onToggled();
     } catch { /* surface via refresh */ }
     finally { setToggling(false); }
@@ -384,7 +464,7 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
                 : 'Enable this trigger — it will start firing again'}
               style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)', flexShrink: 0 }}
             >
-              <ToggleSwitch checked={trigger.enabled !== false} onChange={handleToggle} />
+              <ToggleSwitch checked={trigger.enabled !== false} onChange={handleToggle} label={`Enable trigger ${trigger.description || trigger.id || ''}`.trim()} />
               <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', width: 18 }}>
                 {trigger.enabled !== false ? 'On' : 'Off'}
               </span>
@@ -402,6 +482,38 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
           <Trash2 size={11} />
         </button>
       </div>
+
+      {timing?.invalid && (
+        <div role="status" style={{
+          display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+          padding: 'var(--eb-space-1) var(--eb-space-2)',
+          background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-sm)',
+          fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', lineHeight: 1.4,
+        }}>
+          <AlertCircle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span style={{ overflowWrap: 'anywhere' }}>
+            The agent cannot schedule this trigger — it never fires: {timing.invalid}
+          </span>
+        </div>
+      )}
+
+      {(zoneNote || timing?.next || timing?.last) && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', flexWrap: 'wrap',
+          fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
+        }}>
+          {zoneNote && <span>{zoneNote}</span>}
+          {timing?.next && <span>{zoneNote ? '· ' : ''}Next: {timing.next}</span>}
+          {timing?.last && (
+            <span>
+              {zoneNote || timing.next ? '· ' : ''}Last: {timing.last}
+              {timing.lastResult && (
+                <span style={{ color: toneColor[timing.lastResult.tone] }}> {timing.lastResult.text}</span>
+              )}
+            </span>
+          )}
+        </div>
+      )}
 
       {ghSummary && (
         <div style={{
@@ -429,7 +541,27 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
                 </strong>
               </>
             )}
+            {ghSummary.comments.length > 0 && ` · ${ghSummary.comments.join(' · ')}`}
           </span>
+        </div>
+      )}
+
+      {/* #2626: a stored entry the API would now reject (invalid cron, shared
+          id) — flagged by the GET, never rewritten; Edit/Delete act on this row. */}
+      {issue && (
+        <div
+          role="alert"
+          style={{
+            display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+            padding: 'var(--eb-space-2)',
+            background: 'var(--eb-status-error-bg)',
+            border: '1px solid var(--eb-status-error)',
+            borderRadius: 'var(--eb-radius-sm)',
+            fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5,
+          }}
+        >
+          <AlertCircle size={12} style={{ color: 'var(--eb-status-error)', flexShrink: 0, marginTop: 2 }} />
+          <span style={{ overflowWrap: 'anywhere' }}>{issue}</span>
         </div>
       )}
 
@@ -454,7 +586,7 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
             {repoWarning.links.map((l) => (
               <React.Fragment key={l.to}>
                 {' · '}
-                <Link to={l.to} style={{ color: 'var(--eb-accent, var(--eb-status-info))' }}>{l.label}</Link>
+                <Link to={l.to} style={{ color: 'var(--eb-accent-primary)' }}>{l.label}</Link>
               </React.Fragment>
             ))}
           </span>
@@ -681,6 +813,9 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     // Optional push branch filter (#2570), edited as a comma-separated string and
     // stored as an array. Empty = every branch.
     branchFilter: branchFilterToInput(initialValues?.branchFilter),
+    // Comment-listener filters (#2822): requireLabel / skipAgentComments /
+    // commentTarget (stored as `target`), shown only for issue_comment events.
+    ...commentFilterToForm(initialValues),
     secret:      initialValues?.secret      ?? (initialType === 'http' ? '' : generateSecret()),
     description: initialValues?.description ?? '',
     prompt:      initialValues?.prompt      ?? '',
@@ -728,10 +863,16 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
   const showLabelFilter = form.type === 'github-event'
     && form.events.some(e => LABEL_FILTERABLE_EVENTS.has(e));
   const showBranchFilter = form.type === 'github-event' && form.events.includes('push');
+  const showCommentFilter = form.type === 'github-event' && showsCommentFilter(form.events);
   const [copyDone, setCopyDone] = useState(null); // 'path' | 'secret' | null
   const [secretVisible, setSecretVisible] = useState(!isEdit);
   const [formError, setFormError] = useState(null);
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  // The schedule builder's validation message (#2625): seeded from the stored
+  // expression, then reported by CronBuilder with every change. Blocks saving.
+  const [cronError, setCronError] = useState(() => cronExpressionError(form.cron));
+  const cronInvalid = form.type === 'cron' && !!cronError;
+  const submitDisabled = saving || cronInvalid;
   // One event per trigger: the select replaces the whole events array. Legacy
   // triggers may still carry several — surfaced via the notice below, and the
   // extra events are only dropped when the user saves.
@@ -775,6 +916,20 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     })();
     return () => { cancelled = true; };
   }, [form.type, agentId, availableRepos, isDraftMode, initialValues?.repo]);
+
+  // #2602: the poller's per-repo status names each repo's knowledge-base
+  // branches for the read-only note under Branches. Fetched once, only while
+  // the Branches field is shown; a draft or a failed read falls back to the
+  // default branch name.
+  const [kbStatusRows, setKbStatusRows] = useState(null);
+  useEffect(() => {
+    if (isDraftMode || !showBranchFilter || kbStatusRows !== null) return undefined;
+    let cancelled = false;
+    apiCall('GET', '/api/github-events/repo-status')
+      .then((body) => { if (!cancelled) setKbStatusRows(Array.isArray(body?.repos) ? body.repos : []); })
+      .catch(() => { if (!cancelled) setKbStatusRows([]); });
+    return () => { cancelled = true; };
+  }, [isDraftMode, showBranchFilter, kbStatusRows]);
 
   // A data-flow dependency always lives on the team repo — never an
   // agent-scoped one.
@@ -883,13 +1038,14 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
   // with no authored verifier gets a sibling pre-filled (not left empty). Runs
   // once per roster load; the author can still change the mode/target after.
   const isTeamLoopAgent = !!loopRoster?.isTeamAgent;
+  const verifierCopy = loopVerifierCopy(loopRoster);
   useEffect(() => {
     if (form.type !== 'loop' || !isTeamLoopAgent) return;
     const siblings = loopRoster?.siblings || [];
     setForm(f => {
       if (f.verifyMode !== 'none' || f.verifyAgentId) return f; // author already chose
       const pick = pickDefaultVerifier(siblings);
-      if (!pick) return f; // no sibling to assign — leave the notice to explain
+      if (!pick) return f; // no sibling to assign — loopVerifierCopy's notice says so (#2682)
       return { ...f, verifyMode: 'agent', verifyAgentId: pick };
     });
   }, [form.type, isTeamLoopAgent, loopRoster]);
@@ -944,13 +1100,15 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
   async function submit() {
     setFormError(null);
-    if (form.type === 'cron' && !form.cron.trim()) { setFormError('Cron expression is required.'); return; }
+    if (form.type === 'cron' && cronError) { setFormError(`Schedule: ${cronError}`); return; }
     if (form.type === 'once' && !form.at.trim())   { setFormError('Run-at timestamp is required.'); return; }
     if (form.type === 'github-event') {
       if (!form.repo && !isDraftMode) { setFormError('Repository is required.'); return; }
       if (form.events.length === 0) { setFormError('Select the event this trigger reacts to.'); return; }
       const branchError = showBranchFilter ? branchFilterFormError(form.branchFilter) : null;
       if (branchError) { setFormError(branchError); return; }
+      const commentError = showCommentFilter ? commentFilterFormError(form) : null;
+      if (commentError) { setFormError(commentError); return; }
     }
     if (isDataFlow) {
       if (!form.repo && !isDraftMode) { setFormError('A repository is required (the team repo agents push to).'); return; }
@@ -1029,6 +1187,8 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       // Branch filter (#2570): an array, or `null` so an edit clears it when
       // the field is blanked or the event is no longer push.
       body.branchFilter = branchFilterBody(form.branchFilter, { show: showBranchFilter });
+      // Comment filters (#2822): each key `null` when unset so an edit clears it.
+      Object.assign(body, commentFilterBody(form, { show: showCommentFilter }));
       // Claim stamping (#1006): the raw layer follows the same convention as
       // the engine paths — a `.labeled` label listener claims its wake label
       // unless the author opted out. On edit, `null` clears a stored claim;
@@ -1043,7 +1203,13 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       priorPushedBy: initialValues?.pushedBy,
     });
     if (pb !== undefined) body.pushedBy = pb;
-    await onSave(body);
+    // A failed save (409 / 4xx / 5xx) shows the server's message here and keeps
+    // the form open — never an unhandled rejection (#2625).
+    try {
+      await onSave(body);
+    } catch (e) {
+      setFormError(e?.message || 'Could not save the trigger.');
+    }
   }
 
   return (
@@ -1090,7 +1256,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       )}
 
       {form.type === 'cron' && (
-        <CronBuilder value={form.cron} onChange={v => set('cron', v)} />
+        <CronBuilder value={form.cron} onChange={(v, err) => { set('cron', v); setCronError(err); }} />
       )}
 
       {form.type === 'once' && (
@@ -1284,14 +1450,14 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               #1083) as it is already relatively accessible. */}
           <div>
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
-              Who checks the work? (optional{isTeamLoopAgent ? ', enforced for team agents' : ', recommended'})
+              Who checks the work? (optional{verifierCopy.enforced ? ', enforced for team agents' : ', recommended'})
             </div>
             <select
               value={form.verifyMode}
               onChange={e => set('verifyMode', e.target.value)}
               style={{ ...FIELD_STYLE, width: '100%' }}
             >
-              <option value="none">No one{isTeamLoopAgent ? ' (a teammate is assigned automatically)' : ' (the agent judges itself)'}</option>
+              <option value="none">{verifierCopy.noneLabel}</option>
               <option value="command">A command must pass each try</option>
               <option value="agent">Another agent reviews each try</option>
               <option value="flow">The flow checks the hand-off (downstream QS chain)</option>
@@ -1337,10 +1503,9 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               </div>
             )}
 
-            {isTeamLoopAgent && form.verifyMode !== 'flow' && (
-              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
-                Team agents must not grade their own work — a separate teammate is
-                assigned automatically and re-applied on save even if left blank.
+            {verifierCopy.notice && form.verifyMode !== 'flow' && (
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: verifierCopy.noticeTone === 'warning' ? 'var(--eb-status-warning)' : 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                {verifierCopy.notice}
               </div>
             )}
           </div>
@@ -1594,6 +1759,50 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
                 {BRANCH_FILTER_HELP}
               </div>
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                {knowledgeBranchNote(knowledgeBranchesForRepo(kbStatusRows, form.repo))}
+              </div>
+            </div>
+          )}
+
+          {showCommentFilter && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+              <div>
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                  Comments on
+                </div>
+                <select
+                  value={form.commentTarget}
+                  onChange={e => set('commentTarget', e.target.value)}
+                  style={{ ...FIELD_STYLE, width: '100%' }}
+                >
+                  {COMMENT_TARGET_OPTIONS.map(opt => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                  Required label on the item
+                </div>
+                <SuffixedLabelInput
+                  type="text"
+                  value={form.requireLabel}
+                  onChange={v => set('requireLabel', v)}
+                  placeholder={REQUIRE_LABEL_PLACEHOLDER}
+                  style={{ ...FIELD_STYLE, width: '100%' }}
+                />
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                  {REQUIRE_LABEL_HELP}
+                </div>
+              </div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', cursor: 'pointer' }}>
+                <input type="checkbox" checked={form.skipAgentComments} onChange={e => set('skipAgentComments', e.target.checked)} />
+                Ignore comments written by agents
+              </label>
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
+                {SKIP_AGENT_COMMENTS_HELP}
+              </div>
             </div>
           )}
 
@@ -1602,10 +1811,10 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
                 Label name filter
               </div>
-              <input
+              <SuffixedLabelInput
                 type="text"
                 value={form.labelFilter}
-                onChange={e => set('labelFilter', e.target.value)}
+                onChange={v => set('labelFilter', v)}
                 placeholder="e.g. ready (leave empty to fire for any label)"
                 style={{ ...FIELD_STYLE, width: '100%' }}
               />
@@ -1615,7 +1824,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               {form.labelFilter.trim() && form.events.some(e => e === 'issues.labeled' || e === 'pull_request.labeled') && (
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', cursor: 'pointer' }}>
                   <input type="checkbox" checked={form.claimOn} onChange={e => set('claimOn', e.target.checked)} />
-                  Claim the wake label on fire (<code>{form.labelFilter.trim()}</code> → <code>{form.labelFilter.trim()}:wip</code>) — makes work-in-progress visible on GitHub
+                  Claim the wake label on fire (<SuffixedLabelText label={form.labelFilter.trim()} /> → <SuffixedLabelText label={`${form.labelFilter.trim()}:wip`} />) — makes work-in-progress visible on GitHub
                 </label>
               )}
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
@@ -1714,8 +1923,11 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
           </div>
 
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
-            Send <code style={{ fontFamily: 'var(--eb-font-mono)' }}>X-Hook-Secret</code> header with the value above.
-            Anyone with the secret can fire this trigger — copy it once, store it as a GitHub webhook secret, and rotate via the ↻ button.
+            Send the value above in the <code style={{ fontFamily: 'var(--eb-font-mono)' }}>X-Hook-Secret</code> header, e.g.
+            <code style={{ display: 'block', fontFamily: 'var(--eb-font-mono)', wordBreak: 'break-all', margin: 'var(--eb-space-1) 0' }}>
+              {webhookCurlExample(webhookPath)}
+            </code>
+            {WEBHOOK_GITHUB_HINT} {WEBHOOK_SECRET_WARNING}
           </div>
         </div>
       )}
@@ -1737,8 +1949,8 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
       {!lockedMode && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
-          <ToggleSwitch checked={form.enabled} onChange={v => set('enabled', v)} />
-          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+          <ToggleSwitch checked={form.enabled} onChange={v => set('enabled', v)} label="Enable trigger" />
+          <span aria-hidden="true" style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
             Enabled
           </span>
         </div>
@@ -1769,15 +1981,16 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
         )}
         <button
           onClick={submit}
-          disabled={saving}
+          disabled={submitDisabled}
+          title={cronInvalid ? 'Fix the schedule first.' : undefined}
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
             padding: 'var(--eb-space-2) var(--eb-space-4)',
             background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
             border: 'none', borderRadius: 'var(--eb-radius-md)',
             fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
-            cursor: saving ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
-            opacity: saving ? 0.7 : 1,
+            cursor: submitDisabled ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+            opacity: submitDisabled ? 0.7 : 1,
           }}
         >
           {saving && <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />}
@@ -1829,6 +2042,38 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
   // #2571: display names for the producer filter on push-trigger cards
   // ("wakes on push from Specifier …"). Live agents only; ids on failure.
   const [agentNames, setAgentNames] = useState(null);
+  // #2628: the agent scheduler's per-trigger next/last run + scheduling
+  // errors. Live agents only; a failed read just shows no status line.
+  const [triggerStatus, setTriggerStatus] = useState(null);
+  // Trigger ids repeat across agents (template ids), so a status fetched for
+  // the previous agent must never be shown on this one: clear it on switch and
+  // drop late responses for another id. Not cleared per poll (no flicker).
+  const statusAgentRef = useRef(agentId);
+  useEffect(() => {
+    statusAgentRef.current = agentId;
+    setTriggerStatus(null);
+  }, [agentId]);
+
+  // #2858: label fields show a suffixed team's labels as base + chip. Inside
+  // the Flow editor the canvas already provides the team's suffix; on its own
+  // (Agent Chat → Triggers) the panel reads it from the agent's team.
+  const outerSuffixCtx = useLabelSuffix();
+  const [ownSuffixCtx, setOwnSuffixCtx] = useState(null);
+  useEffect(() => {
+    setOwnSuffixCtx(null);
+    if (outerSuffixCtx || isDraft || !agentId) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const cfg = await apiCall('GET', `/api/agents/${encodeURIComponent(agentId)}`);
+        const teamCfg = cfg && cfg.role === 'team' ? cfg
+          : cfg && cfg.parentTeamId ? await apiCall('GET', `/api/agents/${encodeURIComponent(cfg.parentTeamId)}`)
+          : null;
+        if (!cancelled) setOwnSuffixCtx(labelSuffixContextFor(teamCfg));
+      } catch { /* no chip — the fields stay plain inputs */ }
+    })();
+    return () => { cancelled = true; };
+  }, [agentId, isDraft, outerSuffixCtx]);
 
   const fetchTriggers = useCallback(async (id) => {
     if (!id) { setTriggers([]); return; }
@@ -1838,6 +2083,13 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
       const data = await ops.listTriggers(id);
       const list = Array.isArray(data) ? data : [];
       setTriggers(list);
+      if (ops.mode !== 'draft' && list.some((t) => t && (t.type === 'cron' || t.type === 'once'))) {
+        apiCall('GET', `/api/agents/${encodeURIComponent(id)}/trigger-status`)
+          .then((body) => {
+            if (statusAgentRef.current === id) setTriggerStatus(body && typeof body === 'object' ? body : null);
+          })
+          .catch(() => { if (statusAgentRef.current === id) setTriggerStatus(null); });
+      }
       if (ops.mode !== 'draft' && list.some((t) => t && t.type === 'github-event')) {
         apiCall('GET', '/api/github-events/repo-status')
           .then((body) => setRepoStatusRows(Array.isArray(body?.repos) ? body.repos : null))
@@ -1863,6 +2115,7 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
     return () => clearInterval(timer);
   }, [agentId, active, isDraft, fetchTriggers]);
 
+  // Save errors propagate to TriggerForm's submit(), which shows them inline.
   async function handleSave(body) {
     setSaving(true);
     try {
@@ -1870,8 +2123,6 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
       setAddOpen(false);
       fetchTriggers(agentId);
       onChanged?.();
-    } catch (e) {
-      throw e;
     } finally {
       setSaving(false);
     }
@@ -1880,12 +2131,10 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
   async function handleEditSave(body) {
     setSaving(true);
     try {
-      await ops.updateTrigger(agentId, editTarget.id, body);
+      await ops.updateTrigger(agentId, editTarget.id, body, editTarget.position);
       setEditTarget(null);
       fetchTriggers(agentId);
       onChanged?.();
-    } catch (e) {
-      throw e;
     } finally {
       setSaving(false);
     }
@@ -1894,7 +2143,7 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
   async function handleDelete() {
     if (!deleteTarget) return;
     try {
-      await ops.deleteTrigger(agentId, deleteTarget.id);
+      await ops.deleteTrigger(agentId, deleteTarget.id, deleteTarget.position);
       setDeleteTarget(null);
       fetchTriggers(agentId);
       onChanged?.();
@@ -1984,6 +2233,7 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
   }
 
   return (
+    <LabelSuffixContext.Provider value={outerSuffixCtx || ownSuffixCtx}>
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       {toolbar}
 
@@ -2010,7 +2260,7 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
 
         {listedTriggers.map((t, i) => (
           <TriggerRow
-            key={t.id || i}
+            key={triggerRowKey(t, i)}
             trigger={t}
             agentId={agentId}
             ops={ops}
@@ -2019,6 +2269,7 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
             onToggled={afterRowMutation}
             repoWarning={isDraft ? null : triggerRepoWarning(t, repoStatusRows, { agentId })}
             nameOf={agentNames ? (id) => agentNames.get(id) : undefined}
+            status={isDraft ? null : triggerStatus}
           />
         ))}
       </div>
@@ -2060,5 +2311,6 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
 
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
+    </LabelSuffixContext.Provider>
   );
 }

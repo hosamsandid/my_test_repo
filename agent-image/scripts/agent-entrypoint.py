@@ -131,6 +131,10 @@ def _is_human_sender(agent_user_id: str, sender: str, members: list[str]) -> boo
 # verdict, and how often to poll for it. Overridable for tests / slow reviewers.
 VERIFY_WAIT_SEC = int(os.environ.get("LOOP_VERIFY_WAIT_SEC", "1800"))
 VERIFY_POLL_SEC = float(os.environ.get("LOOP_VERIFY_POLL_SEC", "10"))
+# Loop `until.command` / `verify.command` (#2745): shell commands such as
+# `npm test`, so they get far more headroom than the 30 s preCheck default.
+LOOP_COMMAND_TIMEOUT_SEC = max(
+    1, int(os.environ.get("LOOP_COMMAND_TIMEOUT_MS", "600000")) // 1000)
 
 # A triggered run whose claude invocation dies on a transient infra error
 # (API 5xx, connection closed mid-response) gets exactly one retry after this
@@ -336,6 +340,34 @@ RESUME_UNAVAILABLE_NOTICE = (
     "update, or been lost with the container). No new, empty session was "
     "started in its place — please start a new conversation if you need one."
 )
+
+
+# Shown in the room when a pool instance's one lifetime session (#2595) could
+# not be resumed (snapshot gone, e.g. lost with the container) and the run had
+# to start a fresh one — the break must be visible, never silent.
+POOL_SESSION_RESTARTED_NOTICE = (
+    "_(My previous session for this work item could not be resumed — the saved "
+    "conversation snapshot is no longer available. I continued in a new "
+    "session, so I don't remember earlier runs beyond what is on disk.)_"
+)
+
+
+def _pool_instance_session(cfg: dict | None, trigger: dict | None = None) -> bool:
+    """True when this run belongs to a pool instance's single lifetime session
+    (#2595).
+
+    A pool instance (`poolInstance: true`) exists for exactly one work item and
+    is reaped when it is done, so every trigger run and every chat turn resume
+    ONE Claude session through the DM room's session pointer — instead of the
+    fresh, pointer-less session `per-invocation` gives a triggered run. Loop
+    iterations are the exception: they rely on a fresh context per iteration
+    by design. Non-pooled agents are unaffected (False).
+    """
+    if not isinstance(cfg, dict) or cfg.get("poolInstance") is not True:
+        return False
+    if isinstance(trigger, dict) and trigger.get("type") == "loop":
+        return False
+    return True
 
 
 def _session_pointer_file(room_id: str) -> Path:
@@ -571,6 +603,10 @@ class _StatePushClient:
         # isolation (#185), where the agent's own copy is on an unreachable volume.
         self._q.put(("running", list(sessions)))
 
+    def push_trigger_status(self, data: dict) -> None:
+        # Per-trigger next/last-run status (#2628) — last write per tick wins.
+        self._q.put(("trigger-status", dict(data)))
+
     def mark_session_dirty(self, room_id: str) -> None:
         self._q.put(("session", room_id))
 
@@ -610,6 +646,7 @@ class _StatePushClient:
                     break
             status_data = None
             running_sessions = None
+            trigger_status = None
             dirty: list[str] = []
             pointers: dict[str, tuple[str, str]] = {}
             drain_usage = False
@@ -618,6 +655,8 @@ class _StatePushClient:
                     status_data = payload
                 elif kind == "running":
                     running_sessions = payload  # last write within the tick wins
+                elif kind == "trigger-status":
+                    trigger_status = payload  # last write within the tick wins
                 elif kind == "session" and payload not in dirty:
                     dirty.append(payload)  # type: ignore[arg-type]
                 elif kind == "rotate":
@@ -636,6 +675,8 @@ class _StatePushClient:
                     self._post_status(status_data)
                 if running_sessions is not None:
                     self._post_running_sessions(running_sessions)
+                if trigger_status is not None:
+                    self._post_trigger_status(trigger_status)
                 for room_id in dirty:
                     self._flush_session(room_id)
                 for room_id, (sid, upd) in pointers.items():
@@ -652,6 +693,10 @@ class _StatePushClient:
     def _post_running_sessions(self, sessions: list) -> None:
         body = json.dumps(sessions).encode("utf-8")
         self._post(f"/internal/agents/{self._agent_id}/running-sessions", body)
+
+    def _post_trigger_status(self, data: dict) -> None:
+        body = json.dumps(data).encode("utf-8")
+        self._post(f"/internal/agents/{self._agent_id}/trigger-status", body)
 
     def _post_pointer(self, room_id: str, session_id: str, updated_at: str) -> None:
         body = json.dumps({
@@ -1156,6 +1201,19 @@ def _append_event(room_id: str, event: dict) -> None:
         print(f"[Runner] session-log append failed: {exc}", file=sys.stderr)
 
 
+def _log_run_reply(room_id: str, correlation_id: str | None, event_id: str | None) -> None:
+    """Record the `message.posted` row that ties a reply to its run (#2603), so
+    Agent Chat's "Show in session log" resolves the agent-error / abort replies
+    too, not only the answer. No-op without an event id (send failed)."""
+    if not (isinstance(event_id, str) and event_id and correlation_id):
+        return
+    _append_event(room_id, {
+        "type": "message.posted",
+        "correlationId": correlation_id,
+        "eventId": event_id,
+    })
+
+
 def _normalize_usage_tokens(usage: dict) -> dict:
     """Shape a Claude Code stream-json `usage` object (assistant-message or
     result-event, same field names either way) into the token-count dict used
@@ -1495,6 +1553,26 @@ _ASK_USER_QUESTION_TOOL = "AskUserQuestion"
 # path) so a concurrent DM turn and trigger run in the same container can never
 # pick up each other's question.
 _ASK_FILE_ENV = "AEE_ASK_FILE"
+# Epoch seconds by which this invocation is killed (#2796, read by aee-wait-ci).
+_RUN_DEADLINE_ENV = "AEE_RUN_DEADLINE"
+# Claude Code's Bash tool never allows a command more than 10 min, which would
+# kill a foreground `aee-wait-ci` long before its own wait ends (#2796). Only
+# that MAXIMUM is raised per turn — to the CLI's maximum wait (50 min, see
+# aee-wait-ci) plus slack for its last poll and a 60 s `gh` call — so the agent
+# can grant the wait a long tool `timeout` explicitly. The DEFAULT (2 min) is
+# left alone (#2815): raising it made every accidentally blocking command (e.g.
+# a CLI reading stdin) stall the agent silently for the full raised default.
+# An operator-set larger maximum is kept.
+_BASH_MAX_TIMEOUT_MS = (50 + 5) * 60 * 1000
+
+
+def _raise_bash_tool_timeouts(env: dict) -> None:
+    """Let the Bash tool grant a foreground `aee-wait-ci` its full wait when asked."""
+    try:
+        current = int(env.get("BASH_MAX_TIMEOUT_MS") or 0)
+    except ValueError:
+        current = 0
+    env["BASH_MAX_TIMEOUT_MS"] = str(max(current, _BASH_MAX_TIMEOUT_MS))
 
 
 def _ask_sentinel_path(invocation_id: str) -> Path:
@@ -1523,6 +1601,175 @@ def _clear_ask_sentinel(path: Path) -> None:
         pass
     except OSError as exc:
         print(f"[Runner] could not remove ask sentinel {path}: {exc}", file=sys.stderr)
+
+
+# ---- in-turn status notes (#2841) ----
+#
+# A long in-turn wait (today: `aee-wait-ci`) is invisible in the chat: the agent
+# says nothing until the run ends. The CLI appends one JSON line per wait that
+# has really started to a per-invocation file whose path the runner hands it via
+# AEE_STATUS_FILE; a watcher thread turns each line into ONE short m.notice in
+# the run's room ("Pull request #N is open — waiting for CI…"). Reliable by
+# construction — it never depends on the agent remembering to post — and only a
+# status note: it never replaces the final reply. Per-invocation for the same
+# reason as the ask sentinel above.
+_STATUS_FILE_ENV = "AEE_STATUS_FILE"
+_STATUS_POLL_SEC = 1.0
+_STATUS_NOTE_KEY = "io.aee.status-note"
+_STATUS_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_STATUS_HOST_RE = re.compile(r"^[A-Za-z0-9.-]+$")
+
+# Small stopword sets — enough to tell a German chat message from an English one.
+_DE_WORDS = frozenset((
+    "der die das und ist nicht ich du wir ihr sie es ein eine einen mit auf für "
+    "bitte kannst können noch auch schon aber oder wenn dass wie was warum den dem "
+    "des zu im vom zum bei nach mal jetzt hier gibt mach mache").split())
+_EN_WORDS = frozenset((
+    "the and is not you we they it a an with on for please can could still also "
+    "already but or if that how what why to in at by after now here there make do "
+    "this of are").split())
+
+
+def _guess_language(text) -> str:
+    """'de' when the text reads as German, else 'en' (the fallback)."""
+    if not isinstance(text, str) or not text.strip():
+        return "en"
+    words = re.findall(r"[a-zäöüß]+", text.lower())
+    de = sum(1 for w in words if w in _DE_WORDS) + sum(2 for w in words if any(c in w for c in "äöüß"))
+    en = sum(1 for w in words if w in _EN_WORDS)
+    return "de" if de >= 2 and de > en else "en"
+
+
+def _status_file_path(invocation_id: str) -> Path:
+    """Run-scoped file the in-turn CLIs append status events to."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", invocation_id or "") or uuid.uuid4().hex
+    return _agent_workdir() / STATE_DIR / "status" / f"{safe}.jsonl"
+
+
+def _clear_status_file(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"[Runner] could not remove status file {path}: {exc}", file=sys.stderr)
+
+
+def _ci_wait_note(event, attempt: int, language: str = "en",
+                  correlation_id: str | None = None) -> dict | None:
+    """The m.notice content for one `aee-wait-ci` wait, or None when the event
+    is not a well-formed ci-wait (it is then silently dropped)."""
+    if not isinstance(event, dict) or event.get("kind") != "ci-wait":
+        return None
+    repo, pr, host = event.get("repo"), event.get("pr"), event.get("host") or "github.com"
+    if not (isinstance(repo, str) and _STATUS_REPO_RE.match(repo)):
+        return None
+    if not (isinstance(pr, int) and not isinstance(pr, bool) and pr > 0):
+        return None
+    if not (isinstance(host, str) and _STATUS_HOST_RE.match(host)):
+        host = "github.com"
+    minutes = event.get("timeoutMinutes")
+    minutes = int(minutes) if isinstance(minutes, (int, float)) and not isinstance(minutes, bool) and minutes > 0 else None
+    url = f"https://{host}/{repo}/pull/{pr}"
+    if language == "de":
+        limit = f" (bis zu {minutes} Min.)" if minutes else ""
+        retry = f" (Versuch {attempt})" if attempt > 1 else ""
+        text = "Pull Request {ref} ist offen — ich warte, bis die CI durchgelaufen ist" + limit + "." + retry
+    else:
+        limit = f" (up to {minutes} min)" if minutes else ""
+        retry = f" (attempt {attempt})" if attempt > 1 else ""
+        text = "Pull request {ref} is open — waiting for CI to finish" + limit + "." + retry
+    return {
+        "msgtype": "m.notice",
+        "body": text.format(ref=f"#{pr} ({url})"),
+        "format": "org.matrix.custom.html",
+        "formatted_body": text.format(ref=f'<a href="{html.escape(url, quote=True)}">#{pr}</a>'),
+        _STATUS_NOTE_KEY: {
+            "kind": "ci-wait", "repo": repo, "pr": pr, "attempt": attempt,
+            "timeoutMinutes": minutes, "correlationId": correlation_id or None,
+        },
+    }
+
+
+class _StatusNoteWatcher:
+    """Tails one invocation's AEE_STATUS_FILE while claude runs and posts one
+    status note per event through `run_context["_statusPoster"]` (set by the DM
+    and trigger paths; absent → nothing is posted). Attempts are counted per
+    (repo, pr) on the run_context, so a re-run within the same run names it."""
+
+    def __init__(self, path: Path, run_context: dict | None, correlation_id: str | None,
+                 poll_sec: float = _STATUS_POLL_SEC):
+        self.path = path
+        self.run_context = run_context if isinstance(run_context, dict) else {}
+        self.correlation_id = correlation_id
+        self.poll_sec = poll_sec
+        self._offset = 0
+        self._partial = b""
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def drain(self) -> int:
+        """Post a note for every complete new line. Returns how many were posted."""
+        try:
+            with open(self.path, "rb") as f:
+                f.seek(self._offset)
+                chunk = f.read()
+        except OSError:
+            return 0
+        self._offset += len(chunk)
+        data = self._partial + chunk
+        lines = data.split(b"\n")
+        self._partial = lines.pop()  # an unfinished last line waits for the next look
+        posted = 0
+        for raw in lines:
+            try:
+                event = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                continue
+            if not isinstance(event, dict) or event.get("kind") != "ci-wait":
+                continue
+            attempts = self.run_context.setdefault("_ciWaitAttempts", {})
+            key = f"{event.get('repo')}#{event.get('pr')}"
+            attempt = attempts.get(key, 0) + 1
+            note = _ci_wait_note(event, attempt, self.run_context.get("_statusLanguage") or "en",
+                                 self.correlation_id)
+            poster = self.run_context.get("_statusPoster")
+            if note is None or not callable(poster):
+                continue
+            attempts[key] = attempt
+            try:
+                poster(note)
+                posted += 1
+            except Exception as exc:  # a status note must never break the run
+                print(f"[Runner] status note failed: {exc}", file=sys.stderr)
+        return posted
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.poll_sec):
+            self.drain()
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop watching. Nothing is posted after the turn: a wait that started
+        in its last second has ended along with the turn."""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+
+def _make_status_poster(client, room_id: str, loop, timeout: float = 15.0):
+    """A thread-safe `post(content)` for _StatusNoteWatcher: schedules the send
+    on the runner's event loop (the watcher runs in claude's worker thread)."""
+    def post(content: dict) -> None:
+        fut = asyncio.run_coroutine_threadsafe(
+            client.room_send(room_id=room_id, message_type="m.room.message", content=content),
+            loop,
+        )
+        fut.result(timeout=timeout)
+    return post
 
 
 def _is_ask_user_question_tool(name) -> bool:
@@ -1645,6 +1892,31 @@ def _ask_user_question_payload(tool_input) -> dict | None:
     return {"version": 1, "questions": out_questions}
 
 
+_CHAT_AUTHOR_FIELD = "io.aee.author"
+
+
+def _chat_author(content):
+    """The console-stamped author of a human chat message (#2065, #2715).
+
+    The Matrix `sender` is not the person who wrote the message: a console
+    user without a personal Matrix identity posts through the shared admin
+    account. The console stamps the real author under `io.aee.author`; keep
+    just its `userId` / `subject` strings so the session log can name the same
+    person the transcript bubble does. `None` when no usable stamp is present.
+    """
+    if not isinstance(content, dict):
+        return None
+    raw = content.get(_CHAT_AUTHOR_FIELD)
+    if not isinstance(raw, dict):
+        return None
+    author = {}
+    for key in ("userId", "subject"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            author[key] = value.strip()[:256]
+    return author or None
+
+
 _ASK_ANSWER_FIELD = "io.aee.ask-answer"
 _ASK_ANSWER_MAX_LABELS = 50
 
@@ -1658,7 +1930,10 @@ def _ask_answer_prompt(body: str, content) -> str:
     `answers[]`); its visible body only joins them with ", ", which is ambiguous
     when a label contains a comma. For those, rebuild the prompt from the
     structured labels so every selected answer reaches the model as its own
-    line. Anything malformed falls back to the plain body.
+    line. In a multi-question answer each block is labelled with its question
+    header, a typed answer (`custom`, #2821) keeps its own lines (indented) and
+    a skipped question reads "(skipped)". Anything malformed falls back to the
+    plain body.
     """
     if not isinstance(content, dict):
         return body
@@ -1672,6 +1947,12 @@ def _ask_answer_prompt(body: str, content) -> str:
 
     blocks: list[str] = []
     for e in entries:
+        if e.get("skipped") is True:
+            blocks.append("(skipped)")
+            continue
+        if e.get("custom") is True and isinstance(e.get("text"), str) and e["text"].strip():
+            blocks.append("\n".join(f"  {l}" for l in e["text"].strip().splitlines()))
+            continue
         raw = e.get("labels") if isinstance(e.get("labels"), list) else [e.get("label")]
         labels = [l.strip() for l in raw[:_ASK_ANSWER_MAX_LABELS]
                   if isinstance(l, str) and l.strip()]
@@ -1680,8 +1961,14 @@ def _ask_answer_prompt(body: str, content) -> str:
         blocks.append("\n".join(f"- {l}" for l in labels))
     if len(blocks) == 1:
         return "My answer to your question (selected options):\n" + blocks[0]
+
+    def title(i: int, e: dict) -> str:
+        header = e.get("header")
+        if isinstance(header, str) and header.strip():
+            return f"Question {i} ({header.strip()[:120]}):"
+        return f"Question {i}:"
     return "My answers to your questions (selected options, in question order):\n" + "\n".join(
-        f"Question {i}:\n{b}" for i, b in enumerate(blocks, 1))
+        f"{title(i, e)}\n{b}" for i, (e, b) in enumerate(zip(entries, blocks), 1))
 
 
 # ---- status.json ----
@@ -3482,6 +3769,19 @@ def _call_claude_once_inner(prompt: str, room_id: str, correlation_id: str,
     ask_sentinel = _ask_sentinel_path(f"{correlation_id or 'run'}-{uuid.uuid4().hex[:8]}")
     _clear_ask_sentinel(ask_sentinel)
     env[_ASK_FILE_ENV] = str(ask_sentinel)
+    # In-turn status notes (#2841): `aee-wait-ci` announces a wait here; the
+    # watcher started with the process posts one note per wait to the room.
+    status_file = _status_file_path(f"{correlation_id or 'run'}-{uuid.uuid4().hex[:8]}")
+    _clear_status_file(status_file)
+    try:
+        status_file.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"[Runner] could not create status dir {status_file.parent}: {exc}", file=sys.stderr)
+    env[_STATUS_FILE_ENV] = str(status_file)
+    # Run deadline (#2796): `aee-wait-ci` caps its in-turn CI wait so it ends
+    # before this invocation's own timeout, with room left to act on the verdict.
+    env[_RUN_DEADLINE_ENV] = str(int(time.time() + timeout_sec))
+    _raise_bash_tool_timeouts(env)
 
     # Git context for the usage record (#654): capture HEAD before the run so the
     # record can show what this invocation moved. Best-effort — never blocks the run.
@@ -3619,6 +3919,8 @@ def _call_claude_once_inner(prompt: str, room_id: str, correlation_id: str,
 
     threading.Thread(target=drain_stderr, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
+    status_watcher = _StatusNoteWatcher(status_file, run_context, correlation_id)
+    status_watcher.start()
 
     try:
         for line in iter(proc.stdout.readline, ""):
@@ -3644,6 +3946,8 @@ def _call_claude_once_inner(prompt: str, room_id: str, correlation_id: str,
                 ask_question_input = queued
                 ask_via_cli = True
         _clear_ask_sentinel(ask_sentinel)
+        status_watcher.stop()
+        _clear_status_file(status_file)
 
     rc = proc.returncode
     stderr_blob = "".join(stderr_chunks)
@@ -3750,15 +4054,23 @@ def _call_claude_once_inner(prompt: str, room_id: str, correlation_id: str,
 
 def _call_claude(prompt: str, room_id: str, correlation_id: str,
                  blueprint_id: str | None, timeout_sec: int = CLAUDE_TIMEOUT_SEC,
-                 run_context: dict | None = None) -> str:
-    """Drive _call_claude_once with --resume retry-on-stale-session logic."""
+                 run_context: dict | None = None,
+                 pointer_room_id: str | None = None) -> str:
+    """Drive _call_claude_once with --resume retry-on-stale-session logic.
+
+    `pointer_room_id` names the room whose session pointer is read and moved
+    (default: `room_id`, where the run logs and posts). A pool instance
+    (#2595) passes its DM room so a trigger posting elsewhere still continues
+    the instance's one session. When a stale pointer forces a fresh session,
+    `run_context["_resumeFellBack"]` is set so the caller can say so."""
+    pointer_room = pointer_room_id or room_id
     # Pyramid level 1 guarantee: the digest CLAUDE.md @-imports is current for
     # this run (per-invocation agents see the team state on every run).
     _rebuild_knowledge_digest()
     # Level 1.5 (#917): task-scoped knowledge for THIS prompt — the one place
     # in the whole system where the task text and the KB meet.
     _rebuild_scoped_knowledge(prompt)
-    resume_id, resume_requested = _read_session_pointer_full(room_id)
+    resume_id, resume_requested = _read_session_pointer_full(pointer_room)
     if resume_id:
         try:
             text, observed = _call_claude_once(
@@ -3766,14 +4078,14 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
                 run_context,
             )
             if observed:
-                _write_session_pointer(room_id, observed)
+                _write_session_pointer(pointer_room, observed)
             return text
         except subprocess.CalledProcessError as err:
             if getattr(err, "user_aborted", False):
                 raise
             blob = (str(err.stderr or "") + " " + str(err)).lower()
             if "session" in blob or "resume" in blob or "not found" in blob:
-                _clear_session_pointer(room_id)
+                _clear_session_pointer(pointer_room)
                 # An explicit resume (#574) must NOT silently fall back to a
                 # fresh empty session (AC6) — the user chose *this* snapshot, so
                 # tell them it's gone and let them decide, rather than answering
@@ -3789,12 +4101,14 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
                     f"[Runner] --resume {resume_id} failed; retrying without resume",
                     file=sys.stderr,
                 )
+                if run_context is not None:
+                    run_context["_resumeFellBack"] = True
                 text, observed = _call_claude_once(
                     prompt, room_id, correlation_id, None, blueprint_id, timeout_sec,
                     run_context,
                 )
                 if observed:
-                    _write_session_pointer(room_id, observed)
+                    _write_session_pointer(pointer_room, observed)
                 return text
             raise
 
@@ -3803,7 +4117,7 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
         run_context,
     )
     if observed:
-        _write_session_pointer(room_id, observed)
+        _write_session_pointer(pointer_room, observed)
     return text
 
 
@@ -4139,6 +4453,53 @@ def _save_triggers(triggers: list[dict]) -> None:
         print(f"[Runner] _save_triggers: {exc}", file=sys.stderr)
 
 
+# Per-trigger scheduling status (#2628): what the console shows next to each
+# cron / once trigger — when it fires next, when it last fired and how that
+# went, and why the scheduler refused it. Agent → control state, so it is
+# mirrored to the orchestrator like status.json (the admin can't read an
+# isolated agent's volume). Shape:
+#   {"timeZone": "Europe/Berlin", "updatedAt": "<iso>",
+#    "triggers": {<id>: {"nextFireAt"?, "lastFiredAt"?, "lastResult"?, "invalid"?}}}
+# `lastResult` is one of running / ok / error / skipped / skipped-maintenance /
+# interrupted (a run cut off by a restart or cancellation).
+_TRIGGER_STATUS_FILENAME = "trigger-status.json"
+
+
+def _iso_utc(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _load_trigger_status() -> dict[str, dict]:
+    p = _agent_workdir() / _TRIGGER_STATUS_FILENAME
+    try:
+        if not p.exists():
+            return {}
+        data = json.loads(p.read_text(encoding="utf-8"))
+        entries = data.get("triggers") if isinstance(data, dict) else None
+        if not isinstance(entries, dict):
+            return {}
+        return {k: dict(v) for k, v in entries.items()
+                if isinstance(k, str) and isinstance(v, dict)}
+    except Exception as exc:
+        print(f"[Runner] _load_trigger_status: {exc}", file=sys.stderr)
+        return {}
+
+
+def _save_trigger_status(entries: dict[str, dict]) -> None:
+    data = {
+        "timeZone": _TRIGGER_TZ.key,
+        "updatedAt": _iso_utc(datetime.now(timezone.utc)),
+        "triggers": entries,
+    }
+    try:
+        _atomic_write_json(_agent_workdir() / _TRIGGER_STATUS_FILENAME, data)
+        pc = _get_push_client()  # mirror to control plane (#185)
+        if pc:
+            pc.push_trigger_status(data)
+    except Exception as exc:
+        print(f"[Runner] _save_trigger_status: {exc}", file=sys.stderr)
+
+
 def _load_in_flight() -> list[dict]:
     p = _agent_workdir() / _IN_FLIGHT_FILENAME
     try:
@@ -4203,6 +4564,51 @@ def _run_pre_check(script_path: str, env: dict) -> tuple[int, str]:
     return proc.returncode, (proc.stdout or "")[:4000]
 
 
+def _run_loop_command(command: str, env: dict) -> tuple[int, str]:
+    """Run a loop's ``until.command`` / ``verify.command`` (#2745).
+
+    Unlike ``_run_pre_check`` (a script *path*), loop commands are shell
+    command lines (``npm test && test ! -s fix_plan.md``), so they run through
+    ``/bin/sh -c`` in the agent workspace. Returns ``(exit_code, output)``;
+    the output carries stdout plus stderr, and a spawn error or timeout is
+    reported as text with a non-zero code, so the loop feedback / outcome DM
+    always shows why the command failed instead of an empty block.
+    """
+    full_env = {**os.environ, **(env or {})}
+    try:
+        cwd = _agent_workdir()
+        cwd = str(cwd) if cwd.is_dir() else None
+    except Exception:
+        cwd = None
+    try:
+        proc = subprocess.run(
+            ["/bin/sh", "-c", command],
+            env=full_env,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=LOOP_COMMAND_TIMEOUT_SEC,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        msg = f"loop command timed out after {LOOP_COMMAND_TIMEOUT_SEC}s: {command}"
+        print(f"[Runner] {msg}", file=sys.stderr)
+        return 124, msg
+    except Exception as exc:
+        msg = f"loop command could not be started: {exc}"
+        print(f"[Runner] {msg}", file=sys.stderr)
+        return 127, msg
+
+    out = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    if err:
+        print(f"[Runner] loop command stderr: {err[:400]}", file=sys.stderr)
+    if proc.returncode != 0 and not (out or err):
+        out = f"(command exited {proc.returncode} with no output)"
+    combined = "\n".join(part for part in (out, f"[stderr]\n{err}" if err else "") if part)
+    return proc.returncode, combined[:4000]
+
+
 def _validate_loop_trigger(trigger: dict) -> tuple[bool, str]:
     """Validate a `loop` trigger's stop contract (#932).
 
@@ -4258,8 +4664,8 @@ def _validate_verify_spec(verify) -> tuple[bool, str]:
 
     A verifier takes exactly one of four shapes:
 
-    - ``{"command": "<sh>", "env": {}}`` — an exit-code gate (reuses
-      ``_run_pre_check``).
+    - ``{"command": "<sh>", "env": {}}`` — an exit-code gate (a shell
+      command line, run by ``_run_loop_command``).
     - ``{"agentId": "<other-agent>"}`` — delegate the check to a *different*
       agent and block on its verdict.
     - ``{"flow": true}`` — hand-off to the flow: no inline gate, verification
@@ -4807,11 +5213,18 @@ class TriggerScheduler:
         # always self-consistent.
         self._gate = workspace_gate if workspace_gate is not None else WorkspaceGate()
 
-        self._cron_tasks: dict[str, dict] = {}  # triggerId -> {"task": Task, "expr": str}
-        self._loop_tasks: dict[str, dict] = {}  # loop triggerId -> {"task": Task} (#932)
+        # triggerId -> {"task": Task, "expr": str, "trigger": dict}. `trigger` is
+        # refreshed on every sync, so a runner fires with the latest edit (#2627).
+        self._cron_tasks: dict[str, dict] = {}
+        self._loop_tasks: dict[str, dict] = {}  # loop triggerId -> {"task": Task, "trigger": dict} (#932)
         # Raw-layer guard (#1006): trigger ids already flagged as deviating
         # from the wiring rules — each gets ONE advisory DM, never a repeat.
         self._nonconformant_notified: set[str] = set()
+        # Triggers the scheduler SKIPS (#2626) — an invalid cron expression
+        # (keyed "cron:<id>:<expr>", so a re-broken fix is reported again) or a
+        # second enabled trigger sharing an id ("dup:<id>"). One advisory DM
+        # each, like the nonconformant guard; stderr alone reached nobody.
+        self._skipped_notified: set[str] = set()
         self._loop_done: set[str] = set()  # loop triggers that reached a terminal state this lifetime (#932)
         # Chat-launched loops (#1020): a loop launched from the composer is a
         # one-off "run until done", NOT a standing subscription. It carries
@@ -4823,6 +5236,12 @@ class TriggerScheduler:
         self._stale_launched_loops: set[str] = set()
         self._running: set[str] = set()
         self._fired_once: set[str] = set()  # once-triggers already fired this lifetime (#185)
+        # Per-trigger next/last-run status shown in the console (#2628). Loaded
+        # from trigger-status.json in start() so a restart keeps "last run".
+        self._trigger_status: dict[str, dict] = {}
+        # Outcome of the latest _execute per trigger id (#2628), read back by
+        # the cron runner: ok / error / skipped.
+        self._exec_results: dict[str, str] = {}
         # Blast-radius backstop (#611): caps concurrent + per-window triggered
         # Claude spawns so a self-triggering loop can't fan out unbounded.
         self._backstop = TriggerBackstop(
@@ -4849,6 +5268,8 @@ class TriggerScheduler:
                   file=sys.stderr)
         await self._reconcile_in_flight()
         self._capture_stale_launched_loops()
+        self._trigger_status = _load_trigger_status()
+        self._mark_interrupted_runs()
         await self._sync()
         self._sync_task = asyncio.create_task(self._sync_loop())
         self._pending_task = asyncio.create_task(self._pending_loop())
@@ -4881,6 +5302,55 @@ class TriggerScheduler:
             asyncio.get_running_loop().remove_signal_handler(signal.SIGUSR2)
         except (NotImplementedError, RuntimeError, ValueError):
             pass
+
+    # -- per-trigger status (#2628) ------------------------------------------
+
+    def _set_trigger_status(self, tid: str, *, persist: bool = True,
+                            **fields) -> bool:
+        """Merge `fields` into the trigger's status entry (a None value drops
+        the key). Persists only when something actually changed, so the 60 s
+        sync tick re-reporting the same invalid cron costs nothing. Returns
+        whether the entry changed."""
+        prev = self._trigger_status.get(tid) or {}
+        cur = dict(prev)
+        for key, value in fields.items():
+            if value is None:
+                cur.pop(key, None)
+            else:
+                cur[key] = value
+        if cur == prev:
+            return False
+        if cur:
+            self._trigger_status[tid] = cur
+        else:
+            self._trigger_status.pop(tid, None)
+        if persist:
+            self._persist_trigger_status()
+        return True
+
+    def _persist_trigger_status(self) -> None:
+        # #606: a test harness must never write the live workdir or push to
+        # the control plane of the agent it happens to run inside.
+        if _under_test_harness():
+            return
+        _save_trigger_status(self._trigger_status)
+
+    def _reconcile_trigger_status(self, triggers: list, scheduled: set[str]) -> None:
+        """Drop status for triggers that no longer exist, and clear the
+        next-run / invalid fields of every trigger the scheduler is not
+        currently handling (disabled, or not a cron/once trigger) — neither
+        claim is true for a trigger that doesn't run. `lastFiredAt` stays."""
+        known = {t.get("id") for t in triggers if isinstance(t, dict)}
+        changed = False
+        for tid in list(self._trigger_status):
+            if tid not in known:
+                self._trigger_status.pop(tid, None)
+                changed = True
+            elif tid not in scheduled:
+                changed |= self._set_trigger_status(
+                    tid, persist=False, nextFireAt=None, invalid=None)
+        if changed:
+            self._persist_trigger_status()
 
     # -- in-flight markers (#506 crash reconciliation) -----------------------
 
@@ -5155,9 +5625,18 @@ class TriggerScheduler:
         triggers = _load_triggers()
         active_ids: set[str] = set()
         active_loop_ids: set[str] = set()
+        # cron/once ids the scheduler is handling this tick — their status
+        # entries keep nextFireAt/invalid; every other entry drops them (#2628).
+        status_ids: set[str] = set()
         # Checked once per tick (not per overdue once-trigger) — a single
         # HTTP round-trip to the orchestrator covers the whole batch.
         maintenance_active = await self._maintenance_active()
+        # Enabled trigger ids seen this pass (#2626). Every per-id structure
+        # (_cron_tasks, _loop_tasks, _running) assumes ids are unique; with two
+        # enabled entries sharing one, each sync would cancel and reschedule
+        # the other. The FIRST wins (the console API edits/deletes the first
+        # match too); later ones are skipped and reported once.
+        seen_ids: set[str] = set()
 
         for trigger in triggers:
             if not isinstance(trigger, dict):
@@ -5167,6 +5646,17 @@ class TriggerScheduler:
             tid = trigger.get("id")
             if not isinstance(tid, str) or not tid:
                 continue
+            # Duplicate ids (#2627): the task maps are keyed by id, so two
+            # triggers sharing one would cancel and reschedule each other on
+            # every sync. The first one wins; the rest are skipped, and the
+            # user is told once (#2626).
+            if tid in seen_ids:
+                await self._notify_skipped_trigger(
+                    f"dup:{tid}", tid,
+                    "another enabled trigger already uses this id, so only the first one runs — "
+                    "give each trigger its own id")
+                continue
+            seen_ids.add(tid)
 
             # Raw-layer guard (#1006, §4.8): a self-managed edit that deviates
             # from the wiring rules is flagged ONCE (stderr + advisory DM) and
@@ -5181,32 +5671,49 @@ class TriggerScheduler:
 
             ttype = trigger.get("type")
             if ttype == "cron":
+                status_ids.add(tid)
                 expr = trigger.get("cron")
                 if not isinstance(expr, str) or not expr:
+                    self._set_trigger_status(
+                        tid, invalid="No cron expression", nextFireAt=None)
                     continue
                 active_ids.add(tid)
                 existing = self._cron_tasks.get(tid)
                 if existing and existing.get("expr") == expr and not existing["task"].done():
+                    # Same schedule: keep the running task, but hand it the
+                    # latest trigger so its next fire uses the edited prompt,
+                    # description, roomId, … (#2627).
+                    existing["trigger"] = dict(trigger)
                     continue
                 if existing:
                     existing["task"].cancel()
                     print(f"[Runner:{self._agent_id}] Trigger updated: {tid}",
                           file=sys.stderr)
                 if not self._croniter.is_valid(expr):
-                    print(f"[Runner:{self._agent_id}] Invalid cron: {expr} ({tid})",
-                          file=sys.stderr)
+                    self._set_trigger_status(
+                        tid, invalid=f"Invalid cron expression `{expr}`",
+                        nextFireAt=None)
+                    await self._notify_skipped_trigger(
+                        f"cron:{tid}:{expr}", tid,
+                        f"its cron expression `{expr}` is not valid, so it never fires")
                     continue
-                # Snapshot the trigger dict so later edits to triggers.json
-                # don't mutate the running task's view.
+                self._set_trigger_status(tid, invalid=None)
+                # Copy the trigger dict so later edits to triggers.json don't
+                # mutate the running task's view; each sync replaces the
+                # entry's copy and the runner reads it at fire time (#2627).
                 snapshot = dict(trigger)
                 task = asyncio.create_task(self._cron_runner(snapshot, expr))
-                self._cron_tasks[tid] = {"task": task, "expr": expr}
+                self._cron_tasks[tid] = {"task": task, "expr": expr,
+                                         "trigger": snapshot}
                 print(f"[Runner:{self._agent_id}] Trigger scheduled: {tid} ({expr})",
                       file=sys.stderr)
 
             elif ttype == "once":
+                status_ids.add(tid)
                 at_raw = trigger.get("at")
                 if not isinstance(at_raw, str):
+                    self._set_trigger_status(
+                        tid, invalid="No date/time set", nextFireAt=None)
                     continue
                 try:
                     # Accept ISO-8601 with trailing Z (Python <3.11 quirk).
@@ -5217,7 +5724,12 @@ class TriggerScheduler:
                 except Exception as exc:
                     print(f"[Runner:{self._agent_id}] Invalid once 'at' for {tid}: {exc}",
                           file=sys.stderr)
+                    self._set_trigger_status(
+                        tid, invalid=f"Invalid date/time `{at_raw}`",
+                        nextFireAt=None)
                     continue
+                self._set_trigger_status(
+                    tid, invalid=None, nextFireAt=_iso_utc(fire_at))
                 now = datetime.now(tz=_TRIGGER_TZ)
                 if now >= fire_at:
                     # AC1 (#504): don't fire while Maintenance Mode is active.
@@ -5291,18 +5803,23 @@ class TriggerScheduler:
                     continue
                 existing = self._loop_tasks.get(tid)
                 if existing and not existing["task"].done():
+                    # Next iteration runs with the edited trigger (#2627); the
+                    # stop contract and verifier stay as resolved at loop start.
+                    existing["trigger"] = dict(trigger)
                     continue
-                # Snapshot so later edits to triggers.json don't mutate the
-                # running task's view (same as the cron path).
+                # Copy so later edits to triggers.json don't mutate the running
+                # task's view (same as the cron path).
                 snapshot = dict(trigger)
                 task = asyncio.create_task(self._loop_runner(snapshot))
-                self._loop_tasks[tid] = {"task": task}
+                self._loop_tasks[tid] = {"task": task, "trigger": snapshot}
                 print(f"[Runner:{self._agent_id}] Loop scheduled: {tid} "
                       f"(maxIterations={trigger.get('maxIterations')})",
                       file=sys.stderr)
 
             # http / github-event triggers are scheduled by the pending-poll
             # loop (see _process_pending), not here.
+
+        self._reconcile_trigger_status(triggers, status_ids)
 
         # Stop cron tasks that disappeared / got disabled.
         for tid in list(self._cron_tasks.keys()):
@@ -5334,6 +5851,7 @@ class TriggerScheduler:
                     print(f"[Runner:{self._agent_id}] cron next_fire failed for {tid}: {exc}",
                           file=sys.stderr)
                     return
+                self._set_trigger_status(tid, nextFireAt=_iso_utc(next_fire))
                 delay = max(0.0, (next_fire - now).total_seconds())
                 try:
                     await asyncio.sleep(delay)
@@ -5351,19 +5869,54 @@ class TriggerScheduler:
                     print(f"[Runner:{self._agent_id}] cron {tid} fire skipped "
                           f"(maintenance mode active) — will catch up once it ends",
                           file=sys.stderr)
+                    self._set_trigger_status(
+                        tid, lastFiredAt=_iso_utc(next_fire),
+                        lastResult="skipped-maintenance", nextFireAt=None)
                     while not self._shutdown_event.is_set() and await self._maintenance_active():
                         await asyncio.sleep(5.0)
                     if self._shutdown_event.is_set():
                         return
                     print(f"[Runner:{self._agent_id}] cron {tid} catching up "
                           f"after maintenance mode ended", file=sys.stderr)
+                self._exec_results.pop(tid, None)
+                self._set_trigger_status(
+                    tid, lastFiredAt=_iso_utc(datetime.now(tz=_TRIGGER_TZ)),
+                    lastResult="running", nextFireAt=None)
                 try:
-                    await self._execute(trigger)
+                    await self._execute(self._latest_trigger(self._cron_tasks, tid, trigger))
+                    result = self._exec_results.pop(tid, "ok")
                 except Exception as exc:
                     print(f"[Runner:{self._agent_id}] cron _execute({tid}) error: {exc}",
                           file=sys.stderr)
+                    result = "error"
+                self._set_trigger_status(tid, lastResult=result)
         except asyncio.CancelledError:
+            # Cancelled mid-run (disable / reschedule): don't leave "running".
+            if (self._trigger_status.get(tid) or {}).get("lastResult") == "running":
+                self._set_trigger_status(tid, lastResult="interrupted")
             return
+
+    def _mark_interrupted_runs(self) -> None:
+        """A run still recorded as "running" at start-up was cut off by a
+        restart; record it as "interrupted" instead of "running" until the
+        next fire (#2628 review S1)."""
+        for tid, entry in list(self._trigger_status.items()):
+            if isinstance(entry, dict) and entry.get("lastResult") == "running":
+                self._set_trigger_status(tid, lastResult="interrupted")
+
+    @staticmethod
+    def _latest_trigger(tasks: dict[str, dict], tid: str, fallback: dict) -> dict:
+        """The trigger as of the last sync (#2627), else the runner's own copy.
+
+        A runner is started with a copy of its trigger, but `_sync` keeps the
+        task alive across edits that leave the schedule unchanged and only
+        swaps the entry's `trigger`. Reading it here, right before a run, is
+        what makes a prompt-only edit take effect on the next fire. Removal and
+        disabling need no check here: `_sync` cancels the task instead.
+        """
+        entry = tasks.get(tid)
+        latest = entry.get("trigger") if isinstance(entry, dict) else None
+        return dict(latest) if isinstance(latest, dict) else fallback
 
     async def _loop_runner(self, trigger: dict) -> None:
         """Run a `loop` trigger (#932): a continuation primitive.
@@ -5453,8 +6006,9 @@ class TriggerScheduler:
                 try:
                     # `_gate_held=True`: the gate is already held for the whole
                     # loop (above), so the iteration must not re-acquire it.
-                    await self._execute(trigger, ctx, loop_sink=sink,
-                                        _gate_held=True)
+                    await self._execute(
+                        self._latest_trigger(self._loop_tasks, tid, trigger),
+                        ctx, loop_sink=sink, _gate_held=True)
                 except Exception as exc:
                     print(f"[Runner:{self._agent_id}] loop _execute({tid}) error: {exc}",
                           file=sys.stderr)
@@ -5524,7 +6078,7 @@ class TriggerScheduler:
                 until_code: int | None = None
                 if until_cmd:
                     until_code, last_until_output = await asyncio.to_thread(
-                        _run_pre_check, until_cmd, until_env)
+                        _run_loop_command, until_cmd, until_env)
                 outcome = _loop_stop_decision(
                     iterations, max_iterations, until_code,
                     tokens_spent, max_tokens)
@@ -5595,6 +6149,28 @@ class TriggerScheduler:
             )
         except Exception as exc:
             print(f"[Runner:{self._agent_id}] nonconformant-trigger DM failed: {exc}",
+                  file=sys.stderr)
+
+    async def _notify_skipped_trigger(self, key: str, tid: str, reason: str) -> None:
+        """One-time advisory DM for a trigger the scheduler skips (#2626) —
+        an invalid cron or a duplicate id. Unlike a wiring deviation (#1006)
+        the trigger does NOT run, so the message says so. `key` de-duplicates
+        across the 60 s sync ticks. Best-effort, like the nonconformant DM."""
+        if key in self._skipped_notified:
+            return
+        self._skipped_notified.add(key)
+        print(f"[Runner:{self._agent_id}] trigger {tid} skipped: {reason}", file=sys.stderr)
+        room_id = _load_dm_room_id()
+        if not room_id:
+            return
+        try:
+            await self._send_formatted(
+                room_id,
+                f"⚠️ **Trigger `{tid}` is not scheduled** — {reason}.\n\n"
+                "Fix it in the Triggers panel or `triggers.json`.",
+            )
+        except Exception as exc:
+            print(f"[Runner:{self._agent_id}] skipped-trigger DM failed: {exc}",
                   file=sys.stderr)
 
     async def _post_loop_outcome(self, trigger: dict, outcome: str,
@@ -5806,7 +6382,7 @@ class TriggerScheduler:
                                iteration: int) -> tuple[bool, str]:
         """Run one iteration's verifier gate (#933). Returns ``(passed, output)``.
 
-        - ``command`` → exit-code gate via ``_run_pre_check`` (0 == pass).
+        - ``command`` → exit-code gate via ``_run_loop_command`` (0 == pass).
         - ``agent``   → delegate to a different agent and block on its verdict.
         - ``flow``    → no inline gate; the downstream flow QS chain verifies
           each hand-off asynchronously.
@@ -5815,7 +6391,7 @@ class TriggerScheduler:
         mode = plan.get("mode")
         if mode == "command":
             code, out = await asyncio.to_thread(
-                _run_pre_check, plan["command"], plan.get("env") or {})
+                _run_loop_command, plan["command"], plan.get("env") or {})
             return code == 0, out
         if mode == "agent":
             return await self._run_agent_verify(plan["agentId"], trigger, iteration)
@@ -6572,10 +7148,13 @@ class TriggerScheduler:
         if not isinstance(count, int) or count <= 0:
             count = len(events)
         conv = entry.get("convKey") or "?"
+        # #2799: the poller carries the PR conversation's linked issue(s) on the
+        # entry; name them so a search for the issue number finds the digest.
+        closes = self._closes_text(self._closes_issues(entry.get("closesIssues")))
 
         lines = [
             f"⚠️ **Event burst clamped** — {count} GitHub events on "
-            f"`{conv}` in one poll cycle. Collapsing them into this digest "
+            f"`{conv}`{closes} in one poll cycle. Collapsing them into this digest "
             f"instead of starting **{count}** separate sessions.",
             "",
         ]
@@ -6620,6 +7199,9 @@ class TriggerScheduler:
         'pull_request.reopened':                'PR reopened',
         'pull_request.labeled':                 'PR labeled',
         'pull_request.unlabeled':               'PR unlabeled',
+        'pull_request.checks_passed':           'PR checks passed',
+        'pull_request.checks_failed':           'PR checks failed',
+        'pull_request.merge_conflict':          'PR merge conflict',
         'pull_request_review.submitted':        'PR review submitted',
         'pull_request_review_comment.created':  'PR review comment',
         'issue_comment.created':                'Issue / PR comment',
@@ -6641,6 +7223,29 @@ class TriggerScheduler:
     ])
 
     @staticmethod
+    def _closes_issues(value) -> list[int]:
+        """The PR's linked issue numbers (#2799), normalised for display.
+
+        Reads the ``closesIssues`` list the orchestrator already resolved
+        (poller enrichment, label fast-path, re-fire — pr-events-log.js
+        ``parseCloses``); never derives a link itself. Keeps positive ints only
+        (bools excluded), de-duplicated and ascending, so an absent, empty or
+        malformed value yields ``[]`` and the caller's text stays unchanged.
+        """
+        if not isinstance(value, list):
+            return []
+        nums = {n for n in value if isinstance(n, int) and not isinstance(n, bool) and n > 0}
+        return sorted(nums)
+
+    @staticmethod
+    def _closes_text(numbers: list[int]) -> str:
+        """`` → closes #12, #15`` — the GitHub Event Log's wording (#1833), or
+        ``""`` when there is no linked issue."""
+        if not numbers:
+            return ""
+        return " → closes " + ", ".join(f"#{n}" for n in numbers)
+
+    @staticmethod
     def _github_event_detail(event_key: str, payload: dict) -> tuple[str, str] | None:
         """Best-effort `(plain, html)` detail for a `github-event` trigger notice.
 
@@ -6655,19 +7260,28 @@ class TriggerScheduler:
         ``<a href="url">#N</a>``) and ``: <title>`` is appended only when a title
         is present. A missing title therefore never wipes out the number and
         link (the old all-or-nothing gate); it degrades to ``#N`` + link.
+
+        A PR linked to issue(s) (#2799) carries `` → closes #M`` right after its
+        number (plain ``#N → closes #M (url)``, html ``<a>#N</a> → closes #M``),
+        so a search for the issue number finds the run. Unlinked → unchanged.
         """
         try:
             item = None
+            is_pr = False
             if event_key.startswith("issues."):
                 item = payload.get("issue")
             elif event_key.startswith("pull_request.") or event_key.startswith("pull_request_review."):
                 item = payload.get("pull_request")
+                is_pr = True
             if isinstance(item, dict):
                 number, title, url = item.get("number"), item.get("title"), item.get("html_url")
                 if number is not None and url:
                     nref = f"#{number}"
-                    plain = f"{nref} ({url})"
-                    link_html = f'<a href="{html.escape(str(url), quote=True)}">{html.escape(nref)}</a>'
+                    closes = (TriggerScheduler._closes_text(TriggerScheduler._closes_issues(item.get("closesIssues")))
+                              if is_pr else "")
+                    plain = f"{nref}{closes} ({url})"
+                    link_html = (f'<a href="{html.escape(str(url), quote=True)}">{html.escape(nref)}</a>'
+                                 f'{html.escape(closes)}')
                     if title:
                         plain = f"{plain}: {title}"
                         link_html = f"{link_html}: {html.escape(str(title))}"
@@ -6688,7 +7302,8 @@ class TriggerScheduler:
         return None
 
     async def _post_trigger_notice(self, trigger: dict, ctx: dict | None,
-                                   room_id: str) -> None:
+                                   room_id: str,
+                                   correlation_id: str | None = None) -> None:
         """Send the m.notice envelope that issue #158 republishes.
 
         Keys are fixed:
@@ -6696,6 +7311,10 @@ class TriggerScheduler:
           io.aee.trigger.triggerId   (string)
           io.aee.trigger.triggerType (string)
           io.aee.trigger.event       (string|None — None for non-github triggers)
+
+        Additive (#2603): io.aee.trigger.correlationId (string, only when
+        known) — the run's session-log correlationId, so Agent Chat's "Show in
+        session log" button can open the run the notice announces.
         """
         ttype = trigger.get("type", "")
         tid = trigger.get("id", "")
@@ -6706,7 +7325,12 @@ class TriggerScheduler:
         formatted_body: str | None = None
 
         if ttype in ("cron", "once"):
-            phrase = trigger.get("description") or "Scheduled trigger"
+            # Name the trigger (#2628): with several schedules on one agent a
+            # generic phrase doesn't say which one fired.
+            phrase = trigger.get("description") or tid or "Scheduled trigger"
+            sched = trigger.get("cron") if ttype == "cron" else trigger.get("at")
+            if isinstance(sched, str) and sched:
+                phrase += f" ({ttype} `{sched}`)"
             body = f"⚡ Trigger fired — {phrase} — starting work…"
         elif ttype == "github-event":
             event_key = gh.get("event") or ""
@@ -6783,6 +7407,8 @@ class TriggerScheduler:
                 "event": gh.get("event") or None,
             },
         }
+        if isinstance(correlation_id, str) and correlation_id:
+            content["io.aee.trigger"]["correlationId"] = correlation_id
         # AC3: carry the HTML so the abbreviated `[#N](url)` link renders in the
         # Admin Console and other Matrix clients; the plain `body` (`#N (url)`)
         # stays the fallback for clients that ignore formatting. AC7: the
@@ -6832,6 +7458,9 @@ class TriggerScheduler:
         serialization gate is held (by ``_execute`` for a non-loop caller, or by
         the loop runner's ``acquire_loop`` for a loop iteration)."""
         tid = trigger.get("id", "?")
+        # Outcome read back by the cron runner for the trigger list (#2628) —
+        # set before the still-running check so that skip is recorded too.
+        self._exec_results[tid] = "skipped"
         if tid in self._running:
             print(f"[Runner:{self._agent_id}] Trigger {tid} still running — skipping",
                   file=sys.stderr)
@@ -6865,8 +7494,10 @@ class TriggerScheduler:
             return
         self._running.add(tid)
         try:
-            await self._execute_inner(trigger, ctx, loop_sink)
+            skipped = await self._execute_inner(trigger, ctx, loop_sink)
+            self._exec_results[tid] = "skipped" if skipped == "skipped" else "ok"
         except Exception as exc:
+            self._exec_results[tid] = "error"
             # A user Stop aborts the in-flight iteration (#1231): surface it to
             # the loop runner via the sink so the loop terminates with a
             # `stopped` outcome (and leaves a persistent record) instead of
@@ -6932,7 +7563,8 @@ class TriggerScheduler:
     async def _post_trigger_failure_notice(self, trigger: dict, room_id: str,
                                            err: Exception,
                                            permanent: bool = False,
-                                           restored_label: str | None = None
+                                           restored_label: str | None = None,
+                                           correlation_id: str | None = None
                                            ) -> None:
         """Post one plain DM notice when a triggered run is given up. Best-effort,
         no Claude call — the triggering event is consumed and will not re-fire,
@@ -6944,7 +7576,11 @@ class TriggerScheduler:
         attempts. When the run had claimed the item and the claim was rolled
         back (#957), `restored_label` names the wake label that is back on it:
         the poller re-fires the chain by itself, so the notice must not ask for
-        a manual re-issue that would double-run the work."""
+        a manual re-issue that would double-run the work.
+
+        `correlation_id` (#2603) is carried as
+        `io.aee.triggerFailure.correlationId` so Agent Chat's "Show in session
+        log" button can open the failed run."""
         if not (isinstance(room_id, str) and _MATRIX_ROOM_ID_RE.match(room_id)):
             return
         tid = trigger.get("id", "?")
@@ -6978,6 +7614,8 @@ class TriggerScheduler:
         }
         if restored_label:
             failure_block["claimRolledBack"] = restored_label
+        if isinstance(correlation_id, str) and correlation_id:
+            failure_block["correlationId"] = correlation_id
         content = {
             "msgtype": "m.notice",
             "body": body,
@@ -7001,7 +7639,9 @@ class TriggerScheduler:
             self._clear_in_flight(marker_id)
 
     async def _execute_inner(self, trigger: dict, ctx: dict | None,
-                             loop_sink: dict | None = None) -> None:
+                             loop_sink: dict | None = None) -> str | None:
+        """Run one triggered invocation. Returns "skipped" when the run was
+        gated off before Claude was called (preCheck, no room); None otherwise."""
         tid = trigger.get("id", "?")
 
         # Optional preCheck — gates the LLM call.
@@ -7018,7 +7658,7 @@ class TriggerScheduler:
                     f"{exit_code} — skipping LLM",
                     file=sys.stderr,
                 )
-                return
+                return "skipped"
             pre_check_output = stdout or None
 
         room_id = trigger.get("roomId") or _load_dm_room_id()
@@ -7028,7 +7668,7 @@ class TriggerScheduler:
                 f"no DM room exists yet",
                 file=sys.stderr,
             )
-            return
+            return "skipped"
 
         gh = (ctx or {}).get("github") or {}
         gh_event_id = gh.get("eventId")
@@ -7047,10 +7687,19 @@ class TriggerScheduler:
             "conversationKey": conversation_key,
         }
         run_context["github"] = github_block
+        # In-turn status notes (#2841) go to the run's room; a triggered run has
+        # no human message to read the language from, so they are in English.
+        if self._client is not None:
+            run_context["_statusPoster"] = _make_status_poster(
+                self._client, room_id, asyncio.get_running_loop())
 
         cfg = _load_dm_agent_config()
         session_policy = cfg.get("sessionPolicy")
         is_per_invocation = session_policy == "per-invocation"
+        # A pool instance (#2595) is still per-invocation for everything else
+        # (learn hint, harvest, autonomy) but resumes its one lifetime session
+        # instead of starting fresh — shared with its chat via the DM pointer.
+        instance_session = _pool_instance_session(cfg, trigger)
 
         # Build the prompt — order mirrors agent-runner.js:874-914.
         task_body = trigger.get("prompt", "")
@@ -7226,7 +7875,7 @@ class TriggerScheduler:
         _bump_active(+1, session)
         try:
             try:
-                await self._post_trigger_notice(trigger, ctx, room_id)
+                await self._post_trigger_notice(trigger, ctx, room_id, correlation_id)
             except Exception as exc:
                 print(
                     f"[Runner:{self._agent_id}] Could not post trigger notice for "
@@ -7237,7 +7886,9 @@ class TriggerScheduler:
             # Per-invocation runs MUST NOT read or write the per-room session
             # pointer — otherwise the DM's resume id gets stolen. Bypass the
             # _call_claude wrapper for that case and call _call_claude_once
-            # directly with resume_id=None.
+            # directly with resume_id=None. A pool instance is the exception
+            # (#2595): its DM pointer IS the instance's one session, so its
+            # triggers resume and move it exactly like its chat turns do.
             #
             # The claude invocation gets one retry on transient failure: the
             # triggering event is already consumed at this point, so giving up
@@ -7248,7 +7899,14 @@ class TriggerScheduler:
             while True:
                 attempt += 1
                 try:
-                    if is_per_invocation:
+                    if instance_session:
+                        result = await asyncio.to_thread(
+                            _call_claude,
+                            prompt, room_id, correlation_id, self._blueprint_id,
+                            timeout_sec, run_context,
+                            _load_dm_room_id() or room_id,
+                        )
+                    elif is_per_invocation:
                         result, _observed = await asyncio.to_thread(
                             _call_claude_once,
                             prompt, room_id, correlation_id, None,
@@ -7316,7 +7974,8 @@ class TriggerScheduler:
                         try:
                             await self._post_trigger_failure_notice(
                                 trigger, room_id, err, permanent=permanent,
-                                restored_label=restored_label)
+                                restored_label=restored_label,
+                                correlation_id=correlation_id)
                         except Exception as exc:
                             print(
                                 f"[Runner:{self._agent_id}] Could not post "
@@ -7457,6 +8116,20 @@ class TriggerScheduler:
                 })
             except Exception:
                 pass
+
+        # A pool instance whose one session could not be resumed (#2595) says
+        # so in the room — even when the run itself then reports `[PASS]`.
+        if instance_session and run_context.get("_resumeFellBack"):
+            try:
+                _append_event(room_id, {
+                    "type": "system_event",
+                    "subtype": "pool-session-restarted",
+                    "correlationId": correlation_id,
+                })
+                await self._send_formatted(room_id, POOL_SESSION_RESTARTED_NOTICE)
+            except Exception as exc:
+                print(f"[Runner:{self._agent_id}] Could not post session-restart "
+                      f"notice for {tid}: {exc}", file=sys.stderr)
 
         # Deterministic KB harvest (issue #602): record the structured
         # ```knowledge block the run emitted, then drop it from the reply. Only
@@ -7714,12 +8387,17 @@ async def run_dm_listener() -> None:
         # needed.
         await workspace_gate.acquire_chat_turn()
         try:
-            _append_event(room_id, {
+            content = (getattr(event, "source", None) or {}).get("content")
+            received = {
                 "type": "message.received",
                 "correlationId": correlation_id,
                 "from": sender,
                 "body": body[:4000],
-            })
+            }
+            author = _chat_author(content)
+            if author:
+                received["author"] = author
+            _append_event(room_id, received)
 
             # Custom slash commands (#1796): recognise a provisioned `/command`
             # so it is fed verbatim (Claude Code expands it), and neutralise an
@@ -7730,7 +8408,6 @@ async def run_dm_listener() -> None:
                 _agent_workdir() / ".claude" / "commands")
             # A multi-select quick-reply answer (#2523) is resumed with every
             # selected label from its structured `io.aee.ask-answer`.
-            content = (getattr(event, "source", None) or {}).get("content")
             prepared = _prepare_chat_prompt(_ask_answer_prompt(body, content),
                                             known_commands)
             send_body = prepared["prompt"]
@@ -7779,6 +8456,14 @@ async def run_dm_listener() -> None:
             # Only the event is named; the orchestrator reads its sender from
             # the homeserver, so nothing here can choose whose credential runs.
             dm_run_context["chatEvent"] = {"roomId": room_id, "eventId": getattr(event, "event_id", None)}
+            # In-turn status notes (#2841): posted to this room, in the language
+            # the human wrote in.
+            dm_run_context["_statusPoster"] = _make_status_poster(
+                client, room_id, asyncio.get_running_loop())
+            dm_run_context["_statusLanguage"] = _guess_language(body)
+            # A pool instance (#2595) continues its one lifetime session — the
+            # same DM pointer its triggered runs resume and move.
+            dm_instance_session = _pool_instance_session(_load_dm_agent_config())
             try:
                 # claude invocation is blocking — run it off the event loop so
                 # matrix-nio can keep syncing (otherwise no follow-on messages
@@ -7786,6 +8471,7 @@ async def run_dm_listener() -> None:
                 result = await asyncio.to_thread(
                     _call_claude, send_body, room_id, correlation_id, blueprint_id,
                     CLAUDE_TIMEOUT_SEC, dm_run_context,
+                    (_load_dm_room_id() or room_id) if dm_instance_session else None,
                 )
             finally:
                 _bump_active(-1, session)
@@ -7837,6 +8523,16 @@ async def run_dm_listener() -> None:
                     "misconfigured or the run was interrupted — check the agent container logs.)_"
                 )
 
+            # A pool instance whose one session could not be resumed (#2595)
+            # says so rather than answering as if it remembered.
+            if dm_instance_session and dm_run_context.get("_resumeFellBack"):
+                _append_event(room_id, {
+                    "type": "system_event",
+                    "subtype": "pool-session-restarted",
+                    "correlationId": correlation_id,
+                })
+                reply = f"{POOL_SESSION_RESTARTED_NOTICE}\n\n{reply}"
+
             # If the run paused on an AskUserQuestion, carry the structured
             # options to the console so it can render clickable quick-reply
             # buttons (#1663; multi-select toggles + Submit, #2523). Absent →
@@ -7872,7 +8568,8 @@ async def run_dm_listener() -> None:
             if getattr(err, "user_aborted", False):
                 print(f"[Runner:{agent_id}] Session stopped by user", file=sys.stderr)
                 try:
-                    await send_formatted(room_id, "_(Execution aborted.)_")
+                    abort_event_id = await send_formatted(room_id, "_(Execution aborted.)_")
+                    _log_run_reply(room_id, correlation_id, abort_event_id)
                 except Exception as post_exc:
                     print(f"[Runner:{agent_id}] Could not post abort notice: {post_exc}",
                           file=sys.stderr)
@@ -7884,10 +8581,11 @@ async def run_dm_listener() -> None:
                 })
                 print(f"[Runner:{agent_id}] Error: {detail}", file=sys.stderr)
                 try:
-                    await send_formatted(
+                    err_event_id = await send_formatted(
                         room_id,
                         f"⚠️ **Agent error**\n\n```\n{detail[:800]}\n```",
                     )
+                    _log_run_reply(room_id, correlation_id, err_event_id)
                 except Exception:
                     pass
         except Exception as err:
@@ -7898,10 +8596,11 @@ async def run_dm_listener() -> None:
             })
             print(f"[Runner:{agent_id}] Error: {detail}", file=sys.stderr)
             try:
-                await send_formatted(
+                err_event_id = await send_formatted(
                     room_id,
                     f"⚠️ **Agent error**\n\n```\n{detail[:800]}\n```",
                 )
+                _log_run_reply(room_id, correlation_id, err_event_id)
             except Exception:
                 pass
         finally:

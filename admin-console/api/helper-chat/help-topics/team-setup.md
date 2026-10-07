@@ -40,13 +40,13 @@ are actually given access to. They only share a word.
 | **Environment** | *Where* the team works — and **optional**. An environment already bundles the repository, branch, credentials and knowledge sources, so pick one to reuse them instead of re-entering them. Leave it unset and the team gets a fresh, repo-less environment of its own — there is no environment to name or find first (#2168). Whether picked or auto-created, a repo-less environment is a legitimate outcome — the team then runs chat + skills only, with no GitHub hand-offs. |
 | **Team** | The team name and the **Team ID** slug. The slug is the naming prefix for everything created: agent ids come out as `<teamId>-<roleId>`. Names may repeat; the ID is the identifier and must be free. |
 | **Knowledge** *(optional)* | Initial skills for the whole team, and a read-only view of the MCP knowledge sources inherited from the environment. Nothing here blocks continuing. |
-| **Review** | The summary of what will be created, and the go-live warning. |
+| **Review** | The summary of what will be created, and the go-live warning. Credentials show what the environment really uses — one you cannot see reads as e.g. *personal token of Alex (hidden)*, never as empty — and, when your own personal GitHub token will carry the team's commits and PRs instead of the environment's token, an **Acts on GitHub as** row says so. |
 
 Only **global-pool** skills can be granted in the Knowledge step, and they land on
 the *team* agent so every member inherits them. The reason is timing: the team's
 own skill pool does not exist until the team does. Once it is created you can grant
-from the team tier on the team's card on the Agents page. MCP knowledge sources are
-read-only here on purpose — they come from the environment, so the server would
+from the team tier in the team's Agent Chat **Settings** tab. MCP knowledge
+sources are read-only here on purpose — they come from the environment, so the server would
 ignore a selection made here; change them by editing the environment.
 
 ## What "Create team" provisions
@@ -63,7 +63,7 @@ One transaction, in this order:
 
 Members omit a skills override, so they inherit the team's skills. You can later
 switch any member to *Additional input* or *Exclusive overriding input* for its
-prompt, and to its own skills or MCP set, on the Agents page.
+prompt, and to its own skills or MCP set, in its Agent Chat **Settings** tab.
 
 ## The agents go live immediately
 
@@ -72,7 +72,12 @@ real containers, and the reactive members begin watching the bound repository fo
 issues and pull requests **at once** — acting on their own from that moment, with
 no further confirmation.
 
-If you want to stage the rollout, disable individual agents on the **Agents** page
+The Review step's notice follows your choices: with **Provision agents now**
+unticked the members are written as stubs and nothing goes live until you enable
+them; a repo-less team watches no repository at all, and if its process hands work
+over on GitHub the notice warns that those hand-offs cannot work without one.
+
+If you want to stage the rollout, disable individual agents in Agent Chat
 right after creation; a disabled agent keeps its configuration and picks up work
 again when you enable it.
 
@@ -83,13 +88,19 @@ each other's agents with the same label. The optional **Label suffix** (up to ei
 lowercase letters, digits and single inner dashes — so `team-1` or `pre-prod` reads
 as well as `k3f9`; a leading, trailing or doubled dash is refused, because it would
 produce `ready-x-` or `ready--x`) is stamped onto every label the team uses: trigger
-filters, channel labels, the label registry and the wake instructions the agents
-read. The suggest button still proposes a random four-character one — an
+filters and claims, channel labels, the label registry, the human roles' labels and
+the wake instructions the agents read. Labels you add to the live team later get
+the same suffix. The suggest button still proposes a random four-character one — an
 auto-generated token has no words to separate.
 
-Leave it blank unless another Agent Team already uses that repository. When you
-re-run the wizard to *extend* an existing team, the suffix must match the one
-stored on it.
+Leave it blank unless another Agent Team already uses that repository.
+
+After creation you no longer type the suffix: the live team's label fields show
+the editable **base** (`ready-for-review`) next to a muted, read-only
+**`-k3f9` chip**, and save the full name for you. To change, add or remove the
+suffix later, use **Team Settings → General → Label suffix** — it renames every
+team label in one step, including the labels on GitHub (see the Agent Chat
+help, *The team's configuration tabs, in detail*).
 
 ## Collisions, failure and growing later
 
@@ -99,10 +110,15 @@ stored on it.
   succeed here and fail later at the team's first run. Ask a Team or System
   Administrator to add one under **Model Providers**; the button re-enables the
   moment one exists (#2179).
-- Re-running the wizard with an existing Team ID switches to **extend** mode and
-  adds the missing roles instead of starting over.
+- An existing Team ID is refused on the Team step — pick a free one. If a
+  create still runs into left-over members of the same id, the failure card
+  offers **Add missing agents** instead of starting over — that re-runs the
+  create in *extend* mode, adding only the members that are missing. The wizard
+  has no extend toggle of its own.
 - If a member id is already held by an *unrelated* agent, the wizard refuses with a
   conflict rather than quietly adopting it.
+- Leaving the page (reload, closing the tab) mid-wizard asks for confirmation
+  first — the wizard keeps no draft, so the input would be lost.
 - If anything fails partway, everything is **rolled back** in reverse order —
   members, then the team agent, then the environment — and the failure card offers
   a **Retry** that starts from a clean slate. Left-over directories from an earlier

@@ -50,6 +50,45 @@ building the broker image, seeding the registry, installing, then granting:
    chained from `make up` — a broker sidecar holds real privilege, so building
    it is an explicit action.
 
+   Each image is stamped with the checkout's **build identity** (#2646) — the
+   short commit hash (`-dirty` for uncommitted changes) and the commit
+   timestamp, the same `GIT_COMMIT` / `GIT_DIRTY` / `GIT_COMMIT_TIME` the console
+   shows. They are baked in as `AEE_BUILD_COMMIT` / `AEE_BUILD_DIRTY` /
+   `AEE_BUILD_COMMIT_TIME` (every broker Dockerfile ends with that `ARG`/`ENV`
+   block, defaulting to `unknown`) and as OCI labels, readable without starting
+   anything:
+
+   ```bash
+   podman image inspect localhost/aee-plugin-jira:latest \
+     --format '{{index .Labels "org.opencontainers.image.revision"}} {{index .Labels "aee.build.commit-time"}} {{index .Labels "aee.build.tag"}}+{{index .Labels "aee.build.tag-distance"}}'
+   ```
+
+   Since #2893 the identity also carries the nearest **release tag** and the
+   number of commits since it (`GIT_TAG` / `GIT_TAG_DISTANCE` →
+   `AEE_BUILD_TAG` / `AEE_BUILD_TAG_DISTANCE`, labels `aee.build.tag` /
+   `aee.build.tag-distance`), computed by `scripts/git-release-tag.sh`: only
+   `v<major>.<minor>.<patch>` tags count, the nearest one wins, and several on
+   one commit resolve to the highest version. Both are empty when no release tag
+   is reachable (no tags, a shallow clone without fetched tags) — never a build
+   failure. The `make plugin-images` summary prints them next to the commit.
+   The Plugins page reads the version as:
+
+   | Build | Shown as |
+   |---|---|
+   | exactly on a tag | `v0.4.0` |
+   | 12 commits after it | `v0.4.0+12 (5500e15)` |
+   | dirty working tree | `v0.4.0+12 (5500e15-dirty)` (on the tag: `v0.4.0 (5500e15-dirty)`) |
+   | no tag info | `5500e15` — the hash, as before |
+
+   The mismatch hints keep comparing commits, never tags.
+
+   A running broker reports the same values on `GET /healthz` as
+   `build: { commit, dirty, commitTime[, tag, tagDistance] }` (Broker SDK
+   `healthEndpoint`); the orchestrator asks every live sidecar, so the Plugins
+   page shows what the container really runs, not what `:latest` points at now.
+   Another build path must pass the same `--build-arg`s (`PLUGIN_BUILD_ARGS`),
+   or the image reports `unknown` (without the tag args: the hash only).
+
 2. **Seed the registry** so operators can see the plugin:
 
    ```bash
@@ -58,6 +97,11 @@ building the broker image, seeding the registry, installing, then granting:
 
    Copies `plugins/<id>/` into the pool volume → the operator registry at
    `/workspace/plugins/<id>/`.
+   Every seeded plugin gets a `build-info.json`
+   (`{ commit, dirty, commitTime, tag, tagDistance }`)
+   with the same identity; installing copies it into the registry, so the
+   **Installed files** line on the Plugins page names the commit the manifest
+   and CLI came from.
 
 3. **Install** (System Admin) from the **Plugins** page (`/plugins`) or
    `POST /api/plugins/:id/install`. Install copies the plugin into the operator
@@ -65,6 +109,15 @@ building the broker image, seeding the registry, installing, then granting:
    capabilities are shown in plain language for review first, because a sidecar
    can hold real privilege (e.g. `podman-sandbox` mounts the host Podman
    socket). **Install still grants nothing to any agent.**
+
+   Each card shows the **Installed files**, **Running broker** and **Broker
+   image** build identities (the last read from the image labels in the local
+   store; *unknown* on Kubernetes). **"Running broker differs from its image"**
+   means the image was rebuilt under a running sidecar — a rebuilt `:latest`
+   image does not replace a running sidecar; it keeps the old image until the
+   sidecar container is recreated. **"Running broker differs from installed
+   plugin"** means the live sidecar runs another commit than the installed
+   manifest and CLI; reinstalling brings them back in step.
 
 4. **Grant** the plugin to a team or agent (Team Admin) — from the Agents edit
    form's plugin picker, or `POST /api/agents/:id/plugins/activate`. Only then
@@ -196,9 +249,9 @@ no labels, the repo's own labels are shown instead. Free-text entry always works
 **title filter** at the top. The filter drives a server-side search over the whole
 repository via GitHub's Search API (`GET /search` on the broker's `/ui` surface) so
 results are not limited to the currently loaded page; clearing the box restores the
-normal paginated listing. The broker owns all qualifiers (`repo:`, `type:issue`,
-`in:title`, `state:`) and strips colons from user input so a typed `qualifier:` can
-never broaden scope.
+normal paginated listing. The broker owns all qualifiers (`repo:`, `type:issue` /
+`type:pr`, `in:title`, `state:`) and strips colons from user input so a typed
+`qualifier:` can never broaden scope.
 
 **Workflow-trigger buttons (#1730):** the issue detail now leads with an **action
 bar** — between the issue's meta line and its description — of prominent
@@ -211,9 +264,17 @@ button shows the underlying label name and, when a label wakes more than one
 agent, says so; an already-applied label's button is shown visible-but-disabled.
 The "Labels" list and free-text "add a label" area at the bottom are unchanged.
 
+**Pull requests (#2746):** a **Show** selector — *Issues* (default), *Pull
+requests* or *Issues and pull requests* — drives both the listing and the title
+search (broker `type=issues|prs|all`); pull requests are marked **PR**, and the
+choice is remembered with the repository and state. A label added to a pull
+request goes to the #1858 label fast path as `pull_request.labeled` (the broker
+reports the kind in its `X-AEE-Label-Target-Kind` response header), so a PR-level
+gate wakes its agent immediately, just like an issue label.
+
 Agents can also browse issues read-only with the dependency-free `aee-issues` CLI
 (`aee-issues repos`, `aee-issues list --repo owner/name`, `aee-issues show --repo
-owner/name --number N`). Pull requests are deferred to a later iteration. See
+owner/name --number N`); the CLI still lists issues only. See
 `github-issues/broker/README.md`.
 
 ## `gke`

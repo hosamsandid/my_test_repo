@@ -108,15 +108,16 @@ identity":
    human their own reserved Matrix account `@u-<16 hex of sha256(subject)>:local`
    (`orchestrator/human-matrix-identity.js`); interactive chat then sends under *their* token,
    not the shared console token. This happens at user-record creation — there is no flag to
-   toggle it on.
+   toggle it on — and users still without one (older records, the seeded first administrator,
+   a failed attempt) are backfilled at startup and retried every two minutes (#2721).
 2. **Set `AUTH_ENABLED=true`.** The default is single-user compatibility mode, in which
    whoever signs in is the implicit System Admin and every scoping/authorization check is a
    no-op. With it on, list endpoints are filtered by team membership, per-mutation
    management gates apply, and the work-plane gate isolates each agent's chat/workspace/git.
 
-> **These two go together.** With `AUTH_ENABLED` off, the single operator has no user record,
-> so per-user Matrix identity never provisions and chat falls back to the shared
-> `MATRIX_ACCESS_TOKEN`. Turn it on **before** you invite a second person, or they inherit
+> **These two go together.** With `AUTH_ENABLED` off, the single operator has no user record;
+> it still gets its own `@u-…` chat identity keyed by its login subject, and chat never falls
+> back to the shared `MATRIX_ACCESS_TOKEN` (#2721). Turn it on **before** you invite a second person, or they inherit
 > the operator's view. Flipping it back off on a stack that already has named users grants
 > every one of them full visibility — the console logs a boot warning when that is the case.
 
@@ -159,7 +160,7 @@ One rough edge behind a proxy:
 | Port | Service | Expose? |
 |---|---|---|
 | `4000` | Admin Console | **yes** — behind TLS + your identity provider's proxy if you have one |
-| `4003` | Orchestrator webhook (`http` triggers) | only if external systems must fire triggers; it authenticates per-trigger via `X-Hook-Secret` |
+| `4003` | Orchestrator webhook (`http` triggers) | only if external systems must fire triggers; it authenticates per-trigger via `X-Hook-Secret` or a GitHub `X-Hub-Signature-256` |
 | `8448` | Matrix homeserver | **no** — keep internal; nothing outside needs it |
 | `4002` | Orchestrator internal API | already unpublished; **leave it that way** — and arm the internal-auth gate below, because unpublished is not the same as unreachable |
 
@@ -330,6 +331,33 @@ Steady state = **4 service containers + one container per enabled persistent age
 A practical starting point for a pilot of ~10 agents: 8 vCPU, 32 GiB RAM, 100 GiB disk —
 then measure, because real usage depends entirely on how busy the agents are. (The GCP VM
 runbook pilots ~5 concurrent agents on an `e2-standard-4` — 4 vCPU / 16 GB / 64 GB disk.)
+
+The chat rail's roster (`GET /api/matrix/agents`) is built once per `AGENT_ROSTER_TTL_MS`
+(default `2000`) and shared by every tab and user. A successful roster-affecting console
+mutation (create, rename, enable/disable, delete, environment rename, a new DM room)
+clears it; changes the orchestrator makes on its own (pool spawn/reap, idle reclaim)
+show within one TTL. `AGENT_ROSTER_TTL_MS=0` turns the cache off: every request then
+runs its own full, unscoped fleet sweep, which is more work than the pre-#566 per-caller
+sweep, so it is a kill switch rather than a faithful "before" baseline.
+`/api/agents/statuses` is served stale-while-revalidate (#570): within
+`AGENT_STATUSES_TTL_MS` (default `5000`) a poll gets the cached set; after that, up to
+`AGENT_STATUSES_MAX_STALE_MS` (default `30000`), it gets the cached set at once while one
+rebuild runs in the background. The same console mutations invalidate it: the next poll
+still gets the cached set and starts the rebuild. A failed rebuild is not retried for one
+`AGENT_STATUSES_TTL_MS` (a poll that has to wait gets the same answer), and a failure
+streak logs once when it starts and once when it recovers. `AGENT_STATUSES_TTL_MS=0`
+turns it off. The rebuild's orchestrator hop (`/internal/agents/processes`) is one request
+at a time, shared by every rebuild, with a hard deadline of `AGENT_PROCESSES_TIMEOUT_MS`
+(default `60000`, at or above the orchestrator's observed stall). A rebuild waits at most
+`AGENT_PROCESSES_WAIT_MS` (default `3000`) on it and otherwise uses the last good runtime
+view: for as long as that request is still running (a slow orchestrator never turns agents
+offline), and for `AGENT_PROCESSES_LAST_VIEW_MAX_MS` (default `15000`) after a failed answer.
+With no view left, agents read offline. Right after a console restart there is no view yet,
+so if the orchestrator takes longer than the wait, agents read offline until its first answer
+lands. The trade-off: a lone 5 s poller now sees a status change about one poll later than
+before (it gets the previous build while the next one runs). A stopped agent can read running
+for up to last-view + max-stale (~45 s) while the orchestrator refuses connections, and up to
+last-view + deadline + max-stale (~105 s) while it accepts them but never answers.
 
 ---
 

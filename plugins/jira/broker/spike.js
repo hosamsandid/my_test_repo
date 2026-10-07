@@ -10,7 +10,7 @@
 //   node spike.js scopes
 //       list every scope that has a watch config (and its inbox depth)
 //
-//   node spike.js watch --scope <id> --project KAN [--status "Ready for Dev"]
+//   node spike.js watch --scope <id> --project KAN [--status "Ready for Dev"] [--events status_changed,…]
 //       set (replace) a scope's watch list — the on-disk equivalent of the
 //       Team Admin's /admin UI action, for a session without a console
 //
@@ -84,8 +84,9 @@ if (cmd === 'scopes') {
   const scope = opt('scope') || die('need --scope <id>');
   const project = opt('project') || die('need --project <KEY>');
   const status = opt('status');
+  const events = (opt('events') || '').split(',').map((s) => s.trim()).filter(Boolean);
   const conf = watchStore.setConfig(scope, {
-    watches: [{ projectKey: project, ...(status ? { statusFilters: [status] } : {}) }],
+    watches: [{ projectKey: project, ...(status ? { statusFilters: [status] } : {}), ...(events.length ? { events } : {}) }],
     setBy: 'spike',
   });
   out({ ok: true, scope, watches: conf.watches });
@@ -251,5 +252,5 @@ if (cmd === 'scopes') {
     out(report);
   })().catch((e) => die(`probe failed: ${e.message}`));
 } else {
-  die('usage: node spike.js {scopes|watch|status|inbox|whoami-jira|projects|probe|raw|poke|debug-search} [--scope <id>] [--project KEY] [--jql "<query>"] [--status "..."] [--window MIN] [--consume]');
+  die('usage: node spike.js {scopes|watch|status|inbox|whoami-jira|projects|probe|raw|poke|debug-search} [--scope <id>] [--project KEY] [--jql "<query>"] [--status "..."] [--events k1,k2] [--window MIN] [--consume]');
 }

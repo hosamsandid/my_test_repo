@@ -245,7 +245,7 @@ function processEdgeToUnified(e) {
  *   unified node set (below) so they participate in the layered layout; their
  *   `consumes` bind gate/brake/PR/issue edges (in buildProcessGraph) and the
  *   data-flow `file` deliveries (here).
- * @returns {{ nodes, edges, gates, labels, lints }}
+ * @returns {{ nodes, edges, gates, labels, unusedLabels, lints }}
  */
 function buildUnifiedGraph(nodes, edges, options) {
   const list = asArray(nodes);
@@ -456,6 +456,8 @@ function buildUnifiedGraph(nodes, edges, options) {
         // Authored wake-prompt override (#868), surfaced so the channel edit
         // dialog can pre-fill and round-trip it.
         ...(typeof ch.wakePrompt === 'string' && ch.wakePrompt.trim() ? { wakePrompt: ch.wakePrompt } : {}),
+        // Readiness gate (#2795), so the edit dialog shows the stored state.
+        ...(artifact === 'pr' && ch.readiness && typeof ch.readiness === 'object' ? { readiness: ch.readiness } : {}),
         ...(nodeIds.has(ch.from) ? {} : { orphan: true }),
       });
     }
@@ -492,6 +494,8 @@ function buildUnifiedGraph(nodes, edges, options) {
 
   return {
     nodes: outNodes, edges: unifiedEdges, gates: pg.gates, labels: pg.labels,
+    // Registry entries no flow element references (#2716) — Label registry panel.
+    unusedLabels: pg.unusedLabels,
     // Process-level touchpoints plus the data-flow artifact deliveries (#981),
     // merged into the one deterministic order.
     humanTouchpoints: [...pg.humanTouchpoints, ...artifactDeliveries].sort(compareHumanTouchpoints),

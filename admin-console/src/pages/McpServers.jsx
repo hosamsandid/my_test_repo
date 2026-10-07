@@ -189,7 +189,7 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
           style={{ ...inputStyle, ...monoStyle, resize: 'vertical' }}
         />
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          Use <code style={monoStyle}>${'${credential}'}</code> as the placeholder for the bound credential's secret —
+          Use <code style={monoStyle}>{'${credential}'}</code> as the placeholder for the bound credential's secret —
           the orchestrator substitutes it per-agent at seed time. {isHttp
             ? <>For http/sse the rendered values become HTTP request headers (e.g. <code style={monoStyle}>Authorization: Bearer …</code>).</>
             : <>For stdio they're injected as process environment variables.</>}
@@ -436,7 +436,7 @@ export default function McpServers() {
       ? (
         <span title="Available to every user and agent — no team required" style={{
           display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)', fontSize: 'var(--eb-text-xs)',
-          background: 'var(--eb-accent-subtle, var(--eb-bg-elevated))', color: 'var(--eb-accent, var(--eb-text-secondary))',
+          background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
           fontWeight: 'var(--eb-font-medium)',
         }}>Global</span>
       )

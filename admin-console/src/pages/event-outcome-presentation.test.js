@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   OUTCOME_TONES, NO_MATCH_LABEL, outcomeLabel, outcomeTone, outcomePresentation,
+  outcomeStatus, outcomesFilterText,
 } from './event-outcome-presentation.js';
 
 // #2524: the GitHub Event Log's Outcomes column shows plain text lines instead
@@ -23,7 +24,7 @@ function block(startMarker, endMarker) {
 }
 const outcomeBlock = block('/* ── Outcome line (#2524)', '/* ── Work-item cell (#1827)');
 const noMatchBlock = block('function NoMatchLine()', '\n}\n');
-const columnBlock = block("key: 'outcomes', label: 'Outcomes'", '} },');
+const columnBlock = block("key: 'outcomes', label: 'Outcomes'", 'filterValue: outcomesFilterText }');
 
 test('label wording is unchanged from the pre-#2524 chips', () => {
   assert.equal(outcomeLabel({ status: 'delivered', agentId: 'agent-x' }), 'delivered → agent-x');
@@ -114,8 +115,11 @@ test('AC2/AC3: outcomes stack one per line with spacing', () => {
 });
 
 test('AC5: a delivered session outcome stays a clickable, link-styled button with a hover state', () => {
-  assert.match(outcomeBlock, /isSessionOutcome\(outcome\) && correlationId && onOpenSession/);
-  assert.match(outcomeBlock, /<button\s+type="button"\s+onClick=\{\(\) => onOpenSession\(outcome\.agentId, correlationId\)\}/);
+  // #2596: the link target is the agent sessionLinkTarget resolves (the pool
+  // instance for a pooled delivery, the recorded agent otherwise).
+  assert.match(outcomeBlock, /const target = sessionLinkTarget\(outcome\);/);
+  assert.match(outcomeBlock, /target && target\.kind === 'agent' && correlationId && onOpenSession/);
+  assert.match(outcomeBlock, /<button\s+type="button"\s+onClick=\{\(\) => onOpenSession\(target\.agentId, correlationId\)\}/);
   assert.match(outcomeBlock, /textDecoration: 'underline'/);
   assert.match(outcomeBlock, /onMouseEnter=\{\(\) => setHover\(true\)\}/);
   assert.match(outcomeBlock, /hover \? 'var\(--eb-accent-hover\)' : 'var\(--eb-accent-primary\)'/);
@@ -142,4 +146,114 @@ test('#2571 AC8: a producer-filter drop reads who pushed, or that the producer i
     'dropped (pushed by `t1-review`, not in producer filter) → t1-dev');
   assert.equal(outcomeLabel({ status: 'dropped', reason: 'producer-filter', producer: null, agentId: 't1-dev' }),
     'dropped (producer unknown) → t1-dev');
+});
+
+test('#2602 AC4: a knowledge-branch drop reads as the built-in rule, never as branch-filter', () => {
+  const l = outcomeLabel({ status: 'dropped', reason: 'knowledge-branch', agentId: 't1-dev' });
+  assert.equal(l, 'dropped (knowledge-base branch — never wakes push triggers) → t1-dev');
+  assert.doesNotMatch(l, /branch-filter/);
+});
+
+test('#2822: a comment-label drop names the required label', () => {
+  assert.equal(outcomeLabel({ status: 'dropped', reason: 'comment-label', requireLabel: 'clarifying', agentId: 'dev' }),
+    "dropped (item lacks required label 'clarifying') → dev");
+  assert.equal(outcomeLabel({ status: 'dropped', reason: 'comment-label', agentId: 'dev' }),
+    'dropped (item lacks the required label) → dev');
+  assert.equal(outcomeLabel({ status: 'dropped', reason: 'agent-comment', agentId: 'dev' }), 'dropped (agent-comment) → dev');
+});
+
+// #2596: a pooled delivery names the per-ticket instance that ran it.
+test('a pooled delivery names the instance, falling back to its id (AC3)', () => {
+  assert.equal(
+    outcomeLabel({ status: 'delivered', wakeLabel: 'ready', agentId: 'team-developer', instanceId: 'team-developer-i2562', instanceName: 'Developer · #2562' }),
+    'delivered (ready) → Developer · #2562',
+  );
+  assert.equal(
+    outcomeLabel({ status: 'delivered', agentId: 'team-developer', instanceId: 'team-developer-i2562' }),
+    'delivered → team-developer-i2562',
+  );
+  // Non-pooled / pre-#2596 rows read exactly as before (AC7).
+  assert.equal(outcomeLabel({ status: 'delivered', wakeLabel: 'ready', agentId: 'dev', agentName: 'dev' }), 'delivered (ready) → dev');
+});
+
+test('a pool pause/drain hold reads as held by the role, not by WIP (AC6)', () => {
+  assert.equal(outcomeLabel({ status: 'held', reason: 'pool-paused', agentId: 'r' }), 'held (role paused) → r');
+  assert.equal(outcomeLabel({ status: 'held', reason: 'pool-draining', wakeLabel: 'ready', agentId: 'r' }), 'held (role draining) (ready) → r');
+  assert.equal(outcomeTone({ status: 'held', reason: 'pool-off' }), 'held');
+});
+
+// ── #2693: digest flag, provisioning-sweep rows, Outcomes filter text ──────
+test('#2693: a delivered outcome with digest:true is shown as a digest', () => {
+  const o = { agentId: 'dev', status: 'delivered', digest: true };
+  assert.equal(outcomeStatus(o), 'digest');
+  assert.equal(outcomeTone(o), 'digest');
+  assert.equal(outcomeLabel(o), 'digested → dev');
+  // a plain delivery and a literal digest status are unchanged
+  assert.equal(outcomeStatus({ status: 'delivered', digest: false }), 'delivered');
+  assert.equal(outcomeLabel({ agentId: 'dev', status: 'digest' }), 'digested → dev');
+  assert.equal(outcomeStatus(null), undefined);
+});
+
+test('#2693: provisioning-sweep reaped / reap-failed rows are never shown as a drop', () => {
+  const reaped = { agentId: 't-dev-i9', status: 'reaped', reason: null };
+  const failed = { agentId: 't-dev-i9', status: 'reap-failed', reason: null };
+  assert.equal(outcomeTone(reaped), 'reaped');
+  assert.equal(outcomeLabel(reaped), 'reaped → t-dev-i9');
+  assert.equal(outcomeTone(failed), 'reapFailed');
+  assert.equal(outcomeLabel(failed), 'reap failed → t-dev-i9');
+  for (const o of [reaped, failed]) {
+    assert.doesNotMatch(outcomeLabel(o), /dropped/);
+    const p = outcomePresentation(o);
+    assert.ok(p.marker && p.markerColor && p.textColor, 'tone has a marker');
+  }
+  assert.notEqual(OUTCOME_TONES.reaped.marker, OUTCOME_TONES.dropped.marker);
+  assert.notEqual(OUTCOME_TONES.reapFailed.marker, OUTCOME_TONES.dropped.marker);
+});
+
+test('#2693: outcomesFilterText carries the rendered line, agent name + id and the raw reason', () => {
+  const outcomes = [
+    { agentId: 't-code-reviewer', agentName: 'Code Reviewer', status: 'delivered', triggerId: 't1' },
+    { agentId: 't-developer', agentName: 'Developer', status: 'dropped', reason: 'label-filter' },
+    { agentId: 't-developer', status: 'delivered', instanceId: 't-developer-i2666', instanceName: 'Developer · #2666', triggerId: 't2' },
+    { agentId: 't-pusher', status: 'dropped', reason: 'producer-filter', producer: 'x' },
+  ];
+  const text = outcomesFilterText(outcomes, {}).toLowerCase();
+  for (const needle of ['code-reviewer', 'code reviewer', 'developer', 'i2666', '#2666', 'label-filter',
+    'dropped (label-filter) → developer', 'delivered → code reviewer', 'producer-filter', 'not in producer filter']) {
+    assert.ok(text.includes(needle), `filter text misses ${needle}: ${text}`);
+  }
+  assert.doesNotMatch(text, /\[object object\]/);
+});
+
+test('#2693: outcomesFilterText for digests, sweep rows, re-fires and no-subscriber rows', () => {
+  assert.match(outcomesFilterText([{ agentId: 'dev', status: 'delivered', digest: true }], {}), /digested → dev/);
+  assert.match(outcomesFilterText([{ agentId: 'dev-i1', status: 'reaped', reason: null }], {}), /reaped → dev-i1/);
+  assert.match(outcomesFilterText([{ agentId: 'dev', status: 'delivered' }], { source: 'manual-refire' }), /fired again/);
+  assert.equal(outcomesFilterText([], { noMatchingTrigger: true }), NO_MATCH_LABEL);
+  assert.equal(outcomesFilterText(undefined, {}), '');
+  assert.equal(outcomesFilterText([null, 'x'], null), '');
+});
+
+test('#2693: the Outcomes column wires outcomesFilterText as its filterValue', () => {
+  const src = readFileSync(fileURLToPath(new URL('./GithubEventLog.jsx', import.meta.url)), 'utf8').replace(/\s+/g, ' ');
+  assert.match(src, /\{ key: 'outcomes', label: 'Outcomes',[^]*?filterValue: outcomesFilterText \}, \];/);
+});
+
+test('#2795: readiness-gate outcomes read as held / cleared / not woken, naming the gate', () => {
+  const base = { agentId: 'rev', agentName: 'Reviewer', wakeLabel: 'ready-for-review' };
+  assert.equal(outcomeLabel({ ...base, status: 'held', reason: 'readiness-gate', gates: ['ci', 'conflict'] }),
+    'held — waiting for CI / conflict-free (ready-for-review) → Reviewer');
+  assert.equal(outcomeLabel({ ...base, status: 'held', reason: 'readiness-gate', gates: ['ci'] }),
+    'held — waiting for CI (ready-for-review) → Reviewer');
+  assert.equal(outcomeTone({ ...base, status: 'held', reason: 'readiness-gate' }), 'held');
+  assert.equal(outcomeLabel({ ...base, status: 'delivered', reason: 'gate-released' }),
+    'delivered · gate cleared (ready-for-review) → Reviewer');
+  assert.equal(outcomeLabel({ ...base, status: 'dropped', reason: 'gate-failed', gates: ['ci'] }),
+    'not woken (gate failed: CI failing) (ready-for-review) → Reviewer');
+  assert.equal(outcomeLabel({ ...base, status: 'dropped', reason: 'gate-failed', gates: ['conflict'] }),
+    'not woken (gate failed: merge conflict) (ready-for-review) → Reviewer');
+  assert.equal(outcomeLabel({ ...base, status: 'dropped', reason: 'gate-timeout', gates: ['ci'] }),
+    'not woken (gate timed out waiting for CI) (ready-for-review) → Reviewer');
+  assert.equal(outcomeLabel({ ...base, status: 'dropped', reason: 'gate-cancelled', cancelReason: 'closed' }),
+    'not woken (gate cancelled: PR closed) (ready-for-review) → Reviewer');
 });

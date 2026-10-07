@@ -176,7 +176,7 @@ jobs:
       # be added here or CI never runs it.
       - name: Run unit tests
         working-directory: agent-image/scripts
-        run: python -m pytest test_agent_entrypoint.py test_knowledge.py test_cli_contract.py test_bp_removal_guard.py test_aee_gh.py -q
+        run: python -m pytest test_agent_entrypoint.py test_knowledge.py test_cli_contract.py test_bp_removal_guard.py test_aee_gh.py test_aee_wait_ci.py -q
 
       # The toolchain bootstrap (#1941) is python and lives outside agent-image/,
       # but it is the same KIND of test — a pure unit suite over an agent-runtime
@@ -275,8 +275,65 @@ jobs:
   # `_`-prefixed directories skipped as shared material (the convention
   # listPluginDirs already uses), the tag read out of the manifest. So adding a
   # stack stays "one Dockerfile and one manifest" with no edit to this file (AC14).
+  # ── Gate: build the toolchain variants only when something they depend on
+  # changed ──────────────────────────────────────────────────────────────────
+  # The heavy job below tests an IMAGE BUILD (base image + every variant + the
+  # base-contract gate), so it is only meaningful on a change under toolchains/**
+  # or agent-image/** (the base-contract check reads the pinned Claude CLI
+  # version straight out of agent-image/Dockerfile) — or an edit to this
+  # workflow itself. An unrelated PR (a frontend tweak, a doc) spends seconds
+  # here and skips a ~10–40 min build. toolchain-images is NOT a required check,
+  # so a skip never blocks a merge. Same dependency-free `git diff` shape as
+  # ui-screenshots.yml's `decide` gate.
+  decide-toolchain:
+    name: toolchain (decide)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0   # need base..head (PR) / before..sha (push) to diff paths
+      - id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+          # Resolve the diff range per event. A push whose `before` is the
+          # all-zero SHA (a brand-new ref) has no prior state to diff against, so
+          # run to be safe.
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="$BASE_SHA"; head="$HEAD_SHA"
+          else
+            base="$PUSH_BEFORE"; head="$PUSH_AFTER"
+            case "$base" in 0000000000000000000000000000000000000000)
+              echo "new ref (no before SHA) — running"
+              echo "run=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
+            esac
+          fi
+          # A failed diff (shallow history, missing SHA) must fail OPEN — build
+          # rather than silently skip a real toolchain change.
+          if ! changed="$(git diff --name-only "$base" "$head" 2>/dev/null)"; then
+            echo "could not diff $base..$head — running to be safe"
+            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if printf '%s\n' "$changed" | grep -qE '^(toolchains/|agent-image/|\.github/workflows/ci\.yml$)'; then
+            echo "toolchain-relevant change detected — running"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no change under toolchains/** or agent-image/** — skipping"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   toolchain-images:
     name: toolchain variants (build + base contract)
+    needs: decide-toolchain
+    if: needs.decide-toolchain.outputs.run == 'true'
     runs-on: ubuntu-latest
     # Generous by this file's standards (the fast suites are 5–10): two image
     # builds, one of which downloads a JDK. The two heavy steps are bounded
@@ -355,8 +412,8 @@ jobs:
             done
             # THE GATE. Non-zero here = the variant is no longer an agent image.
             ./toolchains/_shared/base-contract-check.sh "$tag" "$id"
-            # Hand the verified (id, tag) pairs to the demo step below so the tag
-            # is parsed out of the manifest exactly once.
+            # Record the built (id, tag) pairs so the discovery guard below can
+            # assert that something was actually matched.
             echo "$id $tag" >> /tmp/toolchain-variants.txt
           done
           # Guards the DISCOVERY, not the variants: a glob or `sed` that stopped
@@ -368,30 +425,12 @@ jobs:
           fi
           docker images --filter reference='as-agent-*' --format '  {{.Repository}}:{{.Tag}}  {{.Size}}'
 
-      - name: Toolchain verification demo (AC5–AC9 + AC12 measurements)
-        # NOT a gate, deliberately. verify-toolchain.sh DEMONSTRATES the bootstrap
-        # model against real containers — a pinned `mvn test`, a pin change that
-        # needs no rebuild, two projects on two Java versions, and the measured
-        # image size plus cold/warm build cost. Getting those numbers into the CI
-        # log is the point (the ticket asks for them measured, not estimated), but
-        # it downloads a JDK and Maven dependencies from the public internet, so a
-        # network hiccup here must not turn a base-contract-clean build red. The
-        # hard gate is the step above; this one reports.
-        continue-on-error: true
-        timeout-minutes: 30
-        env:
-          AEE_CONTAINER_CLI: docker
-        run: |
-          set -uo pipefail
-          # Driven off the list the build step wrote, so nothing here is
-          # Java-specific: a variant that ships no sample project simply has no
-          # demo, and a second stack needs no edit to this file (AC14).
-          while read -r id tag; do
-            if [ ! -d "toolchains/$id/sample" ]; then
-              echo "== $id: no sample project — nothing to demonstrate"
-              continue
-            fi
-            echo "== verifying $id ($tag)"
-            ./toolchains/_shared/verify-toolchain.sh "$tag" "$id" \
-              || echo "== $id: verification demo did not pass (non-blocking; the base contract above is the gate)"
-          done < /tmp/toolchain-variants.txt
+      # NOTE: the former "Toolchain verification demo (AC5–AC9 + AC12
+      # measurements)" step was removed from the per-run lane. It was
+      # explicitly `continue-on-error: true` — a non-gating step that downloaded
+      # a JDK + Maven dependencies from the public internet on every run (~5 min)
+      # purely to print image-size and cold/warm build-cost numbers for #1941.
+      # Those were one-off measurements, not an ongoing pass/fail signal, so they
+      # do not belong on every PR. verify-toolchain.sh still lives in the repo for
+      # on-demand runs (`make toolchain-images` / direct invocation); the hard
+      # gate (base-contract-check.sh above) stays in CI.

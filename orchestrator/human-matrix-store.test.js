@@ -181,3 +181,40 @@ test("listProvisionedUserIds is empty before anything is provisioned", () => {
   const store = createHumanMatrixStore({ root: tempRoot() });
   assert.deepEqual(store.listProvisionedUserIds(), []);
 });
+
+// ---- the single-operator slot (#2721 AC9) -----------------------------------
+
+test("the operator slot round-trips per subject, normalised like the user store", () => {
+  const root = tempRoot();
+  const store = createHumanMatrixStore({ root });
+  assert.equal(store.readOperatorIdentity("admin"), null);
+  const written = store.writeOperatorIdentity(" Admin ", {
+    matrixUserId: "@u-0123456789abcdef:local",
+    accessToken: "syt_operator",
+  });
+  assert.equal(written.subject, "admin");
+  assert.deepEqual(store.readOperatorIdentity("ADMIN"), written);
+  const perm = fs.statSync(path.join(root, "users", "matrix", "_operator.json")).mode & 0o777;
+  assert.equal(perm, FILE_MODE);
+});
+
+test("an operator credential for a different subject reads as none", () => {
+  const store = createHumanMatrixStore({ root: tempRoot() });
+  store.writeOperatorIdentity("admin", { matrixUserId: "@u-0123456789abcdef:local", accessToken: "t" });
+  assert.equal(store.readOperatorIdentity("someone-else"), null);
+  assert.equal(store.readOperatorIdentity(""), null);
+});
+
+test("the operator slot is never listed as a provisioned user", () => {
+  const store = createHumanMatrixStore({ root: tempRoot() });
+  store.writeOperatorIdentity("admin", { matrixUserId: "@u-0123456789abcdef:local", accessToken: "t" });
+  store.writeIdentity(UUID_A, { matrixUserId: "@u-1:local", accessToken: "t" });
+  assert.deepEqual(store.listProvisionedUserIds(), [UUID_A]);
+});
+
+test("writeOperatorIdentity rejects a blank subject or an incomplete credential", () => {
+  const store = createHumanMatrixStore({ root: tempRoot() });
+  assert.throws(() => store.writeOperatorIdentity("  ", { matrixUserId: "@u-1:local", accessToken: "t" }), /subject is required/);
+  assert.throws(() => store.writeOperatorIdentity("admin", { accessToken: "t" }), /matrixUserId is required/);
+  assert.throws(() => store.writeOperatorIdentity("admin", { matrixUserId: "@u-1:local" }), /accessToken is required/);
+});

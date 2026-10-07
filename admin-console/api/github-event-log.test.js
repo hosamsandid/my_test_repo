@@ -137,6 +137,18 @@ test('projectAgentRows (#2525): one row per trigger outcome of this agent only, 
   assert.deepEqual(eventLog.projectAgentRows([armedDrop], 'nobody'), []);
 });
 
+test('projectAgentRows (#2875): a pool instance\'s drop re-fired through its template reads as re-fired on the instance', () => {
+  const inst = 'developer-i7';
+  const drop = { ...armedDrop, outcomes: [{ ...armedDrop.outcomes[0], agentId: inst }] };
+  const viaTemplate = {
+    ...refireRow,
+    refireOf: { ...refireRow.refireOf, agentId: inst },
+    outcomes: [{ ...refireRow.outcomes[0], agentId: DEV, instanceId: inst }],
+  };
+  const row = eventLog.projectAgentRows([drop, viaTemplate], inst).find(r => r.eventId === '100');
+  assert.deepEqual(row.refired, { eventId: 'refire:abc', by: 'ana', at: '2026-09-28T11:00:00.000Z' });
+});
+
 test('projectAgentRows (#2525): a re-fired drop carries who/when; the other trigger does not', () => {
   const rows = eventLog.projectAgentRows([armedDrop, refireRow], DEV);
   const t1 = rows.find(r => r.eventId === '100' && r.triggerId === 't1');
@@ -202,4 +214,76 @@ test('projectAgentRows (#2570): a push row carries its ref so a branch-filter dr
   const [row] = eventLog.projectAgentRows([push], 'dev');
   assert.equal(row.ref, 'refs/heads/agent-knowledge');
   assert.equal(row.reason, 'branch-filter');
+});
+
+// ── #2596: naming/linking the pool instance a pooled delivery ran on ──────
+test('projectPoolInstance names an existing instance by its display name', () => {
+  const configs = {
+    'team-developer': { displayName: 'Developer' },
+    'team-developer-i2562': { displayName: 'Developer · #2562' },
+  };
+  const r = eventLog.projectPoolInstance(
+    { agentId: 'team-developer', status: 'delivered', instanceId: 'team-developer-i2562' },
+    (id) => configs[id] || null,
+  );
+  assert.equal(r.instanceName, 'Developer · #2562');
+  assert.equal(r.instanceExists, true);
+  assert.equal(r.instanceItem, '2562');
+  assert.equal(r.poolRoleName, 'Developer');
+});
+
+test('projectPoolInstance marks a reaped instance and still names it after its ticket', () => {
+  const r = eventLog.projectPoolInstance(
+    { agentId: 'team-developer', status: 'delivered', instanceId: 'team-developer-i2562' },
+    (id) => (id === 'team-developer' ? { displayName: 'Developer' } : null),
+  );
+  assert.equal(r.instanceExists, false);
+  assert.equal(r.instanceName, 'Developer · #2562');
+  assert.equal(r.poolRoleName, 'Developer');
+});
+
+test('projectPoolInstance falls back to the ids when no config is readable', () => {
+  const r = eventLog.projectPoolInstance(
+    { agentId: 'team-developer', status: 'delivered', instanceId: 'team-developer-i7' },
+    () => null,
+  );
+  assert.equal(r.instanceName, 'team-developer-i7');
+  assert.equal(r.poolRoleName, 'team-developer');
+  assert.equal(r.instanceExists, false);
+});
+
+test('projectPoolInstance leaves non-pooled and pre-#2596 outcomes untouched', () => {
+  const o = { agentId: 'dev', status: 'delivered', agentName: 'dev' };
+  let calls = 0;
+  assert.equal(eventLog.projectPoolInstance(o, () => { calls++; return null; }), o);
+  assert.equal(calls, 0, 'no config read for a row without an instance');
+});
+
+test('projectAgentRows (#2795): a readiness-gate row carries its gates and cancel reason', () => {
+  const entry = {
+    ts: '2026-10-03T10:00:00.000Z', eventId: '900', repo: 'org/repo', event: 'pull_request.labeled', label: 'ready-for-review',
+    workItem: { kind: 'pr', number: 9 },
+    outcomes: [
+      { agentId: DEV, triggerId: 'g1', status: 'held', reason: 'readiness-gate', gates: ['ci', 'conflict'], wakeLabel: 'ready-for-review' },
+      { agentId: DEV, triggerId: 'g2', status: 'dropped', reason: 'gate-cancelled', cancelReason: 'closed' },
+      { agentId: DEV, triggerId: 'g3', status: 'dropped', reason: 'wake-already-armed', cancelReason: 'stray' },
+    ],
+  };
+  const rows = eventLog.projectAgentRows([entry], DEV);
+  const by = Object.fromEntries(rows.map(r => [r.triggerId, r]));
+  assert.deepEqual(by.g1.gates, ['ci', 'conflict']);
+  assert.equal(by.g2.cancelReason, 'closed');
+  assert.ok(!('gates' in by.g3) && !('cancelReason' in by.g3));
+});
+
+test('projectAgentRows (#2822): a comment-label drop names the required label', () => {
+  const comment = {
+    ts: '2026-10-04T10:00:00.000Z', eventId: 'c1', repo: 'o/r', event: 'issue_comment.created',
+    workItem: { kind: 'issue', number: 4 },
+    outcomes: [{ agentId: 'dev', triggerId: 'answer', status: 'dropped', reason: 'comment-label', requireLabel: 'clarifying' }],
+  };
+  const [row] = eventLog.projectAgentRows([comment], 'dev');
+  assert.equal(row.reason, 'comment-label');
+  assert.equal(row.requireLabel, 'clarifying');
+  assert.equal('requireLabel' in eventLog.projectAgentRows([armedDrop], DEV)[0], false);
 });

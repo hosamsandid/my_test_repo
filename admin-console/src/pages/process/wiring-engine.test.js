@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   matchesListener,
   wireLabelHandoff, updateLabelHandoff, unwireLabelHandoff,
-  wireChannel, unwireChannel,
+  wireChannel, unwireChannel, updateChannel,
   wireHumanDelivery, unwireHumanDelivery, moveHumanDelivery,
   wireHumanGate, wireReviewGate, unwireReviewGate,
   wireEscalation, unwireEscalation,
@@ -33,6 +33,27 @@ test('wireLabelHandoff: single-event claimed listener + outcome, idempotent', as
   const ba = state.roles.ba;
   assert.equal(ba.outcomes.options.length, 1);
   assert.deepEqual(ba.outcomes.options[0].actions, [{ type: 'setLabel', label: 'ready' }]);
+});
+
+test('#2629: wireLabelHandoff for a PR label listens on pull_request.labeled and records target pr', async () => {
+  const state = await onBoth(async (ctx) => {
+    await wireLabelHandoff(ctx, {
+      from: 'ba', to: 'dev', label: 'needs-conflict-resolution', target: 'pull_request', prompt: 'x',
+    });
+  });
+  const t = state.roles.dev.triggers[0];
+  assert.deepEqual(t.events, ['pull_request.labeled']);
+  assert.equal(t.labelFilter, 'needs-conflict-resolution');
+  assert.deepEqual(state.roles.ba.outcomes.options[0].actions,
+    [{ type: 'setLabel', label: 'needs-conflict-resolution', target: 'pr' }]);
+});
+
+test('#2629: an explicit issue target is recorded on the emit too', async () => {
+  const state = await onBoth(async (ctx) => {
+    await wireLabelHandoff(ctx, { from: 'ba', to: 'dev', label: 'go', target: 'issues', prompt: 'x' });
+  });
+  assert.deepEqual(state.roles.dev.triggers[0].events, ['issues.labeled']);
+  assert.deepEqual(state.roles.ba.outcomes.options[0].actions, [{ type: 'setLabel', label: 'go', target: 'issue' }]);
 });
 
 test('wireLabelHandoff: claim rules — opt-out, unlabeled, PR kind', async () => {
@@ -130,6 +151,46 @@ test('unwireChannel removes the port; the producer outcome (and its badge) stays
     'what a role opens is authored on the role, not implied by consumers');
 });
 
+test('#2717 updateChannel: a label rename leaves one channel on both adapters (AC1/AC2)', async () => {
+  for (const [a, b] of [['before', 'after'], ['before', ''], ['', 'after']]) {
+    const state = await onBoth(async (ctx) => {
+      await wireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr', label: a });
+      await updateChannel(ctx, { to: 'dev', prevLabel: a, spec: { artifact: 'pr', from: 'ba', ...(b ? { label: b } : {}) } });
+    });
+    assert.deepEqual(state.roles.dev.channels, [{ artifact: 'pr', from: 'ba', ...(b ? { label: b } : {}) }],
+      `${JSON.stringify(a)} → ${JSON.stringify(b)}`);
+  }
+});
+
+test('#2717 updateChannel: renaming onto a sibling label is refused on both adapters (AC4)', async () => {
+  const state = await onBoth(async (ctx) => {
+    await wireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr', label: 'ready-to-merge' });
+    await wireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr', label: 'revisions-required' });
+    await assert.rejects(updateChannel(ctx, { to: 'dev', prevLabel: 'ready-to-merge',
+      spec: { artifact: 'pr', from: 'ba', label: 'revisions-required' } }), /already exists/);
+  });
+  assert.deepEqual(state.roles.dev.channels.map(c => c.label), ['ready-to-merge', 'revisions-required']);
+});
+
+test('#2717 unwireChannel with the edited label keeps fan-in siblings on both adapters (AC6)', async () => {
+  const state = await onBoth(async (ctx) => {
+    await wireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr', label: 'ready-to-merge' });
+    await wireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr', label: 'revisions-required' });
+    await unwireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr', label: 'ready-to-merge' });
+  });
+  assert.deepEqual(state.roles.dev.channels, [{ artifact: 'pr', from: 'ba', label: 'revisions-required' }]);
+});
+
+test('#2717 updateChannel keeps the claim opt-out and wake instruction on both adapters (AC7/AC8)', async () => {
+  const state = await onBoth(async (ctx) => {
+    await wireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr', label: 'go', autoClaim: false, wakePrompt: 'Custom.' });
+    // The dialog's Save: label + gate, no autoClaim, unchanged wake instruction.
+    await updateChannel(ctx, { to: 'dev', prevLabel: 'go', spec: { artifact: 'pr', from: 'ba', label: 'went', gate: 'human', wakePrompt: 'Custom.' } });
+  });
+  assert.deepEqual(state.roles.dev.channels,
+    [{ artifact: 'pr', from: 'ba', label: 'went', gate: 'human', wakePrompt: 'Custom.', autoClaim: false }]);
+});
+
 // ── human delivery ──────────────────────────────────────────────────────────
 
 test('wireHumanDelivery: PR/issue ensures the producer outcome, file does not; move + unwire', async () => {
@@ -196,6 +257,22 @@ test('wireReviewGate wires the whole triangle in one call (+ rejection leg)', as
   const rej = state.roles.ba.triggers.find(t => t.labelFilter === 'rework');
   assert.deepEqual(rej.events, ['issues.labeled']);
   assert.deepEqual(rej.claim, { remove: 'rework', add: 'rework:wip' });
+});
+
+test('#2706: wireReviewGate refuses an unusable gate or rejection label before any write', async () => {
+  for (const bad of [
+    { gateLabel: 'uitest ok, bad' },
+    { gateLabel: 'two words' },
+    { gateLabel: 'ready', rejectLabel: 'needs, rework' },
+  ]) {
+    const bundle = freshBundle();
+    const before = clone(bundle);
+    await assert.rejects(
+      wireReviewGate(makeDraftLike(bundle), { from: 'ba', human: 'p', to: 'dev', artifact: 'pr', ...bad }),
+      /Label names can't contain/,
+    );
+    assert.deepEqual(bundle, before, `nothing may be written for ${JSON.stringify(bad)}`);
+  }
 });
 
 test('convergence (§4.5): assembly orders and re-runs produce identical persisted state', async () => {

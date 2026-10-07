@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useReducer, useEffect, useRef, useCallback } from 'react';
 import { Plus, AlertTriangle, Info, Loader2, Github, Layers } from 'lucide-react';
 import { useApi, apiCall } from '../../hooks/useApi';
 // One repository card for the whole console (#2067): rendering it here rather
@@ -9,6 +9,7 @@ import RepoPropagationDialog from '../../components/RepoPropagationDialog';
 import McpServerRows from '../../components/McpServerRows';
 import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning } from '../toolchain-select-view.js';
 import { mcpChangeNotice, mcpApplySummary } from '../working-env-mcp-view.js';
+import { promptRebuildSummary } from '../working-env-context-view.js';
 import { classifyRepositoryChanges, hasRepositoryChanges } from '../working-env-repo-diff.js';
 import { describeWorkingEnvSubmitState } from '../working-env-submit-state.js';
 import { providerOptionLabel } from '../provider-option-view.js';
@@ -16,6 +17,7 @@ import { personalProviderNoticeText } from '../provider-health-view.js';
 import { initialTeamEnvForm, teamEnvSubmitBody } from './team-environment-view.js';
 import { describeCredentialRef } from '../credential-ref-legibility.js';
 import { describeEffectiveCredential } from '../effective-identity-view.js';
+import { recheckReducer, initialRecheckState, remainingBusyMs, describeRecheck } from './github-health-recheck.js';
 
 /**
  * Team Settings — the five environment tabs of the flat configuration row
@@ -184,6 +186,8 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
   const [notice, setNotice] = useState('');
   // #2289: what the save did to the agents' MCP servers (mcpApplySummary), or null.
   const [mcpReport, setMcpReport] = useState(null);
+  // #2688: what the save did to existing members' CLAUDE.md (promptRebuildSummary), or null.
+  const [contextReport, setContextReport] = useState(null);
   // #2323: set when a save is blocked for a repo-backed env with no GitHub token;
   // holds the server message and drives the reference-only opt-out prompt.
   const [tokenWarn, setTokenWarn] = useState(null);
@@ -278,7 +282,7 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
     // reference-only opt-out below — strict-check it so an `onClick={() => save()}`
     // (event) or any truthy leak can never silently acknowledge.
     const ack = acknowledgeNoToken === true;
-    setSaving(true); setSaveError(null); setNotice(''); setMcpReport(null);
+    setSaving(true); setSaveError(null); setNotice(''); setMcpReport(null); setContextReport(null);
     if (!ack) setTokenWarn(null);
     try {
       const body = teamEnvSubmitBody(baseline, form);
@@ -289,6 +293,7 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
       setForm(initialTeamEnvForm(saved));
       setNotice('Saved.');
       setMcpReport(mcpApplySummary(saved?.mcpApply));
+      setContextReport(promptRebuildSummary(saved?.promptRebuild));
       const agents = Array.isArray(saved?.agents) ? saved.agents : (Array.isArray(baseline?.agents) ? baseline.agents : []);
       const diff = classifyRepositoryChanges(saved?.previousRepositories, saved?.repositories);
       if (agents.length > 0 && hasRepositoryChanges(diff)) {
@@ -340,14 +345,14 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
       {notice && !saveError && (
         <div style={{ ...helpTextStyle, color: 'var(--eb-status-success)' }}>{notice}</div>
       )}
-      {mcpReport && !saveError && (
-        <div role={mcpReport.tone === 'warn' ? 'alert' : undefined} style={mcpReport.tone === 'warn' ? warnBoxStyle : helpTextStyle}>
-          {mcpReport.tone === 'warn' && (
+      {!saveError && [mcpReport, contextReport].filter(Boolean).map((report, idx) => (
+        <div key={idx} role={report.tone === 'warn' ? 'alert' : undefined} style={report.tone === 'warn' ? warnBoxStyle : helpTextStyle}>
+          {report.tone === 'warn' && (
             <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1, color: 'var(--eb-status-warning)' }} />
           )}
-          <div>{mcpReport.lines.map((line, i) => <div key={i}>{line}</div>)}</div>
+          <div>{report.lines.map((line, i) => <div key={i}>{line}</div>)}</div>
         </div>
-      )}
+      ))}
 
       {tab === 'repositories' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
@@ -587,7 +592,8 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
           <div style={labelStyle}>Additional instructions for agents (CLAUDE.md)</div>
           <div style={helpTextStyle}>
             Appended to every member's CLAUDE.md — project context, coding conventions, domain
-            terminology, or constraints the whole team should follow.
+            terminology, or constraints the whole team should follow. Saving a change also updates
+            the CLAUDE.md of existing members; it takes effect from their next run.
           </div>
           <textarea
             value={form.additionalContext}
@@ -749,10 +755,43 @@ const inputStyle = {
 // so "why aren't events arriving?" is answered in the UI, not the poller log.
 // Reflects the SAVED environment; a probe failure never blocks the tab.
 function GithubHealthBadge({ envId }) {
-  const { data, loading, error, refetch } = useApi(
-    envId ? `/api/environments/${encodeURIComponent(envId)}/github-health` : null,
-  );
-  if (!envId || error) return null;
+  const url = envId ? `/api/environments/${encodeURIComponent(envId)}/github-health` : null;
+  const { data: initial, loading, error } = useApi(url);
+  // #2712: Recheck runs its own request instead of useApi's refetch (which
+  // never shows a busy state once data is loaded and hides the box on error).
+  const [recheck, dispatch] = useReducer(recheckReducer, initialRecheckState);
+  // Bumped on env change/unmount so a recheck in flight for a previous
+  // environment never lands on the one now shown.
+  const generation = useRef(0);
+  const busy = useRef(false);
+  useEffect(() => {
+    dispatch({ type: 'reset' });
+    return () => { generation.current += 1; busy.current = false; };
+  }, [url]);
+  useEffect(() => {
+    if (initial) dispatch({ type: 'loaded', at: Date.now() });
+  }, [initial]);
+  const runRecheck = useCallback(async () => {
+    if (!url || busy.current) return;
+    busy.current = true;
+    const gen = generation.current;
+    const startedAt = Date.now();
+    dispatch({ type: 'start' });
+    let result;
+    try {
+      result = { type: 'success', data: await apiCall('GET', url) };
+    } catch {
+      result = { type: 'failure' };
+    }
+    const wait = remainingBusyMs(startedAt, Date.now());
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    if (gen !== generation.current) return;
+    busy.current = false;
+    dispatch({ ...result, at: Date.now() });
+  }, [url]);
+  const data = recheck.data || initial;
+  const view = describeRecheck(recheck);
+  if (!envId || (error && !data)) return null;
   if (loading && !data) {
     return (
       <div style={{ ...helpTextStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
@@ -779,16 +818,19 @@ function GithubHealthBadge({ envId }) {
         <span>GitHub integration: {roll.ok ? 'OK' : (roll.label || 'Problem')}</span>
         <button
           type="button"
-          onClick={refetch}
-          disabled={loading}
+          onClick={runRecheck}
+          disabled={view.disabled}
+          aria-busy={view.disabled}
           style={{
             marginLeft: 'auto', padding: 'var(--eb-space-0-5) var(--eb-space-2)',
+            display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
             background: 'transparent', color: 'var(--eb-text-secondary)',
             border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
-            fontSize: 'var(--eb-text-xs)', cursor: loading ? 'wait' : 'pointer', fontFamily: 'inherit',
+            fontSize: 'var(--eb-text-xs)', cursor: view.disabled ? 'wait' : 'pointer', fontFamily: 'inherit',
           }}
         >
-          {loading ? 'Checking…' : 'Recheck'}
+          {view.disabled && <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />}
+          {view.buttonLabel}
         </button>
       </div>
       {unhealthy.map((r, i) => (
@@ -796,6 +838,14 @@ function GithubHealthBadge({ envId }) {
           <code>{r.fullName || r.url}</code>: {r.label}{r.detail ? ` — ${r.detail}` : ''}
         </div>
       ))}
+      {view.note && (
+        <div style={{
+          fontSize: 'var(--eb-text-xs)',
+          color: view.note.tone === 'error' ? 'var(--eb-status-error)' : 'var(--eb-text-muted)',
+        }}>
+          {view.note.text}
+        </div>
+      )}
     </div>
   );
 }

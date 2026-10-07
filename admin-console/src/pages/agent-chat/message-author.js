@@ -122,6 +122,27 @@ export function resolveAuthorName(author, directory = EMPTY_AUTHOR_DIRECTORY) {
 }
 
 /**
+ * The author name the session log shows on a `message.received` row (#2715).
+ *
+ * The runner records the Matrix `sender` as `from`, but that is the account
+ * that physically posted the message — for a console user without a personal
+ * Matrix identity it is the shared admin account, i.e. somebody else's handle.
+ * So `from` is never used for display. The name comes from the `author` the
+ * runner copied off the message's `io.aee.author` stamp and is resolved exactly
+ * like the transcript bubble's (AC3). No stamp — every row recorded before the
+ * fix, or a message from a third-party Matrix client — yields `''`, and the
+ * caller omits the "from" segment instead of showing a wrong name (AC5, AC6).
+ *
+ * @param {object} event   a session-log row
+ * @param {{byId: Map, bySubject: Map}} [directory]
+ * @returns {string}
+ */
+export function receivedMessageAuthorName(event, directory = EMPTY_AUTHOR_DIRECTORY) {
+  if (!event || typeof event !== 'object') return '';
+  return resolveAuthorName(normalizeAuthor(event.author), directory);
+}
+
+/**
  * The leading user-perceived character of a string: one full code point plus
  * any combining marks that belong to it. `u`-flagged `.` keeps a surrogate pair
  * together, `\p{M}*` keeps a decomposed accent attached — dropping the mark

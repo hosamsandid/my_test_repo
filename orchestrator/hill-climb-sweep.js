@@ -201,12 +201,39 @@ function consumedLabelsFromMembers(members) {
   return [...out];
 }
 
-// The flat `[{agentId, triggerId}]` list of declared triggers (zero-fire base).
+// The flat list of declared triggers (zero-fire base). Beyond `{agentId,
+// triggerId}` each entry carries what a human needs to recognise the trigger in
+// a card title (#2710) — the member's display name, the trigger type, its
+// events and labelFilter — plus `since`, the trigger's activation stamp (the
+// same `activatedAt → createdAt` precedence as the poller's history horizon), so
+// a trigger younger than the measurement window is not reported as dead.
+// An unstamped trigger falls back to the creation time encoded in a
+// console-generated id (`t<epoch-ms>`, optionally + a short random suffix), so
+// a young cron/loop/agent-authored trigger is not mistaken for legacy (#2710).
+const ID_EPOCH_RE = /^t(\d{13})\d{0,3}$/;
+function sinceFromTriggerId(id) {
+  const m = typeof id === 'string' ? ID_EPOCH_RE.exec(id) : null;
+  if (!m) return null;
+  const ms = Number(m[1]);
+  const d = new Date(ms);
+  return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+}
+
 function triggerDefsFromMembers(members) {
   const out = [];
   for (const m of Array.isArray(members) ? members : []) {
     for (const t of Array.isArray(m && m.triggers) ? m.triggers : []) {
-      if (t && t.id) out.push({ agentId: m.id, triggerId: t.id });
+      if (!t || !t.id) continue;
+      const since = t.activatedAt || t.createdAt || sinceFromTriggerId(t.id);
+      out.push({
+        agentId: m.id,
+        triggerId: t.id,
+        ...(m.displayName ? { agentName: m.displayName } : {}),
+        ...(t.type ? { type: t.type } : {}),
+        ...(Array.isArray(t.events) && t.events.length ? { events: t.events.filter((e) => typeof e === 'string') } : {}),
+        ...(t.labelFilter ? { labelFilter: t.labelFilter } : {}),
+        ...(since ? { since } : {}),
+      });
     }
   }
   return out;
@@ -242,7 +269,9 @@ function wasteSignalsFromEventLog(entries, fromMs, toBound, teamAgentIds) {
     for (const o of Array.isArray(e && e.outcomes) ? e.outcomes : []) {
       if (scope && !(o && scope.has(o.agentId))) continue;
       if (o && o.status === 'dropped') throttleDrops += 1;
-      else if (o && o.status === 'digest') digestFolds += 1;
+      // #2693: the poller records a folded burst as `delivered` + `digest: true`;
+      // a literal `status: 'digest'` stays accepted.
+      else if (o && (o.status === 'digest' || (o.status === 'delivered' && o.digest === true))) digestFolds += 1;
     }
   }
   return { throttleDrops, digestFolds };

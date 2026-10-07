@@ -1334,6 +1334,19 @@ test('#1006: raw-trigger-nonconformant lint — visible deviation, advisory only
   assert.deepEqual(raws.map(l => l.triggerIds[0]).sort(), ['t-badclaim', 't-two']);
 });
 
+test('#2626: an invalid cron trigger lints as never firing, not as a tolerated deviation', () => {
+  const g = buildProcessGraph([
+    { id: 'sched', triggers: [
+      { id: 'bad', type: 'cron', cron: '75 * * * *', prompt: 'p' },
+      { id: 'good', type: 'cron', cron: '0 9 * * 1-5', prompt: 'p' },
+    ] },
+  ], {});
+  const raws = g.lints.filter(l => l.code === 'raw-trigger-nonconformant');
+  assert.deepEqual(raws.map(l => l.triggerIds[0]), ['bad']);
+  assert.match(raws[0].message, /`bad` never fires: Invalid cron expression "75 \* \* \* \*": minute must be 0–59/);
+  assert.doesNotMatch(raws[0].message, /still runs/);
+});
+
 test('#1008: derived channel/data-flow triggers are exempt from the raw-trigger lint', () => {
   // A derived listener is ENGINE-written and regenerated on every port
   // reconcile — the operator cannot "edit it to conform". The unlabelled
@@ -1601,4 +1614,232 @@ test('#2032: computeLints still works without a classifier (nodes+edges callers)
   const nodes = [{ id: 'a', triggers: [] }, { id: 'b', triggers: [] }];
   const edges = [{ from: 'a', to: 'b', label: 'hold', kind: 'agent', triggerId: 't' }];
   assert.doesNotThrow(() => computeLints(nodes, edges));
+});
+
+// ─── label-target-mismatch (#2629) ───────────────────────────────────────────
+// A label on a PR arrives as `pull_request.labeled`, on an issue as
+// `issues.labeled` — a consumer subscribed to the other one never wakes.
+
+const prListener = (id, label) => ({
+  id, role: 'agent',
+  triggers: [{ id: `${id}-t`, type: 'github-event', events: ['pull_request.labeled'], labelFilter: label }],
+});
+// The #2622 incident shape: a merger woken on PRs sets `needs-conflict-resolution`.
+const merger = (actions) => ({
+  id: 'merger', role: 'agent',
+  triggers: [{ id: 'merger-t', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-to-merge' }],
+  outcomes: { mode: 'exactlyOne', options: [
+    { id: 'merged', actions: [{ type: 'none' }] },
+    { id: 'conflicts', actions },
+  ] },
+});
+const mismatches = g => g.lints.filter(l => l.code === 'label-target-mismatch');
+
+test('lint: label-target-mismatch fires (warning) when a PR label is consumed on issues.labeled', () => {
+  const g = buildProcessGraph([
+    merger([{ type: 'setLabel', label: 'needs-conflict-resolution', target: 'pr' }]),
+    outcomeListener('solver', 'needs-conflict-resolution'),
+  ]);
+  const [m] = mismatches(g);
+  assert.ok(m, 'mismatch lint expected');
+  assert.equal(m.severity, 'warning');
+  assert.equal(m.nodeId, 'solver');
+  assert.equal(m.label, 'needs-conflict-resolution');
+  assert.equal(m.outcome, 'conflicts');
+  assert.deepEqual(m.triggerIds, ['solver-t']);
+  assert.match(m.message, /pull_request\.labeled/);
+
+  // Consumer repointed to pull_request.labeled → cleared.
+  const ok = buildProcessGraph([
+    merger([{ type: 'setLabel', label: 'needs-conflict-resolution', target: 'pr' }]),
+    prListener('solver', 'needs-conflict-resolution'),
+  ]);
+  assert.equal(mismatches(ok).length, 0);
+});
+
+test('lint: label-target-mismatch infers the PR target from the producer\'s own PR-only triggers', () => {
+  // No explicit target — the incident as authored. The merger is only ever woken
+  // on pull requests, so the label it sets can only land on a PR.
+  const g = buildProcessGraph([
+    merger([{ type: 'setLabel', label: 'needs-conflict-resolution' }]),
+    outcomeListener('solver', 'needs-conflict-resolution'),
+  ]);
+  assert.equal(mismatches(g).length, 1);
+});
+
+test('lint: label-target-mismatch infers the target from an openPr in the same outcome', () => {
+  const dev = withOutcomes('dev', 'anyOf', [
+    { id: 'opens-pr', actions: [{ type: 'openPr' }, { type: 'setLabel', label: 'ready-for-docs' }] },
+  ]);
+  assert.equal(mismatches(buildProcessGraph([dev, outcomeListener('docs', 'ready-for-docs')])).length, 1);
+  assert.equal(mismatches(buildProcessGraph([dev, prListener('docs', 'ready-for-docs')])).length, 0);
+});
+
+test('lint: an explicit target wins over the producer-trigger inference', () => {
+  // Woken on PRs, but the outcome says it labels the linked issue.
+  const g = buildProcessGraph([
+    merger([{ type: 'setLabel', label: 'reopen', target: 'issue' }]),
+    outcomeListener('ba', 'reopen'),
+  ]);
+  assert.equal(mismatches(g).length, 0);
+  const g2 = buildProcessGraph([
+    merger([{ type: 'setLabel', label: 'reopen', target: 'issue' }]),
+    prListener('ba', 'reopen'),
+  ]);
+  assert.equal(mismatches(g2).length, 1);
+});
+
+test('lint: label-target-mismatch stays silent when the target is unknown', () => {
+  // No target, no artifact action, no triggers — nothing to disagree with.
+  const g = buildProcessGraph([
+    withOutcomes('router', 'anyOf', [{ id: 'go', actions: [{ type: 'setLabel', label: 'go' }] }]),
+    outcomeListener('a', 'go'), prListener('b', 'go'),
+  ]);
+  assert.equal(mismatches(g).length, 0);
+});
+
+test('lint: label-target-mismatch accepts a listener subscribed to both labeled events', () => {
+  const both = {
+    id: 'solver', role: 'agent',
+    triggers: [{ id: 'solver-t', type: 'github-event', events: ['issues.labeled', 'pull_request.labeled'], labelFilter: 'x' }],
+  };
+  const g = buildProcessGraph([merger([{ type: 'setLabel', label: 'x', target: 'pr' }]), both]);
+  assert.equal(mismatches(g).length, 0);
+});
+
+// ── #2716: registry entries no flow element references are reported unused ──
+
+test('#2716 unusedLabels lists only registry entries no flow element references', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', role: 'agent', emits: ['ready-for-review'], triggers: [
+      { id: 'dev-t', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' },
+    ] },
+    { id: 'rev', role: 'agent', triggers: [], channels: [
+      { artifact: 'pr', from: 'dev', label: 'ready-for-review' },
+      { artifact: 'issue', from: 'dev', label: 'needs-approval', gate: 'human' },
+    ] },
+    withOutcomes('merger', 'exactlyOne', [{ id: 'ok', actions: [{ type: 'setLabel', label: 'merged' }] }]),
+  ], {
+    labels: [
+      { name: 'ready', humanGate: true },          // trigger labelFilter
+      { name: 'ready-for-review' },                 // emit + channel port
+      { name: 'needs-approval' },                   // inline channel gate only
+      { name: 'merged' },                           // outcome setLabel
+      { name: 'old-jvc', humanGate: true },         // nothing
+      { name: '  stale  ', brake: true },           // nothing, padded
+      { name: 'human-only' },                       // human-role emit
+      { name: 'human-brake' },                      // human-role consume
+    ],
+    humans: [{ id: 'po', emits: ['human-only'], consumes: [{ label: 'human-brake' }] }],
+  });
+  assert.deepEqual(g.unusedLabels, ['old-jvc', 'stale']);
+  // The registry seed still keeps unused entries (and their flags) in graph.labels (#928).
+  assert.deepEqual(g.labels.find(l => l.name === 'old-jvc'), { name: 'old-jvc', humanGate: true, brake: false });
+  assert.ok(g.labels.some(l => l.name === 'stale'));
+});
+
+test('#2716 unusedLabels is empty without a registry and never lists referenced-only labels', () => {
+  const g = buildProcessGraph([{ id: 'dev', role: 'agent', emits: ['x'], triggers: [] }]);
+  assert.deepEqual(g.unusedLabels, []);
+  assert.ok(g.labels.some(l => l.name === 'x'));
+});
+
+test('#2716 a label becomes unused once its last reference is removed', () => {
+  const registry = { labels: [{ name: 'handoff', brake: true }] };
+  const used = buildProcessGraph([{ id: 'a', role: 'agent', emits: ['handoff'], triggers: [] }], registry);
+  assert.deepEqual(used.unusedLabels, []);
+  const unused = buildProcessGraph([{ id: 'a', role: 'agent', emits: [], triggers: [] }], registry);
+  assert.deepEqual(unused.unusedLabels, ['handoff']);
+});
+
+test('#2716 a registry human gate set by an outcome setLabel is in use (not unused)', () => {
+  const g = buildProcessGraph([
+    withOutcomes('a', 'exactlyOne', [{ id: 'ok', actions: [{ type: 'setLabel', label: ' approved ' }] }]),
+  ], { labels: [{ name: 'approved', humanGate: true }] });
+  assert.deepEqual(g.unusedLabels, []);
+  // The gate stays out of the emit projection — the lint still reports it.
+  assert.ok(g.lints.some(l => l.code === 'human-label-as-outcome'));
+});
+
+// #2754: a wake label whose every listener is switched off.
+function labelHandoffGraph({ dev = {}, rev = {}, revTrigger = {} } = {}) {
+  return buildProcessGraph([
+    { id: 'dev', displayName: 'Developer', emits: ['ready-for-review'],
+      triggers: [{ id: 'd', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' }], ...dev },
+    { id: 'rev', displayName: 'Reviewer',
+      triggers: [{ id: 'r', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review', ...revTrigger }], ...rev },
+  ]);
+}
+
+test('#2754: wake-label-no-live-consumer fires when the only consumer agent is switched off', () => {
+  const g = labelHandoffGraph({ rev: { enabled: false } });
+  const l = g.lints.filter(x => x.code === 'wake-label-no-live-consumer');
+  assert.equal(l.length, 1);
+  assert.equal(l[0].severity, 'warning');
+  assert.equal(l[0].label, 'ready-for-review');
+  assert.equal(l[0].nodeId, 'rev');
+  assert.match(l[0].message, /switched off/);
+  // Distinct from the "no consumer at all" lints — those are not raised here.
+  assert.ok(!lintCodes(g).includes('dead-end-emitter'));
+  // The node carries the flag; an enabled node does not carry the key at all.
+  assert.equal(g.nodes.find(n => n.id === 'rev').enabled, false);
+  assert.ok(!('enabled' in g.nodes.find(n => n.id === 'dev')));
+});
+
+test('#2754: wake-label-no-live-consumer fires when the consumer\'s trigger on that label is switched off', () => {
+  const g = labelHandoffGraph({ revTrigger: { enabled: false } });
+  assert.deepEqual(g.lints.filter(x => x.code === 'wake-label-no-live-consumer').map(x => x.label), ['ready-for-review']);
+});
+
+test('#2754: one live listener clears wake-label-no-live-consumer; enabled flows raise none', () => {
+  assert.ok(!lintCodes(labelHandoffGraph()).includes('wake-label-no-live-consumer'));
+  const g = buildProcessGraph([
+    { id: 'dev', emits: ['ready-for-review'], triggers: [] },
+    { id: 'rev', enabled: false, triggers: [{ id: 'r', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review' }] },
+    { id: 'rev2', triggers: [{ id: 'r', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review' }] },
+  ]);
+  assert.ok(!lintCodes(g).includes('wake-label-no-live-consumer'));
+});
+
+// ── #2795: hand-off readiness gate ────────────────────────────────────────
+
+test('#2795: gate-failure-label-unheard warns when nothing listens on the failure label', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', github: { producesPr: true }, emits: ['ready-for-review'], triggers: [] },
+    {
+      id: 'rev',
+      channels: [{ artifact: 'pr', from: 'dev', label: 'ready-for-review', readiness: { ci: true, conflict: true } }],
+      triggers: [],
+    },
+  ]);
+  const l = g.lints.filter(x => x.code === 'gate-failure-label-unheard');
+  assert.equal(l.length, 1);
+  assert.equal(l[0].severity, 'warning');
+  assert.equal(l[0].label, 'revisions-required');
+  assert.equal(l[0].nodeId, 'rev');
+});
+
+test('#2795: a listener on the failure label clears the lint and is wired from the gated consumer, not an orphan', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', github: { producesPr: true }, emits: ['ready-for-review'], triggers: [] },
+    {
+      id: 'merger',
+      triggers: [{
+        id: 'm', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-to-merge',
+        readinessGate: { ci: true, conflict: false, failureLabel: 'fix-ci' },
+      }],
+    },
+    { id: 'fixer', triggers: [{ id: 'f', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'fix-ci' }] },
+  ]);
+  const codes = lintCodes(g);
+  assert.ok(!codes.includes('gate-failure-label-unheard'));
+  assert.ok(!g.lints.some(x => x.code === 'orphan-listener' && x.label === 'fix-ci'));
+  const e = g.edges.find(x => x.label === 'fix-ci');
+  assert.equal(e.from, 'merger');
+  assert.equal(e.to, 'fixer');
+  assert.equal(e.gateFailure, true);
+});
+
+test('#2795: an ungated flow raises no gate lint', () => {
+  assert.ok(!lintCodes(labelHandoffGraph()).includes('gate-failure-label-unheard'));
 });

@@ -16,6 +16,25 @@ export function passwordLabel(u) {
   return u && u.hasPassword ? 'Set' : 'None';
 }
 
+// The per-user chat identity status (#2721 AC8): the orchestrator decorates
+// each record with `matrixIdentity: { status: 'ready'|'pending'|'failed',
+// error?, lastAttemptAt? }`. A record without it (an older orchestrator) reads
+// as pending — never as ready.
+const CHAT_IDENTITY_LABELS = { ready: 'Ready', pending: 'Pending', failed: 'Failed' };
+export function chatIdentityLabel(u) {
+  const status = u && u.matrixIdentity && u.matrixIdentity.status;
+  return CHAT_IDENTITY_LABELS[status] || CHAT_IDENTITY_LABELS.pending;
+}
+
+// Tooltip text for a failed identity: the last error and when it happened,
+// plus that it is retried automatically. Empty for any other status.
+export function chatIdentityDetail(u) {
+  const mi = u && u.matrixIdentity;
+  if (!mi || mi.status !== 'failed') return '';
+  const when = mi.lastAttemptAt ? ` (last attempt ${mi.lastAttemptAt})` : '';
+  return `${mi.error || 'Provisioning failed'}${when} — retried automatically.`;
+}
+
 // Flatten sanitized user records into DataTable rows. DataTable sorts + filters
 // by `row[col.key]` only, so every sortable/filterable value must live as a
 // top-level primitive key on the row; the original record is preserved under
@@ -28,6 +47,7 @@ export function usersToRows(users = []) {
     email: u.email || '',
     systemAdminLabel: systemAdminLabel(u),
     passwordLabel: passwordLabel(u),
+    chatIdentityLabel: chatIdentityLabel(u),
     _user: u,
   }));
 }
@@ -99,14 +119,29 @@ export function lastSystemAdminGuard({ users, target, action } = {}) {
   return { ok: true, reason: null };
 }
 
+// The optional-email rule (#2695 finding 88), mirrored from the store
+// (`orchestrator/teams-store.js` EMAIL_RE / INVALID_EMAIL_REASON) — the two run
+// in different containers, so `users-view.test.js` proves rule and sentence
+// still agree. Needed client-side because the Save buttons submit by onClick,
+// which bypasses the browser's native `type="email"` check.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export const INVALID_EMAIL_REASON = 'Email must be a valid address, e.g. jane.doe@corp.com';
+
+export function isValidEmail(v) {
+  return typeof v === 'string' && EMAIL_RE.test(v.trim());
+}
+
 // Client-side mirror of the backend create/update validation (AC11), returning
 // an error string or null. On create the backend requires a subject (an empty
 // display name defaults to the subject); on edit the backend rejects an empty
-// display name and the subject is immutable. `mode` is 'create' | 'edit'.
-export function validateUserForm({ subject, displayName } = {}, mode = 'create') {
+// display name and the subject is immutable. A non-blank email must be a
+// plausible address in both modes (#2695). `mode` is 'create' | 'edit'.
+export function validateUserForm({ subject, displayName, email } = {}, mode = 'create') {
   const s = String(subject == null ? '' : subject).trim();
   const dn = String(displayName == null ? '' : displayName).trim();
+  const em = String(email == null ? '' : email).trim();
   if (mode === 'create' && !s) return 'Subject is required.';
   if (mode === 'edit' && !dn) return 'Display name cannot be empty.';
+  if (em && !isValidEmail(em)) return INVALID_EMAIL_REASON;
   return null;
 }

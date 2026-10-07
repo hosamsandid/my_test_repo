@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 import {
-  systemAdminLabel, passwordLabel, usersToRows, isSelf, selfActionWarning, validateUserForm,
-  isLastSystemAdmin, lastSystemAdminGuard,
+  systemAdminLabel, passwordLabel, chatIdentityLabel, chatIdentityDetail, usersToRows, isSelf, selfActionWarning, validateUserForm,
+  isLastSystemAdmin, lastSystemAdminGuard, isValidEmail, INVALID_EMAIL_REASON,
 } from './users-view.js';
 
 test('systemAdminLabel / passwordLabel reflect the record flags', () => {
@@ -82,6 +82,30 @@ test('validateUserForm mirrors backend create/edit rules', () => {
   assert.equal(validateUserForm({ subject: 'jane@corp.com', displayName: 'Jane' }, 'edit'), null);
 });
 
+// ── email format (#2695 finding 88) ────────────────────────────────────────
+
+test('validateUserForm rejects a malformed email in both modes; blank stays optional', () => {
+  for (const mode of ['create', 'edit']) {
+    const base = { subject: 'jane', displayName: 'Jane' };
+    assert.equal(validateUserForm({ ...base, email: 'not-an-email' }, mode), INVALID_EMAIL_REASON, mode);
+    assert.equal(validateUserForm({ ...base, email: 'jane@corp' }, mode), INVALID_EMAIL_REASON, mode);
+    assert.equal(validateUserForm({ ...base, email: ' jane.doe@corp.com ' }, mode), null, mode);
+    assert.equal(validateUserForm({ ...base, email: '' }, mode), null, mode);
+    assert.equal(validateUserForm({ ...base, email: undefined }, mode), null, mode);
+  }
+  // The required-field message still wins over the email one.
+  assert.match(validateUserForm({ subject: '', email: 'x' }, 'create'), /Subject is required/);
+});
+
+test('the email rule and sentence match the store exactly (two containers, one rule)', () => {
+  const require_ = createRequire(import.meta.url);
+  const store = require_('../../../orchestrator/teams-store.js');
+  assert.equal(INVALID_EMAIL_REASON, store.INVALID_EMAIL_REASON);
+  for (const v of ['a@b.co', 'jane.doe+x@corp.example.com', ' a@b.co ', '', 'x', 'a@b', 'a b@c.d', '@b.co', 'a@@b.co', 'a@b.', null]) {
+    assert.equal(isValidEmail(v), store.isValidEmail(v), `disagree on ${JSON.stringify(v)}`);
+  }
+});
+
 
 // ── the last System Admin (#2059 AC7) ──────────────────────────────────────
 
@@ -156,4 +180,22 @@ test('the mirrored refusal sentences match the store exactly', () => {
       `client and store disagree about ${target.id} among ${users.length} users`,
     );
   }
+});
+
+test('chatIdentityLabel shows present / pending / failed per user (#2721 AC8)', () => {
+  assert.equal(chatIdentityLabel({ matrixIdentity: { status: 'ready' } }), 'Ready');
+  assert.equal(chatIdentityLabel({ matrixIdentity: { status: 'pending' } }), 'Pending');
+  assert.equal(chatIdentityLabel({ matrixIdentity: { status: 'failed', error: 'x' } }), 'Failed');
+  assert.equal(chatIdentityLabel({}), 'Pending', 'an undecorated record is never shown as ready');
+  assert.equal(chatIdentityLabel({ matrixIdentity: { status: 'bogus' } }), 'Pending');
+  assert.equal(usersToRows([{ id: 'u', matrixIdentity: { status: 'ready' } }])[0].chatIdentityLabel, 'Ready');
+});
+
+test('chatIdentityDetail explains a failure and is empty otherwise', () => {
+  const detail = chatIdentityDetail({ matrixIdentity: { status: 'failed', error: 'homeserver unavailable', lastAttemptAt: '2026-10-01T10:00:00.000Z' } });
+  assert.match(detail, /homeserver unavailable/);
+  assert.match(detail, /2026-10-01T10:00:00.000Z/);
+  assert.match(detail, /retried automatically/);
+  assert.equal(chatIdentityDetail({ matrixIdentity: { status: 'ready' } }), '');
+  assert.equal(chatIdentityDetail({}), '');
 });

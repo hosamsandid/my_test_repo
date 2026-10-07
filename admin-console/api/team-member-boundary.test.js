@@ -243,7 +243,7 @@ test('a malformed agent id is handed to the route, which already answers 400', (
 test('AC2: read/chat-class routes carry no manage gate, so a member is never refused', () => {
   const managePaths = new Set(manageRoutes().map(r => `${r.method} ${r.path}`));
   const readClass = WORK_PLANE_ROUTES.filter(r => r.cls === MUTATION_CLASS.READ);
-  assert.equal(readClass.length, 14, 'the matrix should carry 14 read-class routes');
+  assert.equal(readClass.length, 16, 'the matrix should carry 16 read-class routes');
   for (const r of readClass) {
     assert.equal(managePaths.has(`${r.method} ${r.path}`), false,
       `${r.method} ${r.path} is "allowed" for a member and must not be manage-class`);
@@ -320,7 +320,7 @@ test('every route in the matrix is classified exactly once', () => {
     assert.ok(Object.values(MUTATION_CLASS).includes(r.cls), `${key} has an unknown class ${r.cls}`);
     assert.equal(r.method, r.method.toLowerCase(), `${key} must use a lowercase method`);
   }
-  assert.equal(WORK_PLANE_ROUTES.length, 25);
+  assert.equal(WORK_PLANE_ROUTES.length, 27);
 });
 
 test('classifyWorkPlaneRoute returns null for an unknown route rather than defaulting', () => {

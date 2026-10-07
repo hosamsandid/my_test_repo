@@ -95,7 +95,7 @@ test('the hue is none of the neighbouring edge families', () => {
   const taken = {
     label: '#3b82f6', outcome: '#eab308', artifact: '#22c55e', dependency: '#ef4444',
     gate: '#dc2626', handoff: '#e11d48', review: '#f59e0b', event: '#f97316',
-    timer: '#0ea5e9', webhook: '#eab308', loop: '#d946ef', pr: '#8b5cf6', issue: '#14b8a6',
+    timer: '#0ea5e9', webhook: '#84cc16', loop: '#d946ef', pr: '#8b5cf6', issue: '#14b8a6',
   };
   for (const [name, hex] of Object.entries(taken)) {
     assert.notEqual(WAKE_EDGE_COLOR, hex, `the wake hue must not collide with ${name}`);

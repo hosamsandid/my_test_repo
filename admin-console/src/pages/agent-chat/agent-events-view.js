@@ -7,11 +7,14 @@
 // EventsPanel.jsx only renders what these helpers return.
 
 import { buildTriggerCorrelationId } from '../github-event-session.js';
-import { producerFilterText } from '../event-outcome-presentation.js';
+import { producerFilterText, outcomeStatus, gateWaitText } from '../event-outcome-presentation.js';
 
 // The only drops a human may override (mirrors orchestrator/github-refire.js
 // REFIRABLE_REASONS — the server re-checks, this only decides whether to offer).
 export const REFIRABLE_REASONS = Object.freeze(['wake-already-armed', 'throttle', 'internal-dedup']);
+// Offered only for a label being added (#2874, mirrors LABEL_PRESENT_REASONS):
+// the server then refuses unless the label is still on the open item.
+export const LABEL_PRESENT_REASONS = Object.freeze(['history-horizon']);
 
 // Selectable time windows (AC2). The log keeps 7 days, so that is the widest.
 export const EVENT_RANGES = Object.freeze([
@@ -69,14 +72,39 @@ export function dropReasonText(row) {
     case 'internal-dedup':
       return `Already delivered once for ${q(wake)} (the console or supervisor woke the agent directly) — the poller's copy was skipped.`;
     case 'self-claim-label':
-      return `Label ${q(label)} is the agent's own claim label (':wip'), not a hand-off, so it was ignored.`;
+      return `Label ${q(label)} is the agent's own claim label (':wip') or end-of-run label (':completed'), not a hand-off, so it was ignored.`;
     case 'history-horizon':
       return 'The event is older than this trigger — it happened before the trigger was activated.';
     case 'push-duplicate':
       return 'A duplicate of a push already seen, so it was ignored.';
+    case 'knowledge-branch': {
+      const what = refText(row.ref);
+      return `${what.charAt(0).toUpperCase()}${what.slice(1)} is a knowledge-base branch — pushes to it never wake push triggers.`;
+    }
     case 'producer-filter': {
       const why = producerFilterText(row && row.producer);
       return `${why.charAt(0).toUpperCase()}${why.slice(1)} — this trigger only wakes on pushes by the agents it names.`;
+    }
+    // #2822: the comment-listener filters.
+    case 'comment-target':
+      return "The comment was on the other kind of item — this trigger only listens to comments on issues, or only on PRs.";
+    case 'agent-comment':
+      return 'The comment was written by an agent, and this trigger ignores comments written by agents.';
+    case 'comment-label':
+      return `The commented item did not carry ${row.requireLabel ? `the label '${row.requireLabel}'` : 'the required label'}, so the comment was ignored.`;
+    // #2795: the PR hand-off's readiness gate decided not to wake the agent.
+    case 'gate-failed': {
+      const gates = Array.isArray(row.gates) ? row.gates : [];
+      const why = [gates.includes('ci') ? 'its checks failed' : null, gates.includes('conflict') ? 'it has a merge conflict' : null]
+        .filter(Boolean).join(' and ') || 'it is not ready';
+      return `Held until the PR was ready, but ${why} — ${q(wake)} was removed, the failure label set and a comment posted on the PR.`;
+    }
+    case 'gate-timeout':
+      return `The PR was not ${gateWaitText(row.gates)} within the gate timeout — ${q(wake)} was removed, 'needs-human' set and a comment posted on the PR.`;
+    case 'gate-cancelled': {
+      const why = { closed: 'the PR was closed', 'label-removed': `${q(wake)} was removed`, 'trigger-removed': 'the trigger was removed' }[row.cancelReason]
+        || 'the hand-off went away';
+      return `Held until the PR was ready, but ${why} first, so nobody was woken.`;
     }
     default:
       return reason ? `Dropped (${reason}).` : 'Dropped.';
@@ -88,15 +116,27 @@ export function dropReasonText(row) {
 // the primary/secondary text colours (low-contrast status tokens on white).
 export function outcomeView(row) {
   if (!row) return { tone: 'muted', text: '' };
-  if (row.status === 'delivered') {
+  const status = outcomeStatus(row);
+  if (status === 'delivered') {
+    if (row.reason === 'gate-released') return { tone: 'success', text: 'delivered (gate cleared)' };
     return { tone: 'success', text: row.source === 'manual-refire' ? 'delivered (fired again)' : 'delivered' };
   }
-  if (row.status === 'digest') return { tone: 'info', text: 'digested' };
+  // #2795: the readiness gate holds the wake until the PR is green.
+  if (status === 'held' && row.reason === 'readiness-gate') {
+    return { tone: 'info', text: `held — waiting for ${gateWaitText(row.gates)}` };
+  }
+  if (status === 'digest') return { tone: 'info', text: 'digested' };
+  // #2693: a provisioning-sweep row, not a drop.
+  if (status === 'reaped') return { tone: 'muted', text: 'reaped (orphaned instance cleaned up)' };
+  if (status === 'reap-failed') return { tone: 'warning', text: 'reap failed' };
   return { tone: isRefirable(row) ? 'warning' : 'muted', text: `dropped · ${row.reason || 'unknown'}` };
 }
 
 export function isRefirable(row) {
-  return !!(row && row.status === 'dropped' && REFIRABLE_REASONS.includes(row.reason));
+  if (!row || row.status !== 'dropped') return false;
+  if (REFIRABLE_REASONS.includes(row.reason)) return true;
+  return LABEL_PRESENT_REASONS.includes(row.reason)
+    && typeof row.event === 'string' && row.event.endsWith('.labeled') && !!row.label;
 }
 
 // Whether to OFFER Fire again (AC5/AC7): a refirable drop, not yet re-fired,
@@ -110,15 +150,24 @@ export function canRefire(row, { canManage } = {}) {
 
 // The delivered row's session correlationId (AC4), or null.
 export function sessionCorrelationId(row) {
-  if (!row || row.status !== 'delivered') return null;
+  if (outcomeStatus(row) !== 'delivered') return null;
   return buildTriggerCorrelationId(row.triggerId, row.eventId);
 }
 
-// Work-item cell text: "#42 Title".
+// A PR's linked issue(s) in the GitHub Event Log's wording (#2799):
+// " → closes #12, #15", or '' when the row has no usable link.
+function closesText(wi) {
+  if (wi.kind !== 'pr' || !Array.isArray(wi.closesIssues)) return '';
+  const nums = [...new Set(wi.closesIssues.filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b);
+  return nums.length ? ` → closes ${nums.map((n) => `#${n}`).join(', ')}` : '';
+}
+
+// Work-item cell text: "#42 Title"; a linked PR reads "#42 → closes #7 Title".
 export function workItemText(row) {
   const wi = row && row.workItem;
   if (!wi || wi.number == null) return '';
-  return wi.title ? `#${wi.number} ${wi.title}` : `#${wi.number}`;
+  const ref = `#${wi.number}${closesText(wi)}`;
+  return wi.title ? `${ref} ${wi.title}` : ref;
 }
 
 // The confirm dialog (AC5a): names the reason in plain language; for
@@ -137,6 +186,9 @@ export function refireDialog(row) {
       break;
     case 'internal-dedup':
       why = `This event was already processed once — the console or supervisor woke the agent for ${q(wake)} on ${item} directly, so the poller skipped its own copy.`;
+      break;
+    case 'history-horizon':
+      why = `This event predates the trigger: ${q(wake)} was added to ${item} before the trigger was activated (for example before the flow was re-applied or the team moved to another instance), so the poller ignored it. It is only fired again while ${q(wake)} is still on the item.`;
       break;
     default:
       why = 'This event was dropped.';

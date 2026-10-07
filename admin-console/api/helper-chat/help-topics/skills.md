@@ -37,17 +37,148 @@ inside individual **agents**. A skill name may use letters, digits, `-` and `_`,
 optionally in dotted or colon-separated segments (`review.security`) — that name
 is also the directory name, so it cannot be changed by renaming a heading.
 
-Clicking a row opens the skill in a side panel with four tabs:
+Clicking a row opens the skill in a side panel with three tabs:
 
 | Tab | What it shows |
 |---|---|
-| **Content** | The files in the skill. Markdown is rendered, other text files are shown as code, binaries are named but not displayed, and anything over 512 KB is truncated and read-only. Pool and team skills can be edited here, one file at a time. |
-| **Versions** | The revision history: a content version and hash prefix (`v4 · a1b2c3`), what produced the revision, who did it and when. The live revision on disk is marked **current**. |
-| **Lineage** | Where this copy came from — its **origin** (the tier, team and action it descends from), its knowledge **provenance** when it was distilled from learnings, and every other known copy of the same name, each one clickable. A hand-authored skill honestly says it has no recorded origin. |
-| **Usage** | Where the skill is actually seeded right now: how many places it lives in, broken down by tier, and every agent whose workspace carries it — each with a **drift** badge saying whether that copy is still *in sync* with the pool version or has gone *outdated*, *diverged*, into *conflict*, or *orphaned*. |
+| **Content** | A read-only preview of the skill's files. Markdown is rendered (a `SKILL.md` header is shown as a separate metadata block), other text files are shown as code, binaries are named but not displayed, and anything over 512 KB is truncated. **Edit skill** (or **Open**, when you may not edit it) opens the full-screen skill editor described below. |
+| **Versions** | The revision history: a content version and hash prefix (`v4 · a1b2c3`), what produced the revision, who did it and when. Exactly one entry — the one whose content is on disk right now — is marked **current**. Each version can be opened, compared and restored — see *Versions: open, compare and restore* below. |
+| **Copies & origin** | Where this copy came from, followed by every place the skill lives today, grouped by team — each copy with its version, a **drift** badge and the update actions. Described in detail below. |
 
 Create a skill with **+ New Skill** (you pick the target pool), or bring one in
 with **Import skill** — see the actions chapter below.
+
+### The skill editor
+
+**Edit skill** opens the whole skill in a full-screen editor. The left side is the
+skill's folder tree (folders first, then files, alphabetical; drag the divider to
+widen it); the right side shows the selected file — markdown rendered, with
+`SKILL.md`'s header as its own metadata block. Switch a file between
+**Preview**, **Edit** (a monospaced editor with line numbers) and, for markdown,
+**Split view** with a live preview next to the editor.
+
+The toolbar and each row's menu (right-click, the **⋮** button, or Shift+F10)
+offer **New file**, **New folder**, **Rename / move** (type a new path to move a
+file or a whole folder), **Delete** and **Upload** — uploads also work by
+dropping files onto the tree, are limited to 2 MB per file, and ask before
+replacing a file of the same name. `SKILL.md` at the skill root is the skill
+itself and cannot be renamed, moved or deleted; the platform's own bookkeeping
+(`skill.json`, `provenance.json`, the `_archive` of deleted skills, the
+`_versions` snapshots) is not shown.
+
+Nothing is written until you press **Save** (or Ctrl/⌘+S). Until then every
+change is pending: changed files and folders carry a dot in the tree and the
+header counts the pending changes. **Save** writes all of them at once — either
+everything lands or nothing does — as exactly **one** new version, and the usual
+resync of agent copies runs once. **Discard** throws all pending changes away
+after a confirmation, and closing the editor (✕, Escape or the browser's back
+button) asks first when something is still unsaved. If someone else changed the
+skill since you opened it, Save is refused and offers to **Reload** instead of
+overwriting their work. **Empty folders are kept**: a folder you create stays
+even with nothing in it, and a folder only disappears when you delete it.
+
+Binary files are shown by name only; text files over 512 KB show their first
+512 KB with a notice. Neither can be edited in the editor — replace them by
+uploading. Agent-tier copies, and
+skills you have no write permission for, open in the same editor **read-only**:
+you can browse and preview, but every editing control is gone and the header
+says why. Editing needs the same rights as before — System Admin or a Team Admin
+for global skills, a Team Admin of the team for team skills.
+
+### Versions: open, compare and restore
+
+Every action that records a version — create, save in the editor, import,
+promote, adopt, resync, restore and the rest — also keeps a full copy of the
+skill's content for that version, for every tier including agent copies. Up to
+the last 20 versions are kept, the same as the history itself; a version whose
+content is identical to one already stored costs nothing extra. Versions recorded
+before this feature existed show **Content not available** — their history entry
+stays, but there is nothing to open or compare. The stored copies never travel:
+they are not part of the content hash, not in a ZIP export, and not carried when
+a skill is promoted, adopted, moved, installed or otherwise copied to another
+tier — the copy starts its own version history.
+
+On the **Versions** tab:
+
+- **Open** shows that version in the full-screen editor, read-only, under the
+  banner *You are viewing an old version* with its version, hash, action, author
+  and date.
+- **Compare with current** shows what changed between that version and the
+  current content.
+- Tick any **two** versions and press **Compare** to compare them; the older one
+  is always shown on the left, whichever you ticked first.
+- When an agent's copy was changed by hand after its last recorded version, a
+  **Working copy (unversioned changes)** row at the top stands for the content on
+  disk, and you can compare it like any version.
+
+The comparison opens full-screen. It lists added, removed, modified and renamed
+files with their `+added −removed` line counts; unchanged files are hidden until
+you tick **Show unchanged files**. Switch between **Side-by-side** and
+**Inline** — your choice is remembered for the rest of the browser session.
+Every changed line carries a `+` or `−` marker, so the diff reads without
+colour. Binary files and files over 512 KB are not diffed line by line; they just
+say *binary — changed* or *too large — unchanged*. Comparing a version with
+itself says **No differences**. A renamed file that was also heavily edited may
+show up as one file removed and another added.
+
+From an opened old version you can:
+
+- **Compare with current** — the same comparison, on top of the editor.
+- **Restore this version** — after a confirmation, the version's content
+  replaces the current content and is recorded as a **new** version with the
+  action *restored* (so the content you replaced stays in the history). Agent
+  copies of a global or team skill are resynced once, as after any edit.
+  Restoring an agent's own copy writes into that agent's skill folder and, as
+  with an install, the agent uses the restored content from its next message.
+- **Edit from this version** — loads the old content into the normal editor as
+  pending changes on top of the current skill, so you can adjust it before
+  **Save** records it as one new version.
+
+Both are disabled on the version that already is the current content. Restoring
+needs the same right as editing that copy — a Team Admin of the team for team
+skills, System Admin or a Team Admin for global skills, and for an agent's copy
+the right to install skills on that agent (System Admin or a Team Admin of the
+agent's team). Agent copies cannot be edited here, so they offer **Restore** but
+not **Edit from this version**. If someone changed the skill after you opened the
+old version, the restore is refused and asks you to reload.
+
+### Copies & origin
+
+This tab answers two questions in one place: *where did this copy come from?*
+and *where does this skill live today?* (It replaces the former **Lineage** and
+**Usage** tabs; old links to either open this tab.)
+
+- **Origin** says in plain words what this copy was taken from — e.g. *Taken
+  from agent Onboarding Skill Creator (team Onboarding), version v1 · e663de* —
+  and adds *this source no longer exists* when it is gone. A skill written by
+  hand says *No recorded origin (hand-authored)*. Below it you see the
+  knowledge **provenance** when the skill was distilled from learnings.
+- A **summary line** counts the places the skill lives in, per tier, and names
+  the worst drift among them.
+- The **copies list** shows every copy exactly once. The copy you are viewing is
+  marked *viewing* and listed first; then the **Global pool**, then one group
+  per team (alphabetical), with the team pool's copy before the team's agents.
+  Agents are shown by display name and team name, with the agent id in muted
+  text; two agents of the same name in the same team get their id added. Agents
+  whose team cannot be resolved are listed under **No team**. With more than
+  ten copies a filter over team and agent names and ids appears. Click a copy to
+  open it.
+- **Update** (per copy, or **Update all outdated**) resyncs untouched copies to
+  the current source; **Overwrite…** (per copy, or **Overwrite all edited**)
+  replaces locally edited copies after a confirmation.
+
+Each drift badge has a tooltip; **What do the statuses mean?** shows them all:
+
+| Badge | Meaning | What to do |
+|---|---|---|
+| *in sync* | The copy matches the skill it was taken from. | Nothing. |
+| *outdated* | The source has changed since; the copy is untouched. | **Update** — nothing is lost. |
+| *diverged* | The copy was edited locally; the source has not changed. | Keep the edits, or **Overwrite** to discard them. |
+| *conflict* | Both the copy and the source have changed. | Compare and decide; **Overwrite** discards the local edits. |
+| *orphaned* | The skill the copy was taken from no longer exists (*source gone*). | Nothing — the copy keeps working; remove it only if unwanted. |
+| *unknown* | The copy predates version tracking and cannot be compared. | Nothing; it cannot be updated automatically. |
+
+A copy with nothing to compare against — a hand-authored skill — shows no badge.
 
 ## The three tiers, and which one an agent gets
 
@@ -76,7 +207,7 @@ team, and promoting it to global is a separate, deliberate step.
 not a pool entry — editing one would be overwritten by the next seeding. To share
 one, lift it into a team pool first (from the **Knowledge** page), then promote
 that team skill to global. Both steps write provenance and `skill.json` lineage,
-so the Lineage tab can always show where a skill came from.
+so the **Copies & origin** tab can always show where a skill came from.
 
 ## Grant, activation and Install into agent
 
@@ -84,7 +215,7 @@ The verbs on this page hide three genuinely different mechanics, and mixing them
 up is the usual source of *"why doesn't my agent have that skill?"*:
 
 - **Grant** — the *list of names* an agent, or its whole team, is entitled to.
-  You grant on the **Agents** page, in the **Agent Team Wizard**, or on the
+  You grant in Agent Chat **Settings**, in the **Agent Team Wizard**, or on the
   **Knowledge** page. A grant is a declaration, not a file copy. (Working
   Environments carry repositories, credentials, MCP servers and context folders —
   never skills.)
@@ -110,6 +241,11 @@ yet and would be re-seeded from its environment the moment it is enabled — and
 install refuses to clobber a skill the agent already has, unless you confirm the
 overwrite.
 
+The agent list is grouped by **team**, so agents that share a name (several *My
+Assistant*s, say) can be told apart. Teams and the agents in each are sorted by
+name; two teams with the same name show their team id as well, and agents that
+belong to no team come last under *No team*.
+
 ## The actions: promote, move, adopt, distill, merge, import and export
 
 Everything else on this page moves a skill between the tiers or reshapes it:
@@ -118,7 +254,7 @@ Everything else on this page moves a skill between the tiers or reshapes it:
 |---|---|---|
 | **Promote to global** | Copies a team skill into the global pool; the team-tier copy stays put. | Team skill, side panel |
 | **Move to global** | Relocates a team skill into the global pool and retires the team copy (a recoverable snapshot is archived). | Team skill, side panel |
-| **Adopt** | Copies a global skill into one team's pool and activates it there, so that team owns a curatable copy. | Global skill, side panel |
+| **Adopt** | Copies a global skill into one team's pool and activates it there, so that team owns a curatable copy. The page then says whether the activation worked; if not, activate it in the team's **Skills** tab. | Global skill, side panel |
 | **Move to team** | Relocates a global skill into a team pool and retires the global copy (recoverable snapshot; System Admin only). | Global skill, side panel |
 | **Install into agent** | Activates a global skill for one running agent — see the chapter above. | Global skill, side panel |
 | **Publish** | Pushes an agent's edited skill up to the team pool and/or straight to global — see the chapter below. | Agent skill, side panel or the Knowledge page |

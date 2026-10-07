@@ -90,7 +90,9 @@ an **Agent Team** (a squad of agents working a repo). They only share a word.
   account `@u-<16 hex of sha256(subject)>:local` (`human-matrix-identity.js`,
   token stored out-of-record in `human-matrix-store.js`). Interactive chat sends
   as the acting human's own account, invited into the agent's shared room on
-  first use. Detail: `docs/multi-user-concept.md`.
+  first use; missing identities are backfilled/retried
+  (`human-matrix-provisioner.js`) and a send without one is refused — never
+  the shared admin. Detail: `docs/multi-user-concept.md`.
 - **Ownership**: `role: 'team'` and standalone `role: 'agent'` configs carry an
   **`ownerId`** + `ownerSource`. Access is answered per **Agent Team**
   (`resolveAgentTeam` — a `team` is its own boundary; a `team-member` is bounded
@@ -258,8 +260,10 @@ Concept: `docs/plugin-system-concept.md`, `docs/cli-contract.md`.
   `spec-kit` (command-only), `jira` (the first **event-source** plugin — see
   below). `make seed-plugins`.
 - **Event-source plugins — the Jira plugin** (`plugins/jira/`, docs
-  `docs/jira-plugin.md` / `docs/jira-plugin-plan.md`; further event kinds planned in `docs/jira-plugin-events-plan.md`): wakes granted agents on
-  Jira Cloud status changes. Two generic additions it needed are reusable: the
+  `docs/jira-plugin.md` / `docs/jira-plugin-plan.md`; event kinds in `docs/jira-plugin-events-plan.md` / `docs/jira-plugin-events-implementation.md`): wakes granted agents on
+  Jira Cloud status changes, new issues, comments and other field changes
+  (per-watch opt-in; every wake single-kind; `origin: agent|human` from the
+  broker's own-writes registry breaks self-wake loops). Two generic additions it needed are reusable: the
   **per-scope plugin credential store** (`orchestrator/plugin-credential-store.js`
   — makes the manifest's `credentials[]` real, 0600 under
   `/workspace/plugins/_credentials/<id>/<scopeId>.json`, set by a Team Admin on
@@ -276,6 +280,8 @@ Concept: `docs/plugin-system-concept.md`, `docs/cli-contract.md`.
   no confirmation pen); `/` + `/admin` UI routes, `ui.global: true`. Granted plugin
   CLI copies are refreshed on every plugin reconcile (`planCliRefresh` in
   `plugin-sync.js`), since the grant sync copies them only on a grant change.
+  A **Confluence** plugin (same shape; read/search, ownership-tiered page
+  writes, page/comment events) is planned in `docs/confluence-plugin-plan.md`.
 - **Runtime**: `plugin-registry.js` (re-validates on read, owns the signing
   secret `/workspace/plugins/_secret`), `plugin-runtime.js` (libpod sidecar
   lifecycle). On Kubernetes (`AEE_CONTAINER_RUNTIME=kubernetes`) UI-bearing
@@ -326,6 +332,8 @@ else queues FIFO.
   `[PASS]` suppresses output.
 - **Session policy**: `per-invocation` → triggered runs start fresh (no
   `--resume`), don't move the session pointer; absent = `persistent` (legacy).
+  A pool instance (`poolInstance: true`) instead resumes its DM pointer from
+  every non-loop trigger and chat turn — one session per instance (#2595).
 - Concepts: `docs/triggers.md`, `docs/loop-triggers-concept.md`,
   `docs/direct-agent-handoff-concept.md`,
   `docs/process-template-format.md`.
@@ -345,7 +353,7 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   **brakes** are config flags on the label registry, never a naming convention.
   Named **human roles** are `kind: 'human'` flow nodes (`humans[]`).
 - Graph endpoint `GET /api/process/graph` → `{nodes, edges, gates, labels,
-  humanTouchpoints, lints}`. Pure builders: `process-graph.js`, `unified-graph.js`;
+  unusedLabels, humanTouchpoints, lints}`. Pure builders: `process-graph.js`, `unified-graph.js`;
   layout `flow-layout.js`.
 - **Drafts** (`/api/process/drafts`, `/workspace/process-drafts/<id>.json`):
   private to creator, shared with equal rights (`admin-console/api/draft-access.js`).
@@ -415,19 +423,25 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   once the last instance is gone, #2573) and a per-held-entry Force
   dispatch (`admissionControl.forcePromoteHeld`, promotes past `wipLimit` for
   that one entry). **Pool instance lanes** (#2273): a read-only endpoint (its
-  board panel was folded into "Working now" by #2573), per pooled role's live instances tagged running / held-same-epic /
+  board panel was folded into "Working now" by #2573), per pooled role's live instances tagged running / waiting / held-same-epic /
   timed-out (`pool-instance-lanes.js`, pure, no new persistence — derived
   from live instance configs + the ticket ledger). **Agent Chat rail
   sub-grouping** (#2297): the same live instances, nested under their role as a
   collapsible **Instances (N)** sub-list in the left rail instead of scattered
   flat among the team's members — `poolInstance`/`poolOf`/`poolItem` surfaced on
-  `GET /api/matrix/agents`, nested by `agent-list-model.js` `buildGroups`. **The
+  `GET /api/matrix/agents`, nested by `agent-list-model.js` `buildGroups`; the
+  label reads against the role's cap (*Instances (5 / 3)*, `poolMaxInstances`,
+  #2760 — `pool-cap-view.js`, shared with the Scaling section); an idle
+  instance with an open linked PR is kept alive and counted apart (*2 / 3 active
+  · 4 waiting*, `pool-waiting.json`, outside the cap, never reaped, #2789). **The
   rail live-refreshes** (#2311): `AgentRosterContext` polls the same endpoint on
   its own ~5s beat (a shared singleton poll, mirroring `AgentStatusesContext`'s
   #1677 pattern; paused while the tab is hidden), diffed by `roster-diff.js` so
   only actually-changed rows re-render — a spawned/reaped/renamed instance (or
-  any other roster change) now appears/disappears/updates within ~5s with no
-  manual reload, instead of only at the next navigation or filter toggle.
+  any other roster change) now appears/disappears/updates with no manual reload:
+  within ~5s for a change made in this console (it clears the server's shared
+  roster cache, #566), within ~7s for one the orchestrator makes on its own
+  (one `AGENT_ROSTER_TTL_MS`, default 2s, plus one poll).
   The Parallelism/Scaling surface is **always on** — the former
   `AEE_POOLS_ENABLED` kill switch (#2302) and its `pools-mode.js` module were
   removed; `wipLimit` is configurable both in the Flow editor's Parallelism
@@ -447,12 +461,27 @@ token (replaces webhooks for local stacks).
 - Matched events → `pending-triggers.json` (drained every 5s). Event keys
   `<type>.<action>` (e.g. `pull_request.opened`); bare `push`. Some actions are
   omitted by the API (no `pull_request.synchronize`).
+- **PR readiness** (#2794): CI/merge state is not in the Events API, so for a
+  repo with a subscriber to `pull_request.checks_passed|checks_failed|merge_conflict`
+  the poller reads open PRs + head-commit checks via GraphQL each tick and fans out
+  synthetic `PullRequestEvent`s, once per (PR, head SHA, verdict)
+  (`orchestrator/pr-readiness.js`, state in `state.json` `readiness`). Spec: `docs/triggers.md`.
+  Verdict rules live in `orchestrator/pr-readiness-rules.json`, vendored
+  byte-identical into `agent-image/scripts/` for the in-turn `aee-wait-ci` CLI (#2796).
+- **Hand-off readiness gate** (#2795): a PR hand-off trigger's `readinessGate`
+  (channel port `readiness`) `{ci, conflict, failureLabel?, timeoutMinutes?}`
+  holds the wake until the head is green/mergeable; failure → label swap +
+  comment, timeout → `needs-human` (`orchestrator/handoff-gate.js`, holds in
+  `state.json`). Spec: `docs/triggers.md`.
 - **Loop protection is frequency-only, no source filtering unless a producer
   filter is set**: a per-`(agent, conversation)` throttle (default 5/h) + a
   per-poll burst-cap digest. A trigger fires on any matching event, including
   self-caused. Exception: a push trigger's optional `pushedBy` (same-team agent
   ids, set automatically on Flow-editor data-flow hand-offs) fires only on pushes
   the platform recorded via `gh-as-agent push`/`pr` (`push-attribution.js`).
+  Built-in, non-configurable: a push to any team's knowledge-base branch on the
+  repo never wakes a push trigger — dropped `knowledge-branch` before every
+  other gate (`knowledge-branch-exclusion.js`, resolved per tick).
 - Resilience: hard request deadline + stall watchdog (self-heals a stuck poll).
 - **Event-transparency log** (`github-event-log.js`): every fresh event recorded
   (delivered / dropped / digest / no-subscriber) → `GET /api/github-events`, the
@@ -494,7 +523,8 @@ token (replaces webhooks for local stacks).
   undrained; the console locks every chat composer. Read via
   `GET /internal/maintenance-mode`.
 - **Webhook server** (`HOOK_PORT`): `POST /hooks/:agentId/:hookId` with matching
-  `X-Hook-Secret`; enqueues the trigger's `prompt` (body ignored). Only the
+  `X-Hook-Secret` or GitHub `X-Hub-Signature-256` (`hook-auth.js`); enqueues the
+  trigger's `prompt` (body only signature-checked). Only the
   Maintenance flag protects the queue — prefer `github-event` for must-not-drop.
 - **BP-event router** (`POST /internal/bp-events`): announces Briefing Pack
   changes; the orchestrator routes to affected bp-instances (`bp-event-router.js`).
@@ -523,7 +553,11 @@ in pure, unit-tested `*-view.js`/model modules per the #651 convention (JSX
 uncovered). Key pieces:
 - `AgentList` — left rail (drag-reorder, grouping, disabled/stub opt-ins,
   pool-instance sub-grouping (#2297), lifecycle context menu via
-  `RailLifecycleHost`).
+  `RailLifecycleHost`). A list named "Agents" of listitems whose main
+  `<button>` has the kebab/grip/chevron as siblings, never nested (#2704);
+  e2e locates it via `e2e/steps/agent-rail.js`. Multi-select team filter (#2740): `ListFilterControl` +
+  pure `list-selection.js`; the hidden-entry set is saved per user as
+  `chatListFilter` via `PUT /api/me/preferences`.
 - `ChatPanel` — backfill/pagination/optimistic-send/SSE tail; transcript
   **windowed** (`VirtualList`/`virtual-window.js`), stick-to-bottom. A
   `?msg=<event_id>` deep-link (#2310) bounded-backfills, scrolls to (via
@@ -535,7 +569,11 @@ uncovered). Key pieces:
   questions (raised headlessly via the `aee-ask` CLI → per-turn sentinel file,
   #2523 — the only mechanism since #1719 removed the MCP path); inline image
   thumbnails; hover-revealed "Copy link" builds the `?msg=` deep-link above
-  (#2310, plain text bubbles only).
+  (#2310, plain text bubbles only); next to it "Show in session log" (#2603,
+  pure `session-jump.js`) opens the Sessions tab on the message's run and
+  scrolls to + flashes its rows — an agent reply's run is resolved server-side
+  from the runner's `message.posted` row (`GET …/session/:roomId/locate`), a
+  trigger notice uses its `io.aee.trigger.correlationId`.
 - `MessageInput` — composer, send-keybinding preset, per-agent drafts,
   slash-command palette, unified Send/Stop.
 - `RightRail` — tabs (Sessions, session log, Workspace, Triggers, Outcomes,
@@ -593,7 +631,7 @@ Process step lands on the template/draft gallery; role templates under
 | `orchestrator/spawn-container.js` | Spawns/kills per-agent Podman container over libpod; network + FS + volume + host-folder isolation |
 | `orchestrator/spawn-kubernetes-*.js` | Kubernetes pod / plugin runtimes behind the `container-runtime.js` seam |
 | `orchestrator/prompt-assembly.js` | Pure single source for system-prompt composition (ordering, gating, memory hint) |
-| `orchestrator/agent-id-resolution.js` | Pure collision-free agent id resolution (`nextAvailableAgentId`, `suggestFreeAgentId`) |
+| `orchestrator/agent-id-resolution.js` | Pure collision-free agent id resolution (`nextAvailableAgentId`, `suggestFreeAgentId`; byte-identical in admin-console) |
 | `orchestrator/team-conversion.js` / `team-of-one-migration.js` | Convert/migrate a standalone agent into a team of one |
 | `orchestrator/agent-delete-plan.js` / `agent-orphans.js` | Fast/background delete + cascade; orphan detection |
 | `orchestrator/teams-store.js` | Source of truth for the human Team data model (pure factory) |
@@ -661,7 +699,9 @@ Resolved **team-first then global** at seeding (`orchestrator/skill-source.js`).
 System Admin or Team Admin of any team — promote, publish, import, merge,
 create and edit all apply that one rule (#2178/#2180/#2307;
 `skill-transfer.js`'s `requiredPoolWritePermission`). **Team**:
-`/workspace/teams/<teamId>/skills/` (RW), Team-Admin-of-that-team-managed.
+`/workspace/teams/<teamId>/skills/` (RW), Team-Admin-of-that-team-managed;
+`<teamId>` = Agent Team id (`api/skill-pool-team.js` `agentPoolTeamId`, mirrors
+`agentKnowledgeTeamId`), never the legacy `cfg.teamId` (#2689).
 `/api/skills` tags `source` = `pool`/`team`/`agent`; `POST
 /api/skills/promote-to-global` lifts a team skill into the global pool.
 

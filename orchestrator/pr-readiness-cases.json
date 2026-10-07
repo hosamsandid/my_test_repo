@@ -1,0 +1,53 @@
+{
+  "_comment": "Shared verdict cases (#2796): run by orchestrator/pr-readiness.test.js against ciVerdict/mergeVerdict and by agent-image/scripts/test_aee_wait_ci.py against aee-wait-ci, so the two implementations of the rules in pr-readiness-rules.json cannot drift. graceMs is 180000 unless a case sets it; elapsedMs is now - headSeenAt.",
+  "ci": [
+    { "name": "no checks yet, inside the grace", "checks": [], "elapsedMs": 60000, "expect": { "verdict": "pending", "failingChecks": [] } },
+    { "name": "no checks after the grace = no CI", "checks": [], "elapsedMs": 180000, "expect": { "verdict": "none", "failingChecks": [] } },
+    { "name": "no checks but the page was truncated stays pending", "checks": [], "truncated": true, "elapsedMs": 999999, "expect": { "verdict": "pending", "failingChecks": [] } },
+    { "name": "all check runs passed (neutral/skipped count as pass)", "checks": [
+        { "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS" },
+        { "__typename": "CheckRun", "name": "docs", "status": "COMPLETED", "conclusion": "NEUTRAL" },
+        { "__typename": "CheckRun", "name": "e2e", "status": "COMPLETED", "conclusion": "SKIPPED" }
+      ], "elapsedMs": 0, "expect": { "verdict": "passed", "failingChecks": [] } },
+    { "name": "a non-required CodeQL failure still fails", "checks": [
+        { "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS" },
+        { "__typename": "CheckRun", "name": "CodeQL", "status": "COMPLETED", "conclusion": "FAILURE" }
+      ], "elapsedMs": 0, "expect": { "verdict": "failed", "failingChecks": ["CodeQL"] } },
+    { "name": "a failing check settles early while others still run", "checks": [
+        { "__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "TIMED_OUT" },
+        { "__typename": "CheckRun", "name": "e2e", "status": "IN_PROGRESS", "conclusion": null }
+      ], "elapsedMs": 0, "expect": { "verdict": "failed", "failingChecks": ["lint"] } },
+    { "name": "a running check keeps it pending", "checks": [
+        { "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS" },
+        { "__typename": "CheckRun", "name": "e2e", "status": "QUEUED", "conclusion": null }
+      ], "elapsedMs": 0, "expect": { "verdict": "pending", "failingChecks": [] } },
+    { "name": "an unknown conclusion is pending, never guessed", "checks": [
+        { "__typename": "CheckRun", "name": "odd", "status": "COMPLETED", "conclusion": "SOMETHING_NEW" }
+      ], "elapsedMs": 0, "expect": { "verdict": "pending", "failingChecks": [] } },
+    { "name": "commit statuses count too", "checks": [
+        { "__typename": "StatusContext", "context": "ci/jenkins", "state": "SUCCESS" },
+        { "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS" }
+      ], "elapsedMs": 0, "expect": { "verdict": "passed", "failingChecks": [] } },
+    { "name": "a failing or erroring commit status fails", "checks": [
+        { "__typename": "StatusContext", "context": "ci/b", "state": "ERROR" },
+        { "__typename": "StatusContext", "context": "ci/a", "state": "FAILURE" },
+        { "__typename": "StatusContext", "context": "ci/a", "state": "FAILURE" }
+      ], "elapsedMs": 0, "expect": { "verdict": "failed", "failingChecks": ["ci/a", "ci/b"] } },
+    { "name": "a pending commit status keeps it pending", "checks": [
+        { "__typename": "StatusContext", "context": "ci/x", "state": "PENDING" }
+      ], "elapsedMs": 0, "expect": { "verdict": "pending", "failingChecks": [] } },
+    { "name": "all passed but truncated stays pending", "checks": [
+        { "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS" }
+      ], "truncated": true, "elapsedMs": 0, "expect": { "verdict": "pending", "failingChecks": [] } },
+    { "name": "a cancelled run fails", "checks": [
+        { "__typename": "CheckRun", "name": "deploy", "status": "COMPLETED", "conclusion": "CANCELLED" }
+      ], "elapsedMs": 0, "expect": { "verdict": "failed", "failingChecks": ["deploy"] } }
+  ],
+  "merge": [
+    { "mergeable": "MERGEABLE", "expect": "clean" },
+    { "mergeable": "CONFLICTING", "expect": "conflict" },
+    { "mergeable": "UNKNOWN", "expect": "pending" },
+    { "mergeable": null, "expect": "pending" },
+    { "mergeable": "mergeable", "expect": "clean" }
+  ]
+}

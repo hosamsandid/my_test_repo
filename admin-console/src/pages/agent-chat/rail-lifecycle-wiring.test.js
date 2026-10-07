@@ -122,7 +122,7 @@ test('disabling probes first so a mid-run agent gets the drain/abort dialog', ()
 
 test('a create or import lands in the list without a reload (AC3)', () => {
   assert.match(host, /refresh\(\)/);
-  assert.match(host, /if \(onChanged\) onChanged\(\)/);
+  assert.match(host, /if \(onChanged\) await onChanged\(\)/);
 });
 
 // --------------------------------------------------------------------- #1938
@@ -190,7 +190,7 @@ test('the rail "+" control and its menu are gone, not merely unrendered (AC2)', 
   assert.doesNotMatch(host, /'new-agent'/);
   assert.doesNotMatch(host, /'import-agent'/);
   // The rail header row itself stays — it still carries the filter.
-  assert.match(agentChat, /<FilterSelect/);
+  assert.match(agentChat, /<ListFilterControl/);
 });
 
 test('New Agent hands over to the launcher; Import opens the picker in one click (AC3/AC4)', () => {
@@ -427,10 +427,11 @@ test('#2213 — the chevron is its own click target and is the only thing that t
   // The outer row activates (selects + opens settings), not the collapse.
   assert.match(header, /onClick=\{onActivate\}/);
   assert.doesNotMatch(header, /onClick=\{onToggle\}/);
-  // The chevron is a distinct `role="button"` element carrying `aria-expanded`
-  // and its own stopPropagation'd handler — the outer row's onClick must never
-  // call `onToggle` directly any more.
-  assert.match(header, /role="button"[\s\S]{0,200}aria-expanded=\{!collapsed\}/);
+  // The chevron is a distinct `<button>` (#2704: a sibling of the main
+  // button, no longer a `role="button"` span nested in it) carrying
+  // `aria-expanded` and its own stopPropagation'd handler — the outer row's
+  // onClick must never call `onToggle` directly any more.
+  assert.match(header, /<button\s+type="button"\s+aria-expanded=\{!collapsed\}/);
   assert.match(header, /onClick=\{e => \{ e\.stopPropagation\(\); onToggle\(\); \}\}/);
 });
 
@@ -470,4 +471,59 @@ test('a team the caller may see but not manage gets a read-only notice, never an
   assert.match(agentChat, /const canManage = team\?\.canManage !== false;/);
   assert.match(agentChat, /canManage \? \(\s*<AgentSettingsPanel/);
   assert.match(agentChat, /<TeamReadOnlyNotice team=\{team\} \/>/);
+});
+
+// --------------------------------------------------------------------- #2705
+
+test('#2705 AC1 — both reset-to-stub paths confirm with a success toast', () => {
+  const confirmed = host.slice(host.indexOf('async function deactivateConfirmed'), host.indexOf('async function deactivateMode'));
+  const mode = host.slice(host.indexOf('async function deactivateMode'), host.indexOf('async function confirmDelete'));
+  assert.match(confirmed, /setNotice\(resetToStubNotice\(target\)\)/);
+  assert.match(mode, /setNotice\(resetToStubNotice\(agent\)\)/);
+});
+
+test('#2705 AC2 — Materialize is reported in flight until the roster re-read, then toasts', () => {
+  const toggle = host.slice(host.indexOf('async function toggleEnabled'), host.indexOf('async function disableConfirmed'));
+  assert.match(toggle, /const materializing = agentState\(agent\) === 'stub';/);
+  assert.match(toggle, /if \(materializing\) markMaterializing\(agent\.id, true\);/);
+  // The notice and the release both wait for the refreshed roster.
+  assert.match(toggle, /await refresh\(\);\s*setNotice\(materializedNotice\(agent\)\);/);
+  assert.match(toggle, /finally \{[\s\S]*if \(materializing\) markMaterializing\(agent\.id, false\);/);
+  assert.match(host, /if \(onChanged\) await onChanged\(\);/);
+  assert.match(host, /onMaterializingIdsChange\(materializingIds\)/);
+});
+
+test('#2705 AC2 — the chat pane holds the in-progress card instead of a chat while materializing', () => {
+  assert.match(agentChat, /onMaterializingIdsChange=\{handleMaterializingIdsChange\}/);
+  assert.match(agentChat, /const materializingAgent = routedAgent && railMaterializingIds\.has\(routedAgent\.id\) \? routedAgent : null;/);
+  assert.match(agentChat, /effectiveRoutedAgent && !materializingAgent && isChatOpenable\(effectiveRoutedAgent\)/);
+  assert.match(agentChat, /materializingAgent=\{materializingAgent\}/);
+  assert.match(agentChat, /revealEmptyStateCopy\(\{ waiting: waitingForNewAgent, stubAgent, materializingAgent \}\)/);
+});
+
+test('#2705 — the roster poll drops a response older than the newest applied one', () => {
+  const roster = code(read('../../context/AgentRosterContext.jsx'));
+  assert.match(roster, /const seq = \+\+requestSeqRef\.current;/);
+  assert.match(roster, /if \(isStaleRosterResponse\(seq, appliedSeqRef\.current\)\) return;\s*appliedSeqRef\.current = seq;/);
+});
+
+test('#2685 review S1/B1 — the delete re-checks a team delete against a fresh config list', () => {
+  const start = host.indexOf('async function confirmDelete(');
+  assert.ok(start > 0, 'confirmDelete not found — re-point this guard');
+  const body = host.slice(start, host.indexOf('\n  async function ', start + 1)).replace(/\s+/g, ' ');
+  // A team delete (the id differs from the target's own) triggers a fresh read…
+  assert.match(body, /if \(deleteRequestId\(deleteTarget, deleteTeamToo\) !== deleteTarget\.id\) \{ try \{ fresh = await apiCall\('GET', '\/api\/agents'\);/);
+  // …the sent id comes from resolveDeleteRequest over that fresh list…
+  assert.match(body, /const \{ id: deleteId, keptTeam \} = resolveDeleteRequest\(deleteTarget, deleteTeamToo, fresh\);/);
+  assert.match(body, /apiCall\('DELETE', `\/api\/agents\/\$\{encodeURIComponent\(deleteId\)\}`\)/);
+  assert.equal((body.match(/apiCall\('DELETE'/g) || []).length, 1, 'exactly one DELETE, and it uses the resolved id');
+  // …and a kept team is reported, not silent.
+  assert.match(body, /const kept = teamKeptNotice\(keptTeam\);/);
+  assert.match(body, /else if \(kept\) setActionError\(kept\);/);
+});
+
+test('#2685 review S1 — the "delete the team too" checkbox resets to ticked whenever the dialog opens', () => {
+  assert.match(host, /const \[deleteTeamToo, setDeleteTeamToo\] = useState\(true\);/);
+  assert.match(host, /useEffect\(\(\) => \{ if \(deleteTarget\) setDeleteTeamToo\(true\); \}, \[deleteTarget\]\);/);
+  assert.match(host, /renderDeleteMessage\(deleteTarget, \{ deleteTeamToo, onDeleteTeamTooChange: setDeleteTeamToo \}\)/);
 });

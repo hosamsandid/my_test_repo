@@ -15,8 +15,9 @@
 //         `sort | uniq -c` to keep the build arg small). One tolerant parser
 //         handles both (see parseIdentityLine).
 //       * Non-human committers are dropped (#1778, AC1/AC2): identities whose
-//         author email is on an internal, non-routable agent domain
-//         (`…@agents.local`, `…@agent`, `…@local`) or whose display name carries
+//         author email is on an internal, non-routable agent domain (any
+//         `.local` domain, its `.local.test` test variant, or a bare `@agent` /
+//         `@local` host — #2698) or whose display name carries
 //         `[bot]`. Everyone else (real domains such as `@accenture.com` and
 //         GitHub `…@users.noreply.github.com`) is kept. A human who ever
 //         committed under an internal-looking email, or a future agent under a
@@ -35,18 +36,27 @@
 
 // --- human / non-human classification (#1778) --------------------------------
 
-// Internal, non-routable domains the stack's agents commit under via gh-as-agent.
-// Anchored to the end of the email so a real address is never caught by a
-// substring. `@local` must not swallow `@agents.local` — the two are checked
-// independently and both exclude.
-const AGENT_EMAIL_DOMAINS = [/@agents\.local$/i, /@agent$/i, /@local$/i];
+// Internal, non-routable domains the stack's agents (and test fixtures) commit
+// under. Anchored to the end of the email so a real address is never caught by
+// a substring. Matched by the whole `.local` family rather than a list of known
+// hosts (#2698): `@agents.local`, `@agent.local`, `@agent-studio.local`,
+// `@a.local` and bare `@local` all exclude, as do the `.local.test` variants
+// (`@local.test`, `@x.local.test`) and the bare `@agent` host. `.local` is
+// reserved for link-local names (RFC 6762) and never a real mail domain.
+const AGENT_EMAIL_DOMAINS = [
+  /@(?:[^@]+\.)?local(?:\.test)?$/i,
+  /@agent$/i,
+];
 
 /**
  * Decide whether a git identity belongs to a human contributor (kept) or a
  * platform / technical identity (excluded). The rule is deliberately simple and
  * documented so the behaviour stays predictable (#1778):
  *   - a display name containing `[bot]` is a bot -> excluded;
- *   - an author email on an internal agent domain is an agent -> excluded;
+ *   - an author email on an internal agent domain is an agent -> excluded:
+ *     any `.local` domain (`…@agents.local`, `…@agent.local`,
+ *     `…@agent-studio.local`, bare `…@local`), its `.local.test` variant
+ *     (`…@local.test`), or a bare `…@agent` host (#2698);
  *   - everything else is treated as human -> kept.
  *
  * @param {{name?: string, email?: string}} identity

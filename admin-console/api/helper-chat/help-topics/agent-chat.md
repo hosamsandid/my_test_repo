@@ -147,7 +147,7 @@ The left rail lists every agent you can see, and clicking one opens its room —
 except a team's own header row, which has no room to open (see below).
 
 **Grouping and order.** Agents that belong to an Agent Team are grouped under
-that team; standalone agents are collected under *Single agents*. When every row
+that team; standalone agents are collected under *Individual agents*. When every row
 in a group shares one environment, its member rows stay single-line and drop
 that environment from their own line; a member that deviates keeps its own
 environment line. The team header's second line no longer repeats that shared
@@ -171,8 +171,14 @@ a run you did not start (the hollow-green FYI) never roll up, so collapsing a te
 keeps reducing noise. Expand it and the marker gives way to the per-agent dots
 again.
 
-**Finding an agent.** The filter box above the list narrows it as you type. Next
-to it, the **eye** toggle is the *show disabled agents* opt-in: disabled agents
+**Finding an agent.** The team filter above the list (it reads *All agents*, a
+team's name, or *N of M teams*) opens a panel with one checkbox per team plus
+*Individual agents*: tick the ones to show. A search box narrows the entries,
+**Select all** / **Deselect all** act on the listed ones, and the quick filters
+(*Only my private teams*, *Teams I am a member of*, *… Team Admin*, *… regular
+member*) replace the selection in one click. Your selection is saved to your
+account; teams added later are shown by default. Reordering groups needs every
+team shown. Next to it, the **eye** toggle is the *show disabled agents* opt-in: disabled agents
 are hidden by default, because most of the time they are noise. Turning it on is
 the only thing that widens what the list asks the server for.
 
@@ -211,10 +217,17 @@ on hover, a right-click, or the **Menu** / **Shift+F10** keys. It carries:
   it back. This is the reversible pause.
 - **Reset to stub** — stops the agent and **wipes** its workspace: session
   history, cloned repositories, anything it had written. The configuration stays,
-  so it can be started again from scratch.
+  so it can be started again from scratch; a notice confirms the reset.
 - **Delete** — removes the agent's configuration entirely. Deleting an **Agent
   Team** additionally removes that team's locally cached and curated knowledge
-  (knowledge shared through its repository is untouched).
+  (knowledge shared through its repository is untouched). When the agent is
+  the **last member of its team** (e.g. a team of one), the confirm says so and
+  offers **Also delete the team** (ticked by default; this also removes the
+  team's knowledge); untick it to keep the empty team. Without the rights to
+  delete the team, the confirm says it stays. Before deleting the team, the
+  console re-reads every agent config; if the team still has another member
+  (for example a disabled one hidden from the list), only the agent is
+  deleted and a notice says the team was kept.
 - **Clone**, **Export (ZIP)** and **Save as template** — copy this agent, take a
   copy away, or turn it into a reusable template.
 - A group header carries the team-wide equivalents: **Enable/Disable** for the
@@ -256,8 +269,9 @@ chat, because there is no chat account to open yet. Its menu offers
 **Materialize**, which is the operation the removed Agents page called *Activate*:
 it creates the chat account, seeds the workspace with the agent's skills, prompt
 and MCP configuration, clones the environment's repositories and starts the
-agent. Expect it to take a moment when repositories are involved — the row shows
-it working — and when it finishes the member moves up into the list above.
+agent. Expect it to take a moment when repositories are involved — the row and
+an open chat pane (*Materializing …*) show it working — and when it finishes the
+member moves up into the list above and a notice confirms it.
 
 A stub is *not* the same thing as a **paused** agent: paused means provisioned
 and switched off, stub means never provisioned at all. That is why the *show
@@ -271,17 +285,29 @@ is off.
 shows them nested directly under that role, in a collapsible **Instances (N)**
 sub-list — instead of scattering them through the team as flat, indistinguishable
 rows. It expands/collapses and remembers your choice the same way a team group
-does, and stays empty (no sub-list at all) while the role has nothing live. Each
+does, and stays empty (no sub-list at all) while the role has nothing live. When
+the role has a **Max parallel instances** cap, the count reads against it, e.g.
+**Instances (5 / 3)**; a warning icon marks a count over the cap (running
+instances are not stopped, no new one starts until the count is below it). An
+instance that has finished its run but is kept alive because its pull request
+is still open reads **Waiting for PR #N** under its name; it is left out of
+that count and named apart, e.g. **Instances (2 / 3 active · 4 waiting)** — it
+does not use up the cap, but it does keep a container running until the PR is
+merged or closed (see the Flow Control help, *Instances waiting on a pull
+request*). Each
 instance row is an ordinary agent: its status dot follows the same activity poll,
 and clicking it opens its own chat/session log exactly like any other member —
-they are just as ephemeral as the role that spawned them, so a row can disappear
-once its instance is torn down.
+a row disappears once its instance is torn down. Its triggered runs and your chat
+share one session.
 
 **Adding an agent** is done from the page header, not the list. **New Agent**
 (top right) hands over to the create launcher, where *Configure an agent
 manually* — under **Advanced options** — opens the direct form; **Import Agent**
 next to it takes an exported agent ZIP and asks for an id and a team before it
-lands. The imported agent joins the list
+lands — leave the team on *Its own team* and the agent becomes a team of one,
+like any newly created agent. If the exported id is taken, the dialog suggests
+a free one and a display name ("<name> (Copy)") so the copy can be told apart
+from its source. The imported agent starts right away and joins the list
 without a reload — but if the list filter is narrowed at the time, the
 confirmation says so rather than letting it arrive out of sight. Both buttons
 are greyed out with the reason when you may not create agents.
@@ -350,6 +376,11 @@ immediately.
 **Drafts.** Whatever you have typed is kept per agent, so switching to another
 agent and back does not lose it.
 
+**Read-only as a System Admin.** A System Admin sees every team's chats but
+writes only in teams they belong to. In any other team the composer is
+read-only (Stop still works); **Open team sharing** in the hint leads to the
+team's Sharing tab, where you can add yourself.
+
 **Slash commands.** Typing **/** as the first character of a message opens a
 filterable list of the slash commands this agent has been provisioned with,
 navigable with **↑ ↓ Enter Esc Tab**. Picking one inserts it with the cursor
@@ -388,9 +419,15 @@ gets a thumbnail.
 **Answering a question.** When a run pauses to ask you something, the question
 arrives as a card with the options as buttons — click one instead of typing it.
 A card with several questions walks you through them one at a time and sends a
-single consolidated answer at the end, so the agent resumes once. Only the newest
+single consolidated answer at the end, so the agent resumes once. While such a
+card is waiting, the composer reads *Answer question X of N…*: plain text you
+type and send answers the open question (shown under it as *Your own answer*)
+and the card steps on, just as after a click. A message with an attachment, or
+dictated text, is sent as a normal message instead. **Skip remaining questions**
+sends the answers so far with the rest marked *(skipped)*. Only the newest
 unanswered card is clickable; once a later message arrives it goes inert, and
-your earlier choice stays marked.
+your earlier choice stays marked — a multi-question card left unfinished shows
+the questions you reached and a *Not completed* note.
 
 ## The right rail
 
@@ -417,11 +454,10 @@ editable form; nothing about it becomes editable that was not editable before.
 
 ### Sessions — watching a run
 
-The **Sessions** tab is the monitoring surface: the runs this agent has done and
-the one it is doing now. Its badge counts the currently active sessions. Pick a
-run to see its structured **session log** — every step the agent took — together
-with what that run cost and how much context it used. A live run streams in as it
-happens and can be stopped from here; a finished one can be reopened any time.
+The **Sessions** tab lists this agent's runs, past and current; its badge counts
+active ones. Pick a run to see its **session log** — every step the agent took —
+with its cost and context use. A live run streams in and can be stopped here. A
+message's **Show in session log** icon jumps to its run.
 
 ### The session log and the TODO panel
 
@@ -429,6 +465,19 @@ The session log is a timeline of the run, not a wall of text: each tool call and
 its result are folded into one block, and hovering a row dims everything that
 does not belong to the same turn, so you can follow one exchange through a busy
 log. Long logs are windowed, so a run with thousands of steps stays responsive.
+
+A tool that runs for a long time shows that it is still going: its block reads
+*running · 6m 00s* and the time counts up in place, and once it finishes it
+reads *took 6m 12s* (only for calls long enough to report progress). If the run
+ended first, it reads *stopped after …*. Expand the block for the details —
+the background task id and type, and the latest raw progress report. A wait
+for a pull request's CI (`aee-wait-ci`) shows as a card instead of a command:
+*Waiting for CI · PR #2838 · 6m 00s of max 20m*, then the verdict — **CI
+passed**, **No CI configured**, **CI failed**, **Merge conflict**, **Timed
+out** or **Error** — with the PR linked; the command and raw result stay on
+expand. In the chat itself the agent's room gets one short note when such a
+wait starts (*Pull request #2838 is open — waiting for CI to finish*), so you
+know why the agent is quiet; the agent's answer still follows when it is done.
 
 While the agent is working through a task list, that list is shown live — inline
 in the timeline and in a **TODO panel** docked to the bottom, with a
@@ -454,6 +503,30 @@ console browses them *through* it, and the agent has to be running for that to
 work. A context folder is **read-only** unless it was mounted read-write; a
 read-write one also offers upload, delete and drag-to-move, and a read-only one
 simply offers no write action at all.
+
+**HTML files** (`.html`, `.htm`) open as source code. The **Rendered** toggle
+shows the page itself, but it asks first, **every time**: the page was written
+by an agent and may contain harmful content, so nothing runs until you click
+**Show preview**. The dialog also has an **Also load external resources**
+checkbox. It starts unticked and only applies to this one opening. Unticked,
+inline styles, scripts and embedded (`data:`) images work, but external
+scripts, stylesheets, fonts and images do not load, and scripts cannot fetch or
+send anything. Ticked, it may load from any
+host. Either way the page runs isolated from Agent Studio: it cannot read your
+session, the console or other agents' data. A banner above the preview says
+so, and also says whether external resources are on. Because of that
+isolation the page has no real browser storage; it gets a temporary in-memory
+stand-in instead (local and session storage, cookies), so pages that remember a
+setting such as a light/dark theme still render and work. That storage is
+empty every time you open the preview and is gone when you close it — nothing
+is kept between openings or shared between files. Do not enter passwords
+or credentials into a preview. Relative links to other workspace files (images,
+stylesheets) do not load. A page that navigates away (a link or a redirect)
+closes the preview back to source, but the address it navigated to has
+already been requested, even with external resources off. A page stuck in an endless loop can freeze
+the tab until you reload. Files above **5 MB** offer **Download** instead of a
+preview. The same preview is available in the expanded viewer and when you
+open a file referenced in chat.
 
 ### Repositories: inherited, and this agent's own
 
@@ -514,17 +587,19 @@ same question, "what wakes this agent", and every one of them delivers a
 |---|---|
 | **Cron (recurring)** | a 5-field schedule (`Minute Hour Day Month Weekday`) comes due. If the previous run of *this* trigger is still going, the tick is skipped rather than queued. |
 | **Once (one-shot)** | a specific date and time is reached. It then deletes itself — a reminder, not a schedule. |
-| **HTTP webhook** | something outside the platform sends `POST /hooks/<agentId>/<triggerId>` with the trigger's own `X-Hook-Secret`. Each trigger carries its own generated secret; there is no open mode. Used by CI pipelines, monitoring, GitHub webhooks. |
+| **HTTP webhook** | something outside the platform sends `POST /hooks/<agentId>/<triggerId>` with the trigger's own `X-Hook-Secret` — a GitHub webhook instead takes the secret as its **Secret** (verified via `X-Hub-Signature-256`). Each trigger carries its own generated secret; there is no open mode. Used by CI pipelines, monitoring, GitHub webhooks. |
 | **GitHub event** | the built-in poller sees a matching event on a repository of the agent's environment (about every 30 seconds). The full event payload is appended to the prompt as JSON. Needs a GitHub token on that environment. |
 | **Data flow (agent dependency)** | a teammate pushes to the team repository — the committed work *is* the hand-off. Under the hood this is a GitHub `push` subscription with a marker. |
 | **Plugin event** | a granted plugin's broker reports something (a Jira status change, say). Two filters narrow it — see *Which event vs. Only when* below. |
 | **Loop (re-run until done)** | you start it. It is not a subscription (see below). |
 
-### Cron and once fire on the container clock
+### Cron and once: time zone and status
 
-Both are evaluated against the clock inside the container, not your laptop's. On
-a Podman VM that clock can drift; a forward correction fires every `once` whose
-time it passes and every `cron` whose time it crosses.
+Cron runs in **Europe/Berlin** (your time is shown if it differs); a once time
+is your local time; a past one is flagged and runs at the next sync (about a
+minute), then is removed. Rows show next/last run, or a red warning if the agent
+cannot schedule the trigger. The container clock can drift on a Podman VM; a
+forward correction fires whatever it skips.
 
 ### A GitHub event fires regardless of who caused it
 
@@ -594,7 +669,7 @@ A loop re-runs the same prompt until the goal is reached:
   that must pass, another agent that reviews each try, or the flow's downstream
   reviewers. A failed check is fed back into the next try's prompt. Team agents
   must not grade their own work — leave it blank and a sibling reviewer is
-  re-applied server-side. Pick *the flow checks the hand-off* when each try ends
+  re-applied server-side (with no teammate in the team, the agent checks itself). Pick *the flow checks the hand-off* when each try ends
   in a PR or a label that a wired QS chain already reviews, so the same reviewer
   does not check the work twice.
 
@@ -618,6 +693,17 @@ dropped with the reason. On a *wake-already-armed*, *throttle* or
 *internal-dedup* drop an agent manager can **Fire again**: the agent is woken
 now with the same prompt. Refused if the item is merged/closed, the wake label
 is gone, or it was already re-fired.
+
+A *history-horizon* drop — a label added before the trigger was activated, for
+example just before the flow was re-applied or the team moved to another
+instance — can be fired again too, but only while that wake label is **still
+on the open item**. It is offered only for an event that added the trigger's
+own wake label; the dialog says that the event predates the trigger. The
+poller itself still ignores such events on its own.
+
+A pull request linked to an issue reads `#2798 → closes #2794 <title>` here and
+in the **Fire again** dialog — the same `→ closes #N` the chat's
+`⚡ Trigger fired — …` notice carries — so you can search by the issue number.
 
 ## Outcomes — what the agent signals when a run ends
 
@@ -758,13 +844,31 @@ belongs to this team):
 | **Model provider** | Optional override — members start on this provider and its default model instead of the global `.env` fallback. |
 | **Toolchain** | Optional — which container image members are spawned from, picked from the System-Admin-registered list. Absent means the default image. |
 | **MCP servers** | Optional server + credential pairs from the MCP registry, applied to members on save, from their next turn. |
-| **Additional context** | Optional text appended to every member's `CLAUDE.md`. |
+| **Additional context** | Optional text appended to every member's `CLAUDE.md`; a change is written into existing members' `CLAUDE.md` on save, from their next run. |
 
 **Skills** and **Plugins** carry the team's own grant — the same fields the
 *What the form fields control* chapter describes for an ordinary agent —
 sitting at the same level as everything else rather than as separate sections
 below a box; a team with nothing installed or configured still shows all
 eight tabs, each explaining its own empty state rather than disappearing.
+
+**General → Label suffix** is the one place a team's label suffix is changed
+after creation — the suffix that keeps parallel teams on one repository from
+waking each other. It follows the same rule as at creation (up to eight
+lowercase letters, digits and single inner dashes; empty means no suffix), so
+you can also give an unsuffixed team a suffix or remove one. **Change…**
+first shows a confirmation with how many labels and agents the change touches
+and a warning that the labels are renamed in place on GitHub; only then is
+anything written. It rewrites every place the team uses those labels —
+triggers and claims, channels, outcomes' *set label* actions, the label and
+human-role registries and the prompt text (only whole label names; a plain
+word such as *ready* stays as it is) — and renames the GitHub labels, so open
+issues and pull requests keep them. A suffix that would produce a label name
+another team on the same repository already uses is refused. If a GitHub
+rename fails, the team is still updated and the section lists the pending
+renames with a **Retry GitHub rename** button. Running sessions pick up the
+new labels and prompts on their next run. It applies immediately, not through
+Save.
 
 Saving General or Skills uses this form's own Save button; the five
 environment tabs and Plugins keep their own, unrelated save/apply behaviour

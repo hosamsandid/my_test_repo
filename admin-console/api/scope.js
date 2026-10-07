@@ -116,7 +116,17 @@ function computeScope({ username, adminUsername, users = [], memberships = [], a
   if (!user) return { all: false, teamIds: new Set(), roles: new Map(), userId: null };
 
   // System Admins have global visibility regardless of team membership.
-  if (user.systemAdmin) return { all: true, teamIds: new Set(), roles: new Map(), userId: user.id };
+  // `teamIds`/`roles` stay empty (every other predicate reads `all` first), but
+  // the System Admin's own memberships are recorded on `memberTeamIds`, with
+  // `systemAdmin: true`, for the one rule that is NOT visibility: writing in an
+  // agent chat (`canChatAgent`, #2713).
+  if (user.systemAdmin) {
+    const memberTeamIds = new Set();
+    for (const m of memberships) {
+      if (m && m.userId === user.id && m.teamId) memberTeamIds.add(m.teamId);
+    }
+    return { all: true, teamIds: new Set(), roles: new Map(), userId: user.id, systemAdmin: true, memberTeamIds };
+  }
 
   // Otherwise: visible teams are the caller's memberships, and `roles` records
   // the per-team role (team-admin / team-member) — the basis for the admin
@@ -183,6 +193,32 @@ function visibleAgent(scope, agent) {
   if (scope.all) return true;
   if (agent && agent.teamId) return visibleTeam(scope, agent.teamId);
   return ownedByCaller(scope, agent);
+}
+
+// May the caller WRITE in this agent's chat — send a message (incl. a
+// quick-reply answer), upload a chat attachment, dictate, record a meeting or
+// launch a loop from the composer (#2713)?
+//
+// Everyone who can see an agent may chat with it (D9 lets a Team Member chat),
+// with ONE exception: a System Admin sees every team's chats through
+// `scope.all`, but writes only where they belong — a team they are a member of
+// (any role), or a standalone agent they own. Everything else stays readable.
+// This mirrors the trust rule a chat turn's personal credentials already apply
+// (orchestrator `isActingSenderTrusted`, #2559): a message from outside the
+// team would not have been attributed to its sender there either.
+//
+// The other two `scope.all` callers — the single-operator mode
+// (`AUTH_ENABLED=false`) and the env-admin bootstrap login — carry no
+// `systemAdmin` flag (they have no memberships to check) and keep full write.
+function canChatAgent(scope, agent) {
+  if (!scope) return false;
+  if (scope.systemAdmin === true) {
+    if (agent && agent.teamId) {
+      return scope.memberTeamIds instanceof Set && scope.memberTeamIds.has(agent.teamId);
+    }
+    return ownedByCaller(scope, agent);
+  }
+  return visibleAgent(scope, agent);
 }
 
 // ── Agent → credential tenant resolution ────────────────────────────────────
@@ -666,6 +702,16 @@ function describeAuthz({ username, adminUsername, users = [], memberships = [], 
   // (#2397). Off by default; anyone without a record (env single-admin) gets the
   // off default too.
   const chatNotifyOnBack = !!(self && self.chatNotifyOnBack === true);
+  // Per-user Agent-Chat rail team selection (#2740): the entries the caller has
+  // hidden. `null` when never saved, so the client can tell "no server value
+  // yet" (migrate the old browser-local filter once) from "everything shown".
+  const chatListFilter = (self && self.chatListFilter && Array.isArray(self.chatListFilter.hidden))
+    ? { hidden: self.chatListFilter.hidden.filter(k => typeof k === 'string') }
+    : null;
+  // Per-user Flows rail selection (#2859): same shape and `null` semantics.
+  const flowsListFilter = (self && self.flowsListFilter && Array.isArray(self.flowsListFilter.hidden))
+    ? { hidden: self.flowsListFilter.hidden.filter(k => typeof k === 'string') }
+    : null;
   return {
     admin: scope.all,                    // full visibility: env admin OR System Admin
     envAdmin,                            // env single-admin credential
@@ -678,6 +724,8 @@ function describeAuthz({ username, adminUsername, users = [], memberships = [], 
     githubHandle,
     chatFontSize,
     chatNotifyOnBack,
+    chatListFilter,
+    flowsListFilter,
     teams,
   };
 }
@@ -695,6 +743,7 @@ module.exports = {
   computeScope,
   visibleTeam,
   visibleAgent,
+  canChatAgent,
   resolveAgentTenant,
   canManageTeam,
   isTeamAdminOfAny,

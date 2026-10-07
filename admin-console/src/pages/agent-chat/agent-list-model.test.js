@@ -14,10 +14,14 @@ import {
   stubSectionLabel,
   isPoolInstance,
   poolInstancesLabel,
+  poolWaitingLabel,
+  poolInstanceCounts,
 } from './agent-list-model.js';
 
 const EMPTY_ORDER = { groups: [], singles: [], members: {} };
-const ALL = { kind: 'all' };
+const ALL = { hidden: [] };
+// Team t1 only (#2740): every other entry is hidden.
+const ONLY_T1 = { hidden: ['team:t2', 'singles'] };
 
 const team       = (id, displayName) => ({ id, role: 'team', displayName });
 const member     = (id, parentTeamId, displayName) => ({ id, role: 'team-member', parentTeamId, displayName });
@@ -139,34 +143,30 @@ test('applyStoredOrder ignores stored keys no longer present', () => {
 
 // ── matchesFilter ──────────────────────────────────────────────────────────
 
-test('matchesFilter: all/none passes everyone', () => {
+test('matchesFilter: an empty / missing selection passes everyone', () => {
   assert.equal(matchesFilter(standalone('x'), ALL), true);
   assert.equal(matchesFilter(standalone('x'), null), true);
+  // The retired single-choice spec reads as "everything shown", never as a
+  // narrowed view (a stale value must not be what hides agents).
+  assert.equal(matchesFilter(member('t1-dev', 't1'), { kind: 'team', id: 't2' }), true);
 });
 
-test('matchesFilter: team filter keeps header + its members only', () => {
-  const f = { kind: 'team', id: 't1' };
+test('matchesFilter (#2740): a hidden team hides its header and every member', () => {
+  const f = { hidden: ['team:t2'] };
   assert.equal(matchesFilter(team('t1'), f), true);
   assert.equal(matchesFilter(member('t1-dev', 't1'), f), true);
+  assert.equal(matchesFilter(team('t2'), f), false);
   assert.equal(matchesFilter(member('t2-dev', 't2'), f), false);
-  assert.equal(matchesFilter(standalone('solo'), f), false);
-});
-
-test('#1964 — there is no orchestrator filter branch left', () => {
-  // The filter spec is `all | team | agent` now. A stored `orchestrator` filter
-  // from before the cut is rejected by `loadFilter` in AgentChat.jsx; should one
-  // reach here anyway it degrades to the unknown-kind fallthrough (everyone
-  // visible) rather than to a branch that reads `parentOrchestratorId`.
-  const f = { kind: 'orchestrator', id: 'o1' };
   assert.equal(matchesFilter(orch('o1', 'Orch'), f), true);
-  assert.equal(matchesFilter(standalone('solo'), f), true);
-  assert.equal(matchesFilter(bp('bp-1', 'other'), f), true);
 });
 
-test('matchesFilter: agent filter keeps exactly one id', () => {
-  const f = { kind: 'agent', id: 'solo' };
-  assert.equal(matchesFilter(standalone('solo'), f), true);
-  assert.equal(matchesFilter(standalone('other'), f), false);
+test('matchesFilter (#2740): the Individual agents block is one entry for every ungrouped row', () => {
+  const f = { hidden: ['singles'] };
+  assert.equal(matchesFilter(orch('o1', 'Orch'), f), false);
+  assert.equal(matchesFilter(bp('bp-1', 'other'), f), false);
+  // A member without a team id lands in the ungrouped block, as in buildGroups.
+  assert.equal(matchesFilter({ id: 'lost', role: 'team-member' }, f), false);
+  assert.equal(matchesFilter(member('t1-dev', 't1'), f), true);
 });
 
 // ── orderModel ─────────────────────────────────────────────────────────────
@@ -208,7 +208,7 @@ test('filterModel drops groups with no matching header or child', () => {
     member('t2-dev', 't2', 'Dev2'),
   ]);
   const { orderedGroups, orderedSingles } = orderModel(groups, singles, EMPTY_ORDER);
-  const { visibleGroups, empty } = filterModel(orderedGroups, orderedSingles, { kind: 'team', id: 't1' });
+  const { visibleGroups, empty } = filterModel(orderedGroups, orderedSingles, ONLY_T1);
   assert.deepEqual(visibleGroups.map(g => g.id), ['t1']);
   assert.equal(empty, false);
 });
@@ -216,7 +216,7 @@ test('filterModel drops groups with no matching header or child', () => {
 test('filterModel reports empty when nothing matches', () => {
   const { groups, singles } = buildGroups([orch('solo', 'Solo')]);
   const { orderedGroups, orderedSingles } = orderModel(groups, singles, EMPTY_ORDER);
-  const model = filterModel(orderedGroups, orderedSingles, { kind: 'agent', id: 'nope' });
+  const model = filterModel(orderedGroups, orderedSingles, { hidden: ['singles'] });
   assert.equal(model.empty, true);
   assert.deepEqual(model.visibleGroups, []);
   assert.deepEqual(model.visibleSingles, []);
@@ -319,8 +319,8 @@ test('the disabled filter composes with the text/entity filter rather than overr
     off(member('t1-qa', 't1', 'QA')),
     off(orch('paused', 'Paused')),
   ];
-  const model = buildAgentListModel(agents, EMPTY_ORDER, { kind: 'team', id: 't1' }, true);
-  // Filter says "team t1 only", so the disabled standalone stays out even
+  const model = buildAgentListModel(agents, EMPTY_ORDER, ONLY_T1, true);
+  // Selection says "team t1 only", so the disabled standalone stays out even
   // though the disabled opt-in is on.
   assert.deepEqual(model.visibleSingles, []);
   assert.deepEqual(model.visibleGroups[0].children.map(c => c.id), ['t1-qa']);
@@ -414,7 +414,7 @@ test('the team filter narrows the stub section like the member list', () => {
     team('t1', 'Alpha'), stub('t1-qa', 't1', 'QA'),
     team('t2', 'Beta'),  stub('t2-qa', 't2', 'QA2'),
   ];
-  const model = buildAgentListModel(agents, EMPTY_ORDER, { kind: 'team', id: 't1' });
+  const model = buildAgentListModel(agents, EMPTY_ORDER, ONLY_T1);
   assert.deepEqual(model.visibleGroups.map(g => g.id), ['t1']);
   assert.deepEqual(model.visibleGroups[0].stubs.map(s => s.id), ['t1-qa']);
 });
@@ -450,6 +450,9 @@ test('isPoolInstance tells a spawned instance from an ordinary member', () => {
 test('poolInstancesLabel carries the count, mirrors stubSectionLabel (AC1)', () => {
   assert.equal(poolInstancesLabel(2), 'Instances (2)');
   assert.equal(poolInstancesLabel(1), 'Instances (1)');
+  // #2760 AC5: against the role's cap when it has one.
+  assert.equal(poolInstancesLabel(5, 3), 'Instances (5 / 3)');
+  assert.equal(poolInstancesLabel(2, null), 'Instances (2)');
 });
 
 test('AC1 — a pooled role nests its live instances, sorted by poolItem', () => {
@@ -516,7 +519,28 @@ test('the team filter narrows the instances list like the member list', () => {
     team('t1', 'Alpha'), member('t1-dev', 't1', 'Dev'), instance('t1-dev-i1', 't1', 't1-dev', 1),
     team('t2', 'Beta'),  member('t2-dev', 't2', 'Dev2'), instance('t2-dev-i1', 't2', 't2-dev', 1),
   ];
-  const model = buildAgentListModel(agents, EMPTY_ORDER, { kind: 'team', id: 't1' });
+  const model = buildAgentListModel(agents, EMPTY_ORDER, ONLY_T1);
   assert.deepEqual(model.visibleGroups.map(g => g.id), ['t1']);
   assert.deepEqual(model.visibleGroups[0].children[0].instances.map(i => i.id), ['t1-dev-i1']);
+});
+
+// #2789 AC9 — instances waiting on an open PR.
+
+test('poolWaitingLabel: names the PR, falls back when GitHub could not be read, null otherwise', () => {
+  const inst = { id: 't1-dev-i1', poolInstance: true };
+  assert.equal(poolWaitingLabel({ ...inst, poolWaiting: true, poolWaitingPr: 42 }), 'Waiting for PR #42');
+  assert.equal(poolWaitingLabel({ ...inst, poolWaiting: true, poolWaitingPr: null }), 'Waiting for review');
+  assert.equal(poolWaitingLabel(inst), null);
+  assert.equal(poolWaitingLabel({ id: 'x', poolWaiting: true }), null, 'only pool instances wait');
+  assert.equal(poolWaitingLabel(null), null);
+});
+
+test('poolInstanceCounts + poolInstancesLabel: active against the cap, waiting apart', () => {
+  const w = (n) => ({ id: `i${n}`, poolInstance: true, poolWaiting: true, poolWaitingPr: n });
+  const a = (n) => ({ id: `a${n}`, poolInstance: true });
+  const counts = poolInstanceCounts([a(1), a(2), w(3), w(4), w(5), w(6)]);
+  assert.deepEqual(counts, { active: 2, waiting: 4 });
+  assert.equal(poolInstancesLabel(counts.active, 3, counts.waiting), 'Instances (2 / 3 active · 4 waiting)');
+  assert.equal(poolInstancesLabel(2, 3, 0), 'Instances (2 / 3)');
+  assert.deepEqual(poolInstanceCounts(null), { active: 0, waiting: 0 });
 });

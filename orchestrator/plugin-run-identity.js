@@ -116,8 +116,9 @@ class RunRegistry {
     return { ok: true, state };
   }
 
-  // Declare a run. `run` = { kind: 'chat', roomId, eventId, sender } (sender
-  // already resolved from the homeserver by the caller) | { kind: 'autonomous' }.
+  // Declare a run. `run` = { kind: 'chat', roomId, eventId, sender, author? }
+  // (sender + the `io.aee.author` stamp already resolved from the homeserver by
+  // the caller) | { kind: 'autonomous' }.
   // → { ok: true, runId } | { ok: false, reason }
   begin(agentId, key, run) {
     const auth = this._authorize(agentId, key);
@@ -129,7 +130,12 @@ class RunRegistry {
     auth.state.runs.set(runId, {
       runId,
       kind,
-      ...(kind === 'chat' ? { roomId: String(run.roomId), eventId: String(run.eventId), sender: String(run.sender) } : {}),
+      ...(kind === 'chat' ? {
+        roomId: String(run.roomId),
+        eventId: String(run.eventId),
+        sender: String(run.sender),
+        ...(run.author && typeof run.author === 'object' ? { author: run.author } : {}),
+      } : {}),
       startedAt: this.now(),
     });
     return { ok: true, runId };
@@ -158,9 +164,28 @@ class RunRegistry {
   }
 }
 
+// The platform's own author stamp on a chat event (`io.aee.author`, written
+// server-side by the console from the authenticated session — never the request
+// body, and stripped from the send route's pass-through). In the single-operator
+// model every human's message arrives under the ONE shared Matrix identity
+// (`@admin:local`), so `event.sender` cannot tell one person from another; this
+// stamp is the only place the acting human is named. It is as unforgeable from
+// inside the agent container as the sender is: the container holds only its own
+// Matrix token, so it cannot post an event under a human sender at all (and a
+// self-posted event is rejected as `sender-is-agent` before this is ever read).
+// → { userId, subject } (either may be null) | null
+function authorStampOf(event) {
+  const a = event && typeof event === 'object' && event.content
+    && typeof event.content === 'object' ? event.content['io.aee.author'] : null;
+  if (!a || typeof a !== 'object') return null;
+  const userId = typeof a.userId === 'string' && a.userId.trim() ? a.userId.trim() : null;
+  const subject = typeof a.subject === 'string' && a.subject.trim() ? a.subject.trim() : null;
+  return (userId || subject) ? { userId, subject } : null;
+}
+
 // ── pure: is this homeserver event a live chat message from someone else? ────
 // `event` is the homeserver's JSON for GET /rooms/{room}/event/{id}.
-// → { ok: true, sender } | { ok: false, reason }
+// → { ok: true, sender, author } | { ok: false, reason }
 function chatSenderFromEvent(event, { roomId, agentMatrixId, now = Date.now(), maxAgeMs = CHAT_EVENT_MAX_AGE_MS } = {}) {
   if (!event || typeof event !== 'object') return { ok: false, reason: 'event-not-found' };
   if (event.type !== 'm.room.message') return { ok: false, reason: 'not-a-message' };
@@ -170,7 +195,8 @@ function chatSenderFromEvent(event, { roomId, agentMatrixId, now = Date.now(), m
   if (agentMatrixId && sender === agentMatrixId) return { ok: false, reason: 'sender-is-agent' };
   const ts = Number(event.origin_server_ts);
   if (!Number.isFinite(ts) || now - ts > maxAgeMs) return { ok: false, reason: 'event-too-old' };
-  return { ok: true, sender };
+  const author = authorStampOf(event);
+  return author ? { ok: true, sender, author } : { ok: true, sender };
 }
 
 // ── pure: the credential decision for one plugin call ───────────────────────
@@ -178,14 +204,38 @@ function chatSenderFromEvent(event, { roomId, agentMatrixId, now = Date.now(), m
 //   active            — registry.active(agentId)
 //   senderUserId      — the chat sender's platform user id if resolvable AND
 //                       trusted for this agent (isActingSenderTrusted), else null
+//   senderResolved    — a platform account WAS found for the sender (via the
+//                       `io.aee.author` stamp or the Matrix id) but failed the
+//                       trust check — lets the refusal say "not a member of this
+//                       team" (a real cross-team case) apart from "could not
+//                       identify who sent this message" (default false)
 //   personalValues    — that user's stored personal values for the plugin, or null
 //   personalKeys      — the manifest's personalCredentials[] (required keys matter)
+//   teamSiteConfigured — whether the team scope's connection (Jira: site-url) is
+//                       set. `null`/undefined = the adapter didn't check (older
+//                       callers) → treated as configured, i.e. no site gating.
+//                       This is what lets ONE refusal list BOTH a missing
+//                       personal token and a missing team site, instead of the
+//                       user peeling them off one broker call at a time.
 //   pagePath          — where a person adds their token (for the message)
+//   teamSetupLocation — where a Team Admin sets the team connection (Jira: site)
 //   pluginName        — "Jira"
 // → { ok: true, mode: 'service', interactive: false }
 //   { ok: true, mode: 'personal', interactive: true, userId, values }
-//   { ok: false, status, code, message }
-function decideCredentialGrant({ active, senderUserId, personalValues, personalKeys, pagePath = '/plugin-tokens', pluginName = 'this plugin' }) {
+//   { ok: false, status, code, message, missing? }  — `missing[]` enumerates
+//     every setup item still outstanding, each { item, who, where }, so a caller
+//     (or the agent) can render the whole checklist at once.
+
+// pure: assemble one human message from the outstanding setup items.
+function buildSetupMessage(missing, pluginName) {
+  const lines = missing.map((m) => `• ${m.what} — ${m.how}`);
+  const head = missing.length > 1
+    ? `Before I can use ${pluginName} in this chat, a few things still need setting up:`
+    : `Before I can use ${pluginName} in this chat, one thing still needs setting up:`;
+  return `${head}\n${lines.join('\n')}\nOnce that is done, ask me again. Nothing was sent to ${pluginName}.`;
+}
+
+function decideCredentialGrant({ active, senderUserId, senderResolved = false, personalValues, personalKeys, teamSiteConfigured, pagePath = '/plugin-tokens', teamSetupLocation = 'Agent Chat → Settings → Plugins', pluginName = 'this plugin' }) {
   if (!active || !active.ok) {
     const reason = (active && active.reason) || 'no-active-run';
     return {
@@ -204,21 +254,48 @@ function decideCredentialGrant({ active, senderUserId, personalValues, personalK
       ok: false,
       status: 403,
       code: 'untrusted-sender',
-      message: `Refused: the person who sent this chat message is not a member of this agent's team (or cannot be resolved to a platform account), so no ${pluginName} credential may be used for them.`,
+      message: senderResolved
+        ? `Refused: the person who sent this chat message is not a member of this agent's team, so no ${pluginName} credential may be used for them.`
+        : `Refused: the platform could not identify who sent this chat message (its account maps to no user record), so no ${pluginName} credential could be selected for them.`,
     };
   }
   const values = personalValues && typeof personalValues === 'object' ? personalValues : {};
   const required = (Array.isArray(personalKeys) ? personalKeys : []).filter((k) => k && k.required === true).map((k) => k.key);
-  const missing = required.filter((k) => !(typeof values[k] === 'string' && values[k].trim()));
-  if (missing.length > 0 || Object.keys(values).length === 0) {
-    return {
-      ok: false,
-      status: 424,
-      code: 'personal-credential-required',
-      message: `You have no personal ${pluginName} credential yet. In a chat, ${pluginName} runs under YOUR own account — add your ${pluginName} e-mail and API token in the Admin Console under Connections → Plugin Tokens (${pagePath}), then ask again. Nothing was sent to ${pluginName}.`,
-    };
+  const missingPersonal = required.filter((k) => !(typeof values[k] === 'string' && values[k].trim()));
+  const personalIncomplete = missingPersonal.length > 0 || Object.keys(values).length === 0;
+  // `teamSiteConfigured === false` is the only value that gates; null/undefined
+  // (an older caller that didn't look) never invents a missing-site item.
+  const siteMissing = teamSiteConfigured === false;
+
+  if (!personalIncomplete && !siteMissing) {
+    return { ok: true, mode: 'personal', interactive: true, userId: senderUserId, values: { ...values } };
   }
-  return { ok: true, mode: 'personal', interactive: true, userId: senderUserId, values: { ...values } };
+
+  // Aggregate EVERY outstanding interactive prerequisite into one refusal — the
+  // acting user's own token (they fix it) and the team's connection (a Team
+  // Admin fixes it) — rather than surfacing them one failed call apart.
+  const missing = [];
+  if (personalIncomplete) {
+    missing.push({
+      item: 'personal-credential',
+      who: 'you',
+      what: `your personal ${pluginName} access`,
+      how: `add your ${pluginName} e-mail and API token in Agent Studio under Connections → Plugin Tokens (${pagePath}) — it is yours alone, nobody else can use or see it`,
+    });
+  }
+  if (siteMissing) {
+    missing.push({
+      item: 'team-site',
+      who: 'team-admin',
+      what: `your team's ${pluginName} site`,
+      how: `a Team Admin sets it in ${teamSetupLocation}`,
+    });
+  }
+  // Keep the single-cause codes stable (docs + broker parity); name the combined
+  // case distinctly so a caller can tell "just add your token" from "two things".
+  const code = personalIncomplete && siteMissing ? 'setup-required'
+    : (siteMissing ? 'no-site' : 'personal-credential-required');
+  return { ok: false, status: 424, code, missing, message: buildSetupMessage(missing, pluginName) };
 }
 
 module.exports = {
@@ -230,4 +307,5 @@ module.exports = {
   RunRegistry,
   chatSenderFromEvent,
   decideCredentialGrant,
+  buildSetupMessage,
 };

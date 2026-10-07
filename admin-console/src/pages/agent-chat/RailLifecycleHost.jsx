@@ -17,16 +17,23 @@ import {
   ResetToStubDialog, TeamEnableDialog, TeamActionResultDialog,
   renderDeleteMessage,
 } from '../agent-lifecycle/AgentLifecycleDialogs.jsx';
-import { deleteDialogCopy, cascadeResidueNotice } from '../agent-lifecycle/agent-lifecycle-menu.js';
+import { deleteDialogCopy, cascadeResidueNotice, agentState } from '../agent-lifecycle/agent-lifecycle-menu.js';
+import { importSuccessNotice } from '../agent-lifecycle/import-agent-view.js';
 import RowContextMenu from '../../components/RowContextMenu.jsx';
 import {
   deleteTargetFor,
+  deleteRequestId,
+  resolveDeleteRequest,
+  teamKeptNotice,
   existingIds as existingIdsOf,
   importedAgentFilterNote,
+  materializedNotice,
   mergeAgentConfigs,
   railMenuItems,
+  resetToStubNotice,
   teamOptions,
 } from './rail-lifecycle.js';
+import { SHOW_ALL } from './list-selection.js';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
 import {
   ADD_MEMBER_TITLE, MATERIALIZE_NOW_DEFAULT, MATERIALIZE_NOW_HINT, MATERIALIZE_NOW_LABEL,
@@ -74,8 +81,14 @@ import {
  *        Reported rather than owned by the rail: every request lives here, and
  *        a **Materialize** clones repositories, so the row must not look
  *        untouched for the length of it.
- * @param {{kind:string, id?:string}} props.listFilter
- *        the rail's current filter spec. Read for one thing only: after an
+ * @param {(ids:Set<string>) => void} props.onMaterializingIdsChange
+ *        the subset of those ids whose mutation is a **Materialize** (#2705
+ *        AC2), so the chat pane can say "Materializing…" instead of keeping the
+ *        stub's "choose Materialize" copy for the length of the clone. An id
+ *        leaves the set only after the re-read roster carries the enabled
+ *        record, so the pane never sees the stale pre-enable row in between.
+ * @param {{hidden:string[]}} props.listFilter
+ *        the rail's current team selection (#2740, list-selection.js). Read for one thing only: after an
  *        import, whether the new agent is inside it (#1956 AC4) — a narrowed
  *        filter would otherwise swallow it with a success message that says it
  *        joined the list.
@@ -89,7 +102,8 @@ import {
  */
 const RailLifecycleHost = forwardRef(function RailLifecycleHost({
   request, onClose, chatAgents, onChanged, onOpenSettings, onMarkAsUnread,
-  statuses = {}, listFilter = { kind: 'all' }, onBusyIdsChange = null,
+  statuses = {}, listFilter = SHOW_ALL, onBusyIdsChange = null,
+  onMaterializingIdsChange = null,
 }, ref) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -107,6 +121,10 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
   // one the menu's own `busy` gate reads, so the rail's spinner and the menu's
   // greyed-out entry can never disagree about what is in flight.
   useEffect(() => { if (onBusyIdsChange) onBusyIdsChange(busyIds); }, [busyIds, onBusyIdsChange]);
+  const [materializingIds, setMaterializingIds] = useState(() => new Set());
+  useEffect(() => {
+    if (onMaterializingIdsChange) onMaterializingIdsChange(materializingIds);
+  }, [materializingIds, onMaterializingIdsChange]);
   const [actionError, setActionError] = useState(null);
   const [notice, setNotice] = useState(null);
 
@@ -131,6 +149,11 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
 
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  // "Also delete the team" in the delete confirm of a team's last member
+  // (#2685). On by default — an empty team is what the user would otherwise
+  // have to find and delete separately — and reset each time the confirm opens.
+  const [deleteTeamToo, setDeleteTeamToo] = useState(true);
+  useEffect(() => { if (deleteTarget) setDeleteTeamToo(true); }, [deleteTarget]);
   const [deactivateTarget, setDeactivateTarget] = useState(null);
   const [deactivateWarning, setDeactivateWarning] = useState(null);
   const [disableWarning, setDisableWarning] = useState(null);
@@ -163,18 +186,22 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
     if (configs === null) loadConfigs();
   }, [request, configs, loadConfigs]);
 
-  /** Re-read both the chat list and our configs after a mutation. */
-  const refresh = useCallback(() => {
-    if (onChanged) onChanged();
+  /**
+   * Re-read both the chat list and our configs after a mutation. Resolves once
+   * the chat list has been re-read, for the one caller that must not let go of
+   * its in-progress state before the roster reflects the change (Materialize).
+   */
+  const refresh = useCallback(async () => {
     loadConfigs();
+    if (onChanged) await onChanged();
   }, [onChanged, loadConfigs]);
 
   function markBusy(id, busy) {
-    setBusyIds(prev => {
-      const next = new Set(prev);
-      if (busy) next.add(id); else next.delete(id);
-      return next;
-    });
+    setBusyIds(prev => toggledSet(prev, id, busy));
+  }
+
+  function markMaterializing(id, on) {
+    setMaterializingIds(prev => toggledSet(prev, id, on));
   }
 
   function closePanel() {
@@ -200,7 +227,12 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
   // --------------------------------------------------------------- per-agent
 
   async function toggleEnabled(agent) {
+    // A stub's "enable" is a Materialize (#1957): Matrix user, workspace seed,
+    // repository clones — long enough that the chat pane must say it is running
+    // (#2705 AC2).
+    const materializing = agentState(agent) === 'stub';
     markBusy(agent.id, true);
+    if (materializing) markMaterializing(agent.id, true);
     try {
       if (agent.enabled !== false) {
         // Probe without a mode first: the orchestrator answers 409 + a warning
@@ -220,11 +252,20 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
       } else {
         await apiCall('PUT', `/api/agents/${encodeURIComponent(agent.id)}`, { enabled: true });
       }
-      refresh();
+      if (materializing) {
+        // Held until the roster has the enabled record: clearing the
+        // in-progress state on the PUT alone let the pane fall back to the
+        // stale pre-enable row for a poll cycle.
+        await refresh();
+        setNotice(materializedNotice(agent));
+      } else {
+        refresh();
+      }
     } catch (e) {
       setActionError(e.message);
     } finally {
       markBusy(agent.id, false);
+      if (materializing) markMaterializing(agent.id, false);
     }
   }
 
@@ -255,6 +296,7 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
         return;
       }
       if (!res.ok) { setActionError(data.error || `HTTP ${res.status}`); return; }
+      setNotice(resetToStubNotice(target));
       refresh();
     } catch (e) {
       setActionError(e.message);
@@ -269,6 +311,7 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
     markBusy(agent.id, true);
     try {
       await apiCall('POST', `/api/agents/${encodeURIComponent(agent.id)}/deactivate`, { mode });
+      setNotice(resetToStubNotice(agent));
       refresh();
     } catch (e) {
       setActionError(e.message);
@@ -283,10 +326,21 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
       // See Agents.jsx: `cascadeWarnings` names the members a team delete could
       // not remove. Same helper on both surfaces so the two never word the same
       // residue differently (#1960 AC2).
-      const result = await apiCall('DELETE', `/api/agents/${encodeURIComponent(deleteTarget.id)}`);
+      // #2685 review B1: the rail's list may lack disabled members, and a team
+      // delete cascades — so a team delete is re-checked against a fresh read
+      // of every config before it is sent.
+      let fresh = null;
+      if (deleteRequestId(deleteTarget, deleteTeamToo) !== deleteTarget.id) {
+        try { fresh = await apiCall('GET', '/api/agents'); } catch { /* resolved as unverified: member only */ }
+      }
+      const { id: deleteId, keptTeam } = resolveDeleteRequest(deleteTarget, deleteTeamToo, fresh);
+      const result = await apiCall('DELETE', `/api/agents/${encodeURIComponent(deleteId)}`);
       setDeleteTarget(null);
       const residue = cascadeResidueNotice(result);
+      const kept = teamKeptNotice(keptTeam);
+      // Mutually exclusive: residue comes from a team delete, `kept` from a member-only one.
       if (residue) setActionError(residue);
+      else if (kept) setActionError(kept);
       refresh();
     } catch (e) {
       setActionError(e.message);
@@ -379,10 +433,11 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
     }
   }
 
-  async function submitImport({ newId, parentTeamId }) {
+  async function submitImport({ newId, displayName, parentTeamId }) {
     const formData = new FormData();
     formData.append('file', importFile);
     if (newId) formData.append('newId', newId);
+    if (displayName) formData.append('displayName', displayName);
     if (parentTeamId) formData.append('parentTeamId', parentTeamId);
     const resp = await fetch('/api/agents/import', { method: 'POST', body: formData });
     const data = await resp.json().catch(() => ({}));
@@ -392,10 +447,7 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
       // filter, which the header button that started this knows nothing about
       // (#1956 AC4), so say so rather than let it land out of sight.
       const hidden = importedAgentFilterNote(listFilter, data.agentId, data.parentTeamId);
-      setNotice(
-        `Agent '${data.agentId}' imported${data.parentTeamId ? ` into team '${data.parentTeamId}'` : ''} and started.`
-        + (hidden || ''),
-      );
+      setNotice(importSuccessNotice(data) + (hidden || ''));
       setImportFile(null);
       closePanel();
       refresh();
@@ -650,11 +702,11 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
 
       <ConfirmDialog
         open={!!deleteTarget}
-        title={deleteDialogCopy(deleteTarget).title}
-        message={renderDeleteMessage(deleteTarget)}
+        title={deleteDialogCopy(deleteTarget, { deleteTeamToo }).title}
+        message={renderDeleteMessage(deleteTarget, { deleteTeamToo, onDeleteTeamTooChange: setDeleteTeamToo })}
         variant="danger"
-        confirmLabel={deleteDialogCopy(deleteTarget).confirmLabel}
-        maxWidth={deleteDialogCopy(deleteTarget).maxWidth}
+        confirmLabel={deleteDialogCopy(deleteTarget, { deleteTeamToo }).confirmLabel}
+        maxWidth={deleteDialogCopy(deleteTarget, { deleteTeamToo }).maxWidth}
         onConfirm={confirmDelete}
         onCancel={() => setDeleteTarget(null)}
         busy={deleteBusy}
@@ -754,6 +806,13 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
 });
 
 export default RailLifecycleHost;
+
+/** A copy of `set` with `id` added (`on`) or removed — state sets are never mutated in place. */
+function toggledSet(set, id, on) {
+  const next = new Set(set);
+  if (on) next.add(id); else next.delete(id);
+  return next;
+}
 
 // The wrapping variant of the team-create wizard's `checkboxRow`
 // (`process/LaunchStep.jsx`) — same tokens, same `flex-start` + `marginTop: 3`

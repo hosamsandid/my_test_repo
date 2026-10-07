@@ -7,6 +7,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import PasswordField from '../components/PasswordField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
 import GithubTokenHint from '../components/GithubTokenHint';
 import IconButton from '../components/IconButton';
@@ -23,7 +24,9 @@ import {
 import { environmentsUsingGithubToken, usageCountLabel, usageTooltip } from './credential-usage';
 import { CREDENTIALS_HELP_SECTIONS } from './credentials-help-sections.js';
 import { usePageActions } from '../context/PageActionsContext';
-import { loadPersonalCredentialChangeNotice } from './effective-identity-view.js';
+import {
+  loadPersonalCredentialChangeNotice, personalUsageCell, personalCreateRestartNote, replaceRestartNote,
+} from './effective-identity-view.js';
 
 const inputStyle = {
   width: '100%',
@@ -106,7 +109,7 @@ function PermissionRow({ scope, access, note }) {
   );
 }
 
-function CreateForm({ onSave, onCancel, saving, error, teams, isSysAdmin, adminTeamIds }) {
+function CreateForm({ onSave, onCancel, saving, error, teams, isSysAdmin, adminTeamIds, hasActivePersonal }) {
   const [name, setName] = useState('');
   const [id, setId] = useState('');
   const [token, setToken] = useState('');
@@ -226,24 +229,34 @@ function CreateForm({ onSave, onCancel, saving, error, teams, isSysAdmin, adminT
         isSysAdmin={isSysAdmin}
         adminTeamIds={adminTeamIds}
       />
+      {personalCreateRestartNote({ kind: 'github', scope: ownership.scope, hasActivePersonal }) && (
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)' }}>
+          {personalCreateRestartNote({ kind: 'github', scope: ownership.scope, hasActivePersonal })}
+        </div>
+      )}
 
       <div>
-        <div style={{
+        <label htmlFor="github-token-value" style={{
+          display: 'block',
           fontSize: 'var(--eb-text-sm)',
           fontWeight: 'var(--eb-font-medium)',
           color: 'var(--eb-text-secondary)',
           marginBottom: 'var(--eb-space-1)',
         }}>
           GitHub token <span style={{ color: 'var(--eb-status-error)' }}>*</span>
-        </div>
-        <textarea
+        </label>
+        {/* Masked by default with a reveal toggle — the secret is not shown
+            in clear text while it is pasted (#2654). */}
+        <PasswordField
+          id="github-token-value"
           value={token}
           onChange={e => setToken(e.target.value)}
-          rows={3}
           placeholder="github_pat_… or ghp_…"
+          autoComplete="off"
+          spellCheck={false}
+          buttonTitle="Show or hide the token"
           style={{
             ...inputStyle,
-            resize: 'vertical',
             fontFamily: 'var(--eb-font-mono)',
             fontSize: 'var(--eb-text-xs)',
           }}
@@ -304,7 +317,9 @@ export default function GithubTokens() {
   const [baselineNotice, setBaselineNotice] = useState(null);
   const announceBaselineChange = (entry, action) => {
     if (entry?.scope !== 'personal') return;
-    loadPersonalCredentialChangeNotice(url => apiCall('GET', url), { kind: 'github', action }).then(setBaselineNotice);
+    loadPersonalCredentialChangeNotice(url => apiCall('GET', url), {
+      kind: 'github', action, credentialId: entry.id, restarted: entry.ownerAgentsRestarted === true,
+    }).then(setBaselineNotice);
   };
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
@@ -321,6 +336,8 @@ export default function GithubTokens() {
   // `userId` for the personal-tier manage check — the OWNER of a personal row must
   // get edit/rotate/delete, not a lock (mirrors ModelRegistry #2403).
   const caller = { isSysAdmin, adminTeamIds, userId: user?.userId };
+  // #2655: only the caller's first personal token is used — a further one restarts nothing.
+  const hasActivePersonal = rows.some(r => r.scope === 'personal' && r.activePersonal && r.userId === user?.userId);
 
   // Which Working Environments reference each token (#1141). `envs` is null until
   // /api/environments resolves (or if the caller may not read it) — the "Used by"
@@ -352,7 +369,7 @@ export default function GithubTokens() {
             <span style={{ fontSize: 'var(--eb-text-xs)' }} title="Available to every user and team — no team required">
               <span style={{
                 display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)',
-                background: 'var(--eb-accent-subtle, var(--eb-bg-elevated))', color: 'var(--eb-accent, var(--eb-text-secondary))',
+                background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
                 fontWeight: 'var(--eb-font-medium)',
               }}>Global</span>
             </span>
@@ -376,6 +393,16 @@ export default function GithubTokens() {
     {
       key: '_usedBy', label: 'Used by', sortable: false,
       render: (_, row) => {
+        // #2655: a personal credential is never referenced by an environment —
+        // say whether the runtime uses it instead of a meaningless "None".
+        const personal = personalUsageCell(row, 'github');
+        if (personal) {
+          return (
+            <span title={personal.title} style={{ fontSize: 'var(--eb-text-xs)', color: personal.active ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)', fontWeight: personal.active ? 'var(--eb-font-medium)' : undefined }}>
+              {personal.label}
+            </span>
+          );
+        }
         if (!envsLoaded) {
           return <span title="Environment usage is loading or unavailable" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>—</span>;
         }
@@ -540,6 +567,7 @@ export default function GithubTokens() {
             teams={teams}
             isSysAdmin={isSysAdmin}
             adminTeamIds={adminTeamIds}
+            hasActivePersonal={hasActivePersonal}
           />
         )}
       </SidePanel>
@@ -587,20 +615,21 @@ export default function GithubTokens() {
               <code style={{ display: 'block', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>{rotateTarget.id}</code>
             </p>
             <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>
-              Keeps the same id, name and ownership. Every environment that references this token
-              has its running agents <strong>restarted</strong> so they pick up the new value — a running
-              loop or trigger is cut off, so replace at a quiet moment.
+              {replaceRestartNote(rotateTarget, 'github')}
             </div>
             <GithubTokenHint />
             <label style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
               New token value
-              <textarea
+              <PasswordField
                 value={rotateToken}
                 onChange={e => setRotateToken(e.target.value)}
                 placeholder="github_pat_… or ghp_…"
-                rows={3}
                 autoFocus
-                style={{ width: '100%', marginTop: 'var(--eb-space-2)', padding: 'var(--eb-space-2)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', resize: 'vertical', boxSizing: 'border-box' }}
+                autoComplete="off"
+                spellCheck={false}
+                buttonTitle="Show or hide the token"
+                wrapperStyle={{ marginTop: 'var(--eb-space-2)' }}
+                style={{ padding: 'var(--eb-space-2)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)' }}
               />
             </label>
             {formError && (

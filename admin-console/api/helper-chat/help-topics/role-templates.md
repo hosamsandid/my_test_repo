@@ -47,7 +47,7 @@ created from it afterwards.
 |---|---|
 | **Built-in** | A default shipped with the platform. Read-only — it has no Delete action. |
 | **Edited** | Your override of a built-in. Saving a built-in creates it: the override *shadows* the default and survives a redeploy or a re-seed. **Reset** discards your edits and restores the built-in. |
-| **Custom** | A template you authored yourself, either with **New template** here or with **Save as template** on a live agent (Agents page), which snapshots that agent's effective prompt, skills and session policy into a new entry. |
+| **Custom** | A template you authored yourself, either with **New template** here or with **Save as template** on a live agent (its Agent Chat menu), which snapshots that agent's effective prompt, skills and session policy into a new entry. |
 
 The badge is not a setting — it is derived from *where the file lives*. Built-ins
 sit in a seeded directory the platform rewrites on every release; anything you
@@ -72,9 +72,9 @@ This is the rule that surprises people most: an agent created from a template is
 **independent copy**. Changing the template later does not reach back into agents
 that already exist — they keep the prompt and configuration they were created with.
 
-To change a running agent, edit that agent (Agents page, or its member row inside a
-team). To change what the *next* one looks like, edit the template here. There is
-no "apply to existing agents" action, and no way to ask which template an agent
+To change a running agent, edit that agent (its **Settings** tab in Agent Chat).
+To change what the *next* one looks like, edit the template here. There is no
+"apply to existing agents" action, and no way to ask which template an agent
 came from — that link is not recorded once the agent exists.
 
 ## Role type
@@ -107,7 +107,10 @@ it does not affect chatting with the agent:
 
 - **persistent** (the default when unset) — a triggered run resumes the agent's last
   conversation, so it still has that context in front of it.
-- **per-invocation** — every triggered run starts fresh, with no `--resume`.
+- **per-invocation** — every triggered run starts fresh, with no `--resume`. An
+  auto-scaled instance of a pooled role is the exception: its triggered runs and
+  its chat share one session for the instance's lifetime; only loop iterations
+  start fresh.
 
 It is effectively a two-state switch. Anything that is not exactly
 `per-invocation` — including `persistent` and leaving it unset — is stored as the

@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { useParams } from 'react-router';
+import { Link, useLocation, useParams } from 'react-router';
 import { ExternalLink } from 'lucide-react';
+import { documentTitleForPath } from '../route-title';
+import { PLUGIN_MISSING_COPY, resolvePluginUi, pluginTitlesFor } from './plugin-ui-view.js';
 
 // The console shell for a UI-bearing plugin (Network Plan epic #1554, Phase 2).
 // It renders an <iframe> onto the plugin's own UI, served + governed by the
@@ -15,22 +17,50 @@ import { ExternalLink } from 'lucide-react';
 // "open in a new tab" action above the iframe.
 export default function PluginUiPage() {
   const { id } = useParams();
-  const [title, setTitle] = useState(id);
+  const { pathname } = useLocation();
+  // `loading` until GET /api/plugins answers, then resolvePluginUi's state
+  // (plugin-ui-view.js). The iframe is only mounted once the plugin is known to
+  // serve a UI — or the lookup failed (best effort, as before) — so an unknown
+  // id never flashes the proxy's raw 404 JSON (#2650).
+  // The resolved state is tagged with its id, so switching from one plugin to
+  // another reads as loading until the new lookup lands (no stale iframe).
+  const [resolved, setResolved] = useState(null);
+  const view = resolved && resolved.id === id ? resolved : { status: 'loading', title: id };
 
-  // Best-effort nicer title from the manifest; the iframe works regardless.
   useEffect(() => {
     let cancelled = false;
     fetch('/api/plugins')
       .then((r) => (r.ok ? r.json() : null))
-      .then((body) => {
-        if (cancelled || !body) return;
-        const p = (body.installed || []).find((x) => x.id === id);
-        const ui = p && p.manifest && p.manifest.ui;
-        if (ui && (ui.title || p.manifest.name)) setTitle(ui.title || p.manifest.name);
-      })
-      .catch(() => {});
+      .catch(() => null)
+      .then((body) => { if (!cancelled) setResolved({ ...resolvePluginUi(body, id), id }); });
     return () => { cancelled = true; };
   }, [id]);
+
+  // The tab title follows the display name once it is known (#2650). App's
+  // DocumentTitle sets the id-based title on navigation; this runs after the
+  // lookup resolves, so the name wins.
+  useEffect(() => {
+    if (view.status === 'ready') document.title = documentTitleForPath(pathname, pluginTitlesFor(id, view.title));
+  }, [view.status, view.title, pathname, id]);
+
+  const title = view.title;
+
+  if (view.status === 'loading') return <div style={pageStyle} />;
+
+  if (view.status === 'missing') {
+    return (
+      <div data-testid="plugin-missing" style={{ padding: 'var(--eb-space-6)', maxWidth: 640 }}>
+        <div style={missingCardStyle}>
+          <h2 style={{ margin: 0, fontSize: 'var(--eb-text-lg)' }}>{PLUGIN_MISSING_COPY.title}</h2>
+          <p style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
+            {PLUGIN_MISSING_COPY.body}
+          </p>
+          <pre style={idStyle}>{id}</pre>
+          <Link to={view.back.to} style={backLinkStyle}>{view.back.label}</Link>
+        </div>
+      </div>
+    );
+  }
 
   // Trailing slash is load-bearing: the plugin UI is a directory, so the served
   // index.html can reference its assets ("app.js") and data API ("api/board")
@@ -60,6 +90,37 @@ export default function PluginUiPage() {
     </div>
   );
 }
+
+// "Not available" card — styled like the NotFound page (#2615) so the two
+// "nothing to show here" states read alike.
+const missingCardStyle = {
+  background: 'var(--eb-bg-surface)',
+  border: '1px solid var(--eb-border-default)',
+  borderLeft: '3px solid var(--eb-status-warning)',
+  borderRadius: 'var(--eb-radius-lg)',
+  padding: 'var(--eb-space-5)',
+};
+
+const idStyle = {
+  margin: '0 0 var(--eb-space-4)',
+  padding: 'var(--eb-space-2)',
+  background: 'var(--eb-bg-app)',
+  borderRadius: 'var(--eb-radius-sm)',
+  fontSize: 'var(--eb-text-xs)',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-all',
+};
+
+const backLinkStyle = {
+  display: 'inline-block',
+  padding: 'var(--eb-space-2) var(--eb-space-3)',
+  borderRadius: 'var(--eb-radius-md)',
+  fontSize: 'var(--eb-text-sm)',
+  border: '1px solid var(--eb-accent-primary)',
+  background: 'var(--eb-accent-primary)',
+  color: 'var(--eb-text-inverted)',
+  textDecoration: 'none',
+};
 
 const pageStyle = {
   display: 'flex',

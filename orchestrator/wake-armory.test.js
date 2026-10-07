@@ -118,3 +118,30 @@ test('gcArmed enforces the cap by evicting the oldest', () => {
   assert.equal(isArmed(armed, armedKey({ triggerId: 't', kind: 'issue', number: 9, label: 'ready' })), true);
   assert.equal(isArmed(armed, armedKey({ triggerId: 't', kind: 'issue', number: 0, label: 'ready' })), false);
 });
+
+// ── #2876: a removal seen without its label name ──────────────────────────
+test('markRemovalSeen / isReAddAfterRemoval: only an add naming the wake, after a removal on the same object (#2876)', () => {
+  const w = require('./wake-armory');
+  const armed = {};
+  const k = w.armedKey({ triggerId: 't', kind: 'pr', number: 1, label: 'ready' });
+  const other = w.armedKey({ triggerId: 't', kind: 'pr', number: 2, label: 'ready' });
+  w.arm(armed, k, 1); w.arm(armed, other, 1);
+  const removed = {};
+  assert.equal(w.isReAddAfterRemoval(removed, k, { attributedLabel: 'ready', wakeLabel: 'ready' }), false);
+  w.markRemovalSeen(removed, armed, { kind: 'pr', number: 1 }, 5);
+  assert.deepEqual(Object.keys(removed), [k], 'only the object that lost a label');
+  assert.equal(w.isReAddAfterRemoval(removed, k, { attributedLabel: 'ready', wakeLabel: 'ready' }), true);
+  assert.equal(w.isReAddAfterRemoval(removed, k, { attributedLabel: 'ready:wip', wakeLabel: 'ready' }), false);
+  assert.equal(w.isReAddAfterRemoval(removed, k, { attributedLabel: undefined, wakeLabel: 'ready' }), false);
+  assert.equal(w.isReAddAfterRemoval(removed, other, { attributedLabel: 'ready', wakeLabel: 'ready' }), false);
+  w.clearRemovalSeen(removed, k);
+  assert.deepEqual(removed, {});
+  // GC keeps marks only for keys still armed.
+  w.markRemovalSeen(removed, armed, { kind: 'pr', number: 1 }, 6);
+  w.disarmLabel(armed, { kind: 'pr', number: 1, label: 'ready' });
+  w.gcRemovalSeen(removed, armed);
+  assert.deepEqual(removed, {});
+  // Absent maps are no-ops.
+  assert.equal(w.markRemovalSeen(null, armed, { kind: 'pr', number: 1 }, 1), null);
+  assert.equal(w.isReAddAfterRemoval(null, k, { attributedLabel: 'ready', wakeLabel: 'ready' }), false);
+});

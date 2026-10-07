@@ -100,6 +100,7 @@ test('each Model Providers surface mounts a "?" pointed at its own chapter', () 
     ['the OAuth single-user box', 'oauthSingleUser'],
     ['the Test / Discover row', 'probes'],
     ['the Health column header', 'health'],
+    ['the Budget column header', 'budget'],
   ];
   assert.ok(
     /import PageHelpButton from '\.\.\/components\/PageHelpButton'/.test(page),
@@ -115,14 +116,14 @@ test('each Model Providers surface mounts a "?" pointed at its own chapter', () 
       `${what} must deep-link to the ${key} chapter (never a hand-written slug)`,
     );
   }
-  // Five JSX sites, six chapter references: the auth-type site picks its chapter
+  // Six JSX sites, seven chapter references: the auth-type site picks its chapter
   // from the current selection, so it names two. Counting sites is what notices
   // a dropped affordance — the includes() checks above cannot, because a single
   // surface could name every constant.
   const buttons = (page.match(/<PageHelpButton/g) || []).length;
   assert.equal(
-    buttons, 5,
-    `expected one PageHelpButton JSX site per surface (5), found ${buttons}`,
+    buttons, 6,
+    `expected one PageHelpButton JSX site per surface (6), found ${buttons}`,
   );
 });
 

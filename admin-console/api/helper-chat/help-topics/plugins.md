@@ -39,10 +39,25 @@ accident. Nothing an agent can reach was not first granted to it.
 
 The page lists plugins in two sections. **Installed** are the ones whose broker
 this stack runs; **Available** are the ones sitting in the pool, ready to be
-installed but doing nothing yet. Each card states the plugin's id and version,
-its broker status, the name of the CLI command its agents would get (if it has
+installed but doing nothing yet. Each card states the plugin's id, the build
+it comes from (see *Which build is installed and running* below), its broker
+status, the name of the CLI command its agents would get (if it has
 one), the scope granularities it offers, its per-scope quota, and the privileges
 its broker would receive.
+
+Right after you install a plugin its broker needs a few seconds to come up. The
+card shows **Broker starting…** meanwhile and checks again on its own; once the
+broker runs it switches to **Broker running**. If the broker is still not running
+two minutes after the install, the card says **Broker did not start** and
+suggests where to look — usually a missing broker image (`make plugin-images`) or
+the orchestrator log. A plugin that does not support this stack's runtime says so
+on its card.
+
+A directory in the plugin registry that is not a valid plugin — for example a
+backup copy such as `jira.bak-…`, whose name is not a valid plugin id (lowercase
+letters, digits and hyphens only) — is shown as **Invalid entry** with the
+problem listed. It has no broker, scopes or team settings. A System Admin can
+delete it with **Remove**.
 
 ### Typical use cases
 
@@ -69,7 +84,7 @@ sandbox.
 
 ### Platform plugin vs Claude Code agent plugin
 
-Throughout the Admin Console, "plugin" means a **platform plugin** — this
+Throughout Agent Studio, "plugin" means a **platform plugin** — this
 broker-plus-CLI extension of Agent Studio itself. It is *not* a Claude Code
 **agent plugin** (the CLI's own marketplace format that bundles skills, commands
 and hooks for one agent). Unqualified, it is always the platform one.
@@ -93,9 +108,9 @@ is nothing to install.)
 
 A grant on a team agent is **inherited by that team's member agents**, unless a
 member overrides it. You can grant from this page (per team, on each installed
-card — see *Assigning a plugin to a team on this page* below) or per agent on the
-**Agents** page — both use the same activation path, so there is no second grant
-model to keep in step.
+card — see *Assigning a plugin to a team on this page* below) or per agent in its
+Agent Chat **Settings** tab — both use the same activation path, so there is no
+second grant model to keep in step.
 
 Because the two steps are independent, so are their undos:
 **uninstalling revokes nothing**, and revoking a grant does not stop the broker.
@@ -178,6 +193,78 @@ Uninstalling also removes the plugin's card from the Installed section, and with
 it the team-assignment control on that card, so the page stops offering a grant
 it could not act on.
 
+A grant left behind this way is still listed in the team's (or agent's)
+**Settings → Plugins** as **Plugin not installed**, with a **Revoke** button.
+Until you revoke it, the agent keeps the plugin's command and the capability note
+in its instructions, even though the broker behind them is gone. Revoking works
+without reinstalling the plugin: it removes the command, its config file and the
+capability note, exactly like revoking an installed plugin. Reinstalling
+instead brings the grant back into use.
+
+### Which build is installed and running
+
+Every card shows the **build identity** of the plugin: the short **commit hash**
+of the Agent Studio source it was built from and that commit's **date and time**,
+in the same format as Agent Studio's own version (About page and sidebar footer).
+A build made from a working tree with uncommitted changes carries a `-dirty`
+suffix, just like the console's own version.
+
+When the build can be placed against a release, the card leads with a readable
+**version** built from the nearest release tag (such as `v0.4.0`) instead of the
+bare hash:
+
+| The build… | Shows |
+|---|---|
+| sits exactly on a release tag | `v0.4.0` |
+| is 12 commits past the nearest release tag | `v0.4.0+12 (5500e15)` |
+| comes from a working tree with uncommitted changes | `v0.4.0+12 (5500e15-dirty)` — on the tag itself `v0.4.0 (5500e15-dirty)` |
+| has no release tag before it, or was built before versions were recorded | `5500e15`, the hash alone |
+
+Read `v0.4.0+12 (5500e15)` as "release v0.4.0, plus 12 commits, exactly commit
+5500e15": the number counts the commits since that release, and the hash keeps
+the version unique. Only release tags of the form `v<major>.<minor>.<patch>`
+count; when several sit on the same commit, the highest version is used. A
+build from a copy of the source without its tags (for example a shallow clone)
+shows just the hash. The commit date and time follow the version as before.
+
+An installed plugin can show up to three identities, because they can differ:
+
+- **Installed files** — the manifest and command-line tool in the registry, i.e.
+  the plugin source as it was when it was installed (`make seed-plugins` stamps
+  the pool with the commit; installing copies that stamp along). An available
+  plugin shows the same line as **Source**.
+- **Running broker** — the build the live broker container reports about
+  itself. This is what is really running, even if a newer image has been built
+  since.
+- **Broker image** — the build of the broker image the sidecar would be
+  recreated from, read from the image's labels. It moves on as soon as the image
+  is rebuilt. On Kubernetes the image sits in a node's cache and cannot be read,
+  so this line says *unknown (image not inspectable)*.
+
+Command-only plugins have no broker and show neither broker line. A plugin
+fetched from GitHub at install time (such as spec-kit) also shows **Fetched
+from** — the upstream repository, ref and fetch time.
+
+Two hints flag a difference:
+
+- **"Running broker differs from its image"** — the broker image was rebuilt,
+  but the running sidecar container still runs the old build. Building a new
+  image alone does not replace a running sidecar; it keeps the old image until
+  the sidecar container is recreated, and then the hint disappears.
+- **"Running broker differs from installed plugin"** — the broker runs another
+  commit than the installed files (the manifest and CLI). Reinstalling the
+  plugin brings them back in step.
+
+A hint only appears when both sides are known; a `-dirty` difference counts.
+The hints compare commits only: two lines with the same commit never differ just
+because one of them shows a release version and the other a bare hash.
+
+Whatever cannot be determined is labelled **unknown** instead of left blank:
+a plugin seeded or an image built before build identities existed, a stack built
+without git metadata, a broker that is not running, or a third-party image (such
+as the `dummy-echo` smoke test's busybox), which says *unknown (external
+image)*. None of these affect how the plugin works.
+
 ## Plugins with their own UI
 
 Some plugins also serve a small web UI of their own (a dashboard, a planning
@@ -203,8 +290,8 @@ capability.
 ## Assigning a plugin to a team on this page
 
 Installed cards carry a **Team assignment** control — the grant, made where you
-just installed the plugin, instead of one agent at a time on the Agents page. It
-reuses the same activation path the Agents page uses, so there is no second grant
+just installed the plugin, instead of one agent at a time in Agent Chat. It
+reuses the same activation path Agent Chat uses, so there is no second grant
 model and no second place to check.
 
 - It appears on **installed** cards only, and disappears with the card when the

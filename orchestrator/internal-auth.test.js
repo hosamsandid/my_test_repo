@@ -202,6 +202,7 @@ test("an agent reaches its own telemetry, knowledge, triggers, ticket and git ro
   const own = [
     ["POST", "/internal/agents/team-x-developer/status"],
     ["POST", "/internal/agents/team-x-developer/running-sessions"],
+    ["POST", "/internal/agents/team-x-developer/trigger-status"],
     ["POST", "/internal/agents/team-x-developer/session-events"],
     ["POST", "/internal/agents/team-x-developer/session-pointer"],
     ["POST", "/internal/agents/team-x-developer/usage"],
@@ -450,6 +451,7 @@ test("a plugin scope token is refused on EVERY other route — agent-facing or c
     ["DELETE", "/internal/agents/team-x-developer"],
     ["POST", "/internal/admin/users"],
     ["PUT", "/internal/plugins/jira/credentials"],
+    ["POST", "/internal/plugins/jira/credentials/team-a/test"],
   ]) {
     const d = decide(method, url, asPlugin(), PLUGIN_CONFIG);
     assert.equal(d.allowed, false, `${method} ${url}`);

@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback } from 'react';
-import { useNavigate } from 'react-router';
+import { useNavigate, useSearchParams } from 'react-router';
 import { RefreshCw, MoreVertical } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
@@ -7,18 +7,19 @@ import PageHelpButton from '../components/PageHelpButton';
 import WhenCell from '../components/WhenCell';
 import RowContextMenu from '../components/RowContextMenu';
 import ConfirmDialog from '../components/ConfirmDialog';
-import { buildTriggerCorrelationId, isSessionOutcome } from './github-event-session';
+import { buildTriggerCorrelationId, sessionLinkTarget, reapedInstanceNotice } from './github-event-session';
 import {
   kindLabel, kindTooltip, entryDetail, entryHoverDetail, labelChip, totalPending, totalHeld,
   pendingRowMenu, reassignPickerState, reassignTargetLabel, pendingReassignError, pendingReassignSuccess,
 } from './pending-queue-view';
 import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip, refireNote } from './event-outcome-view';
-import { OUTCOME_TONES, NO_MATCH_LABEL, outcomePresentation } from './event-outcome-presentation';
+import { OUTCOME_TONES, NO_MATCH_LABEL, outcomePresentation, outcomesFilterText } from './event-outcome-presentation';
 import { eventLabel, eventFilterText } from './agent-chat/trigger-summary';
 import { workItemTypeLabel } from './github-event-log-type';
 import { isHandoffRow, handoffNote, handoffNoteDisplay, handoffTitleHint } from './github-event-handoff-view';
 import { GITHUB_EVENTS_HELP_SECTIONS } from './github-events-help-sections';
 import GithubRepoStatus from './GithubRepoStatus';
+import { EVENT_PARAM, FOCUS_RANGE_KEY, focusedEventRows, focusNotice } from './github-event-focus';
 
 /* ── Time-range presets ────────────────────────────────────────────── */
 const RANGE_PRESETS = [
@@ -37,6 +38,29 @@ const controlStyle = {
   fontSize: 'var(--eb-text-sm)',
   fontFamily: 'inherit',
 };
+
+/* ── Column width budget (#2614, regression of #1898) ──────────────────
+   The table uses auto layout, so a single-line (nowrap) column claims its
+   full text width, while a wrap column (overflow-wrap: anywhere) may shrink
+   to about one character. Once the nowrap columns alone filled the
+   container, Title and Outcomes collapsed to about 60 px and the table
+   overflowed again at 1280–1440 px. So every column has a bounded share:
+   the single-line Repository and Actor are capped (ellipsis + full value on
+   hover), Event wraps, and Title, Event and Outcomes get a floor so they
+   stay readable. The floors plus caps fit the ~990 px content width at
+   1280 px with room to spare; wider screens hand the rest to Title/Event. */
+const COL_FLOOR = { title: '8rem', event: '6rem', outcomes: '7rem' };
+const COL_CAP = { repo: '8rem', actor: '7rem' };
+// A capped single-line cell: truncates with an ellipsis at `max`, so its
+// column's min-content is the cap rather than the full text.
+const cappedCellStyle = max => ({
+  display: 'inline-block',
+  maxWidth: max,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+  verticalAlign: 'bottom',
+});
 
 /* ── Outcome line (#2524) ──────────────────────────────────────────────
    Each outcome is a plain text line — no pill border/background, since a
@@ -68,23 +92,71 @@ function OutcomeMarker({ marker, color }) {
   return <span aria-hidden="true" style={{ ...outcomeMarkerStyle, color }}>{marker}</span>;
 }
 
-function OutcomeLine({ outcome, eventId, onOpenSession, refireNote = null }) {
+function OutcomeLine({ outcome, eventId, onOpenSession, onOpenChat, refireNote = null }) {
   const [hover, setHover] = useState(false);
+  const [showReaped, setShowReaped] = useState(false);
   const { label, marker, markerColor, textColor } = outcomePresentation(outcome, { refired: !!refireNote });
 
   // Only a `delivered` outcome that carries a triggerId maps to a real Claude
   // session, so only those become an activatable control (AC1/AC2). Everything
-  // else stays plain, non-interactive text.
+  // else stays plain, non-interactive text. A pooled delivery (#2596) links the
+  // per-ticket instance that ran it, or — once that instance is reaped — says
+  // so instead of silently opening the pooled role's chat.
   const explain = refireNote ? `${refireNote} ${outcomeTooltip(outcome)}` : outcomeTooltip(outcome);
   const correlationId = buildTriggerCorrelationId(outcome.triggerId, eventId);
-  if (isSessionOutcome(outcome) && correlationId && onOpenSession) {
+  const target = sessionLinkTarget(outcome);
+  if (target && target.kind === 'reaped' && correlationId) {
+    const notice = reapedInstanceNotice(target);
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+        <button
+          type="button"
+          onClick={() => setShowReaped(v => !v)}
+          aria-expanded={showReaped}
+          title={`${explain}\n\n${notice}`}
+          style={{
+            ...outcomeLineStyle,
+            background: 'none',
+            border: 'none',
+            padding: 0,
+            margin: 0,
+            textAlign: 'left',
+            fontFamily: 'inherit',
+            cursor: 'pointer',
+            color: textColor,
+          }}
+        >
+          <OutcomeMarker marker={marker} color={markerColor} />
+          <span style={{ ...outcomeTextStyle, textDecoration: 'underline dotted', textUnderlineOffset: 2 }}>{label} (instance removed)</span>
+        </button>
+        {showReaped && (
+          <div role="status" style={{ ...outcomeTextStyle, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', paddingLeft: 14 }}>
+            {notice}
+            {target.poolRoleId && onOpenChat && (
+              <>
+                {' '}
+                <button
+                  type="button"
+                  onClick={() => onOpenChat(target.poolRoleId)}
+                  style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', cursor: 'pointer', color: 'var(--eb-accent-primary)', textDecoration: 'underline' }}
+                >
+                  Open the pooled role's chat ({target.poolRoleName})
+                </button>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (target && target.kind === 'agent' && correlationId && onOpenSession) {
     return (
       <button
         type="button"
-        onClick={() => onOpenSession(outcome.agentId, correlationId)}
+        onClick={() => onOpenSession(target.agentId, correlationId)}
         onMouseEnter={() => setHover(true)}
         onMouseLeave={() => setHover(false)}
-        aria-label={`Open session for ${outcome.agentName || outcome.agentId}`}
+        aria-label={`Open session for ${outcome.instanceId ? (outcome.instanceName || outcome.instanceId) : (outcome.agentName || outcome.agentId)}`}
         title={`${explain}\n\nClick to open the session this event triggered.`}
         style={{
           ...outcomeLineStyle,
@@ -214,7 +286,9 @@ function TitleCell({ title, hover, hint }) {
   // it whole. For every other row `hover` equals `title` and this is the same
   // single-argument hover it has always been.
   const full = hover || title;
-  return <span title={hint ? `${hint}: ${full}` : full}>{title}</span>;
+  // #2614: the floor keeps the column wide enough to wrap at word boundaries
+  // instead of one word (or part of one) per line.
+  return <span title={hint ? `${hint}: ${full}` : full} style={{ display: 'block', minWidth: COL_FLOOR.title }}>{title}</span>;
 }
 
 /* ── Repository cell (#1827, restored to prominence in #1833) — the short repo
@@ -228,11 +302,18 @@ function RepoCell({ repo }) {
   return (
     <span
       title={repo}
-      style={{ color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)' }}
+      style={{ ...cappedCellStyle(COL_CAP.repo), color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)' }}
     >
       {short}
     </span>
   );
+}
+
+/* ── Actor cell (#2614) — the GitHub login, capped like Repository so a long
+   login cannot widen the table; the full login is on hover. */
+function ActorCell({ actor }) {
+  if (!actor) return '—';
+  return <span title={actor} style={cappedCellStyle(COL_CAP.actor)}>{actor}</span>;
 }
 
 /* ── Git ref → short branch/tag name (#1833 AC1.3) — `refs/heads/main` → `main`,
@@ -302,7 +383,16 @@ function OutcomeLegend() {
 /* ── Processed-events history (the original view, fed by /api/github-events) ─ */
 function ProcessedEventsView() {
   const navigate = useNavigate();
-  const [rangeKey, setRangeKey] = useState('24h');
+  // `?event=<id>` (#2872, e.g. from the Flow Control board's "wake never
+  // delivered" flag) shows that one event, over the log's whole retention.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const focusEventId = searchParams.get(EVENT_PARAM) || null;
+  const [rangeKey, setRangeKey] = useState(focusEventId ? FOCUS_RANGE_KEY : '24h');
+  const clearFocus = useCallback(() => {
+    const next = new URLSearchParams(searchParams);
+    next.delete(EVENT_PARAM);
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   // Deep-link into the agent chat's Sessions tab, preselecting the session the
   // delivered event triggered (reconstructed correlationId passed via `?session`).
@@ -310,6 +400,12 @@ function ProcessedEventsView() {
   const openSession = useCallback((agentId, correlationId) => {
     if (!agentId || !correlationId) return;
     navigate(`/chats/${encodeURIComponent(agentId)}?session=${encodeURIComponent(correlationId)}`);
+  }, [navigate]);
+  // The pooled role's own chat, offered when the instance that ran an event
+  // has been reaped (#2596 AC5) — no session preselected, it did not run there.
+  const openChat = useCallback((agentId) => {
+    if (!agentId) return;
+    navigate(`/chats/${encodeURIComponent(agentId)}`);
   }, [navigate]);
 
   const since = useMemo(() => {
@@ -340,6 +436,8 @@ function ProcessedEventsView() {
     // (#1848), consistent with the Work item / Title columns.
     workItemType: workItemTypeLabel(e.workItem),
   })), [data]);
+  const shownRows = useMemo(() => focusedEventRows(rows, focusEventId), [rows, focusEventId]);
+  const focusText = loading ? null : focusNotice(focusEventId, shownRows.length);
 
   const COLS = [
     // Show a scannable relative phrase ("2 minutes ago") with the exact local
@@ -368,7 +466,10 @@ function ProcessedEventsView() {
     // DataTable pages stay single-line + ellipsis (AC9).
     { key: 'workItemNumber', label: 'Work item', wrap: true, render: (_v, row) => <WorkItemCell workItem={row.workItem} repo={row.repo} /> },
     { key: 'workItemTitle', label: 'Title', wrap: true, render: (v, row) => <TitleCell title={handoffNoteDisplay(row) || v} hover={v} hint={handoffTitleHint(row)} /> },
-    { key: 'event', label: 'Event', render: (v, row) => {
+    // Event wraps too (#2614): a long label suffix, e.g.
+    // "(ready-for-documentation-update:completed)", on one line made this the
+    // widest column and starved Title. The floor keeps it from being squeezed.
+    { key: 'event', label: 'Event', wrap: true, render: (v, row) => {
       // Plain-language event name (single source of truth: the shared eventLabel
       // map used by the trigger editor) so this log reads for someone who
       // doesn't know the GitHub Events API vocabulary. The raw technical event
@@ -383,25 +484,30 @@ function ProcessedEventsView() {
       // rather than show a potentially-wrong collapsed label.
       if (row.noMatchingTrigger && row.label) suffix = ` (${row.label})`;
       else if (row.ref) suffix = ` · ${shortRef(row.ref)}`;
-      return <span>{friendly || '—'}{suffix}</span>;
+      return <span style={{ display: 'block', minWidth: COL_FLOOR.event }}>{friendly || '—'}{suffix}</span>;
     },
       // #2442: the raw event key ("pull_request.opened") is no longer shown — only
       // the friendly name ("PR opened"). Search the friendly name, keeping the raw
       // key matchable too so an operator who knows the API vocabulary still finds it.
       filterValue: eventFilterText },
-    { key: 'actor', label: 'Actor', render: v => v || '—' },
+    { key: 'actor', label: 'Actor', render: v => <ActorCell actor={v} /> },
     { key: 'outcomes', label: 'Outcomes', sortable: false, wrap: true, render: (v, row) => {
-      if (row.noMatchingTrigger) return <NoMatchLine />;
       const list = Array.isArray(v) ? v : [];
-      // One outcome per line (#2524), spaced so each reads on its own.
+      // One outcome per line (#2524), spaced so each reads on its own. The
+      // floor (#2614) keeps an outcome wrapping at word boundaries rather than
+      // clipped to a few letters per line.
       return (
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, minWidth: 0 }}>
-          {list.map((o, i) => (
-            <OutcomeLine key={i} outcome={o} eventId={row.eventId} onOpenSession={openSession} refireNote={refireNote(row)} />
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, minWidth: COL_FLOOR.outcomes }}>
+          {row.noMatchingTrigger ? <NoMatchLine /> : list.map((o, i) => (
+            <OutcomeLine key={i} outcome={o} eventId={row.eventId} onOpenSession={openSession} onOpenChat={openChat} refireNote={refireNote(row)} />
           ))}
         </div>
       );
-    } },
+    },
+      // #2693: search what the column shows (outcome lines) plus the raw agent /
+      // instance ids and drop reasons, so "which events woke or dropped agent X?"
+      // is a filter away.
+      filterValue: outcomesFilterText },
   ];
 
   return (
@@ -429,7 +535,7 @@ function ProcessedEventsView() {
         />
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
-        <select value={rangeKey} onChange={e => setRangeKey(e.target.value)} style={controlStyle}>
+        <select value={rangeKey} onChange={e => setRangeKey(e.target.value)} style={controlStyle} aria-label="Time range">
           {RANGE_PRESETS.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
         </select>
         <button onClick={refreshAll} style={{ ...controlStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
@@ -443,6 +549,12 @@ function ProcessedEventsView() {
         />
         {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
       </div>
+      {focusText && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+          <span>{focusText}</span>
+          <button onClick={clearFocus} style={{ ...controlStyle, cursor: 'pointer' }}>Show all events</button>
+        </div>
+      )}
 
       <GithubRepoStatus data={repoStatus.data} error={repoStatus.error} />
 
@@ -451,7 +563,7 @@ function ProcessedEventsView() {
       ) : (
         <DataTable
           columns={COLS}
-          data={rows}
+          data={shownRows}
           pageSize={25}
           getRowKey={(r, i) => `${r.eventId}/${i}`}
           emptyText="No GitHub events recorded in this time range."
@@ -572,6 +684,9 @@ const REFUSAL_COPY = {
   'history-horizon': "the event predates its trigger's subscription window",
   'label-filter': 'its trigger subscribes to a different label',
   'branch-filter': 'its trigger only reacts to pushes on other branches',
+  'comment-target': 'its trigger only reacts to comments on the other kind of item',
+  'agent-comment': 'its trigger ignores comments written by agents',
+  'comment-label': 'its trigger only reacts to comments on items carrying another label',
 };
 
 /* ── Label chip for a pending entry (#2101 AC7) ───────────────────
@@ -791,7 +906,7 @@ function HeldByWipGroup({ group, onOpenBoard }) {
         <button
           type="button"
           onClick={onOpenBoard}
-          style={{ background: 'none', border: 'none', padding: 0, color: 'var(--eb-accent, #2563eb)', cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}
+          style={{ background: 'none', border: 'none', padding: 0, color: 'var(--eb-accent-primary)', cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}
         >
           force-dispatch it on the Flow Control board
         </button>.
@@ -996,7 +1111,7 @@ export default function GithubEventLog() {
               padding: 'var(--eb-space-2) var(--eb-space-3)',
               background: 'transparent',
               border: 'none',
-              borderBottom: `2px solid ${tab === t.key ? 'var(--eb-accent, var(--eb-text-primary))' : 'transparent'}`,
+              borderBottom: `2px solid ${tab === t.key ? 'var(--eb-accent-primary)' : 'transparent'}`,
               color: tab === t.key ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
               fontSize: 'var(--eb-text-sm)',
               fontWeight: tab === t.key ? 'var(--eb-font-semibold)' : 'var(--eb-font-medium)',

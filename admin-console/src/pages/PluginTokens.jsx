@@ -5,7 +5,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import PageHelpButton from '../components/PageHelpButton';
 import WhenCell from '../components/WhenCell';
 import {
-  describePluginTokenStatus, initialFormValues, valuesToSubmit, submitBlockers,
+  describePluginTokenStatus, teamConnectionNote, initialFormValues, valuesToSubmit, submitBlockers,
 } from './plugin-tokens-view.js';
 
 // #2562: the caller's OWN credential for plugins that act as a person (Jira).
@@ -57,6 +57,7 @@ function PluginTokenCard({ plugin, onChanged }) {
   const [error, setError] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const status = describePluginTokenStatus(plugin);
+  const connectionNote = teamConnectionNote(plugin);
   const blockers = submitBlockers(plugin, form);
 
   const save = async () => {
@@ -96,12 +97,23 @@ function PluginTokenCard({ plugin, onChanged }) {
         )}
       </div>
 
+      {connectionNote && (
+        <div style={{
+          marginTop: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-3)',
+          fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning-text)',
+          background: 'var(--eb-status-warning-bg)',
+          border: '1px solid var(--eb-status-warning-text)', borderRadius: 'var(--eb-radius-sm)',
+        }}>
+          {connectionNote}
+        </div>
+      )}
+
       {plugin.credentials.map((c) => {
         const meta = plugin.keys && plugin.keys[c.key];
         return (
           <label key={c.key} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)', fontSize: 'var(--eb-text-sm)' }}>
             <span>
-              {c.key}{c.required ? ' *' : ''}
+              {c.label || c.key}{c.required ? ' *' : ''}
               {c.secret && meta && meta.set && (
                 <span style={{ marginLeft: 'var(--eb-space-2)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
                   stored: {meta.preview}

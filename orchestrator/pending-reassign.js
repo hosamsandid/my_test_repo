@@ -33,6 +33,7 @@ const {
   GRACE_MS,
 } = require('./github-poller');
 const { parseBranchFilter, pushBranch, branchFilterMatches } = require('./branch-filter');
+const commentFilter = require('./comment-filter');
 
 // Why a candidate was refused, in the poller's own vocabulary so an operator
 // reading a refusal can look the reason up in the Event Log's outcome legend.
@@ -43,6 +44,9 @@ const REFUSAL_REASONS = {
   'history-horizon': 'the event predates its trigger\'s subscription window',
   'label-filter': 'its trigger subscribes to a different label',
   'branch-filter': 'its trigger only reacts to pushes on other branches',
+  'comment-target': 'its trigger only reacts to comments on the other kind of item',
+  'agent-comment': 'its trigger ignores comments written by agents',
+  'comment-label': 'its trigger only reacts to comments on items carrying another label',
 };
 
 // Rebuild the event shape the poller matched on from a queued `github` entry.
@@ -79,7 +83,7 @@ function ghEventFromEntry(entry) {
 //                                     self-wake.
 //
 // What remains IS the match: event-key membership, the history horizon, the
-// label filter and the push branch filter — each evaluated with the poller's own exported predicate, and
+// label filter, the push branch filter and the comment filters — each evaluated with the poller's own exported predicate, and
 // each in the same order, so the reason a candidate is refused reads the same
 // way it would in the Event Log.
 function triggerAccepts(trigger, { eventKey, ghEvent, repo, triggersMtime }) {
@@ -103,6 +107,16 @@ function triggerAccepts(trigger, { eventKey, ghEvent, repo, triggersMtime }) {
   // Branch filter (#2570) — `push` only, same parse + match as the poller.
   if (eventKey === 'push' && !branchFilterMatches(pushBranch(ghEvent), parseBranchFilter(trigger.branchFilter))) {
     return { ok: false, reason: 'branch-filter' };
+  }
+  // Comment filters (#2822) — `issue_comment.*` only, same checks as the
+  // poller. The label condition reads the queued payload's label set: a
+  // reassign makes no GitHub call, and that set is what the poller fell back
+  // to as well when it could not read the live one.
+  const cf = commentFilter.isCommentEvent(eventKey) ? commentFilter.parseCommentFilter(trigger) : null;
+  if (cf) {
+    let verdict = commentFilter.commentPrecheck(cf, ghEvent);
+    if (verdict.ok) verdict = commentFilter.requireLabelVerdict(cf, commentFilter.labelNames(ghEvent.payload.issue));
+    if (!verdict.ok) return { ok: false, reason: verdict.reason };
   }
   return { ok: true, triggerId: trigger.id, labelFilter };
 }
@@ -318,9 +332,15 @@ function describeEntryWorkItem(entry) {
   const item = p.issue || p.pull_request || {};
   const number = Number.isInteger(item.number) ? item.number : null;
   const label = (p.label && typeof p.label.name === 'string') ? p.label.name : null;
+  // #2799: a PR's linked issue(s), in the Event Log's `→ closes #N` wording, so
+  // a search for the issue number finds the message. Unlinked → unchanged.
+  const closesIssues = (item === p.pull_request && number != null && Array.isArray(item.closesIssues))
+    ? [...new Set(item.closesIssues.filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b)
+    : [];
+  const closes = closesIssues.length ? ` → closes ${closesIssues.map((n) => `#${n}`).join(', ')}` : '';
   const parts = [];
-  if (g.repo) parts.push(number != null ? `${g.repo}#${number}` : g.repo);
-  else if (number != null) parts.push(`#${number}`);
+  if (g.repo) parts.push(number != null ? `${g.repo}#${number}${closes}` : g.repo);
+  else if (number != null) parts.push(`#${number}${closes}`);
   if (label) parts.push(`label '${label}'`);
   if (g.event) parts.push(g.event);
   return {
@@ -328,6 +348,7 @@ function describeEntryWorkItem(entry) {
     number,
     label,
     event: g.event || null,
+    ...(closesIssues.length ? { closesIssues } : {}),
     text: parts.length ? parts.join(' · ') : 'the queued event',
   };
 }

@@ -71,6 +71,10 @@ const TOPIC_CONTENT = [
       // leave alone. So the concept the guard pins is the new verb.
       'Create team',
       'previously called Materialize',
+      // #2699 — the Flows rail cannot delete a team, so the topic has to say
+      // where it can be done; without it the Ask chat invented a menu entry.
+      'Delete team…',
+      'Administration → All Teams',
       'Flow Copilot',
       // #1876 wrote these as one "Import / Export" phrase. They are separate
       // affordances in separate places — Import is a header create action,
@@ -707,8 +711,8 @@ const TOPIC_CONTENT = [
       // one from creation since Phase B, and a one-time sweep brought every
       // agent that predated it up to the same shape. The chapter now
       // documents growing via Add member instead of a conversion action, plus
-      // the honest Clone/Import edge case and the re-runnable migration sweep
-      // that covers it.
+      // the re-runnable migration sweep that covers Clone/Import leftovers from
+      // before #2684 made those two paths mint a team of one as well.
       'Add member',
       'team-of-one migration sweep',
       'default branch',
@@ -1188,3 +1192,21 @@ for (const spec of TOPIC_CONTENT) {
     );
   });
 }
+
+// #2699 — #1930 removed the Agents page, but several topics kept sending users
+// there, and the Ask chat (grounded in these topics) repeated it. Only two
+// topics may still name it: agent-chat's *Where the Agents page went* chapter,
+// and create's past-tense "the same form the Agents page used".
+const AGENTS_PAGE_ALLOWED = new Set(['agent-chat', 'create']);
+
+test('no help topic presents the removed Agents page as a current surface', () => {
+  const offenders = registry.all
+    .filter((t) => !AGENTS_PAGE_ALLOWED.has(t.id))
+    .filter((t) => /\bAgents(\*\*)? page\b/i.test(`${t.summary}\n${t.body}`))
+    .map((t) => `help-topics/${t.id}.md`);
+  assert.deepEqual(
+    offenders, [],
+    `still pointing at the removed Agents page: ${offenders.join(', ')} — `
+    + 'name the Agent Chat surface that replaced it instead.',
+  );
+});

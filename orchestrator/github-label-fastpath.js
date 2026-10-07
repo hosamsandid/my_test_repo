@@ -26,6 +26,8 @@
 // (queue write, marker store, event log) stays in orchestrator.js.
 
 const { listensTo } = require('./event-key-aliases');
+const handoffGate = require('./handoff-gate');
+const { isDirectWakeListener } = require('./pool-wake-target');
 
 const TARGET_KINDS = ['issue', 'pr'];
 
@@ -37,8 +39,8 @@ function eventKeyForKind(kind) {
 
 // Validate the request body into `{ok: true, value}` or `{ok: false, error}`.
 // Shape: { repo: "owner/name", number, kind?: issue|pr (default issue), label,
-// actor? }. `kind` defaults to `issue` because the GitHub Issues plugin — the
-// only caller today — lists issues; a caller may still pass `pr` explicitly.
+// actor? }. `kind` defaults to `issue`; the console proxy passes `pr` when the
+// GitHub Issues plugin's broker reports it labelled a pull request (#2746).
 function validateLabelAppliedRequest(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return { ok: false, error: 'body must be an object' };
@@ -69,19 +71,26 @@ function validateLabelAppliedRequest(body) {
 // filter (absent/blank labelFilter = any label, the poller's legacy
 // semantics). This is the same predicate `_fanOutBatch` uses. A legacy
 // `transport` field on a trigger is ignored (#2578). Returns
-// [{agentId, triggerId}] in agent order.
+// [{agentId, triggerId}] in agent order; a PR listener whose trigger carries a
+// readiness gate (#2795) also gets its normalized `readinessGate`, so the
+// caller holds that wake instead of delivering it. A pool instance (its
+// `config.poolInstance`) is never a listener (#2875) — the same rule the
+// poller's plan applies, so both paths wake the same set.
 function matchPollerListeners({ repo, label, kind }, agents) {
   const key = eventKeyForKind(kind);
   const out = [];
   for (const a of Array.isArray(agents) ? agents : []) {
     if (!a || a.enabled === false || !Array.isArray(a.triggers)) continue;
+    if (!isDirectWakeListener(a.config)) continue;
     for (const t of a.triggers) {
       if (!t || t.type !== 'github-event' || t.enabled === false) continue;
       if (t.repo !== repo) continue;
       if (!Array.isArray(t.events) || !listensTo(t.events, key)) continue;
       const filter = typeof t.labelFilter === 'string' && t.labelFilter.trim();
       if (filter && filter !== label) continue;
-      out.push({ agentId: a.agentId, triggerId: t.id });
+      const normalized = handoffGate.normalizeGate(t.readinessGate);
+      const gate = handoffGate.gateApplies(normalized, key) ? normalized : null;
+      out.push({ agentId: a.agentId, triggerId: t.id, ...(gate ? { readinessGate: gate } : {}) });
     }
   }
   return out;

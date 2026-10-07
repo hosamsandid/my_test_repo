@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { useAuth } from '../auth/AuthContext';
 
 // Maintenance Mode (#502): a global, console-wide read of the central status
 // endpoint added by #501 (GET /api/maintenance-mode). Polled independently of
@@ -20,8 +21,16 @@ export function MaintenanceModeProvider({ children }) {
   // for this client-only, non-security-boundary lock — intentional, not a
   // bug to "fix" with an extra loading state.
   const [status, setStatus] = useState(INACTIVE);
+  // Polls only while a session exists (#2616): GET /api/maintenance-mode is
+  // session-protected and the login screen does not show maintenance state, so
+  // polling from above the auth gate only produced a 401 per tick there.
+  const { authenticated } = useAuth();
 
   useEffect(() => {
+    if (!authenticated) {
+      setStatus(INACTIVE);
+      return undefined;
+    }
     let cancelled = false;
     const poll = () => {
       fetch('/api/maintenance-mode')
@@ -32,7 +41,7 @@ export function MaintenanceModeProvider({ children }) {
     poll();
     const timer = setInterval(poll, POLL_MS);
     return () => { cancelled = true; clearInterval(timer); };
-  }, []);
+  }, [authenticated]);
 
   // Ticks the displayed countdown down between polls so it doesn't sit
   // frozen for up to POLL_MS; each poll resync overwrites any drift.

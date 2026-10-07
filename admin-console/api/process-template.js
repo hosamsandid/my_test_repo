@@ -30,6 +30,8 @@ const {
   outcomesToGithub, outcomeWakePairs,
 } = require('./outcomes');
 const { branchFilterError, parseBranchFilter } = require('./branch-filter');
+const { commentFilterError, commentFilterFields } = require('./comment-filter');
+const { cronExpressionError } = require('./trigger-validate');
 // Legacy `transport` (#2578) — tolerated on input and dropped, never validated.
 const { withoutTransport } = require('./internal-transport-migration');
 
@@ -484,10 +486,20 @@ function claimError(claim, labelFilter, type) {
  * (the LegacyMultiEventNote migration flow keeps working); changing the events
  * of one must shrink it to a single event.
  *
+ * A `cron` trigger must carry a cron expression the agent will schedule
+ * (#2626, `cronExpressionError`); on an update, a stored expression passing
+ * through UNCHANGED is tolerated so a legacy entry can still be toggled or
+ * re-described.
+ *
  * Returns an actionable error string, or null when conformant.
  */
 function rawTriggerError(t, prev) {
-  if (!t || typeof t !== 'object' || t.type !== 'github-event') return null;
+  if (!t || typeof t !== 'object') return null;
+  if (t.type === 'cron') {
+    if (prev && prev.type === 'cron' && prev.cron === t.cron) return null;
+    return cronExpressionError(t.cron);
+  }
+  if (t.type !== 'github-event') return null;
   const events = Array.isArray(t.events) ? t.events : [];
   if (events.length > 1) {
     const prevEvents = prev && Array.isArray(prev.events) ? prev.events : null;
@@ -501,6 +513,20 @@ function rawTriggerError(t, prev) {
   // rejected rather than silently matching nothing.
   const bfe = branchFilterError(t.branchFilter);
   if (bfe) return bfe;
+  // Comment filters (#2822): requireLabel / skipAgentComments / target, acted
+  // on for `issue_comment.*` only — a malformed value is rejected rather than
+  // silently ignored by the poller.
+  const cfe = commentFilterError(t);
+  if (cfe) return cfe;
+  // Hand-off readiness gate (#2795): a PR hand-off only — anywhere else the
+  // poller would ignore it and the author would believe the wake is gated.
+  if (t.readinessGate !== undefined && t.readinessGate !== null) {
+    const re = readinessError(t.readinessGate, { wakeLabel: t.labelFilter });
+    if (re) return re;
+    if (cleanReadiness(t.readinessGate) && !events.some(e => READINESS_EVENTS.includes(e))) {
+      return `readinessGate is only valid on a PR hand-off (${READINESS_EVENTS.join(', ')})`;
+    }
+  }
   return claimError(t.claim, t.labelFilter, t.type);
 }
 
@@ -534,6 +560,111 @@ function channelAutoClaim(ch) {
 // trigger-level field would be wiped on the next port write.
 function channelPostcondition(ch) {
   return cleanPostcondition(ch && ch.postcondition);
+}
+
+// ─── hand-off readiness gate (#2795) ──────────────────────────────────────
+//
+// A PR hand-off may hold its wake until the PR's current head is green and
+// conflict-free. Authored on the channel PORT as `readiness` (like `autoClaim`,
+// so the regenerated listener keeps it) and carried onto the derived trigger as
+// `readinessGate`, the field the poller reads (orchestrator/handoff-gate.js).
+// Shape: `{ ci, conflict, failureLabel?, timeoutMinutes? }`. Absent — or both
+// toggles off — means no gate: the hand-off wakes immediately, as before, so an
+// existing team is never changed silently.
+const READINESS_DEFAULT_FAILURE_LABEL = 'revisions-required';
+const READINESS_DEFAULT_TIMEOUT_MINUTES = 60;
+const READINESS_MAX_TIMEOUT_MINUTES = 7 * 24 * 60;
+// The PR hand-off events a gate can hold (mirrors GATED_EVENT_KEYS).
+const READINESS_EVENTS = ['pull_request.labeled', 'pull_request.opened', 'pull_request.reopened'];
+
+// Shape errors of a `readiness` / `readinessGate` value, or null when absent or
+// well-formed. `wakeLabel` (optional) is the hand-off's own label: failing back
+// onto it would re-wake the very listener the gate just held back — checked
+// against the EFFECTIVE failure label, so an unset one (the default) counts.
+function readinessError(r, { wakeLabel = '' } = {}) {
+  if (r === undefined || r === null) return null;
+  if (typeof r !== 'object' || Array.isArray(r)) return 'readiness gate must be an object';
+  for (const k of ['ci', 'conflict']) {
+    if (r[k] !== undefined && typeof r[k] !== 'boolean') return `readiness gate ${k} must be true or false`;
+  }
+  if (r.failureLabel !== undefined && r.failureLabel !== null && r.failureLabel !== '') {
+    if (typeof r.failureLabel !== 'string' || !r.failureLabel.trim() || r.failureLabel.trim().length > 50) {
+      return 'readiness gate failureLabel must be a label name of at most 50 characters';
+    }
+  }
+  const wake = typeof wakeLabel === 'string' ? wakeLabel.trim() : '';
+  const explicit = typeof r.failureLabel === 'string' ? r.failureLabel.trim() : '';
+  const effective = explicit || ((r.ci === true || r.conflict === true) ? READINESS_DEFAULT_FAILURE_LABEL : '');
+  if (wake && effective === wake) {
+    return `readiness gate failureLabel must differ from the hand-off label \`${wake}\``
+      + (explicit ? '' : ` (unset, it defaults to \`${READINESS_DEFAULT_FAILURE_LABEL}\`)`);
+  }
+  if (r.timeoutMinutes !== undefined && r.timeoutMinutes !== null && r.timeoutMinutes !== '') {
+    if (!Number.isInteger(r.timeoutMinutes) || r.timeoutMinutes < 1 || r.timeoutMinutes > READINESS_MAX_TIMEOUT_MINUTES) {
+      return `readiness gate timeoutMinutes must be a whole number from 1 to ${READINESS_MAX_TIMEOUT_MINUTES}`;
+    }
+  }
+  return null;
+}
+
+// Canonical `{ ci, conflict, failureLabel?, timeoutMinutes? }`, or null when no
+// gate is on. Defaults are NOT stamped: an absent failure label / timeout reads
+// as the default everywhere, so a bundle stays free of default noise.
+function cleanReadiness(r) {
+  if (!r || typeof r !== 'object' || Array.isArray(r) || readinessError(r)) return null;
+  const ci = r.ci === true;
+  const conflict = r.conflict === true;
+  if (!ci && !conflict) return null;
+  const failureLabel = typeof r.failureLabel === 'string' ? r.failureLabel.trim() : '';
+  return {
+    ci,
+    conflict,
+    ...(failureLabel && failureLabel !== READINESS_DEFAULT_FAILURE_LABEL ? { failureLabel } : {}),
+    ...(Number.isInteger(r.timeoutMinutes) && r.timeoutMinutes !== READINESS_DEFAULT_TIMEOUT_MINUTES
+      ? { timeoutMinutes: r.timeoutMinutes } : {}),
+  };
+}
+
+// Several channels consolidate into ONE derived listener (#826), so their gates
+// merge: a gate is on when any contributing channel turns it on (the
+// any-channel-gates-it rule of `human`), and the first explicit failure label /
+// timeout in insertion order wins (like `wakePrompt`).
+function mergeReadiness(a, b) {
+  const x = cleanReadiness(a);
+  const y = cleanReadiness(b);
+  if (!x) return y;
+  if (!y) return x;
+  return cleanReadiness({
+    ci: x.ci || y.ci,
+    conflict: x.conflict || y.conflict,
+    failureLabel: x.failureLabel || y.failureLabel,
+    timeoutMinutes: x.timeoutMinutes || y.timeoutMinutes,
+  });
+}
+
+// A trigger's effective gate — what the poller will hold on — or null. Only a
+// github-event trigger on a PR hand-off event can be gated.
+function triggerReadiness(t) {
+  if (!t || t.type !== 'github-event') return null;
+  const events = Array.isArray(t.events) ? t.events : [];
+  if (!events.some(e => READINESS_EVENTS.includes(e))) return null;
+  return cleanReadiness(t.readinessGate);
+}
+
+// In place, like `normalizeBranchFilter`: persist a trigger's `readinessGate` in
+// its canonical form, or drop it (null / both toggles off clears the gate).
+function normalizeReadinessGate(t) {
+  if (!t || typeof t !== 'object' || !('readinessGate' in t)) return t;
+  const r = cleanReadiness(t.readinessGate);
+  if (r) t.readinessGate = r;
+  else delete t.readinessGate;
+  return t;
+}
+
+// The label a gate sets on failure (the default when none is authored).
+function readinessFailureLabel(r) {
+  const c = cleanReadiness(r);
+  return c ? (c.failureLabel || READINESS_DEFAULT_FAILURE_LABEL) : null;
 }
 
 // Remap the role references a `wakeAgent` action carries (#2030). A direct
@@ -591,6 +722,8 @@ function remapChannel(ch, teamId) {
     // declaration; dropping it would silently downgrade the claim back to
     // tracking the run instead of the outcome.
     ...(channelPostcondition(ch) ? { postcondition: channelPostcondition(ch) } : {}),
+    // Readiness gate (#2795) — carried so an exported team keeps its gate.
+    ...(cleanReadiness(ch.readiness) ? { readiness: cleanReadiness(ch.readiness) } : {}),
   };
 }
 
@@ -606,6 +739,9 @@ function bundleTrigger(t, teamId) {
     // on export would silently widen the trigger to every branch.
     const branches = parseBranchFilter(t.branchFilter);
     if (branches.length) out.branchFilter = branches;
+    // Comment filters (#2822) — dropping them on export would widen a comment
+    // listener back to every comment in the repository.
+    Object.assign(out, commentFilterFields(t));
     // Claim (#958) — carried on the portable bundle so the claim survives
     // export → materialise → edit-as-draft. Derived listeners get it re-stamped
     // by the expanders anyway; a hand-authored claim would otherwise be lost.
@@ -619,6 +755,9 @@ function bundleTrigger(t, teamId) {
     // "Pushed by agent" producer filter (#2571) — member ids reduced to the
     // portable role ids (mapped back to `<team>-<role>` at materialise).
     if (Array.isArray(t.pushedBy)) out.pushedBy = t.pushedBy.map(id => roleKeyOf(id, teamId));
+    // Hand-off readiness gate (#2795) — dropping it on export would silently
+    // turn a gated hand-off back into an immediate wake.
+    if (cleanReadiness(t.readinessGate)) out.readinessGate = cleanReadiness(t.readinessGate);
   } else if (t.type === 'cron') {
     out.cron = t.cron || null;
   } else if (t.type === 'once') {
@@ -829,6 +968,15 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
           }
           if (!channelAutoClaim(c)) {
             return { ok: false, error: `role ${r.id}: channel postcondition conflicts with autoClaim false (there is no claim to verify)` };
+          }
+        }
+        // Readiness gate (#2795): checked, not tolerated, like the post-condition
+        // — a malformed gate would silently wake without waiting.
+        if (c.readiness !== undefined && c.readiness !== null) {
+          const re = readinessError(c.readiness, { wakeLabel: c.label });
+          if (re) return { ok: false, error: `role ${r.id}: channel ${re}` };
+          if (c.artifact !== 'pr' && cleanReadiness(c.readiness)) {
+            return { ok: false, error: `role ${r.id}: channel readiness gate is only valid on a PR channel` };
           }
         }
       }
@@ -1094,6 +1242,8 @@ function templateToCustomRoles(bundle) {
       labelFilter: t.labelFilter,
       // Push branch filter (#2570) — read by the poller from the member config.
       ...(parseBranchFilter(t.branchFilter).length ? { branchFilter: parseBranchFilter(t.branchFilter) } : {}),
+      // Comment filters (#2822) — read by the poller from the member config.
+      ...commentFilterFields(t),
       // Claim (#958) — MUST survive into the member config: this is the field the
       // container runtime (`_claim_plan` in agent-entrypoint.py, #957) reads to
       // swap the wake label for `<wake>:wip`. Dropping it here made the whole
@@ -1102,6 +1252,8 @@ function templateToCustomRoles(bundle) {
       // "Pushed by agent" producer filter (#2571) — role ids, mapped to member
       // ids by buildMemberFromTemplate.
       ...(Array.isArray(t.pushedBy) ? { pushedBy: t.pushedBy.slice() } : {}),
+      // Hand-off readiness gate (#2795) — read by the poller from triggers.json.
+      ...(cleanReadiness(t.readinessGate) ? { readinessGate: cleanReadiness(t.readinessGate) } : {}),
       cron: t.cron,
       at: t.at,
       // Trigger-level emits removed (#783) — label hand-offs ride on role `emits`.
@@ -1588,7 +1740,9 @@ function expandGithubChannels(bundle, _opts = {}) {
       const human = ch.gate === 'human';
       const key = `${artifact}::${label}`;
       let g = groups.get(key);
-      if (!g) { g = { artifact, label, human: false, wakePrompt: '', autoClaim: true, postcondition: '', sources: [] }; groups.set(key, g); }
+      if (!g) { g = { artifact, label, human: false, wakePrompt: '', autoClaim: true, postcondition: '', readiness: null, sources: [] }; groups.set(key, g); }
+      // Readiness gate (#2795) — PR channels only; merged across the group.
+      if (artifact === 'pr') g.readiness = mergeReadiness(g.readiness, ch.readiness);
       // Claim opt-out (#958): several channels consolidate into ONE derived
       // listener, and the claim is a property of that single listener — so an
       // explicit opt-out on any contributing channel wins, mirroring the
@@ -1628,6 +1782,9 @@ function expandGithubChannels(bundle, _opts = {}) {
         // An unlabelled channel listener (PR/issue opened) has no wake label to
         // claim, so deriveClaim returns null and no field is stamped.
         ...(claim ? { claim } : {}),
+        // Readiness gate (#2795): the poller holds the wake until the PR's
+        // current head is green / conflict-free (orchestrator/handoff-gate.js).
+        ...(g.readiness ? { readinessGate: g.readiness } : {}),
         // No origin filter: the trigger fires on any matching PR/issue event.
         // A human gate is expressed by the channel's `gate: 'human'` flag and/or
         // the label registry's `humanGate` flag (#928) — humans apply the label,
@@ -2075,6 +2232,13 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
       // or a filtered push trigger silently widens back to every branch.
       const branches = parseBranchFilter(tr.branchFilter);
       if (branches.length) out.branchFilter = branches;
+      // Comment filters (#2822). requireLabel is a label name like labelFilter,
+      // so it gets the same `{{var}}` substitution.
+      const cf = commentFilterFields(tr);
+      if (cf.requireLabel) cf.requireLabel = subst(cf.requireLabel);
+      Object.assign(out, cf);
+      // Hand-off readiness gate (#2795) — or a gated hand-off wakes immediately.
+      if (cleanReadiness(tr.readinessGate)) out.readinessGate = cleanReadiness(tr.readinessGate);
       // Data-flow (agent dependency) marker so the trigger UI renders it as an
       // editable "push from <upstream>" hand-off rather than a raw push (#379).
       if (tr.dataFlow) out.dataFlow = true;
@@ -2187,6 +2351,9 @@ module.exports = {
   deriveClaim, claimLabelFor, claimError, rawTriggerError, isValidClaim, channelAutoClaim, CLAIM_SUFFIX,
   completedLabelFor, COMPLETED_SUFFIX,
   POSTCONDITIONS, cleanPostcondition, strictestPostcondition, channelPostcondition,
+  // Hand-off readiness gate (#2795)
+  readinessError, cleanReadiness, mergeReadiness, triggerReadiness, readinessFailureLabel, normalizeReadinessGate,
+  READINESS_DEFAULT_FAILURE_LABEL, READINESS_DEFAULT_TIMEOUT_MINUTES, READINESS_MAX_TIMEOUT_MINUTES, READINESS_EVENTS,
   // Chat-launched loops (#1020)
   launchedLoopConflict,
 };

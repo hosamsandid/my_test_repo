@@ -40,6 +40,49 @@ test('a plugin viewer keeps the plugin id', () => {
   assert.equal(pageNameForPath('/plugins'), 'Plugins');
 });
 
+test('a plugin viewer reads its display name when known (#2650)', () => {
+  const titles = { 'patterns-catalog': 'Patterns Catalog' };
+  assert.equal(pageNameForPath('/plugins/patterns-catalog/view', titles), 'Plugins / Patterns Catalog');
+  assert.equal(documentTitleForPath('/plugins/patterns-catalog/view', titles), 'Plugins / Patterns Catalog · Agent Studio');
+  // an id without an entry falls back to the raw id
+  assert.equal(pageNameForPath('/plugins/other/view', titles), 'Plugins / other');
+});
+
+test('a plugin id named like a built-in object property reads as the raw id (#2650)', () => {
+  for (const titles of [{ 'patterns-catalog': 'Patterns Catalog' }, {}, undefined]) {
+    for (const id of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf']) {
+      assert.equal(pageNameForPath(`/plugins/${id}/view`, titles), `Plugins / ${id}`);
+      assert.equal(documentTitleForPath(`/plugins/${id}/view`, titles), `Plugins / ${id} · Agent Studio`);
+    }
+  }
+});
+
+test('a trailing slash resolves like the bare path (#2650)', () => {
+  assert.equal(pageNameForPath('/plugins/patterns-catalog/view/'), 'Plugins / patterns-catalog');
+  assert.equal(documentTitleForPath('/plugins/patterns-catalog/view//'), 'Plugins / patterns-catalog · Agent Studio');
+  assert.equal(pageNameForPath('/token-usage/'), 'Token Usage');
+  assert.equal(pageNameForPath('/'), 'Agent Chat');
+});
+
+test('static routes and the /chats/ prefix resolve case-insensitively, like React Router (#2697)', () => {
+  assert.equal(pageNameForPath('/Chats'), 'Agent Chat');
+  assert.equal(documentTitleForPath('/Chats'), 'Agent Chat · Agent Studio');
+  assert.equal(pageNameForPath('/CHATS/agent-1'), 'Agent Chat');
+  assert.equal(pageNameForPath('/USERS/'), 'Administration');
+  assert.equal(pageNameForPath('/Token-Usage'), 'Token Usage');
+  assert.equal(pageNameForPath('/Wizard/Team'), 'Agent Team Wizard');
+});
+
+test('a case-variant plugin viewer path keeps the plugin id case for the name lookup (#2697)', () => {
+  assert.equal(pageNameForPath('/Plugins/x/view'), 'Plugins / x');
+  assert.equal(pageNameForPath('/PLUGINS/MyPlugin/VIEW/'), 'Plugins / MyPlugin');
+  const titles = { 'patterns-catalog': 'Patterns Catalog', MyPlugin: 'My Plugin' };
+  assert.equal(documentTitleForPath('/Plugins/patterns-catalog/View', titles), 'Plugins / Patterns Catalog · Agent Studio');
+  assert.equal(pageNameForPath('/plugins/MyPlugin/view', titles), 'Plugins / My Plugin');
+  // the id is not lowercased, so a differently-cased id is not mistaken for a known one
+  assert.equal(pageNameForPath('/plugins/myplugin/view', titles), 'Plugins / myplugin');
+});
+
 test('unknown / unauthenticated routes fall back to the bare app name, never a raw path', () => {
   assert.equal(pageNameForPath('/login'), null);
   assert.equal(documentTitleForPath('/login'), APP_NAME);

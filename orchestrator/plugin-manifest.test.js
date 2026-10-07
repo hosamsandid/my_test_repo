@@ -187,6 +187,29 @@ test('rejects unknown platforms', () => {
   assert.ok(validatePluginManifest({ ...base(), platforms: ['k8s'] }).errors.some((e) => /platforms has unknown/.test(e)));
 });
 
+test('credential fields carry label / group / requiredFor and reject a bad requiredFor', () => {
+  const { ok, manifest } = validatePluginManifest({
+    ...base(),
+    credentials: [
+      { key: 'site-url', label: 'Jira site', group: 'connection', requiredFor: ['interactive', 'automated'], required: true },
+      { key: 'api-token', label: 'Service token', group: 'service-account', requiredFor: ['automated'] },
+      { key: 'plain' },
+    ],
+  });
+  assert.equal(ok, true);
+  const [site, token, plain] = manifest.credentials;
+  assert.equal(site.label, 'Jira site');
+  assert.equal(site.group, 'connection');
+  assert.deepEqual(site.requiredFor, ['interactive', 'automated']);
+  assert.equal(token.required, false); // requiredFor is orthogonal to the hard-required flag
+  assert.deepEqual(token.requiredFor, ['automated']);
+  assert.equal('label' in plain, false); // omitted metadata stays omitted (backward compatible)
+  assert.equal('requiredFor' in plain, false);
+
+  const bad = validatePluginManifest({ ...base(), credentials: [{ key: 'x', requiredFor: ['whenever'] }] });
+  assert.ok(bad.errors.some((e) => /requiredFor must be an array of interactive\/automated/.test(e)));
+});
+
 test('accepts kubernetes alone', () => {
   const { ok, errors, manifest } = validatePluginManifest({ ...base(), platforms: ['kubernetes'] });
   assert.deepEqual(errors, []);
@@ -541,12 +564,23 @@ test('the shipped jira manifest (plugins/jira) is valid', () => {
   // is a per-scope plugin credential (§5), so unlike github-issues the declared
   // credentials are NOT empty:
   assert.deepEqual(manifest.sidecar.capabilities, ['egress']);
-  // The three connection credentials are required; `readable-custom-fields` (#2416)
-  // and `writable-custom-fields` (#2417) are optional admin allow-lists.
+  // Only the connection (`site-url`) is hard-required — it is `requiredFor` both
+  // interactive chat and automated runs. The service account (`email`,
+  // `api-token`) is `requiredFor: ['automated']` only, so an interactive-only
+  // team is not pushed to fill it; `readable-/writable-custom-fields` (#2416/#2417)
+  // are optional admin allow-lists.
   const OPTIONAL_CREDS = ['readable-custom-fields', 'writable-custom-fields'];
   assert.deepEqual(manifest.credentials.map((c) => c.key), ['site-url', 'email', 'api-token', ...OPTIONAL_CREDS]);
-  assert.ok(manifest.credentials.filter((c) => !OPTIONAL_CREDS.includes(c.key)).every((c) => c.required === true));
-  assert.ok(OPTIONAL_CREDS.every((k) => manifest.credentials.find((c) => c.key === k).required === false));
+  const cred = (k) => manifest.credentials.find((c) => c.key === k);
+  assert.equal(cred('site-url').required, true);
+  assert.deepEqual(cred('site-url').requiredFor, ['interactive', 'automated']);
+  assert.equal(cred('site-url').group, 'connection');
+  assert.equal(cred('email').required, false);
+  assert.equal(cred('api-token').required, false);
+  assert.deepEqual(cred('email').requiredFor, ['automated']);
+  assert.deepEqual(cred('api-token').requiredFor, ['automated']);
+  assert.ok([cred('email'), cred('api-token')].every((c) => c.group === 'service-account'));
+  assert.ok(OPTIONAL_CREDS.every((k) => cred(k).required === false));
   // #2449: everything but the api-token is non-secret (its real value is editable
   // in the console); only `api-token` keeps the default write-only masking.
   const NON_SECRET_CREDS = ['site-url', 'email', ...OPTIONAL_CREDS];
@@ -564,13 +598,13 @@ test('the shipped jira manifest (plugins/jira) is valid', () => {
   // Phase 3 read UI (`/` @ team-member) + Phase 4 write config (`/admin` @
   // team-admin); `policy` declares the writes as governed subcommands (D3 —
   // role-gated, no confirmation pen, so `requiresApproval` stays empty). `attach`
-  // (#2408) is the attachment upload, gated like the other writes.
+  // (#2408) is the attachment upload, gated like the other writes; `link` / `unlink` (#2884) `set-epic` (#2895) and `edit` (#2897) likewise.
   assert.deepEqual(manifest.ui.routes, [
     { path: '/', minRole: 'team-member' },
     { path: '/admin', minRole: 'team-admin' },
   ]);
   assert.notEqual(manifest.ui.global, true);
-  assert.deepEqual(Object.keys(manifest.policy).sort(), ['attach', 'comment', 'create', 'set-field', 'sprint-advance', 'sprint-bulk-create', 'sprint-close', 'sprint-create', 'sprint-start', 'transition', 'update']);
+  assert.deepEqual(Object.keys(manifest.policy).sort(), ['attach', 'comment', 'create', 'edit', 'link', 'set-epic', 'set-field', 'sprint-advance', 'sprint-bulk-create', 'sprint-close', 'sprint-create', 'sprint-start', 'transition', 'unlink', 'update']);
   assert.deepEqual(manifest.requiresApproval, []);
 });
 
@@ -647,7 +681,11 @@ test('the jira reference manifest declares personal e-mail + api-token and label
   const { ok, manifest } = validatePluginManifest(raw);
   assert.equal(ok, true);
   assert.deepEqual(manifest.personalCredentials.map((c) => [c.key, c.required]), [['email', true], ['api-token', true]]);
+  // The team `email`/`api-token` are the service account — flagged for automated
+  // runs only (no longer blanket-required) and their copy says so.
   for (const key of ['email', 'api-token']) {
-    assert.match(manifest.credentials.find((c) => c.key === key).description, /^Service account \(used for automated runs and watching projects only\)/);
+    const c = manifest.credentials.find((cc) => cc.key === key);
+    assert.deepEqual(c.requiredFor, ['automated']);
+    assert.match(c.description, /Only for automated runs and watching projects/);
   }
 });

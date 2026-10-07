@@ -149,11 +149,45 @@ test('emit/consumed/trigger derivations from member configs', () => {
   assert.deepEqual(emitLabelsFromMembers(members).sort(), ['ready-for-review', 'ready-to-merge']);
   assert.deepEqual(consumedLabelsFromMembers(members).sort(), ['ready', 'ready-for-review', 'revisions-required']);
   assert.deepEqual(triggerDefsFromMembers(members), [
-    { agentId: 'dev', triggerId: 't-dev' },
-    { agentId: 'rev', triggerId: 't-rev' },
-    { agentId: 'rev', triggerId: 't-rework' },
+    { agentId: 'dev', triggerId: 't-dev', labelFilter: 'ready' },
+    { agentId: 'rev', triggerId: 't-rev', labelFilter: 'ready-for-review' },
+    { agentId: 'rev', triggerId: 't-rework', labelFilter: 'revisions-required' },
   ]);
   assert.deepEqual([...reworkTriggerIds(members)], ['t-rework']);
+});
+
+test('triggerDefsFromMembers carries the display fields and the activation stamp (#2710)', () => {
+  const members = [{
+    id: 'acme-rev', displayName: 'Reviewer',
+    triggers: [
+      { id: 't1', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready-for-review',
+        createdAt: '2026-08-01T00:00:00Z', activatedAt: '2026-08-02T00:00:00Z' },
+      { id: 't2', type: 'cron', createdAt: '2026-07-01T00:00:00Z' },
+      { id: 't3' },
+    ],
+  }];
+  assert.deepEqual(triggerDefsFromMembers(members), [
+    { agentId: 'acme-rev', triggerId: 't1', agentName: 'Reviewer', type: 'github-event',
+      events: ['issues.labeled'], labelFilter: 'ready-for-review', since: '2026-08-02T00:00:00Z' },
+    { agentId: 'acme-rev', triggerId: 't2', agentName: 'Reviewer', type: 'cron', since: '2026-07-01T00:00:00Z' },
+    { agentId: 'acme-rev', triggerId: 't3', agentName: 'Reviewer' },
+  ]);
+});
+
+test('triggerDefsFromMembers falls back to the epoch in a console-generated id when unstamped (#2710)', () => {
+  const members = [{
+    id: 'dev',
+    triggers: [
+      { id: 't1790817163431', type: 'cron' },        // POST /api/agents/:id/triggers id
+      { id: 't1790817163431042', type: 'loop' },     // Flow editor uid (+ random suffix)
+      { id: 't1790817163431', type: 'cron', createdAt: '2026-07-01T00:00:00Z' }, // stamp wins
+      { id: 'nightly-sweep', type: 'cron' },         // agent-authored id: no age signal
+      { id: 't123', type: 'cron' },                  // too short to be an epoch
+    ],
+  }];
+  const since = triggerDefsFromMembers(members).map((t) => t.since);
+  const fromId = new Date(1790817163431).toISOString();
+  assert.deepEqual(since, [fromId, fromId, '2026-07-01T00:00:00Z', undefined, undefined]);
 });
 
 // ── waste signals from the event log ─────────────────────────────────────────
@@ -168,6 +202,16 @@ test('wasteSignalsFromEventLog counts dropped/digest outcomes in window', () => 
   ];
   const w = wasteSignalsFromEventLog(entries, fromMs, NOW);
   assert.deepEqual(w, { throttleDrops: 1, digestFolds: 2 });
+});
+
+test('#2693: wasteSignalsFromEventLog counts a delivered+digest outcome (the poller\'s burst shape) as a digest fold', () => {
+  const NOW = Date.parse('2026-08-03T12:00:00Z');
+  const entries = [
+    { ts: '2026-08-03T11:00:00.000Z', outcomes: [
+      { status: 'delivered', digest: true }, { status: 'delivered', digest: false }, { status: 'reaped', reason: null },
+    ] },
+  ];
+  assert.deepEqual(wasteSignalsFromEventLog(entries, NOW - 3600000, NOW), { throttleDrops: 0, digestFolds: 1 });
 });
 
 test('wasteSignalsFromEventLog scopes to the team agents when given a set', () => {

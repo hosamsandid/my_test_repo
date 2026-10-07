@@ -562,6 +562,56 @@ test('searchIssues: `parent` is a selectable --fields column (#2415)', async () 
   });
 });
 
+test('searchIssues: --fields names priority/labels/dueDate as columns, read from Jira only then (#2901 AC3)', async () => {
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return fieldListResponse();
+    assert.deepEqual(JSON.parse(opts.body).fields, ['summary', 'status', 'assignee', 'updated', 'issuetype', 'parent', 'priority', 'labels', 'duedate']);
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      isLast: true, issues: [
+        { key: 'ENG-1', fields: { summary: 'One', priority: { name: 'High' }, labels: ['backend'], duedate: '2026-10-31' } },
+        { key: 'ENG-2', fields: { summary: 'Two' } },
+      ],
+    }) };
+  }, async () => {
+    const issues = await jc.searchIssues(CRED, { jql: 'project = ENG', fields: ['key', 'priority', 'labels', 'dueDate'], env: CRED.env });
+    assert.deepEqual(issues, [
+      { key: 'ENG-1', priority: 'High', labels: ['backend'], dueDate: '2026-10-31' },
+      { key: 'ENG-2', priority: null, labels: [], dueDate: null },
+    ]);
+  });
+});
+
+test('searchIssues: reporter/components/fixVersions are selectable --fields columns (#2901)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      isLast: true, issues: [{ key: 'ENG-1', fields: { reporter: { displayName: 'Anna' }, components: [{ name: 'API' }], fixVersions: [{ name: '1.4' }] } }],
+    }) };
+  }, async () => {
+    const issues = await jc.searchIssues(CRED, { jql: 'project = ENG', fields: ['reporter', 'components', 'fixVersions'], env: CRED.env });
+    assert.deepEqual(issues, [{ key: 'ENG-1', reporter: 'Anna', components: ['API'], fixVersions: ['1.4'] }]);
+  });
+});
+
+test('searchIssues: without --fields the default row carries none of the #2901 columns (AC4)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      isLast: true, issues: [{ key: 'ENG-1', fields: { summary: 'One', priority: { name: 'High' } } }],
+    }) };
+  }, async () => {
+    const [row] = await jc.searchIssues(CRED, { jql: 'project = ENG', env: CRED.env });
+    assert.deepEqual(Object.keys(row), jc.AGENT_ISSUE_COLUMNS);
+  });
+});
+
+test('shapeStandardReadFields: drops non-string list entries, keeps names', () => {
+  assert.deepEqual(jc.shapeStandardReadFields({ components: [{ name: 'API' }, {}, null], labels: ['a', ''] }), {
+    priority: null, labels: ['a'], reporter: null, components: ['API'], fixVersions: [], dueDate: null,
+  });
+  assert.deepEqual(jc.shapeStandardReadFields(undefined).labels, []);
+});
+
 test('searchIssues: an empty JQL is a 400 before any HTTP call', async () => {
   let called = false;
   const orig = global.fetch;
@@ -696,6 +746,68 @@ test('getIssue: reads summary/status/issueType/assignee and builds a browse URL 
   });
 });
 
+test('getIssue: returns priority, labels, reporter, components, fix versions and due date (#2901 AC1)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    if (isTransitionList(url)) return transitionsResponse();
+    assert.match(url, /fields=[^&]*priority,labels,reporter,components,fixVersions,duedate/);
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      key: 'ENG-7', fields: {
+        summary: 'S', status: { name: 'Open' }, issuetype: { name: 'Bug' },
+        priority: { id: '2', name: 'High' },
+        labels: ['backend', 'urgent'],
+        reporter: { accountId: 'a-1', displayName: 'Anna' },
+        components: [{ id: '10', name: 'API' }],
+        fixVersions: [{ id: '20', name: '1.4' }],
+        duedate: '2026-10-31',
+      },
+    }) };
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-7', { env: CRED.env });
+    assert.equal(issue.priority, 'High');
+    assert.deepEqual(issue.labels, ['backend', 'urgent']);
+    assert.equal(issue.reporter, 'Anna');
+    assert.deepEqual(issue.components, ['API']);
+    assert.deepEqual(issue.fixVersions, ['1.4']);
+    assert.equal(issue.dueDate, '2026-10-31');
+  });
+});
+
+test('getIssue: unset/hidden standard fields are null or [] — never an error (#2901 AC2)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    if (isTransitionList(url)) return transitionsResponse();
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      // No priority key at all (project without a priority scheme); a reporter
+      // whose account was deleted carries no display name.
+      key: 'ENG-8', fields: { summary: 'S', labels: [], reporter: { accountId: 'gone' }, components: [], fixVersions: null, duedate: null },
+    }) };
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-8', { env: CRED.env });
+    assert.equal(issue.priority, null);
+    assert.deepEqual(issue.labels, []);
+    assert.equal(issue.reporter, null);
+    assert.deepEqual(issue.components, []);
+    assert.deepEqual(issue.fixVersions, []);
+    assert.equal(issue.dueDate, null);
+  });
+});
+
+test('getIssue: the #2901 fields are additive — earlier keys keep their order and shape (AC5)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    if (isTransitionList(url)) return transitionsResponse();
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'ENG-9', fields: { summary: 'S' } }) };
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-9', { env: CRED.env });
+    assert.deepEqual(Object.keys(issue).slice(0, 15), [
+      'key', 'summary', 'status', 'issueType', 'assignee', 'created', 'updated', 'parent', 'links', 'url',
+      'priority', 'labels', 'reporter', 'components', 'fixVersions',
+    ]);
+    assert.ok('dueDate' in issue);
+  });
+});
+
 test('getIssue: missing created/updated fields surface as null (#2414)', async () => {
   await withFetch((url) => {
     if (isFieldList(url)) return fieldListResponse();
@@ -772,6 +884,8 @@ test('partitionFields: standard columns vs custom-field names', () => {
   assert.deepEqual(jc.partitionFields(['status', 'Team', 'summary']), { columns: ['status', 'summary'], customNames: ['Team'] });
   assert.deepEqual(jc.partitionFields(undefined), { columns: [], customNames: [] });
   assert.deepEqual(jc.partitionFields(['Team']), { columns: [], customNames: ['Team'] });
+  // #2901 standard fields are columns, not custom-field names.
+  assert.deepEqual(jc.partitionFields(['priority', 'dueDate', 'Team']), { columns: ['priority', 'dueDate'], customNames: ['Team'] });
 });
 
 test('mergeCustomFieldNames: unions and de-dups case-insensitively, first spelling wins', () => {

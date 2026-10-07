@@ -136,6 +136,7 @@ const {
   resolveContextMounts,
 } = require('./context-mount');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
+const { parseItemsQuery, selectItemsPage, graphWithoutItems, lessonTexts } = require('./knowledge-items-page');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { applyPushedBy } = require('./push-producer-filter');
@@ -7655,20 +7656,47 @@ async function buildKnowledgeGraphResponse(scope, parsed, includeArchived) {
   return graph;
 }
 
+// The (cached) knowledge graph for a scope as this viewer sees it. Shared by the
+// graph and the paged items route; callers must never mutate the result.
+function loadKnowledgeGraph(scope, parsed, includeArchived) {
+  const build = () => buildKnowledgeGraphResponse(scope, parsed, includeArchived);
+  return KNOWLEDGE_GRAPH_TTL_MS > 0
+    ? knowledgeGraphCache.getOrCompute(
+      knowledgeGraphCacheKey({ scope: parsed.scope, includeArchived, viewerScope: scope }), build)
+    : build();
+}
+
+// ?items=none (#2921): the graph without its per-entry item nodes — the
+// Knowledge page pages the entries in via GET /api/knowledge/items instead of
+// downloading (and rendering) every entry of a large team at once.
 app.get('/api/knowledge/graph', async (req, res) => {
   const scope = getScope(req);
   const parsed = knowledgeScopeParam(req);
   const includeArchived = req.query.includeArchived === '1' || req.query.includeArchived === 'true';
   try {
-    const build = () => buildKnowledgeGraphResponse(scope, parsed, includeArchived);
-    const graph = KNOWLEDGE_GRAPH_TTL_MS > 0
-      ? await knowledgeGraphCache.getOrCompute(
-        knowledgeGraphCacheKey({ scope: parsed.scope, includeArchived, viewerScope: scope }), build)
-      : await build();
-    res.json(graph);
+    const graph = await loadKnowledgeGraph(scope, parsed, includeArchived);
+    res.json(req.query.items === 'none' ? graphWithoutItems(graph) : graph);
   } catch (err) {
     console.error(`[knowledge] graph build failed: ${err.message}`);
     res.status(500).json({ error: 'knowledge graph build failed' });
+  }
+});
+
+// One page of a team's knowledge items (#2921), filtered + sorted server-side:
+// ?team=&offset=&limit=&q=&kind=&converged=1&today=1&agent=&sort=created|used-desc|used-asc
+// &includeArchived=1. Served from the same cached graph as /api/knowledge/graph.
+app.get('/api/knowledge/items', async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.query.team === 'string' ? req.query.team : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const includeArchived = req.query.includeArchived === '1' || req.query.includeArchived === 'true';
+  try {
+    const graph = await loadKnowledgeGraph(scope, parseScope(`team:${teamId}`), includeArchived);
+    res.json({ team: teamId, ...selectItemsPage(graph, parseItemsQuery(req.query)) });
+  } catch (err) {
+    console.error(`[knowledge] items page failed: ${err.message}`);
+    res.status(500).json({ error: 'knowledge items failed' });
   }
 });
 
@@ -9284,6 +9312,11 @@ app.post('/api/knowledge/domains', apiLimiter, async (req, res) => {
   }
   try {
     const forward = { ...req.body, teamId, op };
+    // #2921: the Knowledge page no longer holds every entry, so the lessons the
+    // bootstrap proposes domains over are read here (same cached team graph).
+    if (op === 'bootstrap' && !(Array.isArray(forward.lessons) && forward.lessons.length)) {
+      forward.lessons = lessonTexts(await loadKnowledgeGraph(scope, parseScope(`team:${teamId}`), false));
+    }
     if (assistTarget && assistTarget.endpointId) {
       forward.assistEndpointId = assistTarget.endpointId; // env fallback (endpointId=null) → orchestrator uses .env
       forward.model = assistTarget.model;

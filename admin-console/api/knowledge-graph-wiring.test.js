@@ -22,10 +22,12 @@ function body(marker) {
 
 test('the route goes through the cache, keyed per viewer, with 0 = off', () => {
   const r = API_SRC.slice(API_SRC.indexOf("app.get('/api/knowledge/graph',"), API_SRC.indexOf('\n});', API_SRC.indexOf("app.get('/api/knowledge/graph',")));
-  assert.match(r, /knowledgeGraphCache\.getOrCompute\(/);
-  assert.match(r, /knowledgeGraphCacheKey\(\{ scope: parsed\.scope, includeArchived, viewerScope: scope \}\)/);
-  assert.match(r, /KNOWLEDGE_GRAPH_TTL_MS > 0/);
+  assert.match(r, /await loadKnowledgeGraph\(scope, parsed, includeArchived\)/);
   assert.doesNotMatch(r, /listAgentDirs|readJsonFile|gatherTeamEntries/, 'the build lives in buildKnowledgeGraphResponse');
+  const load = body('function loadKnowledgeGraph(');
+  assert.match(load, /knowledgeGraphCache\.getOrCompute\(/);
+  assert.match(load, /knowledgeGraphCacheKey\(\{ scope: parsed\.scope, includeArchived, viewerScope: scope \}\)/);
+  assert.match(load, /KNOWLEDGE_GRAPH_TTL_MS > 0/);
   assert.match(API_SRC, /const KNOWLEDGE_GRAPH_TTL_MS = knowledgeGraphTtlMsFromEnv\(process\.env\);/);
   assert.match(API_SRC, /const knowledgeGraphCache = createTtlCache\(\{ ttlMs: KNOWLEDGE_GRAPH_TTL_MS/);
 });
@@ -167,4 +169,19 @@ test('a broken agent config is warned with its real cause, re-armed by a clean r
   assert.match(b, /_knowledgeFleetWarnings\.shouldWarn\(id, err\)/);
   assert.match(b, /onEntryOk: \(id\) => _knowledgeFleetWarnings\.ok\(id\)/);
   assert.match(body('function readJsonFile('), /catch \(err\) \{\n\s+if \(onError\) onError\(err\);\n\s+return fallback;/);
+});
+
+// #2921: the Knowledge page loads the graph without its item nodes and pages the
+// entries in from the same cached graph — projected, never mutated in place.
+test('?items=none and the paged items route serve projections of the cached graph', () => {
+  const g = API_SRC.slice(API_SRC.indexOf("app.get('/api/knowledge/graph',"), API_SRC.indexOf('\n});', API_SRC.indexOf("app.get('/api/knowledge/graph',")));
+  assert.match(g, /req\.query\.items === 'none' \? graphWithoutItems\(graph\) : graph/);
+  const start = API_SRC.indexOf("app.get('/api/knowledge/items',");
+  assert.ok(start > 0, 'items route present');
+  const r = API_SRC.slice(start, API_SRC.indexOf('\n});', start));
+  assert.match(r, /knowledgeTeamVisible\(scope, teamId\)/, 'membership-scoped like the other knowledge reads');
+  assert.match(r, /await loadKnowledgeGraph\(scope, parseScope\(`team:\$\{teamId\}`\), includeArchived\)/);
+  assert.match(r, /selectItemsPage\(graph, parseItemsQuery\(req\.query\)\)/);
+  const d = API_SRC.slice(API_SRC.indexOf("app.post('/api/knowledge/domains',"), API_SRC.indexOf('\n});', API_SRC.indexOf("app.post('/api/knowledge/domains',")));
+  assert.match(d, /op === 'bootstrap' && !\(Array\.isArray\(forward\.lessons\)/, 'bootstrap reads the lessons server-side');
 });

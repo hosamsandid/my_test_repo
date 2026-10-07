@@ -565,6 +565,10 @@ function buildProcessGraph(agents, options) {
         // Claim (#958) rides on the listener edge so the renderer can badge it.
         const cv = claimView(t);
         const clm = cv ? { claim: cv } : {};
+        // Readiness gate (#2795) of a PR hand-off listener, so the canvas can
+        // tag the gated edge (#2913). Spread with the claim onto every edge.
+        const rgv = triggerReadiness(t);
+        if (rgv) clm.readinessGate = rgv;
         const kind = classify(key);
         if (kind === 'gate') gateSet.add(key);
         if (kind === 'gate' || kind === 'brake') {

@@ -292,6 +292,10 @@ const AGENT_ROUTES = [
   // credential, so `own` here is exactly what stops agent A pushing as agent B.
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/git\/push$/, scope: "own" },
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/git\/pr$/, scope: "own" },
+  // SSH commit signing (#2938): the run's signing config and the signer git's
+  // gpg.ssh.program calls — `own`, so agent A can never sign with B's key.
+  { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/git\/signing-config$/, scope: "own" },
+  { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/git\/sign$/, scope: "own" },
   // Chat-attributed `gh` writes (#2559, the `gh` shim) — same reasoning.
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/github\/gh$/, scope: "own" },
 

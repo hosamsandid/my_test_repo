@@ -80,6 +80,18 @@ harness) — you do **not** need to set `GIT_COMMITTER_*` or run `git config`. T
 author email keeps the `@agents.local` marker the poller reads for loop
 protection; the committer mirrors the orchestrator's own identity.
 
+### Signed commits
+
+When an SSH signing key is configured for you in Agent Studio (personal, team or
+global), every commit you create in a run — `gh-as-agent commit`, plain
+`git commit`, amend, cherry-pick, rebase, merge, the `knowledge` CLI — is signed
+automatically, and its committer becomes the key's commit identity (your author
+stays). Nothing to set up; do not change `gpg.*`, `commit.gpgsign` or
+`user.signingkey`. If a commit fails with `aee-ssh-sign: … failed`, the key is
+broken — surface the message, do not retry with `--no-gpg-sign`. If a push or PR
+is rejected because commits are unsigned, `gh-as-agent` prints the cause and the
+fix; surface it to the user.
+
 ### `gh-as-agent pr` when the environment has no GitHub token
 
 Opening a PR needs a GitHub PAT. If this environment has none, `gh-as-agent pr`

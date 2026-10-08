@@ -144,6 +144,14 @@ RUN chmod +x /opt/ace/scripts/aee-ask \
 RUN chmod +x /opt/ace/scripts/aee-wait-ci \
     && ln -sf /opt/ace/scripts/aee-wait-ci /usr/local/bin/aee-wait-ci
 
+# `aee-ssh-sign` — git's `gpg.ssh.program` when a signing key resolves for a run
+# (#2938). The runtime sets it per invocation via GIT_CONFIG_* env; it forwards
+# each commit payload to the orchestrator, which signs with the stored key, so
+# the private key never enters the container. Other `ssh-keygen -Y` operations
+# pass through to the real ssh-keygen.
+RUN chmod +x /opt/ace/scripts/aee-ssh-sign \
+    && ln -sf /opt/ace/scripts/aee-ssh-sign /usr/local/bin/aee-ssh-sign
+
 # `usage` — read-only view of this agent's / its team's token usage (#679). On
 # PATH so agents call it directly: `usage me` / `usage team` query the
 # orchestrator's read-only usage endpoint across the volume-isolation boundary

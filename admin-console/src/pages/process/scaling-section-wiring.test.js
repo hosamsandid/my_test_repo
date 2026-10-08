@@ -4,24 +4,20 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-// ─── #2294 "remove the Workspace dropdown" wiring guard ──────────────────────
+// ─── #2813 AC15 "Workspace mode + work source" wiring guard ─────────────────
 //
 // `ScalingSection.jsx` is uncovered by a renderer (#651: no DOM test renderer
-// in this repo), so the two facts this ticket depends on can only be checked
-// by reading the source:
+// in this repo), so the wiring can only be checked by reading the source.
+// #2294 removed the Workspace dropdown because `input-copy`/`none` had no UI
+// for the `pool.workSource` they need; #2813 brings both back together:
 //
-//   • AC1 — the "Workspace" field/select must be gone from BOTH hosts
-//     (NodeInspector's Details tab and AgentEditForm's Settings tab), which
-//     embed this ONE shared component — removing it here removes it from both.
-//   • AC3 — the save payload must never carry a `workspace` value other than
-//     `git-clean-base` (or omit the field). `buildPoolPayload` (scaling-view.js,
-//     pure, unit-tested) already defaults an omitted `workspace` to
-//     `git-clean-base`, so the save call site must not thread a variable
-//     `workspace` value into it — that is the only way a stale/rehydrated
-//     `pool.workspace` (`input-copy`/`none`) could sneak back into a save.
-//     Since #2295 made ScalingSection a controlled draft, that save call site
-//     is now `scaling-view.js`'s `scalingSaveDecision`, not the component's
-//     own (removed) `save()`.
+//   • the shared section (embedded by NodeInspector's Details tab AND
+//     AgentEditForm's Settings tab) offers the Workspace select from
+//     POOL_WORKSPACE_OPTIONS and the work-source fields, shown only off
+//     git-clean-base (`workSourceApplies`);
+//   • `scalingSaveDecision` threads the chosen workspace, the parsed work
+//     source and the carried `baseBranch` into `buildPoolPayload`, so a save
+//     round-trips them instead of silently resetting to git-clean-base.
 //
 // Source-text guard, not a render test.
 
@@ -33,20 +29,23 @@ function sourceOf(rel) {
     .replace(/^\s*\/\/.*$/gm, '');
 }
 
-test('ScalingSection.jsx: no Workspace select, no POOL_WORKSPACE_OPTIONS/workspaceValue wiring', () => {
+test('ScalingSection.jsx: Workspace select + work-source fields, gated off git-clean-base', () => {
   const src = sourceOf('./ScalingSection.jsx');
-  assert.equal(/<select/.test(src), false, 'a <select> reappeared — the removed Workspace dropdown, or a new one');
-  assert.equal(/POOL_WORKSPACE_OPTIONS/.test(src), false);
-  assert.equal(/workspaceValue/.test(src), false);
-  assert.equal(/\bsetWorkspace\b/.test(src), false);
+  assert.match(src, /<select[^>]*value=\{draft\.workspace\}/);
+  assert.match(src, /POOL_WORKSPACE_OPTIONS\.map/);
+  assert.match(src, /workSourceApplies\(draft\)/);
+  for (const f of ['itemsText', 'outputDirText', 'inputDirText']) {
+    assert.match(src, new RegExp(`set\\(\\{ ${f}:`), `${f} is not editable`);
+  }
 });
 
-test('scaling-view.js: scalingSaveDecision -> buildPoolPayload never threads a workspace value', () => {
+test('scaling-view.js: scalingSaveDecision threads workspace, workSource and baseBranch', () => {
   const src = sourceOf('./scaling-view.js');
   const fn = src.match(/export function scalingSaveDecision[\s\S]*?\n\}/);
   assert.ok(fn, 'expected a scalingSaveDecision function (the host-owned save call site since #2295)');
   const call = fn[0].match(/buildPoolPayload\(\{[\s\S]*?\}\)/);
   assert.ok(call, 'expected exactly one buildPoolPayload({...}) call site in scalingSaveDecision');
-  assert.equal(/workspace/.test(call[0]), false,
-    'buildPoolPayload is called with a workspace key — it must rely on the pure default (git-clean-base) instead');
+  for (const key of ['workspace', 'workSource', 'baseBranch']) {
+    assert.match(call[0], new RegExp(`\\b${key}\\b`), `buildPoolPayload is not given ${key}`);
+  }
 });

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { promptRebuildSummary } from './working-env-context-view.js';
+import { promptRebuildSummary, modelWarningsSummary } from './working-env-context-view.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -45,4 +45,13 @@ test('Team Settings shows the rebuild report and no longer over-promises in the 
 test('the template name help text no longer refers to the removed agent list', () => {
   const src = fs.readFileSync(path.join(HERE, 'EnvironmentTemplates.jsx'), 'utf8');
   assert.doesNotMatch(src, /agent list/);
+});
+
+test('modelWarningsSummary: dropped model pins become a warning, nothing otherwise (#2813 AC9)', () => {
+  assert.equal(modelWarningsSummary(undefined), null);
+  assert.equal(modelWarningsSummary([]), null);
+  assert.deepEqual(modelWarningsSummary(['model m9 not available in provider Proxy — using default (agent a)', '', 7]), {
+    tone: 'warn',
+    lines: ['model m9 not available in provider Proxy — using default (agent a)'],
+  });
 });

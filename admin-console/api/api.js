@@ -146,7 +146,7 @@ const { missingWakeLabels, wakeLabelRepos, missingWakeLabelLints, missingWakeLab
 const { normalizeBranchFilter } = require('./branch-filter');
 const { normalizeCommentFilter } = require('./comment-filter');
 const { newTriggerIdError, annotateTriggerList, stripTriggerAnnotations, resolveTriggerIndex } = require('./trigger-validate');
-const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext, normalizeReadinessGate, cleanReadiness, readinessError, applyChannelTriggerReadiness } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext, normalizeReadinessGate, cleanReadiness, readinessError, resolveBundleModels, staleModelPin, promptModeWarnings, portableTeamPrompt, substituteVars, applyChannelTriggerReadiness } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { rederiveTeamDataFlow } = require('./derived-data-flow');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
@@ -161,6 +161,7 @@ const { buildCredentialDescriptor } = require('./credential-descriptor');
 const draftAccess = require('./draft-access');
 // Team-member system-prompt modes (#1511): inherit / additional / exclusive.
 const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require('./prompt-modes');
+const { memoryCeiling, memoryLimitError, normalizeMemoryLimit, resolveEffectiveMemory, DEFAULT_PLATFORM_MEMORY } = require('./memory-limit');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
 const { normalizeTemplatePorts } = require('./catalog-ports');
@@ -3073,7 +3074,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // validation below, so the gate check sees the name that is persisted.
   const liveSuffix = teamLabelSuffixFor(cfg);
   if (liveSuffix) req.body = stampLiveLabels(req.body || {}, liveSuffix, { keep: teamForeignLabelsFor(id, cfg) });
-  const { displayName, role, enabled, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, wipLimit, autoDispatch, pool, github, channels, assistLlmEndpointId } = req.body;
+  const { displayName, role, enabled, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, wipLimit, autoDispatch, pool, github, channels, assistLlmEndpointId, memoryLimit } = req.body;
 
   // ── Display name (#2679) ──────────────────────────────────────────────────
   // Required: trimmed and non-empty, or the agent renders nameless. Checked up
@@ -3153,6 +3154,26 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
         return res.status(400).json({ error: 'assistLlmEndpointId cannot be an oauth-token provider (subscription seats are not billable for server-side synthesis)' });
       }
       normAssistEndpointId = assistLlmEndpointId;
+    }
+  }
+
+  // ── Role memory requirement (#2813) ───────────────────────────────────────
+  // `memoryLimit` ("4g", "512m"; ''/null clears → toolchain / platform
+  // default) sizes the agent's container at its NEXT start. Validated up front
+  // against the operator ceiling (AEE_AGENT_MEM_CEILING, default 8g) with the
+  // same rule the bundle validator runs, so a live edit and an imported draft
+  // agree. A team agent hosts no container, so it is refused there.
+  let normMemoryLimit; // undefined = untouched, null = clear
+  if (memoryLimit !== undefined) {
+    if (cfg.role === 'team') {
+      return res.status(400).json({ error: 'memoryLimit is set on a role/agent, not on the team agent' });
+    }
+    if (memoryLimit === null || (typeof memoryLimit === 'string' && !memoryLimit.trim())) {
+      normMemoryLimit = null;
+    } else {
+      const merr = memoryLimitError(memoryLimit, { role: id, ceiling: memoryCeiling(process.env) });
+      if (merr) return res.status(400).json({ error: merr });
+      normMemoryLimit = normalizeMemoryLimit(memoryLimit);
     }
   }
 
@@ -3502,6 +3523,14 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
       if (!norm) delete fresh.pool;
       else fresh.pool = norm;
     }
+  }
+
+  // Role memory requirement (#2813) — validated into normMemoryLimit above.
+  // Read by the orchestrator at the next container start; a running container
+  // (and a running pool instance) keeps the limit it was created with.
+  if (normMemoryLimit !== undefined) {
+    if (normMemoryLimit) fresh.memoryLimit = normMemoryLimit;
+    else delete fresh.memoryLimit;
   }
 
   // Named human roles, team-agent only (#987) — validated into normHumans above.
@@ -4567,6 +4596,9 @@ app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
   const materializePref = parseMemberMaterialize(inBody);
   if (materializePref.error) return res.status(400).json({ error: materializePref.error });
   const { materialize } = materializePref;
+  // #2813: a free-form member's memory requirement is checked like a save.
+  const memErr = memoryLimitError(inBody.memoryLimit, { role: inBody.id || teamId, ceiling: memoryCeiling(process.env) });
+  if (memErr) return res.status(400).json({ error: memErr });
   let outBody = { ...inBody, materialize };
   if (typeof inBody.templateId === 'string' && inBody.templateId) {
     const template = loadAgentTemplate(inBody.templateId);
@@ -5971,6 +6003,48 @@ app.patch('/api/agents/:id/model', apiLimiter, (req, res) => {
   res.json({ override: modelId });
 });
 
+// ── Role memory requirement read-out (#2813) ────────────────────────────────
+// The platform side of the effective-limit display: the fleet default
+// (AEE_AGENT_MEM_LIMIT) and the operator ceiling (AEE_AGENT_MEM_CEILING). The
+// draft inspector has no agent yet, so it reads this alone.
+function platformMemoryInfo() {
+  return {
+    platform: normalizeMemoryLimit(process.env.AEE_AGENT_MEM_LIMIT) || DEFAULT_PLATFORM_MEMORY,
+    ceiling: memoryCeiling(process.env),
+  };
+}
+
+app.get('/api/memory-limits', (req, res) => {
+  res.json(platformMemoryInfo());
+});
+
+// Per agent: its own value, the toolchain's `resources.memoryLimit` (via its
+// Working Environment), the platform default and ceiling, and the resolved
+// effective limit + source — the same role → toolchain → platform order the
+// orchestrator applies at the next container start.
+app.get('/api/agents/:id/memory', (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  const scope = getScope(req);
+  if (!visibleAgent(scope, agentMetaForScope(cfg))) {
+    return res.status(404).json({ error: 'Agent not found' });
+  }
+  const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  const tc = env && env.toolchainId ? listToolchains().find((t) => t.id === env.toolchainId) : null;
+  const toolchain = normalizeMemoryLimit(tc && tc.resources && tc.resources.memoryLimit);
+  const plat = platformMemoryInfo();
+  const effective = resolveEffectiveMemory({ role: cfg.memoryLimit, toolchain, platform: plat.platform, ceiling: plat.ceiling });
+  res.json({
+    memoryLimit: cfg.memoryLimit || null,
+    toolchain,
+    toolchainId: (env && env.toolchainId) || null,
+    ...plat,
+    effective: { limit: effective.limit, source: effective.source, clamped: effective.clamped },
+  });
+});
+
 // Switch the Model Provider (LLM endpoint) for a single agent. Unlike the model
 // override (read live by the runtime), the provider is injected at container
 // spawn time, so a change requires a one-agent respawn — done best-effort after
@@ -6034,6 +6108,29 @@ function pruneIncompatibleModelOverride(cfg, endpointId) {
   if (!ep || !(ep.models || []).some(m => m.id === cfg.modelOverride)) {
     delete cfg.modelOverride;
   }
+}
+
+// #2813 AC9: after an environment's provider changed, drop every bound
+// member's model pin the new provider does not serve (see staleModelPin).
+// Returns one warning per dropped pin; no provider bound → pins stay pending.
+function dropStaleEnvModelPins(env) {
+  const endpoint = env && env.llmEndpointId
+    ? (listLlmEndpoints().find(e => e.id === env.llmEndpointId) || null)
+    : null;
+  if (!endpoint) return [];
+  const warnings = [];
+  for (const id of listAgentDirs()) {
+    const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
+    const cfg = readJsonFile(cfgPath, null);
+    if (!cfg || cfg.environmentId !== env.id) continue;
+    const note = staleModelPin(cfg, endpoint);
+    if (!note) continue;
+    delete cfg.modelOverride;
+    writeJsonAtomic(cfgPath, cfg);
+    console.warn(`[api] ${note}`);
+    warnings.push(note);
+  }
+  return warnings;
 }
 
 // Ask the orchestrator to recreate the agent's running container so a new
@@ -7288,6 +7385,8 @@ app.post('/api/process/graph', (req, res) => {
     humans: Array.isArray(bundle.humans) ? bundle.humans : [],
     // Auto-repairs applied on import (#2579) — non-fatal, surfaced to the client.
     ...(coercions.length ? { coercions } : {}),
+    // Prompt-mode lints (#2813) — e.g. an inherit role with no team prompt.
+    ...(promptModeWarnings(bundle).length ? { promptWarnings: promptModeWarnings(bundle) } : {}),
     ...buildProcessGraph(agents, { labels: bundle.labels, humans: bundle.humans }),
   });
 });
@@ -10395,6 +10494,8 @@ app.post('/api/flows/graph', (req, res) => {
     humans: bundleHumans,
     // Auto-repairs applied on import (#2579) — non-fatal, surfaced to the client.
     ...(coercions.length ? { coercions } : {}),
+    // Prompt-mode lints (#2813) — e.g. an inherit role with no team prompt.
+    ...(promptModeWarnings(bundle).length ? { promptWarnings: promptModeWarnings(bundle) } : {}),
     ...buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels, humans: bundleHumans }),
   });
 });
@@ -10414,8 +10515,16 @@ app.get('/api/process/template', (req, res) => {
   let teamHillClimb = null;
   let teamWipLimit = null;
   let teamAutoDispatch = null;
+  let teamPrompt = '';
   if (team) {
     const teamCfg = readJsonFile(path.join(AGENTS_DIR, team, 'config.json'), null);
+    // The team prompt template inherit/additional members compose from (#2813).
+    // Lifted to placeholders so the bundle carries no repository; omitted when
+    // it is still the platform default, which materialise regenerates for the
+    // target team (repo-aware) anyway.
+    const tpl = typeof teamCfg?.systemPromptTemplate === 'string' ? teamCfg.systemPromptTemplate : '';
+    const tplVars = { teamName: teamCfg?.displayName || team, repoFullName: memberRepoFullName(teamCfg) };
+    teamPrompt = tpl.trim() === defaultTeamPrompt(tplVars).trim() ? '' : portableTeamPrompt(tpl, tplVars);
     if (teamCfg?.displayName) teamName = teamCfg.displayName;
     if (Array.isArray(teamCfg?.stages)) teamStages = teamCfg.stages.filter(s => typeof s === 'string');
     // Hill-climb collector config (#1222) round-trips like stages; normalizeHillClimb
@@ -10436,7 +10545,13 @@ app.get('/api/process/template', (req, res) => {
     const tlist = Array.isArray(triggers) ? triggers : [];
     // Effective prompt the agent actually runs (rendered AGENT-PROMPT.md),
     // falling back to the config override.
-    const systemPrompt = readAgentSystemPrompt(id) || cfg.systemPrompt || '';
+    // #2813: an inherit/additional member exports its OWN text (the addition,
+    // or nothing) plus its promptMode, never the flattened prompt — otherwise
+    // the round trip would turn it into an exclusive copy of today's team prompt.
+    const promptMode = resolvePromptMode(cfg);
+    const systemPrompt = promptMode === PROMPT_MODES.EXCLUSIVE
+      ? (readAgentSystemPrompt(id) || cfg.systemPrompt || '')
+      : (cfg.systemPrompt || '');
     // Lift any legacy trigger-level emit to the agent level (#783) so the export
     // carries label hand-offs canonically and loses no edge.
     const emits = liftAgentEmits(cfg.emits, tlist);
@@ -10469,6 +10584,15 @@ app.get('/api/process/template', (req, res) => {
       // (e.g. Developer → Code Reviewer "PR"). buildProcessTemplate reduces the
       // member-id `from` to a portable role key via remapChannel.
       ...(Array.isArray(cfg.channels) && cfg.channels.length ? { channels: cfg.channels } : {}),
+      // PR/issue producer flags (#380) — buildProcessTemplate serializes
+      // `r.github`, but the export never handed it over (#2813 AC11).
+      ...(cfg.github && typeof cfg.github === 'object' ? { github: cfg.github } : {}),
+      // Portable role settings (#2813): prompt mode, model pin (omitted on the
+      // environment default), memory requirement (omitted on platform default).
+      // Repos, mounts, env, provider, MCP, skills and plugins never travel.
+      promptMode,
+      ...(typeof cfg.modelOverride === 'string' && cfg.modelOverride ? { model: cfg.modelOverride } : {}),
+      ...(cfg.memoryLimit ? { memoryLimit: cfg.memoryLimit } : {}),
       // Agent instance pools (#2246): the member's opt-in pooling config. It MUST
       // ride the exported ROLE — buildProcessTemplate's `normalizePool(r.pool)`
       // only serializes what it is given, so without this the pooled role exports
@@ -10498,6 +10622,7 @@ app.get('/api/process/template', (req, res) => {
     wipLimit: teamWipLimit,
     // The Flow Supervisor's opt-in (#2247) rides along on the team agent, same as above.
     autoDispatch: teamAutoDispatch,
+    teamPrompt,
   }));
 });
 
@@ -17110,6 +17235,13 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
   // image is immutable for its whole lifetime, so a toolchain change reaches a
   // RUNNING agent only by recreating it. The console warns about the interruption
   // before the save, as the personal-credential rotate panel does.
+  // #2813 AC9: a model pin the bound members carry (e.g. one kept pending
+  // when the team was created before a provider was bound) is checked against
+  // the NEW provider before the respawn below, so no member starts on a model
+  // its provider does not serve. Dropped pins are named in the response.
+  const modelPinsDropped = (env.llmEndpointId || null) !== prevLlmEndpointId
+    ? dropStaleEnvModelPins(env)
+    : [];
   if ((env.githubTokenId || null) !== prevGithubTokenId) {
     notifyEnvCredentialChange(env.id, 'githubTokenId-changed');
   } else if ((env.toolchainId || null) !== prevToolchainId) {
@@ -17134,6 +17266,7 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
   res.json({
     ...env,
     previousRepositories: prevRepositories,
+    ...(modelPinsDropped.length ? { modelWarnings: modelPinsDropped } : {}),
     ...(mcpApply ? { mcpApply } : {}),
     ...(promptRebuild ? { promptRebuild } : {}),
   });
@@ -17747,6 +17880,31 @@ app.delete('/api/agent-templates/:id', (req, res) => {
   res.json({ deleted: id, revertedToDefault: hasDefault });
 });
 
+// The team agent's prompt template at materialise (#2813): the bundle's own
+// `teamPrompt` (placeholders substituted for THIS team) when it carries one,
+// else the platform default.
+function bundleTeamPrompt(bundle, vars) {
+  const tpl = bundle && typeof bundle.teamPrompt === 'string' ? bundle.teamPrompt : '';
+  return tpl.trim() ? substituteVars(tpl, vars) : defaultTeamPrompt(vars);
+}
+
+// Model availability for a materialising team (#2813 AC9): resolves each
+// planned member template's `model` against the provider bound on the team's
+// environment. Returns the warnings and a lookup giving the (possibly
+// model-less) template for a planned member.
+function gateBundleModels(planned, envId) {
+  const templates = [...new Set((planned || []).map(p => p.template))];
+  let endpoint = null;
+  try {
+    const env = loadEnvironment(envId);
+    const epId = env && env.llmEndpointId;
+    endpoint = epId ? (listLlmEndpoints().find(e => e.id === epId) || null) : null;
+  } catch { endpoint = null; }
+  const { roles, warnings } = resolveBundleModels(templates, endpoint);
+  const byTemplate = new Map(templates.map((t, i) => [t, roles[i]]));
+  return { warnings, templateFor: (t) => byTemplate.get(t) || t };
+}
+
 // Generic, role-agnostic team prompt. Each member can override this with
 // its role-specific prompt; members that don't override inherit this text
 // and pick up edits via /api/agents/:id PUT (systemPromptTemplate).
@@ -18167,12 +18325,15 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   // loop below (var substitution over prompt + triggers).
   let customRolesRaw = Array.isArray(body.customRoles) ? body.customRoles : [];
   let importCoercions = [];
+  let modelWarnings = [];
   if (body.processTemplate) {
     // Repair safe cross-field inconsistencies before validating (#2579) and reuse
     // the coerced bundle for EVERY downstream read (stages/labels/humans/wipLimit/
     // autoDispatch below), so an older/leaky export materialises consistently
     // instead of being rejected outright.
-    const coerced = coerceImportBundle(body.processTemplate);
+    // #2813 AC5: a role memory above the ceiling is clamped (with a warning)
+    // so the team is still created — validation alone would refuse it.
+    const coerced = coerceImportBundle(body.processTemplate, { clampMemory: true });
     body.processTemplate = coerced.bundle;
     importCoercions = coerced.warnings;
     const v = validateProcessTemplate(body.processTemplate);
@@ -18519,7 +18680,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     // first-member auto-create (the wizard adds members itself with role
     // overrides in Phase C).
     if (!teamExists) {
-      const teamPrompt = defaultTeamPrompt(vars);
+      const teamPrompt = bundleTeamPrompt(body.processTemplate, vars);
       const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -18587,6 +18748,10 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     // Phase C — team-members, one per selected role. Each one carries a
     // role-specific prompt override (so the team's generic prompt stays
     // useful as a fallback) and the role's full triggers.json.
+    // #2813 AC9: a role's model pin becomes the member's modelOverride only
+    // when the environment's provider serves it; otherwise the default + a warning.
+    const modelGate = gateBundleModels(toCreate, envId);
+    modelWarnings = modelGate.warnings;
     for (const p of toCreate) {
       const memberVars = { ...vars, agentId: p.memberId };
       // Member display name is the role name only (optionally numbered for
@@ -18599,7 +18764,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
       // Single source of truth for the member-create body (shared with the
       // streaming endpoint and the Flow Editor's add-role-from-template, #586):
       // prompt + triggers substituted per-member; declarative ports carried.
-      const memberBody = buildMemberFromTemplate(p.template, {
+      const memberBody = buildMemberFromTemplate(modelGate.templateFor(p.template), {
         teamId, memberId: p.memberId, memberDisplayName, vars: memberVars,
         materialize: materializeMembers,
       });
@@ -18672,8 +18837,8 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
       dms: created.dms,
       // Suffix collisions + any import auto-repairs (#2579) share the one
       // non-fatal `warnings` channel.
-      ...((suffixWarnings.length || importCoercions.length)
-        ? { warnings: [...importCoercions, ...suffixWarnings] } : {}),
+      ...((suffixWarnings.length || importCoercions.length || modelWarnings.length)
+        ? { warnings: [...importCoercions, ...modelWarnings, ...suffixWarnings] } : {}),
     });
 
     // Phase E — label provisioning (best-effort, after response sent).
@@ -18913,10 +19078,13 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // `processTemplate` bundle (Process Canvas import / wizard Process step, #422).
   let customRolesRaw = Array.isArray(body.customRoles) ? body.customRoles : [];
   let importCoercions = [];
+  let modelWarnings = [];
   if (body.processTemplate) {
     // Repair safe cross-field inconsistencies before validating (#2579), reusing
     // the coerced bundle for every downstream read — parity with POST /api/teams.
-    const coerced = coerceImportBundle(body.processTemplate);
+    // #2813 AC5: a role memory above the ceiling is clamped (with a warning)
+    // so the team is still created — validation alone would refuse it.
+    const coerced = coerceImportBundle(body.processTemplate, { clampMemory: true });
     body.processTemplate = coerced.bundle;
     importCoercions = coerced.warnings;
     const v = validateProcessTemplate(body.processTemplate);
@@ -19278,7 +19446,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
 
     if (!teamExists) {
       emit({ type: 'step', id: 'team', status: 'running' });
-      const teamPrompt = defaultTeamPrompt(vars);
+      const teamPrompt = bundleTeamPrompt(body.processTemplate, vars);
       const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -19342,6 +19510,10 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       emit({ type: 'step', id: 'team', status: 'done' });
     }
 
+    // #2813 AC9 — parity with POST /api/teams.
+    const modelGate = gateBundleModels(toCreate, envId);
+    modelWarnings = modelGate.warnings;
+    for (const w of modelWarnings) emit({ type: 'warning', message: w });
     for (const p of toCreate) {
       const stepId = `member:${p.memberId}`;
       emit({ type: 'step', id: stepId, status: 'running' });
@@ -19358,7 +19530,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       // non-streaming handler does (#1955) — this is the request path both UI
       // surfaces use, so leaving it to the orchestrator default is what made the
       // Materialize dialog's checkbox inert.
-      const memberBody = buildMemberFromTemplate(p.template, {
+      const memberBody = buildMemberFromTemplate(modelGate.templateFor(p.template), {
         teamId, memberId: p.memberId, memberDisplayName, vars: memberVars,
         materialize: materializeMembers,
       });
@@ -19462,8 +19634,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
         dms: created.dms,
         // Import auto-repairs (#2579) + suffix collisions + label-provisioning
         // warnings all share the one non-fatal `warnings` channel.
-        ...((importCoercions.length || suffixWarnings.length || provWarn.length)
-          ? { warnings: [...importCoercions, ...suffixWarnings, ...provWarn] } : {}),
+        ...((importCoercions.length || modelWarnings.length || suffixWarnings.length || provWarn.length)
+          ? { warnings: [...importCoercions, ...modelWarnings, ...suffixWarnings, ...provWarn] } : {}),
       },
     });
     res.end();

@@ -108,6 +108,27 @@ test('a role never sends a section it does not have', () => {
   assert.ok(!('skillsOverride' in body));
 });
 
+test('memory limit (#2813): sent only when edited, empty clears it, never for a team', () => {
+  const agent = { id: 'a1', role: 'agent', displayName: 'A', memoryLimit: '4g' };
+  const form = buildInitialForm(agent);
+  assert.equal(form.memoryLimit, '4g');
+  assert.ok(!('memoryLimit' in buildEditSubmit(agent, form)), 'unchanged → absent');
+  assert.equal(buildEditSubmit(agent, { ...form, memoryLimit: '6g' }).memoryLimit, '6g');
+  assert.equal(buildEditSubmit(agent, { ...form, memoryLimit: '  ' }).memoryLimit, null, 'empty → platform default');
+  assert.equal(isFormDirty(agent, { ...form, memoryLimit: '6g' }), true);
+  const team = { id: 't1', role: 'team', displayName: 'T', memoryLimit: '4g' };
+  const tform = buildInitialForm(team);
+  assert.equal(tform.memoryLimit, '');
+  assert.ok(!('memoryLimit' in buildEditSubmit(team, { ...tform, memoryLimit: '6g' })));
+});
+
+test('Scaling work-source edits read as unsaved (#2813)', () => {
+  const base = buildInitialForm(member);
+  for (const key of ['itemsText', 'outputDirText', 'inputDirText', 'baseBranch']) {
+    assert.equal(isFormDirty(member, { ...base, poolDraft: { ...base.poolDraft, [key]: 'x' } }), true, key);
+  }
+});
+
 test('a team sends its prompt template and its own skills, not member fields', () => {
   const team = { id: 't1', role: 'team', displayName: 'T', systemPromptTemplate: 'be a team' };
   const body = buildEditSubmit(team, buildInitialForm(team));
@@ -217,14 +238,12 @@ test('a role never sends a Scaling section it does not have', () => {
   assert.ok(!('pool' in body));
 });
 
-test('an untouched member round-trips its existing pool, workspace forced to git-clean-base (#2294)', () => {
-  // The member's persisted workspace ('none') has no UI to set it and needs a
-  // `workSource` that also has none — #2294 forces every save to git-clean-base
-  // rather than re-persist it. Everything else (maxInstances, teardown) is
-  // round-tripped unchanged when the pool folds into the one Save (#2295).
-  const pooled = { ...member, pool: { enabled: true, maxInstances: 4, workspace: 'none' } };
+test('an untouched member round-trips its existing pool, workspace included (#2813)', () => {
+  // #2813 AC15 brought the Workspace select back, so a persisted 'none' (and
+  // its work source) round-trips instead of being forced to git-clean-base.
+  const pooled = { ...member, pool: { enabled: true, maxInstances: 4, workspace: 'none', workSource: { items: ['x'], outputDir: 'out' } } };
   const body = buildEditSubmit(pooled, buildInitialForm(pooled), { parentWipLimit: 3 });
-  assert.deepEqual(body.pool, { enabled: true, maxInstances: 4, workspace: 'git-clean-base' });
+  assert.deepEqual(body.pool, { enabled: true, maxInstances: 4, workspace: 'none', workSource: { items: ['x'], outputDir: 'out' } });
 });
 
 test('a member with no pool sends pool: null, not an absent key (clears it if stale)', () => {
@@ -268,6 +287,7 @@ test('every batched field is watched — none can be edited unnoticed', () => {
     inheritMcp: false,
     mcpRows: [{ serverId: 'wiki', credentialId: '' }],
     poolDraft: { ...base.poolDraft, enabled: true },
+    memoryLimit: '4g',
   };
   for (const [key, value] of Object.entries(edits)) {
     // Rows are only sent (and so only unsaved) in Custom mode.

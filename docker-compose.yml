@@ -124,6 +124,12 @@ services:
       # Lets multiple stacks share one Podman store without evicting each other's
       # agent containers. Defaults to COMPOSE_PROJECT_NAME when unset.
       AEE_INSTANCE_ID: "${AEE_INSTANCE_ID:-${COMPOSE_PROJECT_NAME:-agent-studio}}"
+      # Agent container memory (#2813): the fleet default and the ceiling a
+      # role's own memoryLimit may not exceed. Both read by the orchestrator
+      # (spawn) AND the console (save/bundle validation, effective-limit
+      # read-out), so they must agree — empty = 2g / 8g.
+      AEE_AGENT_MEM_LIMIT: "${AEE_AGENT_MEM_LIMIT:-}"
+      AEE_AGENT_MEM_CEILING: "${AEE_AGENT_MEM_CEILING:-}"
       # Internal-API authentication for :4002 (#1456, GOV-PLATFORM-2). Empty
       # (the default) leaves the gate inert. See .env.example for the ladder.
       # startAgentProcess strips both secrets from every agent container it
@@ -203,6 +209,12 @@ services:
       # Max simultaneous orchestrator respawn calls fired by
       # POST /api/llm-endpoints/:id/respawn-agents (see .env.example).
       RESPAWN_CONCURRENCY: "${RESPAWN_CONCURRENCY:-}"
+      # Agent container memory (#2813): the fleet default and the ceiling a
+      # role's own memoryLimit may not exceed. Both read by the orchestrator
+      # (spawn) AND the console (save/bundle validation, effective-limit
+      # read-out), so they must agree — empty = 2g / 8g.
+      AEE_AGENT_MEM_LIMIT: "${AEE_AGENT_MEM_LIMIT:-}"
+      AEE_AGENT_MEM_CEILING: "${AEE_AGENT_MEM_CEILING:-}"
     depends_on:
       conduwuit:
         condition: service_started

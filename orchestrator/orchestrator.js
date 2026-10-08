@@ -97,6 +97,8 @@ const skillReconcile = require("./skill-reconcile");
 // admin-console/api/prompt-modes.js — the team-prompt propagation path
 // (updateTeamPrompt) re-composes inheriting AND additional members through it.
 const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require("./prompt-modes");
+const { memoryCeiling, resolveEffectiveMemory } = require("./memory-limit");
+const { memberPortableFields } = require("./member-portable-fields");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const credentialResolution = require("./credential-resolution");
@@ -628,6 +630,25 @@ const llmAuthFlows = createLlmAuthFlowManager();
 // spawn-on-first-DM path — the container is up and synced before any message
 // arrives, so the first reply is timely. (DM-room readiness is handled on the
 // admin-console side, which pre-creates the 1:1 room at create/enable time.)
+
+// #2813: the role memory value to hand the container runtime — normalised,
+// clamped to the operator ceiling (logged), or null for "toolchain / platform
+// default". An invalid stored value is ignored (logged) rather than blocking
+// the start; save and bundle validation already reject it upstream.
+function resolveRoleMemoryLimit(id, config) {
+  const raw = config && config.memoryLimit;
+  if (raw == null || String(raw).trim() === '') return null;
+  const eff = resolveEffectiveMemory({ role: raw, ceiling: memoryCeiling(process.env) });
+  if (eff.source !== 'role') {
+    console.warn(`[Orchestrator] Agent ${id}: ignoring invalid memoryLimit "${raw}" — using the toolchain/platform default`);
+    return null;
+  }
+  if (eff.clamped) {
+    console.warn(`[Orchestrator] Agent ${id}: memoryLimit "${raw}" exceeds the platform ceiling ${eff.ceiling} — clamped to ${eff.ceiling}`);
+  }
+  return eff.limit;
+}
+
 function startAgentProcess(config) {
   const { id, token, userId, environmentId } = config;
   stopAgentProcess(id); // kill existing if any
@@ -854,12 +875,21 @@ function startAgentProcess(config) {
     );
   }
 
+  // Role memory requirement (#2813). The role's own `memoryLimit` wins over
+  // the toolchain's `resources.memoryLimit` and the fleet default; a value
+  // above the operator ceiling (AEE_AGENT_MEM_CEILING) is clamped here with a
+  // log line rather than refusing the start. Read on every start, so a change
+  // applies on the next container start — a running container (or running
+  // pool instance) keeps the limit it was created with.
+  const memoryLimit = resolveRoleMemoryLimit(id, config);
+
   const child = spawnContainer({
     id,
     env: childEnv,
     contextMounts,
     image: resolvedImage.image,
     toolchain: resolvedImage.toolchain,
+    memoryLimit,
   });
 
   child.stdout.on('data', (d) =>
@@ -11844,6 +11874,13 @@ async function spawnPoolInstance(teamId, templateCfg, instanceId, itemKey, { rep
       id: instanceId,
       displayName: `${templateCfg.displayName || templateCfg.id} · #${itemKey}`,
       systemPromptOverride: templateCfg.systemPrompt,
+      // #2813: an instance carries its template's portable role settings —
+      // prompt mode (so an inherit/additional role keeps tracking the team
+      // prompt), model pin and memory requirement (sized at this spawn; a
+      // later template edit reaches only instances spawned after it).
+      promptMode: templateCfg.promptMode,
+      modelOverride: templateCfg.modelOverride,
+      memoryLimit: templateCfg.memoryLimit,
       skillsOverride: Array.isArray(templateCfg.skillsOverride) ? templateCfg.skillsOverride : undefined,
       mcpServersOverride: Array.isArray(templateCfg.mcpServersOverride) ? templateCfg.mcpServersOverride : undefined,
       sessionPolicy: 'per-invocation',
@@ -12384,8 +12421,7 @@ class Orchestrator {
         parentTeamId: teamId,
         environmentId: teamCfg.environmentId,
         teamId: ownerTeamId,
-        ...(typeof opts.systemPromptOverride === 'string' && opts.systemPromptOverride.length > 0
-          ? { systemPrompt: opts.systemPromptOverride } : {}),
+        ...memberPortableFields(opts),
         ...(Array.isArray(opts.skillsOverride) ? { skillsOverride: opts.skillsOverride } : {}),
         ...(Array.isArray(opts.mcpServersOverride) ? { mcpServersOverride: opts.mcpServersOverride } : {}),
         ...(opts.sessionPolicy === 'per-invocation' ? { sessionPolicy: 'per-invocation' } : {}),
@@ -12468,10 +12504,15 @@ class Orchestrator {
 
     // Resolve effective values once, here. The member's config records ONLY
     // the override fields (when present); absence is the inherit signal that
-    // team-edit propagation reads later.
-    const effectivePrompt = (typeof opts.systemPromptOverride === 'string' && opts.systemPromptOverride.length > 0)
-      ? opts.systemPromptOverride
-      : (teamCfg.systemPromptTemplate || "");
+    // team-edit propagation reads later. #2813: an explicit `promptMode`
+    // (carried by a bundle role) is honoured — an additional-mode member
+    // stores only its addition and gets the team template composed in front.
+    const portable = memberPortableFields(opts);
+    const effectivePrompt = composeMemberPrompt(
+      resolvePromptMode(portable),
+      teamCfg.systemPromptTemplate || "",
+      portable.systemPrompt || "",
+    );
 
     const memberConfig = {
       id: memberId,
@@ -12482,8 +12523,7 @@ class Orchestrator {
       parentTeamId: teamId,
       environmentId: teamCfg.environmentId,
       teamId: ownerTeamId,
-      ...(typeof opts.systemPromptOverride === 'string' && opts.systemPromptOverride.length > 0
-        ? { systemPrompt: opts.systemPromptOverride } : {}),
+      ...portable,
       ...(Array.isArray(opts.skillsOverride) ? { skillsOverride: opts.skillsOverride } : {}),
       ...(Array.isArray(opts.mcpServersOverride) ? { mcpServersOverride: opts.mcpServersOverride } : {}),
       ...(opts.sessionPolicy === 'per-invocation' ? { sessionPolicy: 'per-invocation' } : {}),
@@ -13877,17 +13917,22 @@ class Orchestrator {
     };
     saveAgentConfig(id, updated);
 
-    // team-member: prefer the member's own systemPrompt override (recorded on
-    // a deferred-materialization stub, or any inherit/override member). Only
-    // fall back to the parent team template when the member has no override —
-    // this is the inherit signal.
+    // team-member: compose the prompt from the member's mode (#1511) — an
+    // exclusive member's own systemPrompt verbatim, an inherit member the
+    // parent team template, and (#2813) an additional-mode stub the team
+    // template plus its stored addition (it used to come up with the bare
+    // addition only, as if it were exclusive).
+    const mode = resolvePromptMode(cfg);
     let prompt = (typeof cfg.systemPrompt === 'string' && cfg.systemPrompt.length > 0) ? cfg.systemPrompt : '';
-    if (!prompt) {
+    if (mode !== PROMPT_MODES.EXCLUSIVE || !prompt) {
       const teamCfg = cfg.parentTeamId ? loadAgentConfig(cfg.parentTeamId) : null;
       if (!teamCfg) {
         console.warn(`[Orchestrator] team-member ${id}: parent team '${cfg.parentTeamId}' not found — reactivating with empty system prompt`);
       }
-      prompt = teamCfg?.systemPromptTemplate || "";
+      // An exclusive member with no own text falls back to the team template,
+      // exactly as before.
+      const composeMode = mode === PROMPT_MODES.EXCLUSIVE ? PROMPT_MODES.INHERIT : mode;
+      prompt = composeMemberPrompt(composeMode, teamCfg?.systemPromptTemplate || "", prompt);
     }
     saveAgentPrompt(id, prompt, "team-member", env);
     console.log(`[Orchestrator] Materialized team-member ${id} (team=${cfg.parentTeamId}, prompt=${cfg.systemPrompt ? 'override' : 'inherit'})`);

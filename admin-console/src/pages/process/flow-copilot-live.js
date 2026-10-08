@@ -11,7 +11,7 @@
 // run, with the HTTP transport injected.
 //
 //   diffLiveProposal(live, proposed)      grouped, named change items (AC3/AC14)
-//   carryUnauthored(live, proposed)       keep what the copilot cannot author (autoDispatch, hillClimb, pool)
+//   carryUnauthored(live, proposed)       keep what the copilot cannot author (autoDispatch, hillClimb, pool, portable role settings)
 //   planLiveApply(diff, ctx)              ordered write steps + "not applied" (AC6)
 //   runLiveApply(plan, call)              sequential, continues past failures (AC7)
 //   summarizeLiveApply(diff, result)      what the result message says
@@ -139,8 +139,11 @@ function triggerChanges(before, after) {
 // there means "not expressed", never "removed". Carrying the live value over
 // keeps a copilot turn from switching off the Flow Supervisor, flagging the
 // hill-climb collector, or un-pooling a role.
-const UNAUTHORED_TEAM_KEYS = ['autoDispatch', 'hillClimb'];
-const UNAUTHORED_ROLE_KEYS = ['pool'];
+// #2813: the portable role settings (memory, model, prompt mode) and the
+// team prompt are not copilot-authored either — a proposal that omits them
+// must not read as "clear them".
+const UNAUTHORED_TEAM_KEYS = ['autoDispatch', 'hillClimb', 'teamPrompt'];
+const UNAUTHORED_ROLE_KEYS = ['pool', 'memoryLimit', 'model', 'promptMode'];
 
 export function carryUnauthored(live, proposed) {
   const L = live || {};

@@ -827,6 +827,7 @@ most consequential thing in this form, so it is not below the plugin grants.
   live context, mounted **read-only** by default; tick read-write to let the
   agent change files on the host. Saving re-provisions the agent's container.
   Offered only on the local / self-hosted stack.
+- **Memory limit** — e.g. `4g`; empty = default.
 
 ### The team's configuration tabs, in detail
 

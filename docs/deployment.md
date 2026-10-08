@@ -322,6 +322,14 @@ Steady state = **4 service containers + one container per enabled persistent age
 
 - each agent container is capped at **2 GiB** (`AEE_AGENT_MEM_LIMIT`, default `2g`) and 512
   PIDs (`AEE_AGENT_PIDS_LIMIT`) — neither is in `.env.example`, both are settable;
+- a role may ask for its own memory limit (`memoryLimit` in the agent's Settings tab, the Flow
+  node inspector, or a process-template bundle, #2813). The effective limit is resolved
+  **role → toolchain → `AEE_AGENT_MEM_LIMIT`**, on Podman and Kubernetes and for every pool
+  instance. A role value is bounded by **`AEE_AGENT_MEM_CEILING`** (default `8g`): above it a
+  save is refused, and a bundle being materialised is clamped to the ceiling with a warning.
+  Set both variables on the **orchestrator** and the **admin-console** service (the console
+  validates and displays, the orchestrator enforces). A change applies on the next container
+  start; running containers keep their limit;
 - there is **no CPU limit** on agents, and **no limits at all** on the four service
   containers;
 - each agent also gets **its own Podman network**, with the orchestrator and homeserver

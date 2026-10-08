@@ -63,9 +63,9 @@ function perAgentVolumeName(id) {
 // Container hardening (conservative slice). Memory accepts a human suffix
 // (e.g. "2g", "512m"); 0/empty disables that limit.
 function parseBytes(s) {
-  const m = String(s || '').trim().match(/^(\d+)\s*([kKmMgG]?)[bB]?$/);
+  const m = String(s || '').trim().match(/^(\d+)\s*([kKmMgGtT]?)[bB]?$/);
   if (!m) return 0;
-  const mult = { '': 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3 }[m[2].toLowerCase()];
+  const mult = { '': 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3, t: 1024 ** 4 }[m[2].toLowerCase()];
   return Number(m[1]) * mult;
 }
 const AGENT_MEM_LIMIT_BYTES = parseBytes(process.env.AEE_AGENT_MEM_LIMIT || '2g');
@@ -74,11 +74,18 @@ const AGENT_PIDS_LIMIT = Number(process.env.AEE_AGENT_PIDS_LIMIT || 512);
 // fleet-wide default for agents bound to it (e.g. a JVM/Gradle build that would
 // otherwise OOM at AEE_AGENT_MEM_LIMIT). No override, or one that fails to
 // parse -> AGENT_MEM_LIMIT_BYTES, byte-identical to before this field existed.
+//
+// #2813: a role's own `memoryLimit` (already clamped to the operator ceiling
+// by the orchestrator) wins over the toolchain's — role → toolchain → fleet.
 // An operator who disabled the fleet limit (AEE_AGENT_MEM_LIMIT=0, e.g. on a
 // WSL host whose cgroup delegation cannot write memory.max) stays disabled:
-// the override only raises a limit, it never re-imposes one.
-function resolveMemLimitBytes(toolchain, fleetBytes = AGENT_MEM_LIMIT_BYTES) {
+// neither override re-imposes one.
+// Conflict resolution (#2813 × main): both sides changed the 2nd parameter;
+// the role limit keeps it and the fleet limit moved to the 3rd.
+function resolveMemLimitBytes(toolchain, roleMemoryLimit = null, fleetBytes = AGENT_MEM_LIMIT_BYTES) {
   if (!fleetBytes) return 0;
+  const roleBytes = roleMemoryLimit ? parseBytes(roleMemoryLimit) : 0;
+  if (roleBytes) return roleBytes;
   const override = toolchain && toolchain.resources && toolchain.resources.memoryLimit;
   if (!override) return fleetBytes;
   return parseBytes(override) || fleetBytes;
@@ -603,7 +610,7 @@ async function reseedPerAgentVolume(id, paths) {
 // context of a NON-default image: `resources` (#2282 Band 1) sizes the
 // container's memory limit, the rest words the AC7 refusal; null for the
 // default image.
-function spawnContainer({ id, env, contextMounts, image, toolchain = null }) {
+function spawnContainer({ id, env, contextMounts, image, toolchain = null, memoryLimit = null }) {
   const handle = new EventEmitter();
   handle.stdout = new PassThrough();
   handle.stderr = new PassThrough();
@@ -721,7 +728,7 @@ function spawnContainer({ id, env, contextMounts, image, toolchain = null }) {
           ]
         : [{ Name: WORKSPACE_VOLUME, Dest: '/workspace' }];
       const resourceLimits = {};
-      const memBytes = resolveMemLimitBytes(toolchain);
+      const memBytes = resolveMemLimitBytes(toolchain, memoryLimit);
       if (memBytes) resourceLimits.memory = { limit: memBytes };
       if (AGENT_PIDS_LIMIT) resourceLimits.pids = { limit: AGENT_PIDS_LIMIT };
       // #2601 AC4: the container name is fixed per (instance, agent), so the

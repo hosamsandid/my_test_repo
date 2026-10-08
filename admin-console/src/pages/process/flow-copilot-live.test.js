@@ -7,6 +7,7 @@ import {
   diffLiveProposal, groupItems, describeLiveItem,
   planLiveApply, runLiveApply, summarizeLiveApply,
   inProgressFor, gateWarnings, liveConfirmModel, liveResultStatus,
+  carryUnauthored,
 } from './flow-copilot-live.js';
 
 // The server-side copilot pipeline (sanitize → ops) every live proposal passes
@@ -334,6 +335,21 @@ test('B2: a dropped setting next to a real edit — the edit applies, the drop i
   const plan = planLiveApply(diff, { teamId: 'acme', memberIds: MEMBERS });
   assert.deepEqual(plan.steps.map(s => s.label), ['update trigger rv']);
   assert.deepEqual(plan.notApplied.map(it => it.key), ['role:changed:reviewer#triggerSettings']);
+});
+
+test('carryUnauthored keeps portable role settings and the team prompt a proposal omits (#2813)', () => {
+  const live = {
+    teamPrompt: 'Team {{teamName}}',
+    roles: [{ id: 'dev', memoryLimit: '4g', model: 'm1', promptMode: 'additional', pool: { enabled: true } }],
+  };
+  const out = carryUnauthored(live, { roles: [{ id: 'dev', displayName: 'Dev' }] });
+  assert.equal(out.teamPrompt, 'Team {{teamName}}');
+  assert.deepEqual(
+    { memoryLimit: out.roles[0].memoryLimit, model: out.roles[0].model, promptMode: out.roles[0].promptMode },
+    { memoryLimit: '4g', model: 'm1', promptMode: 'additional' },
+  );
+  // An explicit value in the proposal still wins.
+  assert.equal(carryUnauthored(live, { roles: [{ id: 'dev', memoryLimit: '2g' }] }).roles[0].memoryLimit, '2g');
 });
 
 test('#2915: switching a trigger\'s readiness gate off is written as null, not reported as not applied', () => {

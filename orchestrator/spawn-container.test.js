@@ -15,6 +15,7 @@ test('parseBytes accepts a human suffix and falls back to 0 on junk', () => {
   assert.equal(parseBytes('2g'), 2 * 1024 ** 3);
   assert.equal(parseBytes('512m'), 512 * 1024 ** 2);
   assert.equal(parseBytes('4gb'), 4 * 1024 ** 3);
+  assert.equal(parseBytes('1t'), 1024 ** 4);
   assert.equal(parseBytes('1073741824'), 1073741824);
   assert.equal(parseBytes(''), 0);
   assert.equal(parseBytes('nope'), 0);
@@ -29,19 +30,19 @@ test('resolveMemLimitBytes falls back to the fleet default when the toolchain ha
 
 test('resolveMemLimitBytes uses the toolchain\'s memoryLimit override when present (AC1)', () => {
   assert.equal(
-    resolveMemLimitBytes({ toolchainId: 'jvm', resources: { memoryLimit: '4g' } }, 2 * 1024 ** 3),
+    resolveMemLimitBytes({ toolchainId: 'jvm', resources: { memoryLimit: '4g' } }, null, 2 * 1024 ** 3),
     4 * 1024 ** 3,
   );
 });
 
 test('resolveMemLimitBytes keeps the limit disabled when the fleet limit is 0, even with an override', () => {
-  assert.equal(resolveMemLimitBytes({ toolchainId: 'jvm', resources: { memoryLimit: '4g' } }, 0), 0);
-  assert.equal(resolveMemLimitBytes(null, 0), 0);
+  assert.equal(resolveMemLimitBytes({ toolchainId: 'jvm', resources: { memoryLimit: '4g' } }, null, 0), 0);
+  assert.equal(resolveMemLimitBytes(null, null, 0), 0);
 });
 
 test('resolveMemLimitBytes falls back to the fleet default on an override that fails to parse', () => {
   assert.equal(
-    resolveMemLimitBytes({ toolchainId: 'jvm', resources: { memoryLimit: 'not-a-quantity' } }, 2 * 1024 ** 3),
+    resolveMemLimitBytes({ toolchainId: 'jvm', resources: { memoryLimit: 'not-a-quantity' } }, null, 2 * 1024 ** 3),
     2 * 1024 ** 3,
   );
 });
@@ -149,4 +150,14 @@ test('reseedPerAgentVolume leaves its helper container unnamed (AC3)', async () 
     assert.equal(creates[0].body.labels['aee.agent.id'], 'reseed-agent1');
     assert.equal('name' in creates[0].body, false);
   });
+});
+
+test('resolveMemLimitBytes: a role memoryLimit beats a larger toolchain value and the fleet default (#2813 AC3)', () => {
+  const jvm = { toolchainId: 'jvm', resources: { memoryLimit: '6g' } };
+  assert.equal(resolveMemLimitBytes(jvm, '4g'), 4 * 1024 ** 3);
+  assert.equal(resolveMemLimitBytes(null, '3g'), 3 * 1024 ** 3);
+  // no / unparseable role value -> unchanged toolchain → fleet resolution
+  assert.equal(resolveMemLimitBytes(jvm, null), 6 * 1024 ** 3);
+  assert.equal(resolveMemLimitBytes(jvm, 'garbage'), 6 * 1024 ** 3);
+  assert.equal(resolveMemLimitBytes(null, ''), AGENT_MEM_LIMIT_BYTES);
 });

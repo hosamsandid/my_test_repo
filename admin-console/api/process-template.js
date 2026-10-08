@@ -34,6 +34,8 @@ const { commentFilterError, commentFilterFields } = require('./comment-filter');
 const { cronExpressionError } = require('./trigger-validate');
 // Legacy `transport` (#2578) — tolerated on input and dropped, never validated.
 const { withoutTransport } = require('./internal-transport-migration');
+const { isPromptMode, PROMPT_MODES } = require('./prompt-modes');
+const { memoryCeiling, memoryLimitError, normalizeMemoryLimit, parseMemoryLimit } = require('./memory-limit');
 
 const VERSION = 1;
 
@@ -806,7 +808,7 @@ function bundleTrigger(t, teamId) {
  * @param {Array} [opts.gates]
  * @param {Array} [opts.labels]
  */
-function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stages, humans, hillClimb, wipLimit, autoDispatch }) {
+function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stages, humans, hillClimb, wipLimit, autoDispatch, teamPrompt }) {
   // Reduce each human's PR/issue consume `from` from a live member id to a
   // portable role key (#987), the exact inverse of the materialiser's
   // `${teamId}-` prefixing — the same remap `id`/`channels.from`/`dependsOn`/
@@ -840,6 +842,10 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
     // The Flow Supervisor's opt-in (#2247) — omitted when unset so a flow that
     // never configured it stays byte-identical.
     ...(normAutoDispatch ? { autoDispatch: normAutoDispatch } : {}),
+    // The team prompt template (#2813) — what inherit/additional roles compose
+    // from. Omitted when empty, so a flow without one stays byte-identical and
+    // materialises with the platform's default team prompt.
+    ...(typeof teamPrompt === 'string' && teamPrompt.trim() ? { teamPrompt } : {}),
     roles: (roles || []).map(r => ({
       id: roleKeyOf(r.id, teamId),
       displayName: r.displayName || r.id,
@@ -849,6 +855,15 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
       // portable bundle stays clean; they are regenerated from the `github` flag
       // and the `outcomes` port by expandGithubChannels on import/materialise.
       systemPrompt: stripDerivedPromptBlocks(r.systemPrompt),
+      // Portable role settings (#2813). `promptMode` says how `systemPrompt`
+      // relates to the bundle's `teamPrompt` (an inherit/additional role's
+      // systemPrompt is its OWN text, never the flattened prompt); a role
+      // without one is a legacy role and materialises as before (non-empty
+      // prompt → exclusive). `model` is omitted when the role runs on the
+      // environment default; `memoryLimit` when it uses the platform default.
+      ...(isPromptMode(r.promptMode) ? { promptMode: r.promptMode } : {}),
+      ...(typeof r.model === 'string' && r.model.trim() ? { model: r.model.trim() } : {}),
+      ...(normalizeMemoryLimit(r.memoryLimit) ? { memoryLimit: normalizeMemoryLimit(r.memoryLimit) } : {}),
       // Agent-level OUTCOMES port (#827/#831). Authored outcomes are used directly;
       // legacy flat `emits` are lifted to a degenerate anyOf so the exported bundle
       // never carries a raw `emits` field. Import still works via liftOutcomes (#831).
@@ -926,7 +941,9 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
 // Basic shape validation for a bundle. Returns { ok, error }.
 // `allowEmptyRoles` is for in-progress drafts (#344) — materialisation still
 // requires a non-empty role set, so the default stays strict.
-function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
+function validateProcessTemplate(b, { allowEmptyRoles = false, memoryCeiling: ceiling } = {}) {
+  // #2813: the operator memory ceiling (AEE_AGENT_MEM_CEILING, default 8g).
+  const memCeiling = ceiling || memoryCeiling(process.env);
   if (!b || typeof b !== 'object') return { ok: false, error: 'not an object' };
   if (b.processTemplateVersion !== VERSION) {
     return { ok: false, error: `unsupported processTemplateVersion (expected ${VERSION})` };
@@ -956,6 +973,18 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
       // "may not target its own role" and the same-team check both need it.
       const vo = validateOutcomes(r.outcomes, { labels: b.labels, agents: b.roles, roleId: r.id });
       if (!vo.ok) return { ok: false, error: `role ${r.id}: ${vo.error}` };
+    }
+    // Portable role settings (#2813) — checked, not tolerated, so a typo
+    // refuses the save instead of silently materialising the default.
+    if (r.promptMode !== undefined && !isPromptMode(r.promptMode)) {
+      return { ok: false, error: `role ${r.id}: promptMode must be one of inherit, additional, exclusive` };
+    }
+    if (r.model !== undefined && r.model !== null && typeof r.model !== 'string') {
+      return { ok: false, error: `role ${r.id}: model must be a string model id` };
+    }
+    if (r.memoryLimit !== undefined && r.memoryLimit !== null) {
+      const merr = memoryLimitError(r.memoryLimit, { role: r.id, ceiling: memCeiling });
+      if (merr) return { ok: false, error: merr };
     }
     // Agent instance pools (#2246) — shared shape check, see `poolConfigError`.
     if (r.pool !== undefined) {
@@ -1003,6 +1032,9 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
         }
       }
     }
+  }
+  if (b.teamPrompt !== undefined && b.teamPrompt !== null && typeof b.teamPrompt !== 'string') {
+    return { ok: false, error: 'teamPrompt must be a string' };
   }
   if (b.gates && !Array.isArray(b.gates)) return { ok: false, error: 'gates must be an array' };
   if (b.labels !== undefined) {
@@ -1135,7 +1167,7 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
 // pooled) is left alone for the validator to reject — a robust import must not
 // become a bundle-mangling import. Pure; no IO. Callers run this BEFORE
 // `validateProcessTemplate` and then validate/use the returned bundle.
-function coerceImportBundle(raw) {
+function coerceImportBundle(raw, { clampMemory = false, memoryCeiling: ceiling } = {}) {
   const warnings = [];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { bundle: raw, warnings };
   const bundle = JSON.parse(JSON.stringify(raw));
@@ -1163,7 +1195,91 @@ function coerceImportBundle(raw) {
     }
   }
 
+  // Role memory above the operator ceiling (#2813 AC5) — materialisation only
+  // (`clampMemory`, set by POST /api/teams): the team is still created, the
+  // role falls back to the ceiling, and the warning makes it visible. A draft
+  // save / validation instead REJECTS the value (validateProcessTemplate), and
+  // a value that is not a size at all is never "repaired" here.
+  if (clampMemory && Array.isArray(bundle.roles)) {
+    const cap = ceiling || memoryCeiling(process.env);
+    for (const r of bundle.roles) {
+      if (!r || r.memoryLimit == null || !normalizeMemoryLimit(r.memoryLimit)) continue;
+      if (parseMemoryLimit(r.memoryLimit) > parseMemoryLimit(cap)) {
+        warnings.push(`Role ${r.id}: memory limit ${r.memoryLimit} exceeds the platform ceiling of ${cap} — using ${cap}.`);
+        r.memoryLimit = cap;
+      }
+    }
+  }
+
   return { bundle, warnings };
+}
+
+// Model availability at materialisation (#2813 AC9). A role's `model` becomes
+// the member's `modelOverride` only when the team's model provider serves it;
+// otherwise the role runs on the environment default and a warning says so.
+// With no provider bound yet the pin is kept pending; PUT /api/environments/:id
+// re-checks it with `staleModelPin` once the environment gets a provider.
+// Pure: `endpoint` is the provider record ({ id, name, models[] }) or null.
+// Returns a NEW role list.
+function resolveBundleModels(roles, endpoint) {
+  const warnings = [];
+  const out = (roles || []).map((r) => {
+    if (!r || typeof r.model !== 'string' || !r.model.trim()) return r;
+    const model = r.model.trim();
+    if (!endpoint) {
+      warnings.push(`model ${model} kept pending for role ${r.id} — no model provider is bound yet`);
+      return { ...r, model };
+    }
+    if ((endpoint.models || []).some((m) => m && m.id === model)) return { ...r, model };
+    warnings.push(`model ${model} not available in provider ${endpoint.name || endpoint.id} — using default (role ${r.id})`);
+    const { model: _drop, ...rest } = r;
+    return rest;
+  });
+  return { roles: out, warnings };
+}
+
+// A member's model pin checked against the provider its environment was just
+// bound to (#2813 AC9: a pin kept pending at materialise is applied once a
+// provider is chosen, or dropped with a note when that provider does not
+// serve it). Pure: returns the note when the pin must be dropped, else null.
+// No pin, no provider, or a per-agent provider override (whose own routes
+// re-validate the pin) → null.
+function staleModelPin(cfg, endpoint) {
+  if (!cfg || !endpoint || cfg.llmEndpointOverride) return null;
+  const model = typeof cfg.modelOverride === 'string' ? cfg.modelOverride : '';
+  if (!model) return null;
+  if ((endpoint.models || []).some((m) => m && m.id === model)) return null;
+  return `model ${model} not available in provider ${endpoint.name || endpoint.id} — using default (agent ${cfg.id})`;
+}
+
+// Preview lints for the portable prompt settings (#2813 edge case): an
+// inherit-mode role in a bundle whose team prompt is empty gets nothing but
+// the platform's generic team prompt — almost certainly not what the author
+// meant, so the preview warns (it never blocks: the platform default is valid).
+function promptModeWarnings(bundle) {
+  const b = bundle && typeof bundle === 'object' ? bundle : {};
+  const hasTeamPrompt = typeof b.teamPrompt === 'string' && b.teamPrompt.trim();
+  if (hasTeamPrompt) return [];
+  return (Array.isArray(b.roles) ? b.roles : [])
+    .filter((r) => r && r.promptMode === PROMPT_MODES.INHERIT)
+    .map((r) => `Role ${r.id} inherits the team prompt, but this flow has no team prompt — it will run on the platform's default team prompt.`);
+}
+
+// The portable form of a live team's prompt template (#2813): the team's own
+// repository and name are lifted back to the `{{repoFullName}}` /
+// `{{teamName}}` placeholders materialise substitutes, so a bundle never
+// carries a repository (AC17) and lands with the TARGET team's values.
+function portableTeamPrompt(text, { repoFullName, teamName } = {}) {
+  if (typeof text !== 'string' || !text.trim()) return '';
+  let out = text;
+  if (repoFullName) out = out.split(repoFullName).join('{{repoFullName}}');
+  // Whole words only: a team named e.g. "QA" must not rewrite "QA" inside
+  // "QAT" or "SQA" in a custom team prompt.
+  if (teamName) {
+    const escaped = teamName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, 'gu'), '{{teamName}}');
+  }
+  return out;
 }
 
 // An empty draft skeleton (#344).
@@ -1222,6 +1338,11 @@ function templateToCustomRoles(bundle) {
     displayName: r.displayName || r.id,
     sessionPolicy: r.sessionPolicy === 'per-invocation' ? 'per-invocation' : undefined,
     promptTemplate: r.systemPrompt || '',
+    // Portable role settings (#2813). No `promptMode` = a legacy bundle role,
+    // which keeps today's inference (a non-empty prompt materialises exclusive).
+    ...(isPromptMode(r.promptMode) ? { promptMode: r.promptMode } : {}),
+    ...(typeof r.model === 'string' && r.model.trim() ? { model: r.model.trim() } : {}),
+    ...(normalizeMemoryLimit(r.memoryLimit) ? { memoryLimit: normalizeMemoryLimit(r.memoryLimit) } : {}),
     // Carry the BP data-flow ports + dependencies through so the materialised
     // member's config can record them — the live graph then renders the
     // dependency/artifact edges of an imported flow, not just the push triggers
@@ -2314,7 +2435,16 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
   return {
     id: memberId,
     displayName: memberDisplayName,
-    systemPromptOverride: subst(t.promptTemplate || ''),
+    // #2813: an inherit/additional role stores only its OWN text — the derived
+    // GitHub/Outcomes blocks expandGithubChannels appended to the bundle prompt
+    // are stripped again (reconcileTeamOutcomes re-applies them mode-aware on
+    // top of the composed prompt), or the addition would carry them twice.
+    systemPromptOverride: (t.promptMode === PROMPT_MODES.INHERIT || t.promptMode === PROMPT_MODES.ADDITIONAL)
+      ? stripDerivedPromptBlocks(subst(t.promptTemplate || ''))
+      : subst(t.promptTemplate || ''),
+    ...(isPromptMode(t.promptMode) ? { promptMode: t.promptMode } : {}),
+    ...(typeof t.model === 'string' && t.model.trim() ? { modelOverride: t.model.trim() } : {}),
+    ...(normalizeMemoryLimit(t.memoryLimit) ? { memoryLimit: normalizeMemoryLimit(t.memoryLimit) } : {}),
     // skillsOverride deliberately omitted — members inherit the team agent's
     // `skills[]` (team-owned grant).
     sessionPolicy: t.sessionPolicy === 'per-invocation' ? 'per-invocation' : undefined,
@@ -2350,6 +2480,8 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
 
 module.exports = {
   buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles,
+  // Portable role settings (#2813)
+  resolveBundleModels, staleModelPin, promptModeWarnings, portableTeamPrompt, substituteVars,
   buildMemberFromTemplate, liftTriggerEmits,
   expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview,
   // Direct agent-to-agent hand-off (#2031): the derived consumer listener.

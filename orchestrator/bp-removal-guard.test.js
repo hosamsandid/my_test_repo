@@ -118,7 +118,9 @@ test('AC3: the member prompt still resolves override-then-inherit, and the grant
   // #1958's contract: the member's own systemPrompt wins; absent, fall back to
   // the parent team's template (that absence IS the inherit signal).
   assert.match(src, /cfg\.systemPrompt === 'string' && cfg\.systemPrompt\.length > 0/);
-  assert.match(src, /prompt = teamCfg\?\.systemPromptTemplate \|\| ""/);
+  // #2813: the fallback now composes by prompt mode (an additional-mode stub
+  // gets the team template plus its addition) — still from the team template.
+  assert.match(src, /composeMemberPrompt\(composeMode, teamCfg\?\.systemPromptTemplate \|\| "", prompt\)/);
   assert.match(src, /cfg\.parentTeamId \? loadAgentConfig\(cfg\.parentTeamId\) : null/);
   // The team-owned skill grant is still resolved through the shared helper
   // rather than read off the stub directly.

@@ -55,7 +55,7 @@ RUN mkdir -p /root/.ssh \
   && chmod 600 /root/.ssh/config
 
 # Pin Claude Code CLI version for reproducible builds.
-ARG CLAUDE_CODE_VERSION=2.1.287
+ARG CLAUDE_CODE_VERSION=2.1.293
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
 # Python deps for the in-container Matrix DM listener (P4).

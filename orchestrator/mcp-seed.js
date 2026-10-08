@@ -11,7 +11,7 @@
 // ── Where the CLI actually reads MCP servers from ────────────────────────────
 //
 // Claude Code does NOT read `mcpServers` from `.claude/settings.json` —
-// verified with `claude mcp list` (CLI 2.1.212): a server there is ignored
+// verified with `claude mcp list` (CLI 2.1.212, re-checked on 2.1.293): a server there is ignored
 // ("No MCP servers configured"). What it does read is two files:
 //
 //   <workspace>/.mcp.json               { "mcpServers": { <id>: <stanza> } }

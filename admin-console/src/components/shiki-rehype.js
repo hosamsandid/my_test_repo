@@ -64,7 +64,8 @@ function ensureHighlighter() {
     })
     .then((h) => { _hl = h; bump(); })
     // Defense-in-depth: a failed chunk/WASM load degrades to plain
-    // <pre><code> instead of an unhandled rejection.
+    // <pre><code> instead of an unhandled rejection. Intentionally no retry:
+    // _loading stays set, so code stays plain for the rest of the session.
     .catch(() => { _hl = null; });
 }
 
@@ -138,6 +139,8 @@ function resolveLang(lang) {
   if (_bundled && Object.hasOwn(_bundled, lang) && !_pendingLangs.has(lang)) {
     _pendingLangs.add(lang);
     try {
+      // A grammar that fails to load stays in _pendingLangs on purpose: that
+      // language renders plain for the session instead of retrying per render.
       _hl.loadLanguage(lang).then(bump, () => {});
     } catch {
       // unbundled language — stays plaintext

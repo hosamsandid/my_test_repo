@@ -134,7 +134,7 @@ export function buildEditSubmit(agent, form, opts = {}) {
   // the form and #1962 removed it from the config, so sending it would be this
   // surface re-introducing a key nothing reads.
   const submit = {
-    displayName: form.displayName,
+    displayName: typeof form.displayName === 'string' ? form.displayName.trim() : form.displayName,
   };
   if (hasOwnSkills(a.role)) {
     submit.skills = form.skills;
@@ -165,6 +165,18 @@ export function buildEditSubmit(agent, form, opts = {}) {
     if (!decision.error) submit.pool = decision.payload;
   }
   return submit;
+}
+
+/**
+ * Why the Display Name blocks the Save, or `null` when it doesn't (#2679).
+ * The field is required, and a whitespace-only name would leave the agent
+ * nameless — the API refuses it too, this just says so before the round trip.
+ *
+ * @returns {?string} a reason, or `null` when the name may be saved.
+ */
+export function displayNameError(form) {
+  const name = form?.displayName;
+  return typeof name === 'string' && name.trim() ? null : 'Display name is required.';
 }
 
 /**

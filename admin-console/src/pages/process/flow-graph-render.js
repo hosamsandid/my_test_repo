@@ -32,6 +32,7 @@ import { CANVAS_TITLES, orientationTitle, archivedTitle, stagesTitle } from './f
 import {
   WAKE_EDGE_COLOR, WAKE_EDGE_LEGEND, wakeChipText, wakeEdgeIsAmbiguous,
 } from './wake-edge-view';
+import { readinessChipTag } from './readiness-gate';
 
 // Single source of truth for edge colours and legend names (#402, #1009).
 // Every drawer, the canvas legend AND the Team-Setup wizard's mini preview
@@ -2287,14 +2288,21 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     // badge — one chip per edge keeps the routed-label placement (and
     // estChipWidth) honest.
     const claim = summarizeClaimEdge(e.claim);
-    return claim ? `${base} ${claim}` : base;
+    return withReadinessTag(claim ? `${base} ${claim}` : base, e.readinessGate);
+  }
+  // A gated PR hand-off (#2913) shows its readiness gate on the edge itself
+  // ("⏳CI+clean"), so it is visible without selecting a node. A label edge
+  // carries the listener's `readinessGate`, a channel edge its port `readiness`.
+  function withReadinessTag(text, gate) {
+    const tag = readinessChipTag(gate);
+    return tag ? `${text} ${tag}` : text;
   }
   // The producer's title for an outcome-keyed edge (#828): resolve the outcome
   // option's title from the source node so the edge reads `◇ Accepted` rather
   // than the raw label. Falls back to the option id, then the label.
   function outcomeEdgeText(e) {
     const title = outcomeOptionTitle(e.from, e.outcome) || e.label || '';
-    return `◇ ${title}`;
+    return withReadinessTag(`◇ ${title}`, e.readinessGate);
   }
 
   // A node's display name, and a producer's title for one of its outcome
@@ -2324,7 +2332,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     const parts = [e.artifact === 'issue' ? 'Issue' : 'PR'];
     if (e.gate === 'human') parts.push('👤✓');
     if (e.label) parts.push(e.label);
-    return parts.join(' ');
+    return withReadinessTag(parts.join(' '), e.artifact === 'issue' ? null : e.readiness);
   }
   // Rough rendered-width estimate matching drawEdgeChip. Emoji/wide glyphs count
   // ~1.7×. Used both to size the chip and to widen the column gap so it fits.

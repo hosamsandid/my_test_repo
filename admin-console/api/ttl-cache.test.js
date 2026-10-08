@@ -183,3 +183,74 @@ test('ttlMsFromEnv honours an explicit 0 and falls back on unset or junk', () =>
   assert.equal(ttlMsFromEnv('-1', 2000), 2000);
   assert.equal(ttlMsFromEnv('soon', 2000), 2000);
 });
+
+// ── stale-while-revalidate (#2923) ─────────────────────────────────────────
+
+test('SWR: a fresh value is served without computing', async () => {
+  const clock = fakeClock();
+  const cache = createTtlCache({ ttlMs: 100, staleMs: 1000, now: clock.now });
+  let calls = 0;
+  assert.equal(await cache.getStaleWhileRevalidate('k', () => ++calls), 1);
+  clock.advance(99);
+  assert.equal(await cache.getStaleWhileRevalidate('k', () => ++calls), 1);
+  assert.equal(calls, 1);
+});
+
+test('SWR: an expired value inside the stale window is served at once and refreshed once in the background', async () => {
+  const clock = fakeClock();
+  const cache = createTtlCache({ ttlMs: 100, staleMs: 1000, now: clock.now });
+  cache.set('k', 'old');
+  clock.advance(150);
+  let release;
+  let calls = 0;
+  const compute = () => { calls += 1; return new Promise((r) => { release = r; }); };
+  assert.equal(await cache.getStaleWhileRevalidate('k', compute), 'old', 'never waits for the refresh');
+  assert.equal(await cache.getStaleWhileRevalidate('k', compute), 'old', 'second poller shares the refresh');
+  await Promise.resolve();
+  assert.equal(calls, 1, 'one background compute for concurrent stale readers');
+  release('new');
+  await new Promise((r) => setImmediate(r));
+  assert.equal(await cache.getStaleWhileRevalidate('k', compute), 'new');
+  assert.equal(calls, 1);
+});
+
+test('SWR: a failed background refresh keeps the stale value and does not reject', async () => {
+  const clock = fakeClock();
+  const cache = createTtlCache({ ttlMs: 100, staleMs: 1000, now: clock.now });
+  cache.set('k', 'old');
+  clock.advance(150);
+  assert.equal(await cache.getStaleWhileRevalidate('k', () => Promise.reject(new Error('boom'))), 'old');
+  await new Promise((r) => setImmediate(r));
+  assert.equal(await cache.getStaleWhileRevalidate('k', () => 'new'), 'old', 'stale value still served');
+  await new Promise((r) => setImmediate(r));
+  assert.equal(cache.get('k'), 'new');
+});
+
+test('SWR: a miss or a value older than ttl + stale waits for compute', async () => {
+  const clock = fakeClock();
+  const cache = createTtlCache({ ttlMs: 100, staleMs: 1000, now: clock.now });
+  assert.equal(await cache.getStaleWhileRevalidate('k', () => 'first'), 'first');
+  clock.advance(1100);
+  assert.equal(await cache.getStaleWhileRevalidate('k', () => 'second'), 'second');
+  assert.equal(cache.size, 1);
+});
+
+test('SWR: with staleMs 0 it behaves like getOrCompute and expired entries are evicted', async () => {
+  const clock = fakeClock();
+  const cache = createTtlCache({ ttlMs: 100, now: clock.now });
+  cache.set('k', 'old');
+  clock.advance(100);
+  assert.equal(await cache.getStaleWhileRevalidate('k', () => 'new'), 'new');
+});
+
+test('staleMs keeps an expired entry readable by SWR but get() still reports a miss', () => {
+  const clock = fakeClock();
+  const cache = createTtlCache({ ttlMs: 100, staleMs: 1000, now: clock.now });
+  cache.set('k', 'old');
+  clock.advance(500);
+  assert.equal(cache.get('k'), undefined);
+  assert.equal(cache.size, 1, 'kept for the stale window');
+  clock.advance(600);
+  assert.equal(cache.get('k'), undefined);
+  assert.equal(cache.size, 0, 'evicted after ttl + stale');
+});

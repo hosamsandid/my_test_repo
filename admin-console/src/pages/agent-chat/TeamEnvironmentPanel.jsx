@@ -17,6 +17,8 @@ import { personalProviderNoticeText } from '../provider-health-view.js';
 import { initialTeamEnvForm, teamEnvSubmitBody } from './team-environment-view.js';
 import { describeCredentialRef } from '../credential-ref-legibility.js';
 import { describeEffectiveCredential } from '../effective-identity-view.js';
+import { Link } from 'react-router';
+import { describeEffectiveSigning, signingRecommendation } from '../commit-signing-view.js';
 import { recheckReducer, initialRecheckState, remainingBusyMs, describeRecheck } from './github-health-recheck.js';
 
 /**
@@ -892,10 +894,33 @@ function EffectiveGithubIdentity({ agentId }) {
           )}
         </div>
       ))}
+      {data.signing && <EffectiveSigningRow view={data.signing} />}
       <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>
         Used for automatic runs and the agents' own <code>gh</code>/<code>git</code> calls; a change takes effect at the
         agents' next start. An interactive push or pull request uses the chatting person's own personal credential.
       </div>
+    </div>
+  );
+}
+
+// #2938: which SSH key signs this team's commits (personal → team → global), and
+// a non-blocking recommendation when none does — commits then stay unsigned.
+function EffectiveSigningRow({ view }) {
+  const d = describeEffectiveSigning(view);
+  const hint = view.source === 'none' ? signingRecommendation([], { context: 'team' }) : null;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-0-5)' }}>
+      <div>
+        <span style={{ color: 'var(--eb-text-muted)' }}>Commit signing: </span>
+        <span style={{ color: 'var(--eb-text-primary)' }}>{d.headline}</span>
+      </div>
+      <div style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' }}>{d.detail}</div>
+      {hint && (
+        <div style={warnBoxStyle}>
+          <Info size={12} aria-hidden="true" style={{ flexShrink: 0, marginTop: '2px' }} />
+          <span>{hint.text} <Link to={hint.href}>Set up a signing key</Link></span>
+        </div>
+      )}
     </div>
   );
 }

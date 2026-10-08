@@ -16,6 +16,8 @@ import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import CredentialOwnership from '../components/CredentialOwnership';
 import ReassignPanel from '../components/CredentialReassignPanel';
 import { useAuth } from '../auth/AuthContext';
+import { Link } from 'react-router';
+import { signingRecommendation } from './commit-signing-view.js';
 import {
   teamsById, credentialOwnershipLabel, defaultOwnership, ownershipPayload,
   canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
@@ -304,6 +306,9 @@ export default function GithubTokens() {
   const { data: tokens, loading, error, refetch } = useApi('/api/github-tokens');
   const { data: teamsData } = useApi('/api/admin/teams');
   const { data: envsData } = useApi('/api/environments');
+  // #2938: hint while no SSH key the caller can see signs commits.
+  const { data: sshKeysData } = useApi('/api/ssh-keys');
+  const signingHint = Array.isArray(sshKeysData) ? signingRecommendation(sshKeysData, { context: 'github' }) : null;
   const { user } = useAuth();
   const [creating, setCreating] = useState(false);
   const [editTarget, setEditTarget] = useState(null);
@@ -532,6 +537,11 @@ export default function GithubTokens() {
           style={{ padding: 0, flexShrink: 0 }}
         />
       </p>
+      {signingHint && (
+        <div role="note" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>
+          {signingHint.text} <Link to={signingHint.href}>Set up a signing key</Link>
+        </div>
+      )}
 
       {baselineNotice && (
         <div role="status" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>

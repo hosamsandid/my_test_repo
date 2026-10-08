@@ -180,6 +180,21 @@ function extractRejectedCommits(text, max = 10) {
   return seen;
 }
 
+// `gh` commands GitHub carries out on the PR's existing commits — a merge and
+// an update-branch are refused there when a branch requires signed commits and
+// the PR holds unsigned ones (typically pushed before enforcement). Their
+// failure gets the same AC8 message as a rejected push.
+const GH_UNSIGNED_OPERATIONS = { "pr merge": "merge", "pr update-branch": "update-branch" };
+// Every operation name the `unsigned-hint` route accepts.
+const UNSIGNED_HINT_OPERATIONS = ["push", "PR", "merge", "update-branch"];
+
+// 'merge' | 'update-branch' for a `gh pr merge` / `gh pr update-branch` argv
+// (without the leading `gh`), else null.
+function ghUnsignedOperation(args) {
+  if (!Array.isArray(args) || args.length < 2) return null;
+  return GH_UNSIGNED_OPERATIONS[`${args[0]} ${args[1]}`] || null;
+}
+
 const SCOPE_LABELS = {
   personal: "personal",
   team: "team",
@@ -189,7 +204,7 @@ const SCOPE_LABELS = {
 // The actionable message for an unsigned/unverified rejection (AC8).
 // `signing` is the resolveSigningKey result for the identity that pushed;
 // `pushScope` the tier of the push credential ('personal'|'team'|'global'|null);
-// `operation` names what failed ('push', 'PR', 'merge').
+// `operation` names what failed ('push', 'PR', 'merge', 'update-branch').
 function buildUnsignedRejectionMessage({ operation = "push", signing = null, pushScope = null, commits = [], ownerLabel = null } = {}) {
   const lines = [];
   lines.push(
@@ -244,5 +259,7 @@ module.exports = {
   withGitConfigEnv,
   isUnsignedCommitRejection,
   extractRejectedCommits,
+  UNSIGNED_HINT_OPERATIONS,
+  ghUnsignedOperation,
   buildUnsignedRejectionMessage,
 };

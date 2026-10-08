@@ -35,6 +35,13 @@ only each command's known options (no `--editor`/`--web`, no
 PRs/issues by number — a forwarded `gh pr comment` without one cannot see your
 current branch.
 
+Signed commits (#2938): when `gh pr merge` / `gh pr update-branch` fails because
+GitHub requires signed commits and the PR holds unsigned ones, the shim adds one
+actionable message after gh's own error (cause, the credential scope that lacks
+a signing key, affected commits, fix) — from the orchestrator's `unsigned-hint`
+route, or a generic version when it cannot be reached. A forwarded chat-turn
+merge gets the same message from the orchestrator. gh's exit code is kept.
+
 Exit codes: the real `gh`'s own code for a command that ran · 1 when the write
 was refused or could not be forwarded (nothing was written).
 """
@@ -75,6 +82,34 @@ API_FILE_FLAGS = {"--input"}
 API_FIELD_FLAGS = {"-F", "--field"}
 API_RAW_FIELD_FLAGS = {"-f", "--raw-field"}
 API_METHOD_FLAGS = {"-X", "--method"}
+
+
+# `gh` commands whose server-side rejection over unsigned commits gets the
+# actionable message (orchestrator/commit-signing.js GH_UNSIGNED_OPERATIONS).
+UNSIGNED_HINT_COMMANDS = {"pr merge": "merge", "pr update-branch": "update-branch"}
+# Mirror of commit-signing.js UNSIGNED_PATTERNS — only a match asks the
+# orchestrator for the message.
+UNSIGNED_PATTERNS = [
+    re.compile(p, re.I) for p in (
+        r"commits? must have (?:verified|valid) signatures?",
+        r"must have a verified signature",
+        r"requires? signed commits",
+        r"required signatures?",
+        r"unverified commits?",
+        r"unsigned commits?",
+    )
+]
+UNSIGNED_FALLBACK = (
+    "GitHub rejected this {operation}: this GitHub instance requires signed commits and this pull "
+    "request contains unsigned ones (typically pushed before enforcement).\n"
+    "How to fix:\n"
+    "1. In Agent Studio, open Credentials → SSH Keys (/ssh-keys) and add or generate a signing key "
+    "(personal, team or global) with the commit name and email it signs as.\n"
+    "2. On GitHub, upload its public key as type \"Signing Key\" to the account whose VERIFIED email "
+    "is that commit email.\n"
+    "3. Re-sign the PR's commits in a new run, e.g. `git rebase --force-rebase <base-branch>`, and push "
+    "them to a new branch rather than force-pushing over review history."
+)
 
 
 def _internal_headers(extra=None):
@@ -298,8 +333,50 @@ def current_repo(args):
     return _repo_from_remote_url(url) if url else None
 
 
+def unsigned_hint_operation(args):
+    """'merge' / 'update-branch' for `gh pr merge` / `gh pr update-branch`."""
+    return UNSIGNED_HINT_COMMANDS.get(" ".join(args[:2])) if len(args) >= 2 else None
+
+
+def is_unsigned_rejection(text: str) -> bool:
+    return any(p.search(text or "") for p in UNSIGNED_PATTERNS)
+
+
+def unsigned_hint(operation: str, detail: str) -> str:
+    """The orchestrator's message for this agent (names the credential scope
+    and the affected commits), else the generic fallback."""
+    agent_id = os.environ.get("AGENT_ID", "")
+    if agent_id:
+        req = urllib.request.Request(
+            f"{ORCH}/internal/agents/{urllib.request.quote(agent_id, safe='')}/git/unsigned-hint",
+            data=json.dumps({"operation": operation, "detail": detail[-65536:],
+                             "actingSender": (os.environ.get("AEE_ACTING_SENDER") or "").strip()}).encode("utf-8"),
+            headers=_internal_headers({"Content-Type": "application/json"}),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                message = json.loads(resp.read().decode("utf-8")).get("message")
+            if message:
+                return message
+        except Exception:
+            pass
+    return UNSIGNED_FALLBACK.format(operation=operation)
+
+
 def run_local(args, stdin_data=None):
     gh = real_gh()
+    operation = unsigned_hint_operation(_normalise(list(args)))
+    if operation:
+        # stderr is captured (and passed through) so a rejection over unsigned
+        # commits can be explained; stdout and stdin stay the caller's.
+        proc = subprocess.run([gh, *args], input=stdin_data, stderr=subprocess.PIPE)
+        err = proc.stderr.decode("utf-8", "replace")
+        sys.stderr.write(err)
+        if proc.returncode != 0 and is_unsigned_rejection(err):
+            sys.stderr.write(("" if err.endswith("\n") else "\n") + "\n" + unsigned_hint(operation, err) + "\n")
+        sys.stderr.flush()
+        sys.exit(proc.returncode)
     if stdin_data is None:
         os.execv(gh, [gh, *args])
     proc = subprocess.run([gh, *args], input=stdin_data)

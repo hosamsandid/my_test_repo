@@ -47,6 +47,25 @@ test('push and PR failures translate an unsigned-commit rejection (AC8)', () => 
   assert.match(SRC, /if \(err\.unsignedCommits\) payload\.code = 'unsigned-commits-rejected';/);
 });
 
+test('a forwarded gh pr merge / update-branch failure carries the unsigned-commit message (AC8)', () => {
+  const start = SRC.indexOf("const ghWriteMatch = ");
+  assert.ok(start > 0);
+  const route = stripComments(SRC.slice(start, SRC.indexOf('\n    }\n', start)));
+  assert.match(route, /commitSigning\.ghUnsignedOperation\(parsed\.args\)/);
+  assert.match(route, /unsignedRejectionMessage\(id, ghOp, [^\n]*parsed\.actingSender\)/);
+  assert.match(route, /result\.code = 'unsigned-commits-rejected'/);
+});
+
+test('the unsigned-hint route serves the shim\'s merge post-check, allowlisted with own scope (AC8)', () => {
+  const start = SRC.indexOf("const unsignedHintMatch = ");
+  assert.ok(start > 0);
+  const route = stripComments(SRC.slice(start, SRC.indexOf('\n    }\n', start)));
+  assert.match(route, /commitSigning\.UNSIGNED_HINT_OPERATIONS\.includes\(parsed\.operation\)/);
+  assert.match(route, /unsignedRejectionMessage\(id, operation, parsed\.detail\.slice\(0, UNSIGNED_HINT_MAX_BYTES\), parsed\.actingSender\)/);
+  const auth = fs.readFileSync(path.join(__dirname, 'internal-auth.js'), 'utf8');
+  assert.match(auth, /git\\\/unsigned-hint\$\/, scope: "own"/);
+});
+
 test('the agent signer re-resolves the key per call and refuses a changed key', () => {
   const body = region('async function signAgentPayload(');
   assert.match(body, /resolveAgentSigning\(cfg, env, resolveActingSenderUserId\(body\.actingSender, cfg\)\)/);

@@ -7363,6 +7363,9 @@ async function signAgentPayload(id, body = {}) {
   }
 }
 
+// Cap on the GitHub error text the `unsigned-hint` route reads.
+const UNSIGNED_HINT_MAX_BYTES = 64 * 1024;
+
 // AC8: turn a GitHub "signed commits required" rejection into one actionable
 // message. Returns null when `detail` is a different failure.
 function unsignedRejectionMessage(id, operation, detail, actingSenderMatrixId) {
@@ -19563,6 +19566,41 @@ async function main() {
       return;
     }
 
+    // `unsigned-hint` (#2938 AC8): an autonomous run's `gh pr merge` /
+    // `update-branch` runs the real gh in the container, so the `gh` shim
+    // posts GitHub's rejection text here and prints the actionable message
+    // (cause, credential scope lacking a key, affected commits, fix). `own`.
+    const unsignedHintMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/git\/unsigned-hint$/);
+    if (unsignedHintMatch) {
+      const id = decodeURIComponent(unsignedHintMatch[1]);
+      let body = '';
+      req.on('data', (d) => { if (body.length <= UNSIGNED_HINT_MAX_BYTES) body += d; });
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* {} */ }
+        const operation = commitSigning.UNSIGNED_HINT_OPERATIONS.includes(parsed.operation) ? parsed.operation : null;
+        if (!operation || typeof parsed.detail !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: `operation must be one of ${commitSigning.UNSIGNED_HINT_OPERATIONS.join(', ')} and detail a string` }));
+          return;
+        }
+        if (!loadAgentConfig(id)) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: `Agent '${id}' not found` }));
+          return;
+        }
+        let message = null;
+        try {
+          message = unsignedRejectionMessage(id, operation, parsed.detail.slice(0, UNSIGNED_HINT_MAX_BYTES), parsed.actingSender);
+        } catch (err) {
+          console.warn(`[Orchestrator] git unsigned-hint for ${id}: ${errorMessage(err)}`);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, message, code: message ? 'unsigned-commits-rejected' : null }));
+      });
+      return;
+    }
+
     // ── Chat-attributed `gh` write (#2559) ──────────────────────────────────
     // The agent image's `gh` shim forwards a live chat turn's GitHub WRITE here
     // so it runs under the chat sender's personal credential without that
@@ -19592,6 +19630,16 @@ async function main() {
           if (result.mode === 'attributed') {
             // The validated command only — never `gh api`'s agent-supplied endpoint.
             console.log(`[Orchestrator] chat gh ${chatGithubWrite.commandKey(parsed.args).slice(0, 80)} for ${id} → exit ${result.exitCode}`);
+            // #2938 AC8: a merge / update-branch GitHub refused over unsigned
+            // commits gets the actionable message appended to gh's own stderr.
+            const ghOp = commitSigning.ghUnsignedOperation(parsed.args);
+            const unsigned = ghOp && Number(result.exitCode) !== 0
+              ? unsignedRejectionMessage(id, ghOp, `${result.stderr || ''}\n${result.stdout || ''}`, parsed.actingSender)
+              : null;
+            if (unsigned) {
+              result.stderr = `${result.stderr || ''}${String(result.stderr || '').endsWith('\n') ? '' : '\n'}\n${unsigned}\n`;
+              result.code = 'unsigned-commits-rejected';
+            }
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));

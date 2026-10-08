@@ -226,6 +226,7 @@ test("an agent reaches its own telemetry, knowledge, triggers, ticket and git ro
     ["POST", "/internal/agents/team-x-developer/git/pr"],
     ["POST", "/internal/agents/team-x-developer/git/signing-config"],
     ["POST", "/internal/agents/team-x-developer/git/sign"],
+    ["POST", "/internal/agents/team-x-developer/git/unsigned-hint"],
     ["POST", "/internal/agents/team-x-developer/github/gh"],
     ["POST", "/internal/agents/team-x-developer/run-key"],
     ["POST", "/internal/agents/team-x-developer/runs"],

@@ -88,9 +88,10 @@ global), every commit you create in a run — `gh-as-agent commit`, plain
 automatically, and its committer becomes the key's commit identity (your author
 stays). Nothing to set up; do not change `gpg.*`, `commit.gpgsign` or
 `user.signingkey`. If a commit fails with `aee-ssh-sign: … failed`, the key is
-broken — surface the message, do not retry with `--no-gpg-sign`. If a push or PR
-is rejected because commits are unsigned, `gh-as-agent` prints the cause and the
-fix; surface it to the user.
+broken (or this run could not read its signing config — start a new run) —
+surface the message, do not retry with `--no-gpg-sign`. If a push or PR is
+rejected because commits are unsigned, `gh-as-agent` prints the cause and the
+fix; so does `gh pr merge` / `gh pr update-branch`. Surface it to the user.
 
 ### `gh-as-agent pr` when the environment has no GitHub token
 

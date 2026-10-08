@@ -58,6 +58,12 @@ key is set up, and the box shows which key signs the team's commits.
 - **Signing fails** (key deleted, unreadable, orchestrator unreachable): the
   commit fails with an `aee-ssh-sign: … failed` message. A commit is never
   silently created unsigned.
+- **The run could not read its signing config** (the orchestrator errored,
+  timed out or could not be reached when the run started): every commit in that
+  run fails with "could not read this run's commit-signing config … start a new
+  run" — whether or not a key is configured, because the run cannot tell. Only
+  an orchestrator that predates commit signing (no such route) leaves commits
+  unsigned.
 - **The key changed during a run** (rotated, replaced, signing switched off):
   the run's later commits fail and ask for a new run, so a run never switches
   identity half-way.
@@ -65,6 +71,11 @@ key is set up, and the box shows which key signs the team's commits.
   report it with the code `unsigned-commits-rejected` and the fix (set up a
   signing key, then re-create the commits, e.g. with `git rebase --exec
   'git commit --amend --no-edit' <base>`).
+- **A merge or branch update is rejected because commits are unsigned**
+  (typically a pull request with commits pushed before enforcement):
+  `gh pr merge` and `gh pr update-branch` print the same explanation after
+  GitHub's error — the cause, the credential that lacks a signing key, the
+  affected commits and the fix. gh's exit code is unchanged.
 
 ## Merging and updating pull requests
 

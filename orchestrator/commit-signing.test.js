@@ -13,6 +13,8 @@ const {
   withGitConfigEnv,
   isUnsignedCommitRejection,
   extractRejectedCommits,
+  UNSIGNED_HINT_OPERATIONS,
+  ghUnsignedOperation,
   buildUnsignedRejectionMessage,
 } = require("./commit-signing");
 
@@ -136,6 +138,22 @@ test("isUnsignedCommitRejection recognises push, protection and merge phrasings 
   assert.equal(isUnsignedCommitRejection("! [rejected] x -> x (non-fast-forward)"), false);
   assert.equal(isUnsignedCommitRejection("Permission denied (publickey)."), false);
   assert.equal(isUnsignedCommitRejection(null), false);
+});
+
+test("ghUnsignedOperation: only gh pr merge / update-branch get the merge-side message (AC8)", () => {
+  assert.equal(ghUnsignedOperation(["pr", "merge", "5", "--squash"]), "merge");
+  assert.equal(ghUnsignedOperation(["pr", "update-branch", "5"]), "update-branch");
+  assert.equal(ghUnsignedOperation(["pr", "create", "--title", "t"]), null);
+  assert.equal(ghUnsignedOperation(["api", "repos/o/r/pulls/5/merge"]), null);
+  assert.equal(ghUnsignedOperation(["pr"]), null);
+  assert.equal(ghUnsignedOperation(null), null);
+  assert.deepEqual(UNSIGNED_HINT_OPERATIONS, ["push", "PR", "merge", "update-branch"]);
+});
+
+test("buildUnsignedRejectionMessage names a merge rejection", () => {
+  const msg = buildUnsignedRejectionMessage({ operation: "merge", signing: { source: "none" }, pushScope: "team" });
+  assert.match(msg, /^GitHub rejected this merge: /);
+  assert.match(msg, /team credential/);
 });
 
 test("extractRejectedCommits lists the full SHAs once", () => {

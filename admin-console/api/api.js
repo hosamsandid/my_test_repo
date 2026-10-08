@@ -609,11 +609,12 @@ app.get('/api/helper/tour-manifest', (req, res) => {
 });
 
 // ─── Context-help topics (#1872, spec docs/context-help-system-concept.md §3) ──
-// GET /api/helper/page-help returns the whole curated topic set once (a few KB;
-// the client resolves the current route → topic locally so face-switching is
+// GET /api/helper/page-help returns the whole curated topic set once (~350 KB,
+// so the client fetches it on the Help panel's first open, #2918; the client
+// resolves the current route → topic locally so face-switching is
 // instant/offline). The SAME help-topics/ files ground the chat corpus above, so
 // there is no vendoring/parity drift. Behind the global /api auth gate like every
-// other /api route. Topics are small + static; load once and memoize.
+// other /api route. Topics are static; load once and memoize.
 const _helpRegistryModule = require('./helper-chat/help-registry');
 let _pageHelpCache = null;
 app.get('/api/helper/page-help', (req, res) => {

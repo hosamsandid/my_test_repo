@@ -1,7 +1,7 @@
-import React from 'react';
+import React, { useSyncExternalStore } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { rehypeShikiSync } from './shiki-rehype';
+import { rehypeShikiSync, subscribeShiki, shikiVersion } from './shiki-rehype';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { MarkdownSafeBoundary, plainTextFallback } from './markdown-safe.js';
 
@@ -51,6 +51,9 @@ const MD_COMPONENTS = {
 };
 
 function SkillMarkdownRender({ content, withShiki }) {
+  // Re-render when the lazily loaded highlighter or a grammar is ready (#2918),
+  // so plain code blocks upgrade to highlighted ones.
+  useSyncExternalStore(subscribeShiki, shikiVersion);
   const rehypePlugins = withShiki
     ? [rehypeShikiSync(), [rehypeSanitize, SANITIZE_SCHEMA]]
     : [[rehypeSanitize, SANITIZE_SCHEMA]];

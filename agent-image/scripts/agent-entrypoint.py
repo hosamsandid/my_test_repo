@@ -1338,9 +1338,20 @@ def _with_git_config_env(env: dict, pairs: list) -> dict:
     return env
 
 
+# Set on a run whose signing config could not be read: signing is switched ON
+# with this error, so every commit fails loudly instead of silently going out
+# unsigned while a key may well be configured (AC9).
+SIGNING_CONFIG_UNREADABLE = ("could not read this run's commit-signing config from the orchestrator "
+                             "({detail}) — start a new run")
+
+
 def _fetch_signing_config(acting_sender: str, timeout: float = 10) -> dict | None:
     """POST /internal/agents/<id>/git/signing-config → the `signing` object or
-    None. Fails open: an unreachable orchestrator means unsigned, as before."""
+    None (no key → unsigned, as before). Fails CLOSED: an orchestrator that
+    errors, times out, cannot be reached or answers garbage yields an `error`
+    signing object, so the run's commits fail with a clear message rather than
+    being created unsigned. Only a 404 (an older orchestrator without the route)
+    and a run outside an agent container (no AGENT_ID) stay unsigned."""
     agent_id = os.environ.get("AGENT_ID", "")
     if not agent_id:
         return None
@@ -1355,10 +1366,23 @@ def _fetch_signing_config(acting_sender: str, timeout: float = 10) -> dict | Non
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             data = json.loads(r.read().decode() or "{}")
+        if not isinstance(data, dict):
+            raise ValueError("not a JSON object")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print("[Runner] commit signing: the orchestrator has no signing-config route — commits stay unsigned",
+                  file=sys.stderr)
+            return None
+        detail = f"HTTP {e.code}"
+        print(f"[Runner] commit signing: could not read the signing config ({detail}) — commits will fail",
+              file=sys.stderr)
+        return {"label": "run's SSH signing key", "error": SIGNING_CONFIG_UNREADABLE.format(detail=detail)}
     except (urllib.error.URLError, OSError, ValueError) as e:
-        print(f"[Runner] commit signing: could not read the signing config ({e}) — commits stay unsigned", file=sys.stderr)
-        return None
-    signing = data.get("signing") if isinstance(data, dict) else None
+        detail = str(getattr(e, "reason", None) or e) or type(e).__name__
+        print(f"[Runner] commit signing: could not read the signing config ({detail}) — commits will fail",
+              file=sys.stderr)
+        return {"label": "run's SSH signing key", "error": SIGNING_CONFIG_UNREADABLE.format(detail=detail)}
+    signing = data.get("signing")
     return signing if isinstance(signing, dict) else None
 
 

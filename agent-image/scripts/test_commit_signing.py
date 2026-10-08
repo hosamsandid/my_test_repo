@@ -22,8 +22,9 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -73,20 +74,97 @@ class SigningConfigPairs(unittest.TestCase):
         self.assertEqual(env["GIT_CONFIG_KEY_1"], "x.y")
         self.assertEqual(env["GIT_CONFIG_KEY_0"], "a.b")
 
-    def test_signing_config_fetch_fails_open(self):
-        old = os.environ.get("ORCHESTRATOR_INTERNAL_URL"), os.environ.get("AGENT_ID")
-        os.environ["ORCHESTRATOR_INTERNAL_URL"] = "http://127.0.0.1:9"
+
+class _ConfigServer:
+    """A one-route fake orchestrator answering /git/signing-config with a fixed
+    status and raw body."""
+
+    def __init__(self, status, body, delay=0.0):
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                time.sleep(delay)
+                data = body.encode()
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class SigningConfigFetch(unittest.TestCase):
+    """B2/AC9: a run whose signing config cannot be read must not commit
+    unsigned — only a 404 (older orchestrator) keeps the old unsigned path."""
+
+    def setUp(self):
+        self.old = {k: os.environ.get(k) for k in ("ORCHESTRATOR_INTERNAL_URL", "AGENT_ID")}
         os.environ["AGENT_ID"] = AGENT
-        try:
-            env = {"AEE_ACTING_SENDER": ""}
-            entrypoint._apply_commit_signing(env)
-            self.assertNotIn("GIT_CONFIG_COUNT", env)
-        finally:
-            for k, v in zip(("ORCHESTRATOR_INTERNAL_URL", "AGENT_ID"), old):
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
+
+    def tearDown(self):
+        for k, v in self.old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def apply(self, url):
+        os.environ["ORCHESTRATOR_INTERNAL_URL"] = url
+        env = {"AEE_ACTING_SENDER": ""}
+        entrypoint._apply_commit_signing(env)
+        return env
+
+    def assert_fails_closed(self, env, detail):
+        self.assertEqual(env["GIT_CONFIG_COUNT"], "4")
+        self.assertIn(("commit.gpgsign", "true"),
+                      [(env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"]) for i in range(4)])
+        self.assertIn("could not read this run's commit-signing config", env["AEE_SIGNING_ERROR"])
+        self.assertIn("start a new run", env["AEE_SIGNING_ERROR"])
+        self.assertIn(detail, env["AEE_SIGNING_ERROR"])
+
+    def with_server(self, status, body):
+        srv = _ConfigServer(status, body)
+        self.addCleanup(srv.close)
+        return self.apply(srv.url)
+
+    def test_unreachable_orchestrator_fails_closed(self):
+        self.assert_fails_closed(self.apply("http://127.0.0.1:9"), "refused")
+
+    def test_server_error_fails_closed(self):
+        self.assert_fails_closed(self.with_server(500, '{"ok": false}'), "HTTP 500")
+
+    def test_non_json_answer_fails_closed(self):
+        self.assert_fails_closed(self.with_server(200, "<html>proxy error</html>"), "")
+
+    def test_timeout_fails_closed(self):
+        srv = _ConfigServer(200, '{"signing": null}', delay=1.0)
+        self.addCleanup(srv.close)
+        os.environ["ORCHESTRATOR_INTERNAL_URL"] = srv.url
+        signing = entrypoint._fetch_signing_config("", timeout=0.2)
+        self.assertIn("could not read this run's commit-signing config", signing["error"])
+        self.assertIn("timed out", signing["error"])
+
+    def test_404_from_an_older_orchestrator_stays_unsigned(self):
+        self.assertNotIn("GIT_CONFIG_COUNT", self.with_server(404, "not found"))
+
+    def test_no_key_configured_stays_unsigned(self):
+        env = self.with_server(200, '{"signing": null}')
+        self.assertNotIn("GIT_CONFIG_COUNT", env)
+        self.assertNotIn("AEE_SIGNING_ERROR", env)
+
+    def test_no_agent_id_stays_unsigned(self):
+        os.environ.pop("AGENT_ID", None)
+        self.assertNotIn("GIT_CONFIG_COUNT", self.apply("http://127.0.0.1:9"))
 
 
 class SignerArgs(unittest.TestCase):
@@ -259,6 +337,17 @@ class EndToEnd(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("invalid format", r.stderr)
         self.assertEqual(len(self.calls), n)
+
+    def test_unreadable_signing_config_fails_the_commit(self):
+        # B2/AC9: the run-start config fetch failed → every commit fails loudly.
+        _, extra = entrypoint._signing_config_pairs(
+            {"label": "run's SSH signing key",
+             "error": entrypoint.SIGNING_CONFIG_UNREADABLE.format(detail="HTTP 503")})
+        self.env.update(extra)
+        r = self.git("commit", "--allow-empty", "-q", "-m", "x", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("could not read this run's commit-signing config from the orchestrator (HTTP 503)", r.stderr)
+        self.assertIn("start a new run", r.stderr)
 
     def test_signer_sends_acting_sender_and_public_key(self):
         self.env["AEE_ACTING_SENDER"] = "@u-abc:local"

@@ -16,13 +16,16 @@ import {
 } from './outcome-consumers.js';
 import {
   moveHumanDelivery, wireLabelHandoff, unwireLabelHandoff, wireChannel, unwireChannel,
+  updateChannel as engineUpdateChannel,
 } from './wiring-engine.js';
 import {
   rowArtifact, wireConsumerSpec, currentConsumers, consumerCandidates, openEndMarker, setLabelTarget,
 } from './outcome-routing.js';
 import { consumeKey } from './humans-registry-ops';
 import { WAKE_NOTE_MAX, clampWakeNote } from './wake-edge-view.js';
-import { readinessSummary, NEW_HANDOFF_READINESS, newHandoffReadiness } from './readiness-gate.js';
+import { NEW_HANDOFF_READINESS, newHandoffReadiness, toggleReadiness } from './readiness-gate.js';
+import { showsReadinessGate } from '../agent-chat/trigger-readiness.js';
+import ReadinessToggles from './ReadinessToggles';
 
 // The human role currently wired to consume `entry` (or '' if none). #987.
 function humanConsuming(humans, entry) {
@@ -236,6 +239,24 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
   };
   const removeTrigger = (tid) => { if (ops.deleteTrigger) run(`t:${tid}`, () => ops.deleteTrigger(node.id, tid)); };
   const toggleTrigger = (t) => { if (ops.updateTrigger) run(`t:${t.id}`, () => ops.updateTrigger(node.id, t.id, { enabled: t.enabled === false })); };
+  // Inline readiness toggles (#2913): one switched gate, saved through the same
+  // path as the hand-off dialog's Save (the channel port via the engine, a
+  // label hand-off listener via its trigger), then the same onChanged refresh.
+  const gateNext = (stored, key, on, wakeLabel) => {
+    const r = toggleReadiness(stored, key, on, { wakeLabel });
+    if (r.error) throw new Error(r.error);
+    return r.readiness;
+  };
+  const toggleChannelGate = (key, c, gateKey, on) => run(key, () => engineUpdateChannel({ ops }, {
+    to: node.id, prevLabel: c.label || '', spec: {
+      artifact: c.artifact, from: c.from,
+      ...(c.label ? { label: c.label } : {}),
+      ...(c.gate === 'human' ? { gate: 'human' } : {}),
+      readiness: gateNext(c.readiness, gateKey, on, c.label || ''),
+    },
+  }));
+  const toggleTriggerGate = (t, gateKey, on) => run(`t:${t.id}`, () =>
+    ops.updateTrigger(node.id, t.id, { readinessGate: gateNext(t.readinessGate, gateKey, on, t.labelFilter || '') }));
 
   const closeEdits = () => { setEditTrigger(null); setEditChannel(null); setEditInput(null); };
   const afterEdit = () => { closeEdits(); onChanged?.(); };
@@ -285,12 +306,17 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
         return (
           <InputRow key={key} busy={busy === key}
             icon={c.artifact === 'pr' ? <GitPullRequest size={14} /> : <CircleDot size={14} />}
+            // #2913: a PR hand-off's readiness gate, switchable inline; an issue
+            // hand-off cannot be gated, so it shows none.
+            subtitle={c.artifact === 'pr' ? (
+              <ReadinessToggles value={c.readiness} busy={busy === key}
+                onToggle={ops.updateChannel ? (k, on) => toggleChannelGate(key, c, k, on) : null} />
+            ) : null}
             onEdit={ops.updateChannel || ops.addChannel ? () => setEditChannel(c) : null}
             onRemove={ops.removeChannel ? () => run(key, () => ops.removeChannel(node.id, { artifact: c.artifact, from: c.from, label: c.label || '' })) : null}
             text={<>Reacts to <strong>{nameOf(c.from)}</strong>'s {noun}
               {c.label ? <> when labeled <code style={codeChip}>{c.label}</code></> : null}
               {c.gate === 'human' ? ' · 👤 human gate' : null}
-              {readinessSummary(c.readiness) ? <span title={readinessSummary(c.readiness)}> · waits for {[c.readiness.ci ? 'CI' : null, c.readiness.conflict ? 'conflict-free' : null].filter(Boolean).join(' + ')}</span> : null}
               {/* Derived claim, read-only (auto) + per-listener opt-out. The flag
                   lives on the PORT because the derived trigger is regenerated on
                   every reconcile — a trigger-level flag would be wiped. */}
@@ -348,6 +374,10 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
           onEdit={ops.updateTrigger ? () => setEditTrigger(t) : null}
           onToggle={ops.updateTrigger ? () => toggleTrigger(t) : null}
           onRemove={ops.deleteTrigger ? () => removeTrigger(t.id) : null}
+          readiness={showsReadinessGate(t.type, t.events) ? (
+            <ReadinessToggles value={t.readinessGate} busy={busy === `t:${t.id}`}
+              onToggle={ops.updateTrigger ? (k, on) => toggleTriggerGate(t, k, on) : null} />
+          ) : null}
           nameOf={nameOf} />
       ))}
 
@@ -436,7 +466,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
 // A manual trigger row: type icon + plain-language schedule + enabled switch +
 // edit + remove. The detail editor (edit) is the reused TriggersPanel form.
 const TRIGGER_ICON = { cron: Clock, once: CalendarClock, http: Globe, 'github-event': Github };
-function ManualTriggerRow({ trigger, agentId, busy, onEdit, onToggle, onRemove, nameOf }) {
+function ManualTriggerRow({ trigger, agentId, busy, onEdit, onToggle, onRemove, readiness, nameOf }) {
   const Icon = TRIGGER_ICON[trigger.type] || Github;
   const enabled = trigger.enabled !== false;
   const sources = Array.isArray(trigger.sources) ? trigger.sources : [];
@@ -453,6 +483,7 @@ function ManualTriggerRow({ trigger, agentId, busy, onEdit, onToggle, onRemove, 
         {sources.length > 0 && (
           <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>← {sources.map(nameOf).join('  ← ')}</span>
         )}
+        {readiness}
         {!enabled && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>disabled</span>}
       </div>
       {onToggle && (

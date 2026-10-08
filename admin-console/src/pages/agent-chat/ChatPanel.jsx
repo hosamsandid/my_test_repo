@@ -43,6 +43,7 @@ import { RESUME_MESSAGE } from './resume-session';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
 import { AUTHOR_FIELD, authorStampFor, buildAuthorDirectory } from './message-author.js';
 import { STATUS_NOTE_FIELD, lastTurnMessage } from './status-note.js';
+import { GIT_INFO_POLL_MS, gitInfoPollArmed } from './git-info-poll.js';
 import {
   resolveInitialFontSize, loadStoredFontSize, FONT_SIZE_CHANGED_EVENT,
 } from './chat-font-size.js';
@@ -265,6 +266,8 @@ export default function ChatPanel({
   }, [modelOptions]);
   // Git repos info for the agent workspace (branch + dirty status).
   const [gitInfo, setGitInfo] = useState(null);
+  // Room whose history backfill has settled — arms the git-info poll (#2923).
+  const [historyLoadedFor, setHistoryLoadedFor] = useState(null);
 
   // Active-sessions context (#1678, extended in #1852): the one shared poll of
   // /api/agents/:id/sessions/active (polled at 3 s by SessionsActiveContext in
@@ -342,8 +345,16 @@ export default function ChatPanel({
   }, [agent, roomId, onRoomCreated]);
 
   /* ─── 1b. Git info polling ──────────────────────────────────────── */
+  // Starts only after the room's history has loaded (#2923): a cold git-info
+  // runs `git status` and must not hold a connection the bootstrap needs.
+  const gitInfoArmed = gitInfoPollArmed({
+    agentId: agent?.id,
+    agentEnabled: agent?.enabled,
+    roomId,
+    historyLoadedFor,
+  });
   useEffect(() => {
-    if (!agent?.id) return;
+    if (!agent?.id || !gitInfoArmed) return;
     let cancelled = false;
     const loadGitInfo = () => {
       apiCall('GET', `/api/agents/${agent.id}/git-info`)
@@ -351,9 +362,9 @@ export default function ChatPanel({
         .catch(() => { if (!cancelled) setGitInfo([]); });
     };
     loadGitInfo();
-    const timer = setInterval(loadGitInfo, 30_000);
+    const timer = setInterval(loadGitInfo, GIT_INFO_POLL_MS);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [agent?.id]);
+  }, [agent?.id, gitInfoArmed]);
 
   /* ─── 2. Backfill on roomId change ──────────────────────────────── */
   useEffect(() => {
@@ -411,7 +422,11 @@ export default function ChatPanel({
         }
       })
       .catch(e => { if (!cancelled) setError(`History load failed: ${e.message}`); })
-      .finally(() => { if (!cancelled) setLoading(false); });
+      .finally(() => {
+        if (cancelled) return;
+        setLoading(false);
+        setHistoryLoadedFor(roomId);
+      });
 
     return () => { cancelled = true; };
   }, [roomId]);

@@ -947,3 +947,16 @@ test('#2716 unusedLabels passes through from a draft bundle (POST /api/flows/gra
   const g = buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels });
   assert.deepEqual(g.unusedLabels, ['plan-approved-jvc']);
 });
+
+test('#2913: a gated PR label hand-off edge carries its readiness gate; an ungated one none', () => {
+  const g = buildUnifiedGraph([
+    { id: 'dev', emits: ['ready-for-review', 'ready-to-merge'] },
+    { id: 'rev', triggers: [{ id: 'r', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review',
+      readinessGate: { ci: true, conflict: false, timeoutMinutes: 30 } }] },
+    { id: 'merger', triggers: [{ id: 'm', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-to-merge' }] },
+  ]);
+  const gated = findEdge(g, x => x.on === 'label' && x.from === 'dev' && x.to === 'rev');
+  assert.deepEqual(gated.readinessGate, { ci: true, conflict: false, timeoutMinutes: 30 });
+  const ungated = findEdge(g, x => x.on === 'label' && x.from === 'dev' && x.to === 'merger');
+  assert.ok(!('readinessGate' in ungated));
+});

@@ -30,15 +30,20 @@ test('resolveMemLimitBytes falls back to the fleet default when the toolchain ha
 
 test('resolveMemLimitBytes uses the toolchain\'s memoryLimit override when present (AC1)', () => {
   assert.equal(
-    resolveMemLimitBytes({ toolchainId: 'jvm', resources: { memoryLimit: '4g' } }),
+    resolveMemLimitBytes({ toolchainId: 'jvm', resources: { memoryLimit: '4g' } }, null, 2 * 1024 ** 3),
     4 * 1024 ** 3,
   );
 });
 
+test('resolveMemLimitBytes keeps the limit disabled when the fleet limit is 0, even with an override', () => {
+  assert.equal(resolveMemLimitBytes({ toolchainId: 'jvm', resources: { memoryLimit: '4g' } }, null, 0), 0);
+  assert.equal(resolveMemLimitBytes(null, null, 0), 0);
+});
+
 test('resolveMemLimitBytes falls back to the fleet default on an override that fails to parse', () => {
   assert.equal(
-    resolveMemLimitBytes({ toolchainId: 'jvm', resources: { memoryLimit: 'not-a-quantity' } }),
-    AGENT_MEM_LIMIT_BYTES,
+    resolveMemLimitBytes({ toolchainId: 'jvm', resources: { memoryLimit: 'not-a-quantity' } }, null, 2 * 1024 ** 3),
+    2 * 1024 ** 3,
   );
 });
 

@@ -462,7 +462,7 @@ export default function RightRail({
           <WorkspaceBrowser agentId={agentId} active={effectiveTab === 'workspace'} refreshKey={workspaceRefreshKey} onReference={onReferenceInChat} />
         </div>
         <div style={{ display: effectiveTab === 'triggers' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
-          <TriggersPanel agentId={agentId} active={effectiveTab === 'triggers'} />
+          <TriggersPanel agentId={agentId} active={effectiveTab === 'triggers'} focusRequest={openTabRequest && openTabRequest.tab === 'triggers' && openTabRequest.triggerId ? openTabRequest : null} />
         </div>
         {showEvents && (
           <div style={{ display: effectiveTab === 'events' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>

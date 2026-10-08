@@ -55,7 +55,7 @@ import {
   labelStyle, inputStyle, helpTextStyle, PrimaryBtn, SecondaryBtn,
 } from './form-kit.jsx';
 import {
-  buildInitialForm, buildEditSubmit, hasOwnSkills, poolSectionError, skillsListUrl,
+  buildInitialForm, buildEditSubmit, displayNameError, hasOwnSkills, poolSectionError, skillsListUrl,
 } from './agent-edit-form-model.js';
 import { inheritedMcpPreview, switchMcpMode, memberMcpBlockers } from './member-mcp-view.js';
 import { TEAM_CONFIG_TABS, ENV_TAB_IDS, resolveTeamConfigTab } from './team-config-tabs-view.js';
@@ -542,13 +542,14 @@ export default function AgentEditForm({
     mcpEnvId ? `/api/environments/${encodeURIComponent(mcpEnvId)}` : null,
   );
   const mcpBlockers = isMember ? memberMcpBlockers(form.inheritMcp, form.mcpRows) : [];
+  const nameError = displayNameError(form);
   const isTeam = agent.role === 'team';
   // Role memory requirement (#2813): the effective limit (role → toolchain →
   // platform) and the ceiling come from the server; a team holder runs no
   // container, so it has none.
   const { data: memoryInfo } = useApi(!isTeam && agent.id ? `/api/agents/${encodeURIComponent(agent.id)}/memory` : null);
   const memoryError = isTeam ? null : memoryLimitError(form.memoryLimit, { ceiling: memoryInfo?.ceiling });
-  const canSubmit = !!form.displayName && mcpBlockers.length === 0 && !memoryError;
+  const canSubmit = !nameError && mcpBlockers.length === 0 && !memoryError;
 
   // Team-axis Parallelism (wipLimit + Flow Supervisor) is now configurable
   // directly from Team Settings, not only the Flow editor. The panel writes
@@ -659,7 +660,7 @@ export default function AgentEditForm({
       )}
 
       {(!isTeam || activeTab === 'general') && (
-        <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} />
+        <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} error={nameError} />
       )}
 
       {/* The prompt is the most important thing in this form, so it sits

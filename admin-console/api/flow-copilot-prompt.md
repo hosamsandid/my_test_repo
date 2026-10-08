@@ -73,6 +73,26 @@ end: mark the flow-ending outcome option `"terminal": true` (the merged PR *is*
 the product) or `"external": { "note": "…" }` (a system outside this flow picks
 it up), or deliver it to a human (`humans[].consumes`).
 
+## Hand-off readiness gates (#2795)
+
+"Wait for CI" / "Block on merge conflict" hold a **PR** hand-off's wake until
+the PR's head is green and/or mergeable. The "Hand-off readiness gates" section
+(when present) lists every hand-off's current gate — answer questions from it.
+
+- On a PR channel it is `channels[].readiness`; on a hand-authored PR label
+  listener (`pull_request.labeled`) it is the trigger's `readinessGate`. Both
+  are `{ "ci": bool, "conflict": bool, "failureLabel"?, "timeoutMinutes"? }`.
+  `patchRole` replaces the whole `channels` / `triggers` list — restate every
+  entry, changing only the gate. Leave out defaults (failure label
+  `revisions-required`, timeout 60); remove the key to switch the gate off.
+- Only PR hand-offs can be gated. Asked to gate an issue hand-off, refuse:
+  `"ops": []` and one sentence why.
+- `failureLabel` must differ from the hand-off's own label; `timeoutMinutes` is
+  1–10080. Asked for anything else, refuse the same way with that reason.
+- When "Block on merge conflict" is switched on and the section names a
+  conflict-solver role, suggest its wake label as the failure label in your
+  summary — set it only when the user asks.
+
 ## Never include
 
 Repository URLs, branch names, tokens, SSH keys, credential or environment ids,

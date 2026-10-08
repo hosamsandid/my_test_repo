@@ -94,12 +94,12 @@ On a channel port the same object is the channel's `readiness` field; the derive
 - **Release**: every enabled gate is satisfied for the current head → the agent is woken with the original event, logged `delivered · gate cleared`.
 - **Failure**: a check failed or the PR conflicts → nobody is woken; the poller removes the wake label, sets the failure label and comments on the PR, listing the failing checks or naming the conflict. Wire an agent on the failure label (e.g. a developer that fixes the PR and re-applies the hand-off label) — the Flows editor warns when nobody listens on it.
 - **Timeout**: still pending after `timeoutMinutes` → the wake label is removed, `needs-human` set and a comment names what was still pending.
-- **Push during a hold**: the new head is evaluated from scratch (a failure of the old head no longer counts); the timeout still counts from the original hold.
-- **Cancel**: the PR is closed or merged, the wake label is removed, or the listening trigger is deleted → the hold is dropped and nobody is woken.
-- **Labels applied from the console**: a hand-off label set through the GitHub Issues plugin (Agent Chat, Flow Control, the Flow Supervisor) is held the same way — it never skips the gate.
-- **Restarts**: holds live in the poller's `state.json` and survive an orchestrator restart; a failed GitHub write is retried on the next cycle.
+- **Push during a hold**: the new head is evaluated afresh (the old head's failure is void); the timeout counts from the original hold.
+- **Cancel**: PR closed or merged, wake label removed, or trigger deleted → the hold is dropped, nobody is woken.
+- **Labels applied from the console** (GitHub Issues plugin, Flow Supervisor) are held the same way.
+- **Restarts**: holds live in the poller's `state.json` and survive a restart; a failed GitHub write is retried next cycle.
 - **Fan-in**: when several PR channels share one listener, their gates are combined — each toggle is on if any channel enables it; the first channel's explicit failure label / timeout wins.
-- **Defaults**: the core, extended and dispatched SDLC templates gate their PR hand-offs, and a new PR hand-off drawn in the Flow editor starts with both gates on. Existing teams are not changed — their hand-offs stay ungated until switched on in the hand-off dialog.
+- **Defaults**: the core, extended and dispatched SDLC templates gate their PR hand-offs, and a new PR hand-off drawn in the Flow editor starts with both gates on. Existing hand-offs stay ungated until switched on in the hand-off dialog or **Agent Chat → Triggers** (new triggers start ungated; a derived listener's gate is saved to its channels).
 
 Visible in the **GitHub Event Log** (`held — waiting for CI / conflict-free`, then `delivered · gate cleared` or `not woken (gate failed / timed out / cancelled)`), on the agent's **Events** tab, and as **waiting for CI** on the PR's row in **Flow Control**. Only PR hand-offs can be gated; issue hand-offs are not.
 

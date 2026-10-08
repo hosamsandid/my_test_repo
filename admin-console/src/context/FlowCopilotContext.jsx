@@ -196,6 +196,9 @@ export function FlowCopilotProvider({ children }) {
         changes: Array.isArray(body.changes) ? body.changes : [],
         lints: Array.isArray(body.lints) ? body.lints : [],
         ok: !!body.ok,
+        // An answer-only turn (#2915): a question answered or a request
+        // refused — no bundle, nothing to apply.
+        answer: !!body.answer,
         bundle: body.bundle,
         // The bundle the turn was asked to change — a live-team apply diffs
         // against it and refuses when the team has moved on since (#2556).

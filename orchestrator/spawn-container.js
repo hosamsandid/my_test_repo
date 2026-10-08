@@ -77,12 +77,18 @@ const AGENT_PIDS_LIMIT = Number(process.env.AEE_AGENT_PIDS_LIMIT || 512);
 //
 // #2813: a role's own `memoryLimit` (already clamped to the operator ceiling
 // by the orchestrator) wins over the toolchain's — role → toolchain → fleet.
-function resolveMemLimitBytes(toolchain, roleMemoryLimit = null) {
+// An operator who disabled the fleet limit (AEE_AGENT_MEM_LIMIT=0, e.g. on a
+// WSL host whose cgroup delegation cannot write memory.max) stays disabled:
+// neither override re-imposes one.
+// Conflict resolution (#2813 × main): both sides changed the 2nd parameter;
+// the role limit keeps it and the fleet limit moved to the 3rd.
+function resolveMemLimitBytes(toolchain, roleMemoryLimit = null, fleetBytes = AGENT_MEM_LIMIT_BYTES) {
+  if (!fleetBytes) return 0;
   const roleBytes = roleMemoryLimit ? parseBytes(roleMemoryLimit) : 0;
   if (roleBytes) return roleBytes;
   const override = toolchain && toolchain.resources && toolchain.resources.memoryLimit;
-  if (!override) return AGENT_MEM_LIMIT_BYTES;
-  return parseBytes(override) || AGENT_MEM_LIMIT_BYTES;
+  if (!override) return fleetBytes;
+  return parseBytes(override) || fleetBytes;
 }
 // Label stamped on every agent container so the orchestrator can reconcile
 // live container state against its in-memory process map (source of truth).

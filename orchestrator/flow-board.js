@@ -21,6 +21,8 @@
 
 'use strict';
 
+const { normalizeGate, GATED_EVENT_KEYS } = require('./handoff-gate');
+
 // Documented mirrors of `flow-anomaly-detector.js` (itself a mirror of
 // process-template.js): claim and completed suffixes are states of a wake, not
 // wakes, so they never form a hand-off edge.
@@ -426,6 +428,7 @@ function buildFlowBoard(args = {}) {
   const retentionMs = config.doneRetentionHours * 3600 * 1000;
   const removed = normalizeRemoved(args.removed);
   const gateHolds = normalizeGateHolds(args.gateHolds);
+  const handoffs = prHandoffs(members, { graph, stages, stageOf, teamId: args.teamId || null });
 
   // --- the GitHub snapshot, keyed `<repo>#<n>` -----------------------------
   const items = new Map();
@@ -621,6 +624,8 @@ function buildFlowBoard(args = {}) {
     }
 
     const gateHold = isDone ? null : gateHoldOf(gateHolds, keys);
+    // #2914: the PR hand-off that brought the row here wakes without waiting.
+    const ungatedHandoff = isDone || gateHold ? null : ungatedHandoffOf(handoffs, position.roleId, prs);
     const needsHuman = isDone ? null : humanBlock({
       keys, items, graph, position, live, now, queued, gateHold, itemEvents, roleOf,
     });
@@ -644,6 +649,7 @@ function buildFlowBoard(args = {}) {
       needsHuman,
       // #2795: a hand-off to this item's PR held by its CI / conflict gate.
       gateHold,
+      ungatedHandoff,
       // An agent working on it or queued for it keeps it on the board (#2637 AC5).
       removable: position.status !== 'working' && position.status !== 'queued',
     });
@@ -719,6 +725,9 @@ function buildFlowBoard(args = {}) {
   return {
     stages: stages.map(({ id, label, roles: r }) => ({ id, label, roles: r })),
     roles,
+    // #2914: every PR hand-off of the team and whether it waits for CI /
+    // a conflict-free PR before it wakes its agent.
+    handoffs,
     rows: out,
     needsHuman,
     sessions,
@@ -775,6 +784,77 @@ function gateHoldOf(gateHolds, keys) {
     };
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// PR hand-off gates (#2914).
+// ---------------------------------------------------------------------------
+
+/**
+ * Every PR hand-off into a team role — an enabled github-event trigger on a
+ * PR hand-off event (`GATED_EVENT_KEYS`), the only kind a readiness gate can
+ * hold — with its gate state. `from` are the roles that set its wake label (or,
+ * for an unlabelled PR-open listener, its PR channel's producers); none means
+ * a person sets it. `flowManaged` = derived from a channel port (`channel:
+ * true`), changed in the Flow Editor; otherwise a raw trigger.
+ */
+function prHandoffs(members, { graph, stages, stageOf, teamId = null }) {
+  const name = (id) => (graph.roles.get(id) || {}).displayName || id;
+  const roleId = (from) => (graph.roles.has(from) ? from : teamId && graph.roles.has(`${teamId}-${from}`) ? `${teamId}-${from}` : null);
+  const out = [];
+  for (const m of members) {
+    if (!m || !str(m.id) || m.poolInstance || !graph.roles.has(m.id)) continue;
+    const idx = stageOf(m.id);
+    for (const t of Array.isArray(m.triggers) ? m.triggers : []) {
+      if (!t || t.type !== 'github-event' || t.enabled === false || !str(t.id)) continue;
+      if (!(Array.isArray(t.events) ? t.events : []).some((e) => GATED_EVENT_KEYS.includes(e))) continue;
+      const label = str(t.labelFilter);
+      if (label && isStateSuffix(label)) continue;
+      const from = label
+        ? [...graph.roles.values()].filter((r) => r.id !== m.id && r.emits.has(label)).map((r) => r.id)
+        : [...new Set((Array.isArray(m.channels) ? m.channels : [])
+          .filter((c) => c && c.artifact === 'pr' && !str(c.label))
+          .map((c) => roleId(str(c.from)))
+          .filter((id) => id && id !== m.id))];
+      const gate = normalizeGate(t.readinessGate);
+      out.push({
+        id: `${m.id}:${t.id}`,
+        agentId: m.id,
+        triggerId: t.id,
+        label: label || null,
+        to: name(m.id),
+        toStageId: idx != null ? stages[idx].id : null,
+        from: from.sort((a, b) => (stageOf(a) ?? Infinity) - (stageOf(b) ?? Infinity) || name(a).localeCompare(name(b))).map(name),
+        flowManaged: t.channel === true,
+        ci: !!(gate && gate.ci),
+        conflict: !!(gate && gate.conflict),
+        _stage: idx == null ? Infinity : idx,
+      });
+    }
+  }
+  return out
+    .sort((a, b) => a._stage - b._stage || a.to.localeCompare(b.to) || a.id.localeCompare(b.id))
+    .map(({ _stage, ...h }) => h);
+}
+
+/**
+ * The ungated PR hand-off a row's open PR came in through, or null. Only for a
+ * row at a role with PR hand-offs into it: the hand-offs whose wake label (or
+ * its claim / completed state) the PR carries — else all of the role's — and
+ * only when none of them is gated, so a gated alternative never reads ungated.
+ */
+function ungatedHandoffOf(handoffs, roleId, prs) {
+  const open = (Array.isArray(prs) ? prs : []).filter((p) => p && p.state !== 'closed');
+  if (!roleId || !open.length) return null;
+  const into = handoffs.filter((h) => h.agentId === roleId);
+  if (!into.length) return null;
+  const carried = new Set(open.flatMap((p) => p.labels || []));
+  const wakes = (l) => carried.has(l) || carried.has(`${l}${CLAIM_SUFFIX}`) || carried.has(`${l}${COMPLETED_SUFFIX}`);
+  const matched = into.filter((h) => !h.label || wakes(h.label));
+  const pick = matched.length ? matched : into;
+  if (pick.some((h) => h.ci || h.conflict)) return null;
+  const h = pick[0];
+  return { id: h.id, agentId: h.agentId, triggerId: h.triggerId, label: h.label, to: h.to, flowManaged: h.flowManaged };
 }
 
 // ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ const http = require('http');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { runArchiveTool, streamArchiveTool, describeArchiveFailure } = require('./archive');
+const { normalizeDisplayName } = require('./agent-display-name');
 const {
   WORKSPACE_ZIP_MAX_BYTES,
   WORKSPACE_ZIP_MAX_FILES,
@@ -21,6 +22,7 @@ const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
 const requestTiming = require('./request-timing');
+const { createCompressionMiddleware, setStaticCacheHeaders, INDEX_CACHE_CONTROL } = require('./http-delivery');
 const { chatUploadBaseName, uniqueFileName } = require('./chat-upload-name');
 const internalAuthClient = require('./internal-auth-client');
 const githubEventLog = require('./github-event-log');
@@ -45,6 +47,7 @@ const { createProcessesSource } = require('./agent-processes-view');
 const { indexAgentsByEnvironment, environmentAgentRows, firstAgentIdUsingEnvironment } = require('./environment-agents');
 const { invalidateOnSuccessfulWrite } = require('./invalidate-on-write');
 const knowledgeFleetLib = require('./knowledge-fleet');
+const { listStoreFiles, fileSignature, readStoreFiles, createFingerprintCache } = require('./knowledge-entries-cache');
 const {
   knowledgeGraphCacheKey, mutationInvalidatesKnowledgeGraph, knowledgeGraphTtlMsFromEnv, knowledgeAugmentTimeoutMsFromEnv,
   knowledgeGraphKeyStaleForEvent, claimKnowledgeEventOffset, knowledgeEventMarkForFileSize,
@@ -134,6 +137,7 @@ const {
   resolveContextMounts,
 } = require('./context-mount');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
+const { parseItemsQuery, selectItemsPage, graphWithoutItems, lessonTexts } = require('./knowledge-items-page');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { applyPushedBy } = require('./push-producer-filter');
@@ -142,7 +146,7 @@ const { missingWakeLabels, wakeLabelRepos, missingWakeLabelLints, missingWakeLab
 const { normalizeBranchFilter } = require('./branch-filter');
 const { normalizeCommentFilter } = require('./comment-filter');
 const { newTriggerIdError, annotateTriggerList, stripTriggerAnnotations, resolveTriggerIndex } = require('./trigger-validate');
-const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext, normalizeReadinessGate, cleanReadiness, readinessError, resolveBundleModels, staleModelPin, promptModeWarnings, portableTeamPrompt, substituteVars } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext, normalizeReadinessGate, cleanReadiness, readinessError, resolveBundleModels, staleModelPin, promptModeWarnings, portableTeamPrompt, substituteVars, applyChannelTriggerReadiness } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { rederiveTeamDataFlow } = require('./derived-data-flow');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
@@ -368,13 +372,18 @@ const perfTiming = requestTiming.createPerfTiming({
   env: process.env, log: (line) => console.log(line),
 });
 if (perfTiming.enabled) app.use('/api', perfTiming.middleware);
+// gzip/brotli for static assets and JSON (#2919); SSE and NDJSON streams are
+// excluded so they keep streaming. Before express.static and every route.
+app.use(createCompressionMiddleware());
 app.use(cors());
 // Document-bundle endpoints (process drafts, the unified flow graph, imported
 // BriefingPack flows) carry the full brief.md / prompt bodies inline, which
 // easily exceeds body-parser's 100kb default. Raise the limit so importing /
 // rendering / saving a multi-BP flow doesn't 413 (#377). Behind the auth gate.
 app.use(express.json({ limit: '10mb' }));
-app.use(express.static(STATIC_DIR));
+// Content-hashed /assets/* are immutable for a year; index.html is revalidated
+// on every load so a deploy takes effect immediately (#2919).
+app.use(express.static(STATIC_DIR, { setHeaders: setStaticCacheHeaders }));
 
 // Allowlist for ids that turn into filesystem path segments. The dotted-
 // segment pattern explicitly rejects "..", leading/trailing dots and
@@ -3067,6 +3076,12 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   if (liveSuffix) req.body = stampLiveLabels(req.body || {}, liveSuffix, { keep: teamForeignLabelsFor(id, cfg) });
   const { displayName, role, enabled, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, wipLimit, autoDispatch, pool, github, channels, assistLlmEndpointId, memoryLimit } = req.body;
 
+  // ── Display name (#2679) ──────────────────────────────────────────────────
+  // Required: trimmed and non-empty, or the agent renders nameless. Checked up
+  // front so a blank name can't ride along with a half-applied write.
+  const normDisplayName = normalizeDisplayName(displayName);
+  if (normDisplayName.error) return res.status(400).json({ error: normDisplayName.error });
+
   // ── Label registry (#928/#981) ────────────────────────────────────────────
   // The gate/brake flags live on the TEAM agent (like `stages`) — the live
   // Flow Editor writes them here. Validate up front so a bad shape can't
@@ -3294,7 +3309,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // (The orchestrator's enable/disable already wrote enabled itself; the
   // team-prompt and team-skills branches above also wrote canonically.)
   const fresh = readJsonFile(cfgPath, cfg);
-  if (displayName !== undefined) fresh.displayName = displayName;
+  if (normDisplayName.value !== undefined) fresh.displayName = normDisplayName.value;
   if (role !== undefined) fresh.role = role;
   // ── Team-owned skill grant (skill-grants.js) ──────────────────────────────
   // `skills` lives on the construct itself: a team agent carries the team's
@@ -7035,6 +7050,12 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   normalizeCommentFilter(merged);
   // Readiness gate (#2795) — as on POST; `null` clears it.
   normalizeReadinessGate(merged);
+  // A gate edited on a flow-derived channel listener (#2912) is written back
+  // to the consumer's PR channel ports — the reconcile regenerates the listener
+  // from them, so the Flow editor and Agent Chat show the same gate.
+  const channelWriteBack = isChannelTrigger(prev) && reqTrigger && 'readinessGate' in reqTrigger
+    ? applyChannelTriggerReadiness(agentCfg && agentCfg.channels, id, triggerId, merged.readinessGate || null)
+    : null;
   // Producer filter (#2571) — same route-level check as POST; `null` clears it.
   const pbf = applyPushedBy(merged, { ownerId: id, lookupAgent: readAgentConfigForFilter });
   if (pbf.error) return res.status(400).json({ error: pbf.error });
@@ -7056,10 +7077,21 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
     if (!merged.activatedAt) merged.activatedAt = now;
   }
   triggers[idx] = merged;
+  if (channelWriteBack) {
+    const cfgPath = path.join(agentDir, 'config.json');
+    const fresh = readJsonFile(cfgPath, agentCfg);
+    fresh.channels = channelWriteBack;
+    writeJsonAtomic(cfgPath, fresh);
+  }
   try {
     await putTriggers(id, triggers);
   } catch (err) {
     return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
+  }
+  // The ports changed: re-derive the team's channel listeners (#380), exactly
+  // as a Flow-editor port write does.
+  if (channelWriteBack && agentCfg && agentCfg.parentTeamId) {
+    await reconcileTeamGithubChannels(agentCfg.parentTeamId);
   }
   // Consumer write (#1007) — see the POST handler.
   await reconcileTeamOutcomesForAgent(id);
@@ -7371,8 +7403,6 @@ app.post('/api/process/graph', (req, res) => {
 
 const KNOWLEDGE_CLONE_ROOT = path.join(WORKSPACE, 'knowledge');
 const KNOWLEDGE_EVENTS_FILE = path.join(WORKSPACE, 'knowledge-events', 'events.jsonl');
-const KB_KINDS = ['fact', 'entity', 'convention'];
-const KB_DEFAULT_DIRS = { fact: 'facts', entity: 'entities', convention: 'conventions' };
 const KB_DEFAULT_STORE_PATH = 'docs/agent-knowledge/';
 
 function kbParseLine(line) {
@@ -7456,43 +7486,6 @@ function teamAgentIds(teamId, fleet = null) {
   return knowledgeFleetLib.teamAgentIds(fleet || buildKnowledgeFleetNow(), teamId);
 }
 
-// Kind → { dir, file }, honouring a store's manifest if present, else defaults.
-function kbKindDirs(storeRoot) {
-  const m = readJsonFile(path.join(storeRoot, 'knowledge.manifest.json'), null);
-  if (m && m.kinds && typeof m.kinds === 'object') {
-    const out = [];
-    for (const k of KB_KINDS) {
-      const e = m.kinds[k];
-      if (e && typeof e.dir === 'string' && typeof e.file === 'string') {
-        out.push({ dir: e.dir.replace(/\/+$/, ''), file: e.file });
-      }
-    }
-    if (out.length) return out;
-  }
-  return KB_KINDS.map(k => ({ dir: KB_DEFAULT_DIRS[k], file: `${KB_DEFAULT_DIRS[k]}.jsonl` }));
-}
-
-function kbReadStore(entries, storeRoot) {
-  for (const { dir, file } of kbKindDirs(storeRoot)) {
-    const kindDir = path.join(storeRoot, dir);
-    const shardsDir = path.join(kindDir, 'shards');
-    let shardNames = [];
-    try { shardNames = fs.readdirSync(shardsDir).filter(n => n.endsWith('.jsonl')); } catch { /* none */ }
-    const files = shardNames.map(n => path.join(shardsDir, n));
-    const canonical = path.join(kindDir, file);
-    if (fs.existsSync(canonical)) files.push(canonical);
-    for (const fp of files) {
-      let raw;
-      try { raw = fs.readFileSync(fp, 'utf8'); } catch { continue; }
-      for (const line of raw.split('\n')) {
-        if (!line.trim()) continue;
-        const e = kbParseLine(line);
-        if (e) entries.push(e);
-      }
-    }
-  }
-}
-
 // originAgent → knowledge team, for re-homing entries at read time. Entries are
 // stamped with the CLI's KNOWLEDGE_TEAM_ID at harvest, which historically was
 // the human tenant team ('default' for everyone) — and two squads can share one
@@ -7538,67 +7531,98 @@ function readTriggersFor(teamId) {
 // Entries are re-homed to their origin agent's squad, and the operator-decision
 // overlays (archive, supervised review) are re-applied at read time so they hold
 // even when the git-sync side lags (see overlayStatuses).
-function gatherTeamEntries(teamId, { fleet = null } = {}) {
-  let entries = [];
-  const warnings = [];
-  if (!AGENT_ID_RE.test(teamId)) return { entries, warnings };
+//
+// #2920: the store sits on the shared (NFS) volume with hundreds of shard files,
+// so it is read with async fs (never blocking the event loop) and the result is
+// cached per team for as long as its fingerprint — every store and sidecar
+// file's size + mtime, plus the fleet-derived inputs — is unchanged. A write
+// changes the fingerprint, so the next call rebuilds. The returned entries are
+// shared between callers and must not be mutated.
+const teamEntriesCache = createFingerprintCache({ maxEntries: 64 });
+
+async function pathExists(p) {
+  try { await fs.promises.access(p); return true; } catch { return false; }
+}
+
+// The sidecar files the overlays below read: this team's plus (legacy) 'default'.
+function teamOverlayFiles(teamId) {
+  const ids = teamId !== 'default' ? [teamId, 'default'] : [teamId];
+  const dirs = [KNOWLEDGE_ARCHIVED_DIR, KNOWLEDGE_REVIEW_DIR, KNOWLEDGE_VALIDITY_DIR, KNOWLEDGE_TRIGGERS_DIR];
+  return dirs.flatMap((dir) => ids.map((id) => path.join(dir, `${path.basename(id)}.json`)));
+}
+
+async function gatherTeamEntries(teamId, { fleet = null } = {}) {
+  if (!AGENT_ID_RE.test(teamId)) return { entries: [], warnings: [] };
   const kfleet = fleet || buildKnowledgeFleetNow();
   const storeRel = resolveTeamStorePath(teamId, kfleet);
   const cloneRoot = path.join(KNOWLEDGE_CLONE_ROOT, path.basename(teamId));
   const cloneStore = path.join(cloneRoot, storeRel);
-  if (fs.existsSync(path.join(cloneRoot, '.git')) && fs.existsSync(cloneStore)) {
-    kbReadStore(entries, cloneStore);
+  const fsp = fs.promises;
+  let stores;
+  const warnings = [];
+  if (await pathExists(path.join(cloneRoot, '.git')) && await pathExists(cloneStore)) {
+    stores = [cloneStore];
   } else {
-    for (const agentId of teamAgentIds(teamId, kfleet)) {
-      const store = path.join(AGENTS_DIR, agentId, 'knowledge', storeRel);
-      if (fs.existsSync(store)) kbReadStore(entries, store);
-    }
+    const candidates = teamAgentIds(teamId, kfleet).map((agentId) => path.join(AGENTS_DIR, agentId, 'knowledge', storeRel));
+    const present = await Promise.all(candidates.map(pathExists));
+    stores = candidates.filter((_, i) => present[i]);
     warnings.push(`no canonical KB clone for team '${teamId}'; read from agent checkouts`);
   }
-
-  // Re-home each entry to its origin agent's squad; an unknown origin keeps the
-  // entry in the team whose store we are reading. Then drop sibling squads'
-  // entries (a shared env means a shared store — the canonical clone can carry
-  // both squads' shards).
+  const listed = await Promise.all(stores.map((store) => listStoreFiles(store, { fsp })));
+  const storeFiles = listed.flatMap((l) => l.files);
   const originTeams = knowledgeTeamByAgent(kfleet);
-  entries = entries
-    .map((e) => {
-      if (!e || typeof e !== 'object') return e;
-      const t = (typeof e.originAgent === 'string' && originTeams.get(e.originAgent)) || teamId;
-      return e.teamId === t ? e : { ...e, teamId: t };
-    })
-    .filter((e) => !e || typeof e !== 'object' || e.teamId === teamId);
-
-  // Operator-decision overlays: this team's stores plus (legacy) the 'default'
-  // human-team store, so decisions taken before the squad re-homing still hold.
-  const archived = new Set(readArchivedIdsFor(teamId));
-  const decisions = { ...readReviewDecisionsFor(teamId) };
-  if (teamId !== 'default') {
-    for (const id of readArchivedIdsFor('default')) archived.add(id);
-    for (const [k, v] of Object.entries(readReviewDecisionsFor('default'))) {
-      if (!(k in decisions)) decisions[k] = v;
-    }
-  }
   const reviewOn = knowledgeReviewOn(teamKnowledgeEnv(teamId, kfleet)); // #570: per-team config
-  entries = overlayStatuses(entries, { archivedIds: archived, decisions, reviewOn });
-  // #916: validity is a field overlay (never a status) — same legacy-'default'
-  // merge as the archive store so pre-re-homing decisions still hold.
-  const validity = { ...readValidityFor(teamId) };
-  if (teamId !== 'default') {
-    for (const [k, v] of Object.entries(readValidityFor('default'))) {
-      if (!(k in validity)) validity[k] = v;
+  const fingerprint = [
+    storeRel, reviewOn ? 'review' : 'open',
+    JSON.stringify([...originTeams].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))),
+    await fileSignature([...listed.map((l) => l.manifest), ...storeFiles, ...teamOverlayFiles(teamId)], { fsp }),
+  ].join('\n');
+
+  const entries = await teamEntriesCache.get(teamId, fingerprint, async () => {
+    let read = await readStoreFiles(storeFiles, { fsp, parseLine: kbParseLine });
+
+    // Re-home each entry to its origin agent's squad; an unknown origin keeps the
+    // entry in the team whose store we are reading. Then drop sibling squads'
+    // entries (a shared env means a shared store — the canonical clone can carry
+    // both squads' shards).
+    read = read
+      .map((e) => {
+        if (!e || typeof e !== 'object') return e;
+        const t = (typeof e.originAgent === 'string' && originTeams.get(e.originAgent)) || teamId;
+        return e.teamId === t ? e : { ...e, teamId: t };
+      })
+      .filter((e) => !e || typeof e !== 'object' || e.teamId === teamId);
+
+    // Operator-decision overlays: this team's stores plus (legacy) the 'default'
+    // human-team store, so decisions taken before the squad re-homing still hold.
+    const archived = new Set(readArchivedIdsFor(teamId));
+    const decisions = { ...readReviewDecisionsFor(teamId) };
+    if (teamId !== 'default') {
+      for (const id of readArchivedIdsFor('default')) archived.add(id);
+      for (const [k, v] of Object.entries(readReviewDecisionsFor('default'))) {
+        if (!(k in decisions)) decisions[k] = v;
+      }
     }
-  }
-  entries = overlayValidity(entries, validity);
-  // #917: auto-load triggers — same authoritative field overlay + legacy merge.
-  const triggers = { ...readTriggersFor(teamId) };
-  if (teamId !== 'default') {
-    for (const [k, v] of Object.entries(readTriggersFor('default'))) {
-      if (!(k in triggers)) triggers[k] = v;
+    read = overlayStatuses(read, { archivedIds: archived, decisions, reviewOn });
+    // #916: validity is a field overlay (never a status) — same legacy-'default'
+    // merge as the archive store so pre-re-homing decisions still hold.
+    const validity = { ...readValidityFor(teamId) };
+    if (teamId !== 'default') {
+      for (const [k, v] of Object.entries(readValidityFor('default'))) {
+        if (!(k in validity)) validity[k] = v;
+      }
     }
-  }
-  entries = overlayLoadTriggers(entries, triggers);
-  return { entries, warnings };
+    read = overlayValidity(read, validity);
+    // #917: auto-load triggers — same authoritative field overlay + legacy merge.
+    const triggers = { ...readTriggersFor(teamId) };
+    if (teamId !== 'default') {
+      for (const [k, v] of Object.entries(readTriggersFor('default'))) {
+        if (!(k in triggers)) triggers[k] = v;
+      }
+    }
+    return overlayLoadTriggers(read, triggers);
+  });
+  return { entries, warnings, fingerprint };
 }
 
 // Which teams does this scope + membership resolve to?
@@ -7716,7 +7740,7 @@ async function buildKnowledgeGraphResponse(scope, parsed, includeArchived) {
   const entries = [];
   const warnings = [];
   for (const teamId of teamIds) {
-    const g = gatherTeamEntries(teamId, { fleet });
+    const g = await gatherTeamEntries(teamId, { fleet });
     entries.push(...g.entries);
     warnings.push(...g.warnings);
   }
@@ -7738,20 +7762,47 @@ async function buildKnowledgeGraphResponse(scope, parsed, includeArchived) {
   return graph;
 }
 
+// The (cached) knowledge graph for a scope as this viewer sees it. Shared by the
+// graph and the paged items route; callers must never mutate the result.
+function loadKnowledgeGraph(scope, parsed, includeArchived) {
+  const build = () => buildKnowledgeGraphResponse(scope, parsed, includeArchived);
+  return KNOWLEDGE_GRAPH_TTL_MS > 0
+    ? knowledgeGraphCache.getOrCompute(
+      knowledgeGraphCacheKey({ scope: parsed.scope, includeArchived, viewerScope: scope }), build)
+    : build();
+}
+
+// ?items=none (#2921): the graph without its per-entry item nodes — the
+// Knowledge page pages the entries in via GET /api/knowledge/items instead of
+// downloading (and rendering) every entry of a large team at once.
 app.get('/api/knowledge/graph', async (req, res) => {
   const scope = getScope(req);
   const parsed = knowledgeScopeParam(req);
   const includeArchived = req.query.includeArchived === '1' || req.query.includeArchived === 'true';
   try {
-    const build = () => buildKnowledgeGraphResponse(scope, parsed, includeArchived);
-    const graph = KNOWLEDGE_GRAPH_TTL_MS > 0
-      ? await knowledgeGraphCache.getOrCompute(
-        knowledgeGraphCacheKey({ scope: parsed.scope, includeArchived, viewerScope: scope }), build)
-      : await build();
-    res.json(graph);
+    const graph = await loadKnowledgeGraph(scope, parsed, includeArchived);
+    res.json(req.query.items === 'none' ? graphWithoutItems(graph) : graph);
   } catch (err) {
     console.error(`[knowledge] graph build failed: ${err.message}`);
     res.status(500).json({ error: 'knowledge graph build failed' });
+  }
+});
+
+// One page of a team's knowledge items (#2921), filtered + sorted server-side:
+// ?team=&offset=&limit=&q=&kind=&converged=1&today=1&agent=&sort=created|used-desc|used-asc
+// &includeArchived=1. Served from the same cached graph as /api/knowledge/graph.
+app.get('/api/knowledge/items', async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.query.team === 'string' ? req.query.team : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const includeArchived = req.query.includeArchived === '1' || req.query.includeArchived === 'true';
+  try {
+    const graph = await loadKnowledgeGraph(scope, parseScope(`team:${teamId}`), includeArchived);
+    res.json({ team: teamId, ...selectItemsPage(graph, parseItemsQuery(req.query)) });
+  } catch (err) {
+    console.error(`[knowledge] items page failed: ${err.message}`);
+    res.status(500).json({ error: 'knowledge items failed' });
   }
 });
 
@@ -8028,14 +8079,25 @@ function augmentPendingPromotions(graph, teamIds) {
   }
 }
 
+// #2920: the badge is fetched on every chat open/switch. Its counters are kept
+// per (scope, teams) while every team's entries fingerprint is unchanged —
+// within the minute, since "today" is a rolling 24 h window.
+const knowledgeSummaryCache = createFingerprintCache({ maxEntries: 256 });
+
 app.get('/api/knowledge/summary', async (req, res) => {
   const scope = getScope(req);
   const parsed = knowledgeScopeParam(req);
   const fleet = buildKnowledgeFleetNow(); // #571: one config read for every team
   const teamIds = knowledgeScopeTeams(parsed, scope, fleet);
-  const entries = [];
-  for (const teamId of teamIds) entries.push(...gatherTeamEntries(teamId, { fleet }).entries);
-  res.json(summarizeKnowledge({ scope: parsed.scope, entries, now: Date.now() }));
+  const gathered = await Promise.all(teamIds.map((teamId) => gatherTeamEntries(teamId, { fleet })));
+  const now = Date.now();
+  const fingerprint = [Math.floor(now / 60_000), ...gathered.map((g) => g.fingerprint)].join('\n');
+  const summary = await knowledgeSummaryCache.get(`${parsed.scope}|${teamIds.join(',')}`, fingerprint, () => {
+    const entries = [];
+    for (const g of gathered) entries.push(...g.entries);
+    return summarizeKnowledge({ scope: parsed.scope, entries, now });
+  });
+  res.json(summary);
 });
 
 // Read-side retrieval aggregate (#915): per-entry "last used" truth + the
@@ -8055,7 +8117,7 @@ app.get('/api/knowledge/retrieval-stats', async (req, res) => {
   }
 });
 
-app.get('/api/knowledge/item/:id', (req, res) => {
+app.get('/api/knowledge/item/:id', async (req, res) => {
   const scope = getScope(req);
   const { id } = req.params;
   const teamId = typeof req.query.teamId === 'string' ? req.query.teamId : '';
@@ -8064,7 +8126,7 @@ app.get('/api/knowledge/item/:id', (req, res) => {
   const fleet = buildKnowledgeFleetNow(); // #571: one config read for the whole request
   if (!knowledgeTeamVisible(scope, teamId, fleet)) return res.status(404).json({ error: 'not found' });
 
-  const { entries } = gatherTeamEntries(teamId, { fleet });
+  const { entries } = await gatherTeamEntries(teamId, { fleet });
   // Prefer a live entry over a merge tombstone of the same id (Phase 3).
   const entry = entries.find(e => e && e.id === id && e.status !== 'merged')
     || entries.find(e => e && e.id === id) || null;
@@ -8427,11 +8489,11 @@ app.post('/api/knowledge/promotion-suggestions/:id/draft', heavyLimiter, async (
 // Resolve an operator-selected set of KB entry ids into an ad-hoc candidate
 // (manual "combine into skill" — no stored candidate exists). Prefers live
 // entries over merge tombstones, exactly like /api/knowledge/item/:id.
-function adHocCandidate(teamId, entryIds) {
+async function adHocCandidate(teamId, entryIds) {
   const ids = [...new Set((Array.isArray(entryIds) ? entryIds : [])
     .filter(x => typeof x === 'string' && /^[0-9a-f]{12}$/.test(x)))];
   if (ids.length === 0) return null;
-  const { entries } = gatherTeamEntries(teamId);
+  const { entries } = await gatherTeamEntries(teamId);
   const picked = [];
   for (const id of ids) {
     const e = entries.find(x => x && x.id === id && x.status !== 'merged')
@@ -8451,7 +8513,7 @@ app.post('/api/knowledge/draft', heavyLimiter, async (req, res) => {
   const teamId = typeof req.body?.team === 'string' ? req.body.team : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
   if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
-  const cand = adHocCandidate(teamId, req.body?.entryIds);
+  const cand = await adHocCandidate(teamId, req.body?.entryIds);
   if (!cand) return res.status(404).json({ error: 'no matching KB entries' });
 
   const heuristic = knowledgeSuggestions.buildHeuristicSkillDraft(cand);
@@ -8495,7 +8557,7 @@ app.post('/api/knowledge/summaries/backfill', heavyLimiter, async (req, res) => 
   if (!knowledgeTeamVisible(scope, teamId, fleet)) return res.status(404).json({ error: 'not found' });
 
   const MAX_PER_REQUEST = 40;
-  const { entries } = gatherTeamEntries(teamId, { fleet });
+  const { entries } = await gatherTeamEntries(teamId, { fleet });
   const missing = (Array.isArray(entries) ? entries : []).filter(
     (e) => e && typeof e.id === 'string' && /^[0-9a-f]{12}$/.test(e.id)
       && e.status !== 'merged'
@@ -8570,7 +8632,7 @@ app.post('/api/knowledge/extend-draft', heavyLimiter, async (req, res) => {
   const cand = (req.body?.suggestionId
     ? readCandidateStore(teamId).find(c => c && c.id === req.body.suggestionId) || null
     : null)
-    || adHocCandidate(teamId, req.body?.entryIds);
+    || await adHocCandidate(teamId, req.body?.entryIds);
   if (!cand) return res.status(404).json({ error: 'no matching KB entries' });
 
   const heuristic = knowledgeSuggestions.buildHeuristicSkillExtension(target.existingSkillMd, cand);
@@ -8690,7 +8752,7 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     const cand = (req.body.suggestionId
       ? readCandidateStore(teamId).find(c => c && c.id === req.body.suggestionId) || null
       : null)
-      || adHocCandidate(teamId, v.entryIds);
+      || await adHocCandidate(teamId, v.entryIds);
 
     const existingProv = readSkillProvenance(target.dir) || {};
     const extendedBy = (req.user && (req.user.sub || req.user.username)) || 'operator';
@@ -8771,7 +8833,7 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
   const cand = (req.body.suggestionId
     ? readCandidateStore(teamId).find(c => c && c.id === req.body.suggestionId) || null
     : null)
-    || (v.from === 'team' ? adHocCandidate(teamId, v.entryIds) : null);
+    || (v.from === 'team' ? await adHocCandidate(teamId, v.entryIds) : null);
 
   // #2592: a domain card may only create its own domain skill (never a lesson-named one).
   const dc = knowledgeSuggestions.checkDomainCardTarget(
@@ -9356,6 +9418,11 @@ app.post('/api/knowledge/domains', apiLimiter, async (req, res) => {
   }
   try {
     const forward = { ...req.body, teamId, op };
+    // #2921: the Knowledge page no longer holds every entry, so the lessons the
+    // bootstrap proposes domains over are read here (same cached team graph).
+    if (op === 'bootstrap' && !(Array.isArray(forward.lessons) && forward.lessons.length)) {
+      forward.lessons = lessonTexts(await loadKnowledgeGraph(scope, parseScope(`team:${teamId}`), false));
+    }
     if (assistTarget && assistTarget.endpointId) {
       forward.assistEndpointId = assistTarget.endpointId; // env fallback (endpointId=null) → orchestrator uses .env
       forward.model = assistTarget.model;
@@ -9558,7 +9625,7 @@ app.get('/api/knowledge/review-queue', async (req, res) => {
   const fleet = buildKnowledgeFleetNow(); // #571: one config read for the whole request
   if (!knowledgeTeamVisible(scope, teamId, fleet)) return res.status(404).json({ error: 'not found' });
   await refreshTeamCloneBestEffort(teamId);
-  const { entries, warnings } = gatherTeamEntries(teamId, { fleet });
+  const { entries, warnings } = await gatherTeamEntries(teamId, { fleet });
   const only = req.query.include === 'rejected' ? null : 'pending';
   const items = selectReviewQueue(entries, { only });
   res.json({ team: teamId, review: knowledgeReviewOn(teamKnowledgeEnv(teamId, fleet)), items, warnings }); // #570: per-team config
@@ -21625,12 +21692,19 @@ async function readGitDirty(abs) {
   return { isDirty: lines.length > 0, changesCount: lines.length };
 }
 
-// Short-lived cache for git-info dirty results: collapses concurrent pollers
-// (multiple browser tabs on the same agent) onto one `git status` and serves a
+// Cache for git-info dirty results: collapses concurrent pollers (multiple
+// browser tabs on the same agent) onto one `git status` and serves a
 // recently-computed result without re-spawning (#1683). Branch is read fresh
 // from .git/HEAD on every request (cheap) and never cached.
+// `git status` takes 0.8–2.2 s in large workspaces (#2923), so the TTL sits
+// above ChatPanel's 30-s poll and an expired result is served stale-while-
+// revalidate: every poll after the first answers from memory, and a single
+// background `git status` per agent repo and TTL window refreshes it. Only a
+// first look (or one after GIT_INFO_STALE_MS of silence) waits for git.
+const GIT_INFO_STALE_MS = 10 * 60_000;
 const gitInfoCache = createTtlCache({
-  ttlMs: Number.parseInt(process.env.AEE_GIT_INFO_TTL_MS, 10) || 5000,
+  ttlMs: Number.parseInt(process.env.AEE_GIT_INFO_TTL_MS, 10) || 35_000,
+  staleMs: GIT_INFO_STALE_MS,
 });
 
 app.get('/api/agents/:agentId/git-info', async (req, res) => {
@@ -21645,7 +21719,7 @@ app.get('/api/agents/:agentId/git-info', async (req, res) => {
   try {
     const repos = discoverGitRepos(agentRoot);
     const out = await Promise.all(repos.map(async (r) => {
-      const dirty = await gitInfoCache.getOrCompute(
+      const dirty = await gitInfoCache.getStaleWhileRevalidate(
         `${agentId}::${r.repoPath}`,
         () => readGitDirty(r.abs),
       );
@@ -23199,6 +23273,7 @@ app.get('/api/agents/:agentId/session/:roomId/stream', (req, res) => {
 
 app.get('*path', spaLimiter, (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Not found' });
+  res.setHeader('Cache-Control', INDEX_CACHE_CONTROL);
   res.sendFile(path.join(STATIC_DIR, 'index.html'));
 });
 

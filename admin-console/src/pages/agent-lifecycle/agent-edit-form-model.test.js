@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { readFileSync } from 'node:fs';
 import {
-  hasOwnSkills, buildInitialForm, buildEditSubmit, isFormDirty, poolSectionError,
+  hasOwnSkills, buildInitialForm, buildEditSubmit, displayNameError, isFormDirty, poolSectionError,
   skillPoolTeamId, skillsListUrl,
 } from './agent-edit-form-model.js';
 import { PROMPT_MODES } from '../prompt-mode-view.js';
@@ -347,4 +347,24 @@ test('AgentEditForm.jsx loads the skills list via skillsListUrl(agent)', () => {
   const src = readFileSync(new URL('./AgentEditForm.jsx', import.meta.url), 'utf8');
   assert.match(src, /const skillsUrl = skillsListUrl\(agent\);/);
   assert.doesNotMatch(src, /\/api\/skills\?teamId=\$\{encodeURIComponent\(agent\.teamId\)\}/);
+});
+
+test('#2679: a blank or whitespace-only display name blocks the Save', () => {
+  for (const displayName of ['', '   ', '\t', undefined, null]) {
+    assert.ok(displayNameError({ displayName }), JSON.stringify(displayName));
+  }
+  assert.equal(displayNameError({ displayName: 'Dev' }), null);
+  assert.equal(displayNameError({ displayName: '  Dev ' }), null);
+});
+
+test('#2679: the submitted display name is trimmed', () => {
+  const form = { ...buildInitialForm(member), displayName: '  Dev Agent  ' };
+  assert.equal(buildEditSubmit(member, form).displayName, 'Dev Agent');
+});
+
+test('#2679: AgentEditForm gates Save on displayNameError and shows it inline', () => {
+  const src = readFileSync(new URL('./AgentEditForm.jsx', import.meta.url), 'utf8');
+  assert.match(src, /const nameError = displayNameError\(form\);/);
+  assert.match(src, /const canSubmit = !nameError && /);
+  assert.match(src, /label="Display Name \*"[^\n]*error=\{nameError\}/);
 });

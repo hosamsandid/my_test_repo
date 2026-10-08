@@ -562,6 +562,56 @@ test('searchIssues: `parent` is a selectable --fields column (#2415)', async () 
   });
 });
 
+test('searchIssues: --fields names priority/labels/dueDate as columns, read from Jira only then (#2901 AC3)', async () => {
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return fieldListResponse();
+    assert.deepEqual(JSON.parse(opts.body).fields, ['summary', 'status', 'assignee', 'updated', 'issuetype', 'parent', 'priority', 'labels', 'duedate']);
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      isLast: true, issues: [
+        { key: 'ENG-1', fields: { summary: 'One', priority: { name: 'High' }, labels: ['backend'], duedate: '2026-10-31' } },
+        { key: 'ENG-2', fields: { summary: 'Two' } },
+      ],
+    }) };
+  }, async () => {
+    const issues = await jc.searchIssues(CRED, { jql: 'project = ENG', fields: ['key', 'priority', 'labels', 'dueDate'], env: CRED.env });
+    assert.deepEqual(issues, [
+      { key: 'ENG-1', priority: 'High', labels: ['backend'], dueDate: '2026-10-31' },
+      { key: 'ENG-2', priority: null, labels: [], dueDate: null },
+    ]);
+  });
+});
+
+test('searchIssues: reporter/components/fixVersions are selectable --fields columns (#2901)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      isLast: true, issues: [{ key: 'ENG-1', fields: { reporter: { displayName: 'Anna' }, components: [{ name: 'API' }], fixVersions: [{ name: '1.4' }] } }],
+    }) };
+  }, async () => {
+    const issues = await jc.searchIssues(CRED, { jql: 'project = ENG', fields: ['reporter', 'components', 'fixVersions'], env: CRED.env });
+    assert.deepEqual(issues, [{ key: 'ENG-1', reporter: 'Anna', components: ['API'], fixVersions: ['1.4'] }]);
+  });
+});
+
+test('searchIssues: without --fields the default row carries none of the #2901 columns (AC4)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      isLast: true, issues: [{ key: 'ENG-1', fields: { summary: 'One', priority: { name: 'High' } } }],
+    }) };
+  }, async () => {
+    const [row] = await jc.searchIssues(CRED, { jql: 'project = ENG', env: CRED.env });
+    assert.deepEqual(Object.keys(row), jc.AGENT_ISSUE_COLUMNS);
+  });
+});
+
+test('shapeStandardReadFields: drops non-string list entries, keeps names', () => {
+  assert.deepEqual(jc.shapeStandardReadFields({ components: [{ name: 'API' }, {}, null], labels: ['a', ''] }), {
+    priority: null, labels: ['a'], reporter: null, components: ['API'], fixVersions: [], dueDate: null,
+  });
+  assert.deepEqual(jc.shapeStandardReadFields(undefined).labels, []);
+});
+
 test('searchIssues: an empty JQL is a 400 before any HTTP call', async () => {
   let called = false;
   const orig = global.fetch;
@@ -696,6 +746,68 @@ test('getIssue: reads summary/status/issueType/assignee and builds a browse URL 
   });
 });
 
+test('getIssue: returns priority, labels, reporter, components, fix versions and due date (#2901 AC1)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    if (isTransitionList(url)) return transitionsResponse();
+    assert.match(url, /fields=[^&]*priority,labels,reporter,components,fixVersions,duedate/);
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      key: 'ENG-7', fields: {
+        summary: 'S', status: { name: 'Open' }, issuetype: { name: 'Bug' },
+        priority: { id: '2', name: 'High' },
+        labels: ['backend', 'urgent'],
+        reporter: { accountId: 'a-1', displayName: 'Anna' },
+        components: [{ id: '10', name: 'API' }],
+        fixVersions: [{ id: '20', name: '1.4' }],
+        duedate: '2026-10-31',
+      },
+    }) };
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-7', { env: CRED.env });
+    assert.equal(issue.priority, 'High');
+    assert.deepEqual(issue.labels, ['backend', 'urgent']);
+    assert.equal(issue.reporter, 'Anna');
+    assert.deepEqual(issue.components, ['API']);
+    assert.deepEqual(issue.fixVersions, ['1.4']);
+    assert.equal(issue.dueDate, '2026-10-31');
+  });
+});
+
+test('getIssue: unset/hidden standard fields are null or [] — never an error (#2901 AC2)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    if (isTransitionList(url)) return transitionsResponse();
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      // No priority key at all (project without a priority scheme); a reporter
+      // whose account was deleted carries no display name.
+      key: 'ENG-8', fields: { summary: 'S', labels: [], reporter: { accountId: 'gone' }, components: [], fixVersions: null, duedate: null },
+    }) };
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-8', { env: CRED.env });
+    assert.equal(issue.priority, null);
+    assert.deepEqual(issue.labels, []);
+    assert.equal(issue.reporter, null);
+    assert.deepEqual(issue.components, []);
+    assert.deepEqual(issue.fixVersions, []);
+    assert.equal(issue.dueDate, null);
+  });
+});
+
+test('getIssue: the #2901 fields are additive — earlier keys keep their order and shape (AC5)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    if (isTransitionList(url)) return transitionsResponse();
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'ENG-9', fields: { summary: 'S' } }) };
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-9', { env: CRED.env });
+    assert.deepEqual(Object.keys(issue).slice(0, 15), [
+      'key', 'summary', 'status', 'issueType', 'assignee', 'created', 'updated', 'parent', 'links', 'url',
+      'priority', 'labels', 'reporter', 'components', 'fixVersions',
+    ]);
+    assert.ok('dueDate' in issue);
+  });
+});
+
 test('getIssue: missing created/updated fields surface as null (#2414)', async () => {
   await withFetch((url) => {
     if (isFieldList(url)) return fieldListResponse();
@@ -772,6 +884,8 @@ test('partitionFields: standard columns vs custom-field names', () => {
   assert.deepEqual(jc.partitionFields(['status', 'Team', 'summary']), { columns: ['status', 'summary'], customNames: ['Team'] });
   assert.deepEqual(jc.partitionFields(undefined), { columns: [], customNames: [] });
   assert.deepEqual(jc.partitionFields(['Team']), { columns: [], customNames: ['Team'] });
+  // #2901 standard fields are columns, not custom-field names.
+  assert.deepEqual(jc.partitionFields(['priority', 'dueDate', 'Team']), { columns: ['priority', 'dueDate'], customNames: ['Team'] });
 });
 
 test('mergeCustomFieldNames: unions and de-dups case-insensitively, first spelling wins', () => {
@@ -3296,5 +3410,172 @@ test('addSubtasksToIssue: shape and allow-list guards run before any Jira call',
     await bad({ parentKey: 'KAN-1', subtasks: [{ summary: 'S', labels: ['two words'] }] }, 400, /labels cannot contain spaces/);
     await bad({ parentKey: 'KAN-1', subtasks: [{ summary: 'S', fields: { Team: '1' } }], allowList: ['Other'] }, 403, /not writable by agents: Team/);
     assert.equal(calls.length, 0);
+  });
+});
+
+// ── project versions (#2902) ────────────────────────────────────────────────
+
+const NOW_0710 = () => Date.parse('2026-10-07T12:00:00Z');
+
+function versionsJira({ versions, unresolved = 0, onWrite = () => null } = {}) {
+  const writes = [];
+  const list = versions || [
+    { id: '1', name: '1.3', released: true, archived: false, releaseDate: '2026-09-01' },
+    { id: '2', name: '1.4', released: false, archived: false, startDate: '2026-09-02', releaseDate: '2026-10-01' },
+    { id: '3', name: '1.5', released: false, archived: false, self: 'https://acme.atlassian.net/rest/api/3/version/3' },
+    { id: '4', name: '0.9', released: false, archived: true },
+  ];
+  const ok = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+  const handler = (url, opts) => {
+    const u = new URL(url);
+    const method = (opts && opts.method) || 'GET';
+    if (u.pathname === '/rest/api/3/project/KAN') return ok({ id: '100', key: 'KAN' });
+    if (u.pathname === '/rest/api/3/project/KAN/versions') return ok(list);
+    if (u.pathname.startsWith('/rest/api/3/project/')) return { ok: false, status: 404, text: async () => '{}' };
+    if (/\/unresolvedIssueCount$/.test(u.pathname)) return ok({ issuesUnresolvedCount: unresolved, issuesCount: 5 });
+    if (u.pathname === '/rest/api/3/search/jql') {
+      assert.match(JSON.parse(opts.body).jql, /^fixVersion = \d+ AND resolution = EMPTY$/);
+      return ok({ issues: Array.from({ length: unresolved }, (_, i) => ({ key: `KAN-${i + 1}` })), isLast: true });
+    }
+    const body = opts && opts.body ? JSON.parse(opts.body) : undefined;
+    writes.push({ method, path: u.pathname, body });
+    return onWrite({ method, path: u.pathname, body }) || ok({ id: '9', ...body });
+  };
+  return { handler, writes };
+}
+
+test('shapeVersion / sortVersions: dates, flags, overdue (Jira\'s or derived), unreleased first (#2902 AC1)', () => {
+  const today = '2026-10-07';
+  assert.deepEqual(jc.shapeVersion({ id: 2, name: '1.4', description: 'd', startDate: '2026-09-02', releaseDate: '2026-10-01', released: false, archived: false }, today),
+    { id: '2', name: '1.4', description: 'd', startDate: '2026-09-02', releaseDate: '2026-10-01', released: false, archived: false, overdue: true });
+  assert.equal(jc.shapeVersion({ name: 'x', releaseDate: '2026-10-01', overdue: false }, today).overdue, false, 'Jira\'s own flag wins');
+  assert.equal(jc.shapeVersion({ name: 'x', releaseDate: '2026-10-01', released: true }, today).overdue, false);
+  assert.equal(jc.shapeVersion({ name: 'x' }, today).overdue, false);
+  const sorted = jc.sortVersions([{ name: 'a', released: true }, { name: 'b', released: false }, { name: 'c', released: true }, { name: 'd', released: false }]);
+  assert.deepEqual(sorted.map((v) => v.name), ['b', 'd', 'a', 'c']);
+});
+
+test('listProjectVersions: name, dates, released/archived state, unreleased first; archived listed but marked (#2902 AC1)', async () => {
+  const { handler } = versionsJira();
+  await withFetch(handler, async () => {
+    const r = await jc.listProjectVersions(CRED, { projectKey: 'kan', env: CRED.env, now: NOW_0710 });
+    assert.equal(r.project, 'KAN');
+    assert.equal(r.count, 4);
+    assert.equal(r.unreleased, 3);
+    assert.deepEqual(r.versions.map((v) => [v.name, v.released, v.archived]), [['1.4', false, false], ['1.5', false, false], ['0.9', false, true], ['1.3', true, false]]);
+    assert.equal(r.versions[0].overdue, true);
+  });
+});
+
+test('listProjectVersions: a project outside the team scope is the standard refusal (#2902 AC7)', async () => {
+  const { handler } = versionsJira();
+  await withFetch(handler, async () => {
+    await assert.rejects(jc.listProjectVersions(CRED, { projectKey: 'OTHER', env: CRED.env }),
+      (e) => e.status === 404 && /Project OTHER was not found, or it is outside this team's Jira scope/.test(e.message));
+  });
+});
+
+test('createProjectVersion: posts name, projectId, description and dates (#2902 AC2)', async () => {
+  const { handler, writes } = versionsJira();
+  await withFetch(handler, async () => {
+    const r = await jc.createProjectVersion(CRED, { projectKey: 'KAN', name: ' 1.6 ', description: 'Next', startDate: '2026-10-08', releaseDate: '2026-11-30', env: CRED.env, now: NOW_0710 });
+    assert.deepEqual(writes, [{ method: 'POST', path: '/rest/api/3/version', body: { name: '1.6', projectId: 100, description: 'Next', startDate: '2026-10-08', releaseDate: '2026-11-30' } }]);
+    assert.equal(r.project, 'KAN');
+    assert.deepEqual(r.version, { id: '9', name: '1.6', description: 'Next', startDate: '2026-10-08', releaseDate: '2026-11-30', released: false, archived: false, overdue: false });
+  });
+});
+
+test('createProjectVersion: refusals — duplicate name (any case), bad dates, release before start, outside scope, 403 (#2902 AC3/AC6/AC7)', async () => {
+  const { handler, writes } = versionsJira({ onWrite: () => ({ ok: false, status: 403, text: async () => '{"errorMessages":["no"]}' }) });
+  await withFetch(handler, async () => {
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'KAN', name: '1.5', env: CRED.env }),
+      (e) => e.status === 409 && e.message === 'project KAN already has a version "1.5" (unreleased). Nothing was created.');
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'KAN', name: '0.9', env: CRED.env }),
+      (e) => e.status === 409 && /\(unreleased, archived\)/.test(e.message));
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'KAN', name: '2.0', releaseDate: '31.12.2026', env: CRED.env }),
+      (e) => e.status === 400 && /"31\.12\.2026" is not a valid release date — use YYYY-MM-DD/.test(e.message));
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'KAN', name: '2.0', startDate: '2026-02-30', env: CRED.env }),
+      (e) => e.status === 400 && /not a valid start date/.test(e.message));
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'KAN', name: '2.0', startDate: '2026-11-01', releaseDate: '2026-10-31', env: CRED.env }),
+      (e) => e.status === 400 && /the release date 2026-10-31 is before the start date 2026-11-01/.test(e.message));
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'KAN', name: ' ', env: CRED.env }), (e) => e.status === 400);
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'OTHER', name: '2.0', env: CRED.env }),
+      (e) => e.status === 404 && /outside this team's Jira scope.*Nothing was created\./.test(e.message));
+    assert.equal(writes.length, 0, 'nothing reached Jira\'s create before the 403 case');
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'KAN', name: '2.0', env: CRED.env }),
+      (e) => e.status === 403 && /may not manage versions in project KAN \(403\) — creating and releasing versions needs the Jira "Administer Projects" permission on the project \(typically a project admin\)\. Nothing was created\./.test(e.message));
+  });
+});
+
+test('createProjectVersion: Jira\'s own "already exists" answer (a race) reads as the duplicate refusal (#2902 AC3)', async () => {
+  const { handler } = versionsJira({ onWrite: () => ({ ok: false, status: 400, text: async () => '{"errors":{"name":"A version with this name already exists in this project."}}' }) });
+  await withFetch(handler, async () => {
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'KAN', name: '2.0', env: CRED.env }),
+      (e) => e.status === 409 && /already has a version "2\.0"/.test(e.message));
+  });
+});
+
+test('releaseProjectVersion: today by default; no unresolved issues (#2902 AC4)', async () => {
+  const { handler, writes } = versionsJira({ versions: [{ id: '2', name: '1.4', released: false }] });
+  await withFetch(handler, async () => {
+    const r = await jc.releaseProjectVersion(CRED, { projectKey: 'KAN', name: '1.4', env: CRED.env, now: NOW_0710 });
+    assert.deepEqual(writes, [{ method: 'PUT', path: '/rest/api/3/version/2', body: { released: true, releaseDate: '2026-10-07' } }]);
+    assert.equal(r.outcome, 'released');
+    assert.equal(r.version.released, true);
+    assert.equal(r.version.releaseDate, '2026-10-07');
+    assert.equal(r.unresolvedIssues, 0);
+    assert.equal(r.message, '1.4 released on 2026-10-07; it had no unresolved issues.');
+  });
+});
+
+test('releaseProjectVersion: a given date; unresolved issues stay without --move-to and the result says so (#2902 AC4/AC5)', async () => {
+  const { handler, writes } = versionsJira({ unresolved: 3 });
+  await withFetch(handler, async () => {
+    const r = await jc.releaseProjectVersion(CRED, { projectKey: 'KAN', name: '1.4', releaseDate: '2026-10-05', env: CRED.env, now: NOW_0710, onMoved: () => assert.fail('nothing moved') });
+    assert.deepEqual(writes[0].body, { released: true, releaseDate: '2026-10-05' });
+    assert.equal(r.unresolvedIssues, 3);
+    assert.equal(r.moved, 0);
+    assert.equal(r.movedTo, null);
+    assert.equal(r.message, '1.4 released on 2026-10-05; 3 unresolved issues stay assigned to 1.4 (pass --move-to <version> to move them).');
+  });
+});
+
+test('releaseProjectVersion: --move-to moves the unresolved issues via Jira\'s moveUnfixedIssuesTo and reports the keys (#2902 AC5)', async () => {
+  const { handler, writes } = versionsJira({ unresolved: 2 });
+  await withFetch(handler, async () => {
+    let moved;
+    const r = await jc.releaseProjectVersion(CRED, { projectKey: 'KAN', name: '1.4', moveTo: '1.5', env: CRED.env, now: NOW_0710, onMoved: (keys) => { moved = keys; } });
+    assert.deepEqual(writes[0].body, { released: true, releaseDate: '2026-10-07', moveUnfixedIssuesTo: 'https://acme.atlassian.net/rest/api/3/version/3' });
+    assert.deepEqual(moved, ['KAN-1', 'KAN-2']);
+    assert.equal(r.moved, 2);
+    assert.equal(r.movedTo, '1.5');
+    assert.equal(r.message, '1.4 released on 2026-10-07; its 2 unresolved issues were moved to 1.5.');
+  });
+});
+
+test('releaseProjectVersion: already released is reported, not an error, and writes nothing (#2902 edge case)', async () => {
+  const { handler, writes } = versionsJira();
+  await withFetch(handler, async () => {
+    const r = await jc.releaseProjectVersion(CRED, { projectKey: 'KAN', name: '1.3', moveTo: '1.5', env: CRED.env });
+    assert.equal(r.outcome, 'already-released');
+    assert.equal(r.message, '1.3 was already released on 2026-09-01 — nothing was changed and no issues were moved.');
+    assert.equal(writes.length, 0);
+  });
+});
+
+test('releaseProjectVersion: refusals — unknown version, unknown/same/archived move-to, date before start, outside scope, 403 (#2902 AC6/AC7)', async () => {
+  const { handler, writes } = versionsJira({ onWrite: () => ({ ok: false, status: 403, text: async () => '{}' }) });
+  await withFetch(handler, async () => {
+    const rejects = (args, status, re) => assert.rejects(jc.releaseProjectVersion(CRED, { projectKey: 'KAN', env: CRED.env, now: NOW_0710, ...args }),
+      (e) => e.status === status && re.test(e.message));
+    await rejects({ name: '9.9' }, 404, /project KAN has no version "9\.9"\. Available: 1\.3, 1\.4, 1\.5, 0\.9\. Nothing was changed\./);
+    await rejects({ name: '1.4', moveTo: '7.0' }, 404, /no version "7\.0" to move the unresolved issues to/);
+    await rejects({ name: '1.4', moveTo: '1.4' }, 400, /cannot move 1\.4's unresolved issues to 1\.4 itself/);
+    await rejects({ name: '1.4', moveTo: '0.9' }, 400, /version 0\.9 is archived/);
+    await rejects({ name: '1.4', releaseDate: '2026-09-01' }, 400, /the release date 2026-09-01 is before 1\.4's start date 2026-09-02/);
+    await rejects({ name: '1.4', releaseDate: 'today' }, 400, /not a valid release date/);
+    await rejects({ projectKey: 'OTHER', name: '1.4' }, 404, /Project OTHER was not found, or it is outside this team's Jira scope.*Nothing was changed\./);
+    assert.equal(writes.length, 0);
+    await rejects({ name: '1.4' }, 403, /may not manage versions in project KAN \(403\).*Administer Projects.*Nothing was changed\./);
   });
 });

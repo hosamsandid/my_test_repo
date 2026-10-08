@@ -35,8 +35,11 @@ import {
   consolidationStartGate,
 } from './consolidation-view';
 import { hasFrontmatterMeta, syncFrontmatterName, suggestFreeName } from './promotion-frontmatter';
-import { lastUsedLabel, compareLastUsed } from './knowledge-retrieval-view';
+import { lastUsedLabel } from './knowledge-retrieval-view';
 import { createFeedReloadThrottle } from './knowledge-reload-throttle.js';
+import {
+  ITEMS_PAGE_SIZE, ITEMS_RELOAD_MAX, itemsSortFor, itemsQueryKey, itemsQueryUrl, appendItemsPage,
+} from './knowledge-items-query.js';
 
 /*
  * Knowledge Flow — team-scoped (#560).
@@ -217,7 +220,8 @@ export default function KnowledgeFlow() {
     const enc = encodeURIComponent(teamId);
     const q = filters.showArchived ? '&includeArchived=1' : '';
     const gets = [
-      fetch(`/api/knowledge/graph?scope=team:${enc}${q}`).then(r => (r.ok ? r.json() : null)),
+      // #2921: no per-entry nodes — the entry list is paged in by useTeamItems.
+      fetch(`/api/knowledge/graph?scope=team:${enc}&items=none${q}`).then(r => (r.ok ? r.json() : null)),
       fetch(`/api/knowledge/gates?team=${enc}`).then(r => (r.ok ? r.json() : null)),
       fetch(`/api/knowledge/promotion-suggestions?team=${enc}`).then(r => (r.ok ? r.json() : null)),
       fetch(`/api/knowledge/review-queue?team=${enc}`).then(r => (r.ok ? r.json() : null)),
@@ -767,6 +771,78 @@ function ChooseTeam() {
 
 /* ── One team = one section showing its whole flow ──────────────────────────── */
 
+/*
+ * One team's knowledge entries, a page at a time (#2921). Filtering and sorting
+ * run server-side (GET /api/knowledge/items) so a large team never ships or
+ * renders every entry at once. A change of what is selected resets the list to
+ * its first page; a reload of the team slice (`reloadKey` — the graph object)
+ * re-fetches the rows currently in view so live harvests show up in place.
+ */
+function useTeamItems(teamId, { filters, agent = null, sort = 'created', reloadKey }) {
+  const [state, setState] = useState({ items: [], total: 0, loaded: false, loadingMore: false, retrievalStats: false });
+  const seqRef = useRef(0);
+  const inViewRef = useRef(ITEMS_PAGE_SIZE);
+  const queryKey = itemsQueryKey(teamId, { filters, agent, sort });
+  const argsRef = useRef(null);
+  argsRef.current = { teamId, filters, agent, sort };
+
+  const lastKeyRef = useRef(queryKey);
+  useEffect(() => {
+    if (lastKeyRef.current !== queryKey) {
+      lastKeyRef.current = queryKey;
+      inViewRef.current = ITEMS_PAGE_SIZE;
+    }
+    const seq = ++seqRef.current;
+    const { teamId: t, ...q } = argsRef.current;
+    // Debounce typing in the search box; everything else loads at once.
+    const timer = setTimeout(() => {
+      fetch(itemsQueryUrl(t, { ...q, offset: 0, limit: Math.min(inViewRef.current, ITEMS_RELOAD_MAX) }))
+        .then(r => (r.ok ? r.json() : null))
+        .then(d => {
+          if (seq !== seqRef.current) return;
+          if (!d) { setState(s => ({ ...s, loaded: true, loadingMore: false })); return; }
+          setState({ items: d.items || [], total: d.total || 0, loaded: true, loadingMore: false, retrievalStats: !!d.retrievalStats });
+        })
+        .catch(() => { if (seq === seqRef.current) setState(s => ({ ...s, loaded: true, loadingMore: false })); });
+    }, (q.filters?.q || '').trim() ? 250 : 0);
+    return () => clearTimeout(timer);
+  }, [queryKey, reloadKey]);
+
+  const loadMore = useCallback(() => {
+    const seq = ++seqRef.current;
+    const { teamId: t, ...q } = argsRef.current;
+    const offset = state.items.length;
+    setState(s => ({ ...s, loadingMore: true }));
+    fetch(itemsQueryUrl(t, { ...q, offset, limit: ITEMS_PAGE_SIZE }))
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => {
+        if (seq !== seqRef.current) return;
+        if (!d) { setState(s => ({ ...s, loadingMore: false })); return; }
+        setState(s => {
+          const items = appendItemsPage(s.items, d.items);
+          inViewRef.current = items.length;
+          return { ...s, items, total: d.total || 0, loadingMore: false, retrievalStats: !!d.retrievalStats };
+        });
+      })
+      .catch(() => { if (seq === seqRef.current) setState(s => ({ ...s, loadingMore: false })); });
+  }, [state.items.length]);
+
+  return { ...state, loadMore };
+}
+
+function ShowMoreItems({ shown, total, busy, onMore }) {
+  if (total <= shown) return null;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) 0' }}>
+      <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Showing {shown} of {total}</span>
+      <button onClick={onMore} disabled={busy} style={{ ...miniBtn, display: 'inline-flex', alignItems: 'center', gap: 4, opacity: busy ? 0.6 : 1 }}>
+        {busy && <Loader2 size={11} className="kf-spin" aria-hidden="true" />}
+        Show {Math.min(ITEMS_PAGE_SIZE, total - shown)} more
+      </button>
+    </div>
+  );
+}
+
 const TeamSection = React.forwardRef(function TeamSection({
   team, data, filters, pulseId, selectedId, consolidationSignal,
   onOpenItem, onRetireItem, onUnarchiveItem, onOpenChat,
@@ -774,11 +850,13 @@ const TeamSection = React.forwardRef(function TeamSection({
 }, ref) {
   const [agentFilter, setAgentFilter] = useState(null); // agentId | null
   const [hoverConv, setHoverConv] = useState(null); // Set<agentId> | null
-  const [picked, setPicked] = useState(() => new Set()); // entry ids ticked for combining
-  const togglePick = useCallback((id) => {
+  // Entries ticked for combining, id -> item: a tick must survive a filter
+  // change, and only one page of the team's entries is loaded at a time.
+  const [picked, setPicked] = useState(() => new Map());
+  const togglePick = useCallback((item) => {
     setPicked(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      const next = new Map(prev);
+      if (next.has(item.id)) next.delete(item.id); else next.set(item.id, item);
       return next;
     });
   }, []);
@@ -800,26 +878,8 @@ const TeamSection = React.forwardRef(function TeamSection({
     }));
   }, [graph, team.members]);
 
-  const items = useMemo(() => {
-    const list = (graph?.nodes || []).filter(n => n.kind === 'item');
-    const now = Date.now();
-    const DAY = 24 * 3600 * 1000;
-    const q = filters.q.trim().toLowerCase();
-    return list
-      .map(n => ({ ...n, id: n.id.slice(5) })) // strip "item:" prefix
-      .filter(n => {
-        if (filters.kind !== 'all' && n.entryKind !== filters.kind) return false;
-        if (filters.convergedOnly && !n.converged) return false;
-        if (filters.today) {
-          const t = n.createdAt ? Date.parse(n.createdAt) : NaN;
-          if (Number.isNaN(t) || now - t >= DAY) return false;
-        }
-        if (q && !(n.text || '').toLowerCase().includes(q)) return false;
-        if (agentFilter && !(n.convergence || []).includes(agentFilter)) return false;
-        return true;
-      })
-      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-  }, [graph, filters, agentFilter]);
+  const page = useTeamItems(team.id, { filters, agent: agentFilter, reloadKey: graph });
+  const items = page.items;
 
   const skills = useMemo(() => (graph?.nodes || []).filter(n => n.kind === 'skill'), [graph]);
   const pending = useMemo(() => (graph?.nodes || []).filter(n => n.kind === 'pending'), [graph]);
@@ -829,16 +889,11 @@ const TeamSection = React.forwardRef(function TeamSection({
     skills.filter(sk => sk.activation && sk.activation.active).map(sk => sk.label)
   ), [skills]);
 
-  // The picked entries, resolved against ALL of the team's items (not the
-  // filtered view — a tick must survive a filter change).
-  const allItems = useMemo(() => (graph?.nodes || [])
-    .filter(n => n.kind === 'item')
-    .map(n => ({ ...n, id: n.id.slice(5) })), [graph]);
-  const pickedItems = useMemo(() => allItems.filter(n => picked.has(n.id)), [allItems, picked]);
+  const pickedItems = useMemo(() => [...picked.values()], [picked]);
   const combine = useCallback(() => {
     if (pickedItems.length < 1) return;
     onCombineItems(pickedItems, skills);
-    setPicked(new Set());
+    setPicked(new Map());
   }, [pickedItems, onCombineItems, skills]);
   const suggestions = data?.suggestions || [];
   const reviewQueue = data?.reviewQueue || [];
@@ -966,28 +1021,35 @@ const TeamSection = React.forwardRef(function TeamSection({
                 style={{ ...primaryBtn, marginLeft: 'auto', padding: '2px 10px', fontSize: 'var(--eb-text-xs)', opacity: picked.size < 1 ? 0.5 : 1 }}>
                 {picked.size < 2 ? 'Turn into a skill' : 'Combine into one skill'}
               </button>
-              <button onClick={() => setPicked(new Set())} style={{ ...miniBtn }}>Clear</button>
+              <button onClick={() => setPicked(new Map())} style={{ ...miniBtn }}>Clear</button>
             </div>
           )}
-          {items.length === 0 ? (
+          {!page.loaded ? (
+            <div aria-busy="true" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-3) 0' }}>
+              <Loader2 size={14} className="kf-spin" aria-hidden="true" /> Loading entries…
+            </div>
+          ) : items.length === 0 ? (
             <EmptyKnowledge autonomy={autonomy} counts={counts} filtered={!!(filters.q || filters.kind !== 'all' || filters.convergedOnly || filters.today || agentFilter)} />
           ) : (
-            items.map(n => (
-              <ItemCard
-                key={n.id}
-                item={n}
-                pulsing={pulseId === n.id}
-                selected={selectedId === n.id}
-                picked={picked.has(n.id)}
-                anyPicked={picked.size > 0}
-                onPick={() => togglePick(n.id)}
-                onClick={() => onOpenItem(n.id, team.id)}
-                onHover={(on) => setHoverConv(on ? new Set(n.convergence || []) : null)}
-                onRetire={() => onRetireItem(n)}
-                onUnarchive={() => onUnarchiveItem(n)}
-                retrievalOn={!!graph?.retrievalStats}
-              />
-            ))
+            <>
+              {items.map(n => (
+                <ItemCard
+                  key={n.id}
+                  item={n}
+                  pulsing={pulseId === n.id}
+                  selected={selectedId === n.id}
+                  picked={picked.has(n.id)}
+                  anyPicked={picked.size > 0}
+                  onPick={() => togglePick(n)}
+                  onClick={() => onOpenItem(n.id, team.id)}
+                  onHover={(on) => setHoverConv(on ? new Set(n.convergence || []) : null)}
+                  onRetire={() => onRetireItem(n)}
+                  onUnarchive={() => onUnarchiveItem(n)}
+                  retrievalOn={!!graph?.retrievalStats}
+                />
+              ))}
+              <ShowMoreItems shown={items.length} total={page.total} busy={page.loadingMore} onMore={page.loadMore} />
+            </>
           )}
         </div>
 
@@ -1014,7 +1076,6 @@ const TeamSection = React.forwardRef(function TeamSection({
             onReviewSuggestion={onReviewSuggestion}
             onShareSkill={onShareSkill}
             onControlsChanged={onControlsChanged}
-            lessons={allItems.map(i => i.text).filter(Boolean)}
             consolidationSignal={consolidationSignal}
           />
           {privateSkills.length > 0 && (
@@ -1080,7 +1141,7 @@ function DomainRoleTags({ roles }) {
 // a human decision): seed, LLM bootstrap (proposed → confirm), add, edit scope/roles,
 // merge (≥2 → 1), split (1 → ≥2), remove. Collapsible; hidden when a team carries no
 // domains yet and the operator hasn't expanded it.
-function DomainsPanel({ teamId, domains, budget, lessons, onChanged }) {
+function DomainsPanel({ teamId, domains, budget, onChanged }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
@@ -1144,7 +1205,8 @@ function DomainsPanel({ teamId, domains, budget, lessons, onChanged }) {
   };
 
   const runBootstrap = () => {
-    post({ op: 'bootstrap', lessons: Array.isArray(lessons) ? lessons : [] }, { reload: false })
+    // The server reads the team's lessons itself (#2921 — the page holds one page of them).
+    post({ op: 'bootstrap' }, { reload: false })
       .then((out) => setProposal({ proposed: out.proposed || [], fallback: out.fallback === true }))
       .catch(() => {});
   };
@@ -1742,7 +1804,7 @@ function ConsolidationPanel({ teamId, domains, onChanged, signal }) {
   );
 }
 
-function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, skillBudget, onReviewSuggestion, onShareSkill, onControlsChanged, lessons, consolidationSignal }) {
+function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, skillBudget, onReviewSuggestion, onShareSkill, onControlsChanged, consolidationSignal }) {
   const teamId = team.id;
   const tabKey = `kf.skillTab.${teamId}`;
   const seenKey = `kf.suggestSeen.${teamId}`;
@@ -1898,8 +1960,7 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, s
   return (
     <div>
       {/* #780/#841: the team's skill domains + soft skill-budget state + operator ops */}
-      <DomainsPanel teamId={teamId} domains={domains} budget={skillBudget}
-        lessons={lessons} onChanged={reload} />
+      <DomainsPanel teamId={teamId} domains={domains} budget={skillBudget} onChanged={reload} />
       {/* #842: one-time consolidation migration — fold micro-skills into domain playbooks */}
       <ConsolidationPanel teamId={teamId} domains={domains} onChanged={reload} signal={consolidationSignal} />
       {/* Lifecycle tabs */}
@@ -2383,30 +2444,8 @@ function OverviewTable({ team, data, filters, pulseId, selectedId, onOpenItem, o
   // newest-created order; 'desc' = most recently used first (never-used last);
   // 'asc' = the least recently used first (the retire candidates).
   const [usageSort, setUsageSort] = useState(null);
-  const items = useMemo(() => {
-    const list = (graph?.nodes || []).filter(n => n.kind === 'item');
-    const now = Date.now();
-    const DAY = 24 * 3600 * 1000;
-    const q = filters.q.trim().toLowerCase();
-    const out = list
-      .map(n => ({ ...n, id: n.id.slice(5) })) // strip "item:" prefix
-      .filter(n => {
-        if (filters.kind !== 'all' && n.entryKind !== filters.kind) return false;
-        if (filters.convergedOnly && !n.converged) return false;
-        if (filters.today) {
-          const t = n.createdAt ? Date.parse(n.createdAt) : NaN;
-          if (Number.isNaN(t) || now - t >= DAY) return false;
-        }
-        if (q) {
-          const hay = `${n.displaySummary || ''} ${n.text || ''}`.toLowerCase();
-          if (!hay.includes(q)) return false;
-        }
-        return true;
-      })
-      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-    if (usageSort) out.sort((a, b) => (usageSort === 'asc' ? -compareLastUsed(a, b) : compareLastUsed(a, b)));
-    return out;
-  }, [graph, filters, usageSort]);
+  const page = useTeamItems(team.id, { filters, sort: itemsSortFor(usageSort), reloadKey: graph });
+  const items = page.items;
 
   const [picked, setPicked] = useState(() => new Set());
   const [expanded, setExpanded] = useState(() => new Set());
@@ -2495,7 +2534,7 @@ function OverviewTable({ team, data, filters, pulseId, selectedId, onOpenItem, o
         <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
           {picked.size > 0
             ? <><strong style={{ color: 'var(--eb-text-primary)' }}>{picked.size}</strong> of {items.length} selected</>
-            : <>{items.length} learned fact{items.length === 1 ? '' : 's'}</>}
+            : <>{page.total} learned fact{page.total === 1 ? '' : 's'}</>}
         </span>
         <InfoTip size={12} title="One row per learned fact" text="A plain-language overview of everything this team’s agents have learned. Tick rows to retire / un-retire them, or to combine several related lessons into one skill. The summary is a readable rewrite; expand a row to see the exact text agents use." />
         <div style={{ flex: 1 }} />
@@ -2510,7 +2549,11 @@ function OverviewTable({ team, data, filters, pulseId, selectedId, onOpenItem, o
         </button>
       </div>
 
-      {items.length === 0 ? (
+      {!page.loaded ? (
+        <div aria-busy="true" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-4)' }}>
+          <Loader2 size={14} className="kf-spin" aria-hidden="true" /> Loading entries…
+        </div>
+      ) : items.length === 0 ? (
         <div style={{ padding: 'var(--eb-space-4)' }}>
           <EmptyKnowledge autonomy={data?.gates ? data.gates.autonomy : 1} counts={graph?.counts || { items: 0 }} filtered={!!(filters.q || filters.kind !== 'all' || filters.convergedOnly || filters.today)} />
         </div>
@@ -2606,6 +2649,9 @@ function OverviewTable({ team, data, filters, pulseId, selectedId, onOpenItem, o
               })}
             </tbody>
           </table>
+          <div style={{ padding: '0 var(--eb-space-4)' }}>
+            <ShowMoreItems shown={items.length} total={page.total} busy={page.loadingMore} onMore={page.loadMore} />
+          </div>
         </div>
       )}
       <ConfirmDialog

@@ -19,7 +19,9 @@
  * #651 convention. api.js is the thin adapter that wires it to the git helpers.
  */
 
-function createTtlCache({ ttlMs = 5000, now = Date.now, maxEntries = 500 } = {}) {
+// `staleMs` (default 0 = off) keeps an expired entry around for that long so
+// `getStaleWhileRevalidate` can still serve it while a refresh runs (#2923).
+function createTtlCache({ ttlMs = 5000, now = Date.now, maxEntries = 500, staleMs = 0 } = {}) {
   // key -> { value, expiresAt }
   const store = new Map();
   // key -> Promise (compute in flight); never expires on its own, cleared on settle.
@@ -33,9 +35,16 @@ function createTtlCache({ ttlMs = 5000, now = Date.now, maxEntries = 500 } = {})
     const entry = store.get(key);
     if (!entry) return undefined;
     if (entry.expiresAt <= now()) {
-      store.delete(key);
+      if (entry.expiresAt + staleMs <= now()) store.delete(key);
       return undefined;
     }
+    return entry.value;
+  }
+
+  // An expired value still inside the `staleMs` window, else undefined.
+  function getStale(key) {
+    const entry = store.get(key);
+    if (!entry || entry.expiresAt + staleMs <= now()) return undefined;
     return entry.value;
   }
 
@@ -79,6 +88,20 @@ function createTtlCache({ ttlMs = 5000, now = Date.now, maxEntries = 500 } = {})
     return p;
   }
 
+  // Stale-while-revalidate (#2923): a fresh value is returned as-is; an expired
+  // one still inside the `staleMs` window is returned at once while a single
+  // background refresh (shared with any in-flight compute) replaces it — a
+  // failed refresh keeps the stale value and is swallowed. Only a miss (never
+  // computed, or older than ttlMs + staleMs) waits for `compute()`.
+  function getStaleWhileRevalidate(key, compute) {
+    const cached = get(key);
+    if (cached !== undefined) return Promise.resolve(cached);
+    const stale = getStale(key);
+    if (stale === undefined) return getOrCompute(key, compute);
+    getOrCompute(key, compute).catch(() => {});
+    return Promise.resolve(stale);
+  }
+
   // Drop every cached value and detach in-flight computes: callers already
   // awaiting one still get its result, but it is not cached, and the next
   // getOrCompute starts a fresh compute.
@@ -94,7 +117,7 @@ function createTtlCache({ ttlMs = 5000, now = Date.now, maxEntries = 500 } = {})
     for (const key of [...inflight.keys()]) if (predicate(key)) inflight.delete(key);
   }
 
-  return { get, set, getOrCompute, clear, deleteWhere, get size() { return store.size; } };
+  return { get, set, getOrCompute, getStaleWhileRevalidate, clear, deleteWhere, get size() { return store.size; } };
 }
 
 // A cache TTL from an env var. Unset, blank or invalid ⇒ `fallback`; an

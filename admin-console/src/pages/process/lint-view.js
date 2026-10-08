@@ -40,6 +40,8 @@ const LINT_INFO = {
   'wake-label-no-live-consumer': { title: 'Nobody picks this label up', fix: 'Switch the consuming agent (or its trigger on this label) back on, or route the label to an agent that is running.' },
   // Wake label that does not exist on its repository (#2878).
   'wake-label-missing': { title: 'Wake label does not exist on GitHub', fix: 'Create the label on the repository (Create label), or point the trigger at a label that exists.' },
+  // PR hand-off that does not send merge conflicts to the team's conflict solver (#2879).
+  'pr-handoff-conflict-unrouted': { title: 'Conflicting PRs skip the conflict solver', fix: "Open the hand-off, switch on “Block on merge conflict” and set the failure label to the conflict solver's wake label." },
   'gate-failure-label-unheard': { title: 'Failed hand-offs go unnoticed', fix: 'Wire a consumer for the failure label (e.g. a reworker on `revisions-required`), or choose a failure label an agent already listens on in the hand-off dialog.' },
 };
 

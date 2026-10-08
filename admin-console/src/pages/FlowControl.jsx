@@ -309,6 +309,7 @@ export default function FlowControl() {
                 <WorkingNow view={view} busy={busy} onSetState={setRoleState} onForceDispatch={forceDispatch} />
                 {view.needsYou && <NeedsYou items={view.needsYou} canManage={view.canManage} busy={busy} onRelease={setReleaseTarget} onWake={setWakeTarget} carriedOver={view.carriedOver} onAdoptAll={() => setAdoptOpen(true)} />}
                 <InProgress view={view} busy={busy} onRemove={setRemoveTarget} />
+                {view.handoffs.length > 0 && <HandoffGates handoffs={view.handoffs} />}
                 {view.doneRows.length > 0 && (
                   <RecentlyCompleted rows={view.doneRows} hint={view.retentionHint} canManage={view.canManage} busy={busy} onRemove={setRemoveTarget} />
                 )}
@@ -669,6 +670,54 @@ function InProgress({ view, busy, onRemove }) {
   );
 }
 
+/* ── hand-off gates (#2914) ────────────────────────────────────────── */
+
+// Where a gate is changed (Flow Editor or Agent Chat → Triggers); only for a
+// viewer who may change it — the view leaves `edit` null otherwise (AC4).
+function GateEditLink({ edit }) {
+  if (!edit) return null;
+  return (
+    <RouterLink to={edit.to} title={edit.label} aria-label={edit.label} className={CHAT_LINK_CLASS} style={{ textDecoration: 'underline', ...mutedStyle }}>
+      Change
+    </RouterLink>
+  );
+}
+
+// A row whose PR came in through an ungated hand-off (AC2).
+function GateNote({ note }) {
+  return (
+    <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'baseline', ...mutedStyle }}>
+      <span title={note.title}>{note.text}</span>
+      <GateEditLink edit={note.edit} />
+    </div>
+  );
+}
+
+// Every PR hand-off of the team and whether it waits for CI / a conflict-free
+// PR before it wakes the next agent (AC1).
+function HandoffGates({ handoffs }) {
+  return (
+    <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+      <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.states} helpLabel="Where the stages come from">
+        Pull request hand-offs ({handoffs.length})
+      </AreaHeading>
+      {handoffs.map((h) => (
+        <div key={h.id} style={{ ...lineStyle, flexWrap: 'wrap' }}>
+          <span style={{ color: 'var(--eb-text-primary)' }}>{h.from} → <strong>{h.to}</strong></span>
+          {h.label && <code style={{ fontFamily: 'var(--eb-font-mono)', ...mutedStyle }}>{h.label}</code>}
+          <span
+            title={h.title}
+            style={h.gated ? { color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-xs)' } : { color: 'var(--eb-status-warning, #d97706)', fontSize: 'var(--eb-text-xs)' }}
+          >
+            {h.gated ? '⏳ ' : ''}{h.text}
+          </span>
+          <span style={{ marginLeft: 'auto' }}><GateEditLink edit={h.edit} /></span>
+        </div>
+      ))}
+    </section>
+  );
+}
+
 /* ── recently completed (#2607) ────────────────────────────────────── */
 
 // Closed issues and merged PRs, kept for the team's retention window. Only
@@ -723,9 +772,12 @@ function EmptyCell({ cell }) {
   return <span role="img" title={cell.title} aria-label={cell.title} style={style}>{cell.text}</span>;
 }
 
+// Done rows are set apart by their own "Recently completed" section and a
+// check icon in the Stage cell — never by `opacity`, which would pull every
+// link and muted text in the row below WCAG AA contrast (#2934).
 function BoardRow({ row, canManage, busy, onRemove }) {
   return (
-    <tr style={{ opacity: row.done ? 0.65 : 1 }}>
+    <tr>
       <td style={{ ...numberCellStyle, ...numberTextStyle }}>
         {row.issue.empty ? <EmptyCell cell={row.issue} /> : <Link href={row.issue.url}>{row.issue.text}</Link>}
       </td>
@@ -744,10 +796,14 @@ function BoardRow({ row, canManage, busy, onRemove }) {
       <td style={cellStyle}><StageProgress steps={row.steps} blocked={row.blocked} /></td>
       <td style={cellStyle}>
         <ChatLink chat={row.chat}>
-          <div style={{ color: 'var(--eb-text-primary)' }}>{row.stageLabel}</div>
+          <div style={{ color: 'var(--eb-text-primary)', display: 'flex', alignItems: 'center', gap: 4 }}>
+            {row.done && <CheckCircle2 size={12} aria-hidden="true" style={{ color: 'var(--eb-status-success, #16a34a)', flexShrink: 0 }} />}
+            {row.stageLabel}
+          </div>
           <div style={mutedStyle}>{row.statusText}</div>
         </ChatLink>
         {row.gateText && <div style={mutedStyle} title={row.gateTitle}>⏳ {row.gateText}</div>}
+        {row.ungated && <GateNote note={row.ungated} />}
       </td>
       <td style={{ ...cellStyle, whiteSpace: 'nowrap', ...mutedStyle }}>
         {row.inStageTitle ? <span title={row.inStageTitle}>{row.inStage}</span> : row.inStage}

@@ -22,7 +22,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write        # push the refresh branch
+  contents: write        # reset the refresh branch + commit via createCommitOnBranch
   pull-requests: write   # open/update the PR
 
 jobs:
@@ -44,10 +44,10 @@ jobs:
       - name: Ensure ~/.gitconfig is a file (git identity for the commit step)
         # No compose service bind-mounts ~/.gitconfig any more — bp-explorer was its
         # only mounter and went with the service in #1963, so podman can no longer
-        # turn the missing file into a DIRECTORY. The step stays for its other half:
-        # the `git commit` further down needs a committer identity, and the rmdir is
-        # now only a cheap guard against a directory a previous run left behind
-        # (identical to ui-screenshots.yml).
+        # turn the missing file into a DIRECTORY. The commit itself is now made via
+        # the GraphQL API (signed by GitHub, #2938); the identity stays for any git
+        # tooling in the journey run, and the rmdir is a cheap guard against a
+        # directory a previous run left behind (identical to ui-screenshots.yml).
         run: |
           set -euo pipefail
           [ -d "$HOME/.gitconfig" ] && { rmdir "$HOME/.gitconfig" 2>/dev/null || rm -rf "$HOME/.gitconfig"; }
@@ -95,14 +95,41 @@ jobs:
             exit 0
           fi
           branch="chore/refresh-tour-screenshots"
-          git checkout -B "$branch"
-          git commit -m "chore: refresh Helper Chat tour screenshots" \
-            -m "Automated re-capture of the narrated journey screenshots baked into the tour (.github/workflows/tour-screenshots.yml)."
-          # Dedicated bot branch only this workflow ever writes, and the run is
-          # serialized by the concurrency group — a plain force-push is safe and
-          # avoids force-with-lease refusing when the fresh checkout has no
-          # remote-tracking ref for the branch yet.
-          git push --force origin "$branch"
+          base="$(git rev-parse HEAD)"
+          # Commit through the GraphQL createCommitOnBranch mutation, not a local
+          # `git commit` + push (#2938): GitHub signs such commits itself, so they
+          # show as Verified and pass a "require signed commits" rule. Dedicated
+          # bot branch only this workflow ever writes, serialized by the
+          # concurrency group — resetting it to main first is the old force-push.
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}" \
+              -f sha="$base" -F force=true >/dev/null
+          else
+            gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/heads/${branch}" -f sha="$base" >/dev/null
+          fi
+          # Staged additions (base64 contents) and deletions → the mutation input.
+          git diff --cached --name-only --diff-filter=d -z > /tmp/tour-added
+          git diff --cached --name-only --diff-filter=D -z > /tmp/tour-deleted
+          node -e '
+            const fs = require("fs");
+            const list = (f) => fs.readFileSync(f, "utf8").split("\0").filter(Boolean);
+            const input = {
+              branch: { repositoryNameWithOwner: process.env.GITHUB_REPOSITORY, branchName: process.argv[1] },
+              expectedHeadOid: process.argv[2],
+              message: {
+                headline: "chore: refresh Helper Chat tour screenshots",
+                body: "Automated re-capture of the narrated journey screenshots baked into the tour (.github/workflows/tour-screenshots.yml).",
+              },
+              fileChanges: {
+                additions: list("/tmp/tour-added").map((p) => ({ path: p, contents: fs.readFileSync(p).toString("base64") })),
+                deletions: list("/tmp/tour-deleted").map((p) => ({ path: p })),
+              },
+            };
+            const query = "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }";
+            fs.writeFileSync("/tmp/tour-commit.json", JSON.stringify({ query, variables: { input } }));
+          ' "$branch" "$base"
+          gh api graphql --input /tmp/tour-commit.json --jq '.data.createCommitOnBranch.commit.oid'
           # PR body via a file so the multi-line text never has to be an inline
           # (and awkwardly indented) shell argument inside this YAML block.
           printf '%s\n\n%s\n' \
@@ -114,5 +141,5 @@ jobs:
               --title "chore: refresh Helper Chat tour screenshots" \
               --body-file /tmp/pr-body.md
           else
-            echo "existing PR for ${branch} updated by the force-push above"
+            echo "existing PR for ${branch} updated by the signed commit above"
           fi

@@ -99,6 +99,7 @@ const { listPersonalResources } = require('./personal-resource-view');
 // client override behind the flag ("mark a personal credential as service", #2360).
 const { resolveStampedIdentity } = require('./credential-identity');
 const { credentialName, isValidNewCredentialId, sshPrivateKeyError } = require('./credential-input');
+const { parseSigningInput, applySigning, publicKeyFromBlob } = require('./ssh-signing');
 const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
         WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
 const { createChatWriteGates } = require('./chat-write-access');
@@ -19786,6 +19787,19 @@ app.put('/api/blueprints/:id/memory/:file', apiLimiter, express.text({ type: '*/
 
 /* ─── SSH Keys ──────────────────────────────────────────────────────── */
 
+// A signing key (#2938) carries its public key in list/create responses so the
+// UI can show what to upload on GitHub as a "Signing Key". Derived from the
+// stored OpenSSH private key on read (only the PUBLIC half is returned); null
+// for a legacy PEM key — the UI then explains `ssh-keygen -y`.
+function withSigningPublicKey(cred) {
+  if (!cred || !cred.signing || !SSH_KEY_ID_RE.test(String(cred.id || ''))) return cred;
+  let publicKey = null;
+  try {
+    publicKey = publicKeyFromBlob(extractOpensshPubBlob(fs.readFileSync(path.join(SSH_KEYS_DIR, path.basename(cred.id)), 'utf8')));
+  } catch { /* unreadable key file — publicKey stays null */ }
+  return { ...cred, publicKey };
+}
+
 app.get('/api/ssh-keys', (req, res) => {
   // Return only metadata — never the private key. Scoped to the caller (#798):
   // Team Admins see system credentials assigned to a team they administer plus
@@ -19793,7 +19807,7 @@ app.get('/api/ssh-keys', (req, res) => {
   const scope = getScope(req);
   const keys = listSshKeys();
   // #2655: mark which personal key the runtime resolves (the owner's first one).
-  res.json(markActivePersonal(keys.map(normalizeCredential).filter(k => visibleCredential(scope, k)), keys));
+  res.json(markActivePersonal(keys.map(normalizeCredential).filter(k => visibleCredential(scope, k)), keys).map(withSigningPublicKey));
 });
 
 app.post('/api/ssh-keys', apiLimiter, (req, res) => {
@@ -19815,6 +19829,9 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
   // armour lines used to be stored and only failed when an agent cloned.
   const keyError = sshPrivateKeyError(trimmed);
   if (keyError) return res.status(400).json({ error: keyError });
+  // Optional commit-signing identity (#2938): makes this a signing key.
+  const signingInput = parseSigningInput(req.body?.signing);
+  if (signingInput.error) return res.status(400).json({ error: signingInput.error });
 
   const existing = listSshKeys();
   let id;
@@ -19852,6 +19869,7 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
     identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity }),
     fingerprint: sshKeyFingerprint(trimmed),
     createdAt: new Date().toISOString(),
+    ...(signingInput.action === 'set' ? { signing: signingInput.signing } : {}),
   };
   const after = [...existing, entry];
   saveSshKeysIndex(after);
@@ -19861,7 +19879,7 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
   const ownerAgentsRestarted = entry.scope === 'personal'
     && ownerRespawnNeeded({ before: existing, after, userId: entry.userId });
   if (ownerAgentsRestarted) notifyOwnerCredentialChange(entry.userId, 'personal-ssh-key-set');
-  res.status(201).json({ ...normalizeCredential(entry), ...(entry.scope === 'personal' ? { ownerAgentsRestarted } : {}) });
+  res.status(201).json({ ...withSigningPublicKey(normalizeCredential(entry)), ...(entry.scope === 'personal' ? { ownerAgentsRestarted } : {}) });
 });
 
 // Server-side keypair generation. Returns the public key once so the user
@@ -19891,6 +19909,10 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
     }
   }
 
+  // Optional commit-signing identity (#2938): makes this a signing key.
+  const signingInput = parseSigningInput(req.body?.signing);
+  if (signingInput.error) return res.status(400).json({ error: signingInput.error });
+
   const safeComment = (typeof comment === 'string' && comment.trim()) || `aee-${id}`;
   const { privateKey: privText, publicKey: pubText, pubBlob } = generateOpensshEd25519Keypair(safeComment);
 
@@ -19913,6 +19935,7 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
     identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity }),
     fingerprint: sshFingerprintFromPubBlob(pubBlob),
     createdAt: new Date().toISOString(),
+    ...(signingInput.action === 'set' ? { signing: signingInput.signing } : {}),
   };
   const after = [...existing, entry];
   saveSshKeysIndex(after);
@@ -19939,10 +19962,16 @@ app.patch('/api/ssh-keys/:id', apiLimiter, (req, res) => {
   if (!canManageCredential(scope, cred)) {
     return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
   }
-  const updated = applyCredentialPatch({ res, cred, scope, body: req.body, inUse: sshKeyInUse(id), label: 'SSH key' });
-  if (!updated) return; // applyCredentialPatch already sent the error
+  // Set / clear the commit-signing identity (#2938). Validated before the
+  // ownership patch so a bad identity writes nothing. Takes effect on the next
+  // run — signing resolves per run, so no respawn.
+  const signingInput = parseSigningInput(req.body?.signing);
+  if (signingInput.error) return res.status(400).json({ error: signingInput.error });
+  const patched = applyCredentialPatch({ res, cred, scope, body: req.body, inUse: sshKeyInUse(id), label: 'SSH key' });
+  if (!patched) return; // applyCredentialPatch already sent the error
+  const updated = applySigning(patched, signingInput);
   saveSshKeysIndex(keys.map(k => (k.id === id ? updated : k)));
-  res.json(normalizeCredential(updated));
+  res.json(withSigningPublicKey(normalizeCredential(updated)));
 });
 
 app.delete('/api/ssh-keys/:id', apiLimiter, (req, res) => {

@@ -139,6 +139,22 @@ class Classification(unittest.TestCase):
         self.assertEqual(G._repo_from_remote_url("https://ghe.corp/Org/repo.git"), "ghe.corp/Org/repo")
         self.assertIsNone(G._repo_from_remote_url("not a url"))
 
+    def test_unsigned_hint_commands(self):
+        self.assertEqual(G.unsigned_hint_operation(["pr", "merge", "5", "--squash"]), "merge")
+        self.assertEqual(G.unsigned_hint_operation(["pr", "update-branch", "5"]), "update-branch")
+        for args in (["pr", "view", "5"], ["pr"], [], ["api", "repos/o/r/pulls/5/merge"]):
+            self.assertIsNone(G.unsigned_hint_operation(args))
+
+    def test_unsigned_patterns_mirror_the_orchestrator(self):
+        import re as _re
+        src = (SCRIPT.parent.parent.parent / "orchestrator" / "commit-signing.js").read_text()
+        block = src[src.index("const UNSIGNED_PATTERNS"):src.index("];", src.index("const UNSIGNED_PATTERNS"))]
+        js = [m.replace("\\\\", "\\") for m in _re.findall(r"^\s*/(.+)/i,$", block, _re.M)]
+        self.assertEqual(js, [p.pattern for p in G.UNSIGNED_PATTERNS])
+        self.assertTrue(G.is_unsigned_rejection("GraphQL: Base branch requires signed commits (mergePullRequest)"))
+        self.assertTrue(G.is_unsigned_rejection("Commits must have verified signatures."))
+        self.assertFalse(G.is_unsigned_rejection("Pull request is not mergeable: the base branch policy prohibits the merge"))
+
 
 class _Orch(BaseHTTPRequestHandler):
     response = (200, {"ok": True, "mode": "baseline"})
@@ -171,6 +187,12 @@ class EndToEnd(unittest.TestCase):
         with open(cls.fake_gh, "w") as fh:
             fh.write("#!/bin/sh\necho \"LOCAL $* token=$GH_TOKEN\"\necho \"STDIN=$(cat)\"\n")
         os.chmod(cls.fake_gh, 0o755)
+        # A "real" gh whose `pr merge` / `pr update-branch` fail with $FAKE_GH_ERR.
+        cls.failing_gh = os.path.join(cls.tmp, "failing-gh")
+        with open(cls.failing_gh, "w") as fh:
+            fh.write("#!/bin/sh\nif [ -n \"$FAKE_GH_ERR\" ]; then echo \"$FAKE_GH_ERR\" >&2; exit 1; fi\n"
+                     "echo \"LOCAL $*\"\n")
+        os.chmod(cls.failing_gh, 0o755)
 
     @classmethod
     def tearDownClass(cls):
@@ -180,11 +202,11 @@ class EndToEnd(unittest.TestCase):
         _Orch.requests = []
         _Orch.response = (200, {"ok": True, "mode": "baseline"})
 
-    def run_gh(self, args, sender="@b:local", stdin=None):
+    def run_gh(self, args, sender="@b:local", stdin=None, gh=None, extra_env=None):
         env = dict(os.environ)
         env.update({
             "AGENT_ID": "team-x-dev",
-            "AEE_REAL_GH": self.fake_gh,
+            "AEE_REAL_GH": gh or self.fake_gh,
             "GH_TOKEN": "baseline-token",
             "AEE_INTERNAL_TOKEN": "agent-tok",
             "ORCHESTRATOR_INTERNAL_URL": f"http://127.0.0.1:{self.server.server_port}",
@@ -193,6 +215,7 @@ class EndToEnd(unittest.TestCase):
         env.pop("AEE_ACTING_SENDER", None)
         if sender is not None:
             env["AEE_ACTING_SENDER"] = sender
+        env.update(extra_env or {})
         return subprocess.run([sys.executable, str(SCRIPT), *args], input=stdin or "",
                               capture_output=True, text=True, env=env, cwd=self.tmp, timeout=30)
 
@@ -294,6 +317,57 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("LOCAL issue comment 5 --body-file - token=baseline-token", p.stdout)
         [req] = _Orch.requests
         self.assertEqual(base64.b64decode(req["body"]["files"][0]["content"]).decode(), "from stdin")
+
+
+    # ── #2938 AC8: a merge / update-branch rejected over unsigned commits ──
+
+    UNSIGNED_ERR = "GraphQL: Base branch requires signed commits (mergePullRequest)"
+
+    def test_autonomous_merge_rejected_over_unsigned_commits_gets_the_message(self):
+        _Orch.response = (200, {"ok": True, "message": "GitHub rejected this merge: … /ssh-keys …",
+                                "code": "unsigned-commits-rejected"})
+        p = self.run_gh(["pr", "merge", "7", "--squash"], sender=None, gh=self.failing_gh,
+                        extra_env={"FAKE_GH_ERR": self.UNSIGNED_ERR})
+        self.assertEqual(p.returncode, 1)
+        self.assertIn(self.UNSIGNED_ERR, p.stderr)
+        self.assertIn("GitHub rejected this merge: … /ssh-keys …", p.stderr)
+        [req] = _Orch.requests
+        self.assertEqual(req["path"], "/internal/agents/team-x-dev/git/unsigned-hint")
+        self.assertEqual(req["auth"], "Bearer agent-tok")
+        self.assertEqual(req["body"]["operation"], "merge")
+        self.assertIn(self.UNSIGNED_ERR, req["body"]["detail"])
+        self.assertEqual(req["body"]["actingSender"], "")
+
+    def test_update_branch_rejection_names_the_operation(self):
+        _Orch.response = (200, {"ok": True, "message": "HINT"})
+        p = self.run_gh(["pr", "update-branch", "7"], sender=None, gh=self.failing_gh,
+                        extra_env={"FAKE_GH_ERR": "Commits must have verified signatures."})
+        self.assertEqual(p.returncode, 1)
+        self.assertEqual(_Orch.requests[0]["body"]["operation"], "update-branch")
+        self.assertIn("HINT", p.stderr)
+
+    def test_unsigned_rejection_without_the_orchestrator_gets_the_generic_fix(self):
+        env_port = self.server.server_port
+        try:
+            self.server.server_port = 9  # connection refused
+            p = self.run_gh(["pr", "merge", "7"], sender=None, gh=self.failing_gh,
+                            extra_env={"FAKE_GH_ERR": self.UNSIGNED_ERR})
+        finally:
+            self.server.server_port = env_port
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("GitHub rejected this merge: this GitHub instance requires signed commits", p.stderr)
+        self.assertIn("/ssh-keys", p.stderr)
+        self.assertIn('"Signing Key"', p.stderr)
+
+    def test_other_merge_failures_and_successes_are_untouched(self):
+        p = self.run_gh(["pr", "merge", "7"], sender=None, gh=self.failing_gh,
+                        extra_env={"FAKE_GH_ERR": "Pull request is not mergeable"})
+        self.assertEqual(p.returncode, 1)
+        self.assertEqual(p.stderr.strip(), "Pull request is not mergeable")
+        q = self.run_gh(["pr", "merge", "7", "--merge"], sender=None, gh=self.failing_gh)
+        self.assertEqual(q.returncode, 0, q.stderr)
+        self.assertIn("LOCAL pr merge 7 --merge", q.stdout)
+        self.assertEqual(_Orch.requests, [])
 
 
 if __name__ == "__main__":

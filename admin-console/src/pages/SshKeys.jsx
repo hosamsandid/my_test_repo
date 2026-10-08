@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Trash2, Pencil, Plus, ChevronDown, ChevronRight, KeyRound, ClipboardPaste, Copy, Check, ExternalLink, RefreshCw } from 'lucide-react';
+import { Trash2, Pencil, Plus, ChevronDown, ChevronRight, KeyRound, ClipboardPaste, Copy, Check, ExternalLink, RefreshCw, PenLine } from 'lucide-react';
+import { useSearchParams } from 'react-router';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import WhenCell from '../components/WhenCell';
@@ -27,6 +28,10 @@ import { usePageActions } from '../context/PageActionsContext';
 import {
   loadPersonalCredentialChangeNotice, personalUsageCell, personalCreateRestartNote, replaceRestartNote,
 } from './effective-identity-view.js';
+import {
+  signingFormValue, signingFormError, signingPayload, signingCell, signingRecommendation,
+  SIGNING_UPLOAD_HINT, GITHUB_SIGNING_DOCS_HREF,
+} from './commit-signing-view.js';
 
 const inputStyle = {
   width: '100%',
@@ -115,7 +120,7 @@ function Step({ n, children }) {
   );
 }
 
-function PublicKeyReveal({ publicKey, onDone }) {
+function PublicKeyReveal({ publicKey, onDone, signing = false, title = 'Keypair generated — copy the public key to GitHub' }) {
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const copyResetTimerRef = useRef(null);
@@ -141,8 +146,9 @@ function PublicKeyReveal({ publicKey, onDone }) {
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
         color: 'var(--eb-status-success)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
       }}>
-        <Check size={15} /> Keypair generated — copy the public key to GitHub
+        <Check size={15} /> {title}
       </div>
+      {signing && <SigningUploadNote />}
       <textarea
         ref={publicKeyRef}
         aria-label="Public key"
@@ -199,9 +205,93 @@ function PublicKeyReveal({ publicKey, onDone }) {
   );
 }
 
+// #2938: the GitHub upload instruction for a signing key's public key.
+function SigningUploadNote() {
+  return (
+    <div role="note" style={{ padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
+      <strong>Commit signing:</strong> {SIGNING_UPLOAD_HINT}
+    </div>
+  );
+}
+
+// #2938: optional commit-signing identity. Off by default — a key without it
+// only authenticates git transport, as before.
+function SigningFields({ value, onChange }) {
+  const v = value || { enabled: false, name: '', email: '' };
+  const err = signingFormError(v);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-3)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)' }}>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+        <input type="checkbox" checked={!!v.enabled} onChange={e => onChange({ ...v, enabled: e.target.checked })} />
+        <PenLine size={14} aria-hidden="true" /> Sign agent commits with this key
+      </label>
+      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
+        Optional. Commits made with this key are signed and show as <strong>Verified</strong> on GitHub; the commit's
+        committer becomes the name and email below (the agent stays the author). Recommended, and mandatory on GitHub
+        instances that enforce verified commits (Accenture GitHub Enterprise from 2026-10-23). Used personal → team → global.
+      </div>
+      {v.enabled && (
+        <>
+          <FormInput label="Commit name *" value={v.name} onChange={name => onChange({ ...v, name })} placeholder="e.g. Agent Studio Bot" />
+          <FormInput label="Commit email *" type="email" value={v.email} onChange={email => onChange({ ...v, email })} placeholder="a verified email of the GitHub account" error={v.email || v.name ? err : null} />
+          <StepGuide title="How to set up commit signing" defaultOpen={false}>
+            <Step n={1}>Save this key with the commit name and email it should sign as.</Step>
+            <Step n={2}>Copy the public key shown after saving (or later under <strong>Edit</strong>).</Step>
+            <Step n={3}>On GitHub, sign in as the account whose <strong>verified</strong> email is the commit email, open
+              <strong> Settings → SSH and GPG keys → New SSH key</strong>, choose <strong>Key type: Signing Key</strong> and paste it.
+              The same key may also be added as an authentication key.</Step>
+            <Step n={4}>The next agent run signs every commit — no restart needed.{' '}
+              <a href={GITHUB_SIGNING_DOCS_HREF} target="_blank" rel="noreferrer">GitHub: SSH commit signature verification</a></Step>
+          </StepGuide>
+        </>
+      )}
+    </div>
+  );
+}
+
+// #2938: set or clear the signing identity of an existing key; shows its public key.
+function SigningEditSection({ cred, onSave, saving }) {
+  const [value, setValue] = useState(() => signingFormValue(cred));
+  const [error, setError] = useState(null);
+  const changed = JSON.stringify(signingPayload(value, { previous: cred.signing })) !== JSON.stringify(cred.signing ? cred.signing : undefined);
+  const invalid = !!signingFormError(value);
+  async function save() {
+    setError(null);
+    try { await onSave({ signing: signingPayload(value, { previous: cred.signing }) }); }
+    catch (e) { setError(e.message); }
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', marginTop: 'var(--eb-space-5)', paddingTop: 'var(--eb-space-4)', borderTop: '1px solid var(--eb-border-default)' }}>
+      <h3 style={{ margin: 0, fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)' }}>Commit signing</h3>
+      <SigningFields value={value} onChange={setValue} />
+      {cred.signing && cred.publicKey && (
+        <>
+          <textarea aria-label="Signing public key" readOnly value={cred.publicKey} rows={3} onFocus={e => e.target.select()}
+            style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }} />
+          <SigningUploadNote />
+        </>
+      )}
+      {cred.signing && !cred.publicKey && (
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+          The public key cannot be shown for this key format — derive it with <code>ssh-keygen -y -f &lt;private key file&gt;</code>.
+        </div>
+      )}
+      {error && <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{error}</div>}
+      <div>
+        <button type="button" onClick={save} disabled={saving || !changed || invalid} style={{
+          padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+          border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+          cursor: (saving || !changed || invalid) ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+        }}>{saving ? 'Saving…' : 'Save signing settings'}</button>
+      </div>
+    </div>
+  );
+}
+
 function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, generated, onDoneGenerated,
-                      teams, isSysAdmin, adminTeamIds, hasActivePersonal }) {
+                      teams, isSysAdmin, adminTeamIds, hasActivePersonal, initialSigning = false, generatedSigning = false }) {
   const [mode, setMode] = useState('generate');
+  const [signing, setSigning] = useState(() => signingFormValue(null, { enabled: initialSigning }));
   const [name, setName] = useState('');
   const [id, setId] = useState('');
   const [privateKey, setPrivateKey] = useState('');
@@ -215,14 +305,20 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
   const idHelp = <>Auto-derived from Name; edit to override. {ID_FORMAT_HINT} Used as the filename of the stored key.</>;
 
   if (generated) {
-    return <PublicKeyReveal publicKey={generated} onDone={onDoneGenerated} />;
+    return (
+      <PublicKeyReveal
+        publicKey={generated} onDone={onDoneGenerated} signing={generatedSigning}
+        title={mode === 'paste' ? 'Key saved — copy the public key to GitHub as a Signing Key' : undefined}
+      />
+    );
   }
 
   // A team-scoped credential needs an owning team selected before it can be saved;
   // personal / system scopes are ready without one.
   const ownershipReady = ownership.scope === 'system' || ownership.scope === 'personal' || !!ownership.teamId;
-  const canPaste    = name.trim() && privateKey.trim() && ownershipReady;
-  const canGenerate = name.trim() && ownershipReady;
+  const signingOk = !signingFormError(signing);
+  const canPaste    = name.trim() && privateKey.trim() && ownershipReady && signingOk;
+  const canGenerate = name.trim() && ownershipReady && signingOk;
 
   const restartNote = personalCreateRestartNote({ kind: 'ssh', scope: ownership.scope, hasActivePersonal });
   const ownershipFields = (
@@ -235,6 +331,7 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
         adminTeamIds={adminTeamIds}
       />
       {restartNote && <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)' }}>{restartNote}</div>}
+      <SigningFields value={signing} onChange={setSigning} />
     </>
   );
 
@@ -293,7 +390,7 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
 
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
             <button
-              onClick={() => onSaveGenerate({ name: name.trim(), id: id.trim() || undefined, ...ownershipPayload(ownership) })}
+              onClick={() => onSaveGenerate({ name: name.trim(), id: id.trim() || undefined, ...ownershipPayload(ownership), signing: signingPayload(signing) })}
               disabled={saving || !canGenerate}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
@@ -395,7 +492,7 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
 
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
             <button
-              onClick={() => onSavePaste({ name: name.trim(), id: id.trim() || undefined, privateKey: privateKey.trim(), ...ownershipPayload(ownership) })}
+              onClick={() => onSavePaste({ name: name.trim(), id: id.trim() || undefined, privateKey: privateKey.trim(), ...ownershipPayload(ownership), signing: signingPayload(signing) })}
               disabled={saving || !canPaste}
               style={{
                 padding: 'var(--eb-space-2) var(--eb-space-4)',
@@ -452,6 +549,17 @@ export default function SshKeys() {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
   const [generatedPublicKey, setGeneratedPublicKey] = useState(null);
+  const [generatedSigning, setGeneratedSigning] = useState(false);
+  // #2938: `?new=signing` (the "set up a signing key" link of every signing
+  // hint) opens the New-key panel with commit signing switched on.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [createWithSigning, setCreateWithSigning] = useState(false);
+  useEffect(() => {
+    if (searchParams.get('new') !== 'signing') return;
+    setCreateWithSigning(true); setCreating(true); setFormError(null); setGeneratedPublicKey(null);
+    const next = new URLSearchParams(searchParams); next.delete('new');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   const teams = Array.isArray(teamsData) ? teamsData : [];
   const names = teamsById(teams);
@@ -468,6 +576,7 @@ export default function SshKeys() {
   const caller = { isSysAdmin, adminTeamIds, userId: user?.userId };
   // #2655: only the caller's first personal key is used — a further one restarts nothing.
   const hasActivePersonal = rows.some(r => r.scope === 'personal' && r.activePersonal && r.userId === user?.userId);
+  const signingHint = signingRecommendation(rows);
 
   // Which Working Environments reference each key (#1141). `envs` is null until
   // /api/environments resolves (or if the caller may not read it) — the "Used by"
@@ -518,6 +627,16 @@ export default function SshKeys() {
       },
     },
     { key: 'fingerprint', label: 'Fingerprint', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v}</span> },
+    {
+      key: '_signing', label: 'Signing', sortable: false,
+      filterValue: (_, row) => signingCell(row)?.label || '',
+      render: (_, row) => {
+        const c = signingCell(row);
+        return c
+          ? <span title="Commits are signed with this key" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{c.label}</span>
+          : <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>—</span>;
+      },
+    },
     { key: 'createdAt', label: 'Added', render: v => <WhenCell iso={v} /> },
     {
       key: '_usedBy', label: 'Used by', sortable: false,
@@ -563,12 +682,18 @@ export default function SshKeys() {
     },
   ];
 
-  async function handleSavePaste({ name, id, privateKey, scope, teamId, assignedTeamIds, identity }) {
+  async function handleSavePaste({ name, id, privateKey, scope, teamId, assignedTeamIds, identity, signing }) {
     setSaving(true); setFormError(null);
     try {
-      const created = await apiCall('POST', '/api/ssh-keys', { name, id, privateKey, scope, teamId, assignedTeamIds, identity });
+      const created = await apiCall('POST', '/api/ssh-keys', { name, id, privateKey, scope, teamId, assignedTeamIds, identity, signing });
       announceBaselineChange(created, 'added');
-      setCreating(false);
+      // A signing key: show its public key to upload on GitHub as a Signing Key.
+      if (created?.signing && created.publicKey) {
+        setGeneratedSigning(true);
+        setGeneratedPublicKey(created.publicKey);
+      } else {
+        closeCreatePanel();
+      }
       refetch();
     } catch (e) {
       setFormError(e.message);
@@ -577,15 +702,29 @@ export default function SshKeys() {
     }
   }
 
-  async function handleSaveGenerate({ name, id, scope, teamId, assignedTeamIds, identity }) {
+  async function handleSaveGenerate({ name, id, scope, teamId, assignedTeamIds, identity, signing }) {
     setSaving(true); setFormError(null);
     try {
-      const r = await apiCall('POST', '/api/ssh-keys/generate', { name, id, scope, teamId, assignedTeamIds, identity });
+      const r = await apiCall('POST', '/api/ssh-keys/generate', { name, id, scope, teamId, assignedTeamIds, identity, signing });
+      setGeneratedSigning(!!r.signing);
       setGeneratedPublicKey(r.publicKey);
       announceBaselineChange(r, 'added');
       refetch();
     } catch (e) {
       setFormError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // #2938: signing settings save on their own; the panel stays open with the
+  // updated key so its public key can be copied right away.
+  async function handleSigningSave(body) {
+    setSaving(true);
+    try {
+      const updated = await apiCall('PATCH', `/api/ssh-keys/${editTarget.id}`, body);
+      setEditTarget(prev => (prev ? { ...prev, signing: updated.signing, publicKey: updated.publicKey } : prev));
+      refetch();
     } finally {
       setSaving(false);
     }
@@ -607,6 +746,8 @@ export default function SshKeys() {
   function closeCreatePanel() {
     setCreating(false);
     setGeneratedPublicKey(null);
+    setGeneratedSigning(false);
+    setCreateWithSigning(false);
     setFormError(null);
   }
 
@@ -694,6 +835,15 @@ export default function SshKeys() {
         />
       </p>
 
+      {signingHint && (
+        <div role="note" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'center', flexWrap: 'wrap' }}>
+          <span style={{ flex: 1, minWidth: 240 }}>{signingHint.text}</span>
+          <button type="button" onClick={() => { setCreateWithSigning(true); setCreating(true); setFormError(null); setGeneratedPublicKey(null); }}
+            style={{ background: 'none', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-1) var(--eb-space-3)', color: 'var(--eb-accent-primary)', cursor: 'pointer', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)' }}>
+            Set up a signing key
+          </button>
+        </div>
+      )}
       {baselineNotice && (
         <div role="status" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>
           {baselineNotice}
@@ -732,6 +882,8 @@ export default function SshKeys() {
             isSysAdmin={isSysAdmin}
             adminTeamIds={adminTeamIds}
             hasActivePersonal={hasActivePersonal}
+            initialSigning={createWithSigning}
+            generatedSigning={generatedSigning}
           />
         )}
       </SidePanel>
@@ -755,6 +907,9 @@ export default function SshKeys() {
             error={formError}
           />
         )}
+        {editTarget && (
+          <SigningEditSection key={editTarget.id} cred={editTarget} onSave={handleSigningSave} saving={saving} />
+        )}
       </SidePanel>
 
       <SidePanel
@@ -764,7 +919,7 @@ export default function SshKeys() {
         width="560px"
       >
         {rotateTarget && (rotateGenerated
-          ? <PublicKeyReveal publicKey={rotateGenerated} onDone={closeRotatePanel} />
+          ? <PublicKeyReveal publicKey={rotateGenerated} onDone={closeRotatePanel} signing={!!rotateTarget.signing} />
           : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
               <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>

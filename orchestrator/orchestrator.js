@@ -102,6 +102,8 @@ const { memberPortableFields } = require("./member-portable-fields");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const credentialResolution = require("./credential-resolution");
+const commitSigning = require("./commit-signing");
+const sshSign = require("./ssh-sign");
 const chatGithubWrite = require("./chat-github-write");
 // §14 / E10 (#2360): pure policy for a personal provider used as a team default
 // across the team-of-one → multi-user transition. Byte-mirrored in admin-console.
@@ -5912,8 +5914,10 @@ async function gracefulPoolTeardown(id, cfg) {
       }).toString();
       if (status.trim()) {
         execFileSync("git", ["add", "-A"], { cwd: repoPath, stdio: "pipe", timeout: 10_000 });
+        // #2938: signed with the pooled role's own resolution (personal → team → global).
         execFileSync("git", ["commit", "-m", `chore(pool): partial work from ${id} before teardown`], {
-          cwd: repoPath, stdio: "pipe", timeout: 10_000,
+          cwd: repoPath, env: withPlatformSigningEnv(process.env, resolveAgentSigning(cfg, env, null)),
+          stdio: "pipe", timeout: 10_000,
         });
       }
       // Only a declared repository carries the credentials a push needs — an
@@ -7262,7 +7266,158 @@ function describeAgentBaselineCredentials(cfg) {
     environmentId: env?.id || null,
     github: describeBaselineGithubToken(cfg, env),
     ssh: describeBaselineSshKey(cfg, baselineSharedSshKeyId(env)),
+    signing: describeSigning(resolveAgentSigning(cfg, env, null)),
   };
+}
+
+// ── SSH commit signing (#2938) ───────────────────────────────────────────────
+// Which stored key signs an agent's commits: personal → team → global, the same
+// precedence as the push credential (`commit-signing.js` resolveSigningKey).
+// `actingSenderUserId` is an already-TRUSTED acting user (or null → the
+// baseline Team Admin). Never throws, never refuses — signing is optional.
+function resolveAgentSigning(cfg, env, actingSenderUserId) {
+  try {
+    const ownerId = cfg
+      ? credentialResolution.resolveEffectiveOwnerId(cfg, loadAgentConfig, actingSenderUserId, loadBaselineDeps())
+      : null;
+    return commitSigning.resolveSigningKey({
+      index: loadSshKeyIndex(), ownerId, env, liveUsers: loadLiveUserGate(),
+    });
+  } catch (err) {
+    console.warn(`[Signing] could not resolve a signing key: ${err.message}`);
+    return { source: "none", keyId: null, ownerId: null, identity: null };
+  }
+}
+
+// The team-scoped resolution for a platform operation that has no agent owner
+// (KB bootstrap/heal/convergence): team key, else global key, else none.
+function resolveTeamSigning(env) {
+  return resolveAgentSigning(null, env, null);
+}
+
+// Display-safe summary of a resolution (no secrets): what the console shows.
+function describeSigning(signing) {
+  if (!signing || signing.source === "none" || !signing.keyId) return { source: "none", keyId: null, identity: null };
+  const entry = loadSshKeyIndex().find((k) => k && String(k.id) === String(signing.keyId)) || {};
+  return { source: signing.source, keyId: signing.keyId, ownerId: signing.ownerId || null, name: entry.name || null, identity: signing.identity };
+}
+
+// "team key 'deploy'" — names the credential in a signing failure (AC9).
+function signingKeyLabel(signing) {
+  const d = describeSigning(signing);
+  if (d.source === "none") return null;
+  return `${d.source} SSH key '${d.name || d.keyId}'`;
+}
+
+// Git env that makes every commit-creating command run by the PLATFORM itself
+// (pool teardown, KB bootstrap/migration/heal/convergence and their rebases)
+// sign with `signing`'s key, read in place from the key store. No key → the
+// env unchanged (unsigned, as before). A configured key that cannot sign makes
+// git fail the commit — never a silent unsigned commit (AC7/AC9).
+function withPlatformSigningEnv(baseEnv, signing) {
+  if (!signing || !signing.keyId || !signing.identity) return baseEnv;
+  const keyPath = sshSign.keyPathFor(SSH_KEYS_DIR, signing.keyId);
+  if (!keyPath) return baseEnv;
+  try { fs.chmodSync(keyPath, 0o600); } catch { /* git/ssh-keygen reports a missing key itself */ }
+  return commitSigning.withGitConfigEnv(baseEnv, commitSigning.buildSigningGitConfig({
+    identity: signing.identity, signingKey: keyPath,
+  }));
+}
+
+// The agent-side signing config a container applies to its own commits
+// (`POST /internal/agents/:id/git/signing-config`). The PUBLIC key goes into
+// `user.signingkey` as `key::…`; the agent's `aee-ssh-sign` helper sends each
+// payload back here to `signAgentPayload`, so the private key never leaves the
+// key store. `{ signing: null }` = no key resolves → commits stay unsigned.
+async function agentSigningConfig(id, actingSenderMatrixId) {
+  const cfg = loadAgentConfig(id);
+  if (!cfg) { const e = new Error(`agent '${id}' not found`); e.statusCode = 404; throw e; }
+  const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  const signing = resolveAgentSigning(cfg, env, resolveActingSenderUserId(actingSenderMatrixId, cfg));
+  if (!signing.keyId || !signing.identity) return { signing: null };
+  const label = signingKeyLabel(signing);
+  let publicKey;
+  try {
+    publicKey = await sshSign.publicKeyOf(sshSign.keyPathFor(SSH_KEYS_DIR, signing.keyId));
+  } catch (err) {
+    // Configured but unusable: tell the container so its commits FAIL with a
+    // clear message instead of silently going out unsigned (AC9).
+    return { signing: { source: signing.source, keyId: signing.keyId, label, error: `the ${label} cannot be read: ${err.message}` } };
+  }
+  return {
+    signing: {
+      source: signing.source,
+      keyId: signing.keyId,
+      label,
+      name: signing.identity.name,
+      email: signing.identity.email,
+      publicKey,
+    },
+  };
+}
+
+// Sign one git payload for an agent (`POST /internal/agents/:id/git/sign`).
+// Re-resolves the key on every call, so a key replaced or deleted mid-run takes
+// effect on the very next commit; `publicKey` is the key the run was configured
+// with — a mismatch (rotated/replaced since) fails clearly rather than signing
+// with a key the commit's config does not name.
+async function signAgentPayload(id, body = {}) {
+  const cfg = loadAgentConfig(id);
+  if (!cfg) { const e = new Error(`agent '${id}' not found`); e.statusCode = 404; throw e; }
+  const fail = (msg) => { const e = new Error(msg); e.statusCode = 422; e.code = "signing-failed"; return e; };
+  const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  const signing = resolveAgentSigning(cfg, env, resolveActingSenderUserId(body.actingSender, cfg));
+  if (!signing.keyId || !signing.identity) {
+    throw fail("no SSH signing key resolves for this agent any more (it was removed). " +
+      "Start a new run to commit unsigned, or add a signing key under Credentials → SSH Keys (/ssh-keys).");
+  }
+  const label = signingKeyLabel(signing);
+  const keyPath = sshSign.keyPathFor(SSH_KEYS_DIR, signing.keyId);
+  let payload;
+  try {
+    payload = Buffer.from(String(body.payload || ""), "base64");
+  } catch {
+    throw fail("invalid payload");
+  }
+  if (!payload.length) throw fail("empty payload");
+  try {
+    const current = await sshSign.publicKeyOf(keyPath);
+    if (body.publicKey && String(body.publicKey).trim().split(/\s+/).slice(0, 2).join(" ") !== current) {
+      throw new Error("the signing key changed since this run started — start a new run to pick up the new key");
+    }
+    const signature = await sshSign.signPayload({ keyPath, payload, namespace: commitSigning.SIGNING_NAMESPACE });
+    return { ok: true, signature, keyId: signing.keyId, source: signing.source };
+  } catch (err) {
+    throw fail(`signing with the ${label} failed: ${err.message}. ` +
+      "Fix: check the key under Credentials → SSH Keys (/ssh-keys) — re-add or rotate it, or remove its signing identity to commit unsigned.");
+  }
+}
+
+// Cap on the GitHub error text the `unsigned-hint` route reads.
+const UNSIGNED_HINT_MAX_BYTES = 64 * 1024;
+
+// AC8: turn a GitHub "signed commits required" rejection into one actionable
+// message. Returns null when `detail` is a different failure.
+function unsignedRejectionMessage(id, operation, detail, actingSenderMatrixId) {
+  if (!commitSigning.isUnsignedCommitRejection(detail)) return null;
+  const cfg = loadAgentConfig(id) || {};
+  const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  const actingUserId = resolveActingSenderUserId(actingSenderMatrixId, cfg);
+  const signing = resolveAgentSigning(cfg, env, actingUserId);
+  let pushScope = null;
+  let ownerLabel = null;
+  try {
+    const ownerId = credentialResolution.resolveEffectiveOwnerId(cfg, loadAgentConfig, actingUserId, loadBaselineDeps());
+    const personal = credentialResolution.findPersonalCredentialState(loadGithubTokenIndex(), ownerId, undefined, loadLiveUserGate());
+    pushScope = personal.entry ? "personal" : (env?.githubTokenId ? "team" : "global");
+    if (pushScope === "personal") {
+      const u = teamsStore.listUsers().find((x) => x && String(x.id) === String(ownerId));
+      ownerLabel = (u && (u.displayName || u.name || u.subject)) || ownerId;
+    }
+  } catch { /* best effort — the message still names the cause and fix */ }
+  return commitSigning.buildUnsignedRejectionMessage({
+    operation, signing, pushScope, ownerLabel, commits: commitSigning.extractRejectedCommits(detail),
+  });
 }
 
 // ── Shared team Knowledge Base (Shared Agent Learning, Phase 1) ──────────────
@@ -7271,6 +7426,13 @@ function describeAgentBaselineCredentials(cfg) {
 // feature-branch repo clone. See docs/knowledge-cli.md §3.
 
 function _buildKbGitEnv(repoRef, env) {
+  // #2938: KB bootstrap/migration/heal/convergence commits and the rebases in
+  // agentKnowledgePush / _pushKnowledgeClone are team-scoped platform commits —
+  // signed with the team (else global) signing key when one is configured.
+  return withPlatformSigningEnv(_buildKbGitEnvUnsigned(repoRef, env), resolveTeamSigning(env));
+}
+
+function _buildKbGitEnvUnsigned(repoRef, env) {
   return agentGitOps.buildRepoGitEnv({
     env,
     repoUrl: repoRef.url,
@@ -10409,12 +10571,14 @@ async function _agentGitPushLocked(id, repo, req, gitEnv, body) {
       output: agentGitOps.sanitizeGitOutput(stdout).trim(),
     };
   } catch (err) {
-    const detail = agentGitOps
-      .sanitizeGitOutput((err.stderr || err.stdout || err.message || "").toString())
-      .trim()
-      .slice(0, 500);
-    const e = new Error(`git push failed: ${detail}`);
+    const raw = agentGitOps.sanitizeGitOutput((err.stderr || err.stdout || err.message || "").toString()).trim();
+    const detail = raw.slice(0, 500);
+    // #2938 AC8: an enforcing instance rejecting unsigned commits gets one
+    // actionable message (cause, scope lacking a key, commits, fix steps).
+    const unsigned = unsignedRejectionMessage(id, "push", raw, body.actingSender);
+    const e = new Error(unsigned ? `${unsigned}\n\nGitHub said: ${detail}` : `git push failed: ${detail}`);
     e.gitFailed = true;
+    if (unsigned) e.unsignedCommits = true;
     throw e;
   }
 }
@@ -10480,12 +10644,14 @@ async function _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body, gi
   try {
     await run(["push", "--set-upstream", "origin", head]);
   } catch (err) {
-    const detail = agentGitOps
-      .sanitizeGitOutput((err.stderr || err.stdout || err.message || "").toString())
-      .trim()
-      .slice(0, 500);
-    const e = new Error(`git push failed (needed before PR): ${detail}`);
+    const raw = agentGitOps.sanitizeGitOutput((err.stderr || err.stdout || err.message || "").toString()).trim();
+    const detail = raw.slice(0, 500);
+    // #2938 AC8: an enforcing instance rejecting unsigned commits gets one
+    // actionable message (cause, scope lacking a key, commits, fix steps).
+    const unsigned = unsignedRejectionMessage(id, "PR", raw, body.actingSender);
+    const e = new Error(unsigned ? `${unsigned}\n\nGitHub said: ${detail}` : `git push failed (needed before PR): ${detail}`);
     e.gitFailed = true;
+    if (unsigned) e.unsignedCommits = true;
     throw e;
   }
 
@@ -19394,11 +19560,88 @@ async function main() {
             if (err.branchPushed) payload.branchPushed = err.branchPushed;
           } else if (err && err.gitFailed) {
             status = 409;
+            if (err.unsignedCommits) payload.code = 'unsigned-commits-rejected';
           }
           console.warn(`[Orchestrator] git ${gitPushMatch ? 'push' : 'pr'} for ${id}: ${msg}`);
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(payload));
         }
+      });
+      return;
+    }
+
+    // ── SSH commit signing (#2938) ──────────────────────────────────────────
+    // `signing-config`: the agent entrypoint asks once per invocation which key
+    // (if any) signs this run's commits — public key + commit identity only.
+    // `sign`: the agent's `aee-ssh-sign` (git's gpg.ssh.program) sends each
+    // commit payload here and gets the SSH signature back, so the private key
+    // never enters the container. Agent-facing allowlist, `own` scope.
+    const signCfgMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/git\/signing-config$/);
+    const signMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/git\/sign$/);
+    if (signCfgMatch || signMatch) {
+      const id = decodeURIComponent((signCfgMatch || signMatch)[1]);
+      let body = '';
+      let tooLarge = false;
+      req.on('data', (d) => {
+        if (tooLarge) return;
+        body += d;
+        if (body.length > 2 * sshSign.MAX_PAYLOAD_BYTES) { tooLarge = true; body = ''; }
+      });
+      req.on('end', async () => {
+        if (tooLarge) {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'payload too large to sign' }));
+          return;
+        }
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* {} */ }
+        try {
+          const result = signCfgMatch
+            ? await agentSigningConfig(id, parsed.actingSender)
+            : await signAgentPayload(id, parsed);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          const msg = errorMessage(err);
+          console.warn(`[Orchestrator] git ${signCfgMatch ? 'signing-config' : 'sign'} for ${id}: ${msg}`);
+          res.writeHead(err.statusCode || 500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: msg, code: err.code || null }));
+        }
+      });
+      return;
+    }
+
+    // `unsigned-hint` (#2938 AC8): an autonomous run's `gh pr merge` /
+    // `update-branch` runs the real gh in the container, so the `gh` shim
+    // posts GitHub's rejection text here and prints the actionable message
+    // (cause, credential scope lacking a key, affected commits, fix). `own`.
+    const unsignedHintMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/git\/unsigned-hint$/);
+    if (unsignedHintMatch) {
+      const id = decodeURIComponent(unsignedHintMatch[1]);
+      let body = '';
+      req.on('data', (d) => { if (body.length <= UNSIGNED_HINT_MAX_BYTES) body += d; });
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* {} */ }
+        const operation = commitSigning.UNSIGNED_HINT_OPERATIONS.includes(parsed.operation) ? parsed.operation : null;
+        if (!operation || typeof parsed.detail !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: `operation must be one of ${commitSigning.UNSIGNED_HINT_OPERATIONS.join(', ')} and detail a string` }));
+          return;
+        }
+        if (!loadAgentConfig(id)) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: `Agent '${id}' not found` }));
+          return;
+        }
+        let message = null;
+        try {
+          message = unsignedRejectionMessage(id, operation, parsed.detail.slice(0, UNSIGNED_HINT_MAX_BYTES), parsed.actingSender);
+        } catch (err) {
+          console.warn(`[Orchestrator] git unsigned-hint for ${id}: ${errorMessage(err)}`);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, message, code: message ? 'unsigned-commits-rejected' : null }));
       });
       return;
     }
@@ -19432,6 +19675,16 @@ async function main() {
           if (result.mode === 'attributed') {
             // The validated command only — never `gh api`'s agent-supplied endpoint.
             console.log(`[Orchestrator] chat gh ${chatGithubWrite.commandKey(parsed.args).slice(0, 80)} for ${id} → exit ${result.exitCode}`);
+            // #2938 AC8: a merge / update-branch GitHub refused over unsigned
+            // commits gets the actionable message appended to gh's own stderr.
+            const ghOp = commitSigning.ghUnsignedOperation(parsed.args);
+            const unsigned = ghOp && Number(result.exitCode) !== 0
+              ? unsignedRejectionMessage(id, ghOp, `${result.stderr || ''}\n${result.stdout || ''}`, parsed.actingSender)
+              : null;
+            if (unsigned) {
+              result.stderr = `${result.stderr || ''}${String(result.stderr || '').endsWith('\n') ? '' : '\n'}\n${unsigned}\n`;
+              result.code = 'unsigned-commits-rejected';
+            }
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));

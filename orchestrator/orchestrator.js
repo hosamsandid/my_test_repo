@@ -7269,7 +7269,7 @@ function resolveTeamSigning(env) {
 function describeSigning(signing) {
   if (!signing || signing.source === "none" || !signing.keyId) return { source: "none", keyId: null, identity: null };
   const entry = loadSshKeyIndex().find((k) => k && String(k.id) === String(signing.keyId)) || {};
-  return { source: signing.source, keyId: signing.keyId, name: entry.name || null, identity: signing.identity };
+  return { source: signing.source, keyId: signing.keyId, ownerId: signing.ownerId || null, name: entry.name || null, identity: signing.identity };
 }
 
 // "team key 'deploy'" — names the credential in a signing failure (AC9).

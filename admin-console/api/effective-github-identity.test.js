@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { presentBaselineCredential, presentEffectiveIdentity } = require('./effective-github-identity');
+const { presentBaselineCredential, presentSigning, presentEffectiveIdentity } = require('./effective-github-identity');
 
 const users = { alice: 'Alice Admin', bob: 'Bob Member' };
 const names = { 'alice-pat': 'Alice PAT', 'team-pat': 'Team PAT', 'sys-pat': 'System PAT' };
@@ -93,4 +93,29 @@ test('#2560 presentEffectiveIdentity presents both kinds with their own name loo
   assert.equal(out.ssh.kindLabel, 'SSH key');
   assert.equal(out.ssh.credential.name, 'Deploy key');
   assert.equal(out.github.source, 'personal');
+});
+
+test('#2938 signing: another person\'s personal signing key shows only its owner', () => {
+  const d = { source: 'personal', keyId: 'alice-sign', ownerId: 'alice', name: 'Alice sign', identity: { name: 'Alice', email: 'alice@corp.com' } };
+  const other = presentSigning(d, { callerUserId: 'bob', userLabel: (id) => users[id] });
+  assert.deepEqual(other.owner, { label: 'Alice Admin', isYou: false });
+  assert.equal(other.credential, null);
+  assert.equal(other.identity, null);
+  const own = presentSigning(d, { callerUserId: 'alice', userLabel: (id) => users[id] });
+  assert.equal(own.credential.id, 'alice-sign');
+  assert.equal(own.identity.email, 'alice@corp.com');
+});
+
+test('#2938 signing: team key keeps id and identity; global is a tier; none / malformed degrade to none', () => {
+  const team = presentSigning({ source: 'team', keyId: 'bot-sign', identity: { name: 'Bot', email: 'bot@corp.com' } },
+    { credentialName: (id) => (id === 'bot-sign' ? 'Bot signing' : null) });
+  assert.deepEqual(team.credential, { id: 'bot-sign', name: 'Bot signing' });
+  assert.equal(team.identity.email, 'bot@corp.com');
+  const global = presentSigning({ source: 'global', keyId: 'sys', identity: { name: 'S', email: 's@corp.com' } });
+  assert.equal(global.credential, null);
+  assert.equal(global.identity.email, 's@corp.com');
+  assert.equal(presentSigning({ source: 'none' }).source, 'none');
+  assert.equal(presentSigning({ source: 'team' }).source, 'none');
+  assert.equal(presentSigning(null).source, 'none');
+  assert.equal(presentEffectiveIdentity({}).signing.source, 'none');
 });

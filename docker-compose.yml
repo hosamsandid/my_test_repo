@@ -70,10 +70,10 @@ services:
       # source on the host, not inside this container, so PODMAN_SOCK_PATH
       # (/var/run/podman.sock) would point at nothing there.
       PODMAN_HOST_SOCKET: ${PODMAN_HOST_SOCKET:-/run/user/501/podman/podman.sock}
-      # Per-agent container resource caps (spawn-container.js). Forwarded here
-      # so a .env override (e.g. to work around a broken host cgroup delegation
-      # that cannot create memory.max/pids.max) actually reaches the container.
-      AEE_AGENT_MEM_LIMIT: ${AEE_AGENT_MEM_LIMIT:-}
+      # Per-agent container pids cap (spawn-container.js). Forwarded here so a
+      # .env override (e.g. to work around a broken host cgroup delegation that
+      # cannot create pids.max) actually reaches the container. The memory cap,
+      # AEE_AGENT_MEM_LIMIT, is forwarded further down with its ceiling (#2813).
       AEE_AGENT_PIDS_LIMIT: ${AEE_AGENT_PIDS_LIMIT:-}
       MATRIX_HOMESERVER: http://conduwuit:6167
       ADMIN_USER_ID: "@${ADMIN_USER:-admin}:local"

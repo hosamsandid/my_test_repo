@@ -171,7 +171,7 @@ plugin-images:
 	podman build $(PLUGIN_BUILD_ARGS) -t localhost/aee-plugin-gke:latest -f plugins/gke/broker/Dockerfile .
 	podman build $(PLUGIN_BUILD_ARGS) -t localhost/aee-plugin-jira:latest -f plugins/jira/broker/Dockerfile .
 	@echo "Done. Plugin broker images:"
-	@podman images --filter reference='localhost/aee-plugin-*' --format '  {{.Repository}}:{{.Tag}}  commit {{index .Labels "org.opencontainers.image.revision"}}{{with index .Labels "aee.build.tag"}}  tag {{.}} +{{index $$.Labels "aee.build.tag-distance"}}{{end}}'
+	@podman images --filter reference='localhost/aee-plugin-*' --format '{{$$l := .Labels}}  {{.Repository}}:{{.Tag}}  commit {{index $$l "org.opencontainers.image.revision"}}{{with index $$l "aee.build.tag"}}  tag {{.}} +{{index $$l "aee.build.tag-distance"}}{{end}}'
 
 agent-image:
 	@n=0; max=3; \

@@ -50,7 +50,7 @@ The mechanics are ~80% present. The lean path is to slot into them.
 | Per-env repo cache | `cloneRepository` cache fast-path; `envRepoCachePath` / `isUsableRepoCache` (`_repo-cache`) | Fast local `cp` seed from a warm base (incl. `.git`) — but a **stale one-time snapshot**, no refresh, and the first clone in an env is a full network `git clone` (~120 s). |
 | Stub → provision | `addTeamMember({materialize:false})`; `enableAgent`; `isStubMember` | "Reserve now, provision on first use" precedent. |
 | Ephemeral agent route | `POST /internal/agents/ephemeral` | Already spawns a throwaway agent per work-unit — but writes `ephemeral:true` and **never reads it to reap** (no auto-cleanup). |
-| Teardown | `DELETE /internal/agents/:id`; `orchestrator/agent-delete-plan.js` (`cascadeChildIds`, `TeardownRegistry`, `isGracefulDeleteRole` — **currently always false**, the graceful seam kept for "a future flushing role") | Fast phase (stop + plugin reap + delete config/files) + background phase (volume, network, Matrix); id reserved during reap. |
+| Teardown | `DELETE /internal/agents/:id`; `orchestrator/agent-delete-plan.js` (`cascadeChildIds`, `TeardownRegistry`, `isGracefulDeleteRole` — true for a pool instance (`cfg.poolInstance`), which gets the commit-before-delete + archive path; false for every other role) | Fast phase (stop + plugin reap + delete config/files) + background phase (volume, network, Matrix); id reserved during reap. |
 | bp-instance (removed, #1962) | history; `agent-delete-plan.js` graceful comment | Exact precedent: one disposable agent per work-unit, worktree per unit, and the **only role that committed partial work before exit**. |
 | Collision-free ids | `orchestrator/agent-id-resolution.js` (`nextAvailableAgentId`) | Deterministic id resolution; reservation via an immediately-written placeholder config (closes the TOCTOU window). |
 | Autonomous attribution | #2176 / #2177 baseline owner | Autonomous instance commits/PRs attribute to the team's baseline identity; personal-credential refuse-on-missing does **not** apply to autonomous runs (they fall to shared), so no surprise refusals. |
@@ -267,7 +267,7 @@ authors both without hand-editing a bundle, and for the one live-write endpoint
   (D9) — still later/additive, no design beyond D7/D9 themselves exists yet;
   per-role caps (D5) shipped in Phase 1 despite being filed under Phase 5
   (Amendment 2 §A2.1); LLM path-prediction (D6) shipped as Phase 4 (#2249).
-- **Open:** exact retention window for archived instance logs; whether §6
+- **Open:** whether §6
   precedes or follows §7. Board controls for a pool (pause / drain / force
   dispatch) shipped in Phase 5 (Amendment 6, #2250) — the pause/draining
   distinction the concept left open is resolved there as a judgement call.
@@ -1069,7 +1069,8 @@ was filed after exactly that was observed (a developer pool sitting at
   `maxRuntimeMs`/`retainLogsMs` to `null` (= no reaping on that axis) — it
   defaults to `agent-pool.js#TEARDOWN_DEFAULTS` (idle 30m / hard timeout 2h,
   the Scaling section mockup's own example values; retain 7 days, a
-  judgement call with no mockup precedent, flagged for a second opinion).
+  judgement call with no mockup precedent, flagged for a second opinion —
+  raised to 30 days by #2944, Amendment 17).
   Defaulting happens at this runtime-consumption site rather than in
   `process-template.js`'s bundle-round-trip `normalizePool`, so a stored
   config keeps meaning "unset" and a future change to the defaults applies
@@ -1212,3 +1213,31 @@ follow-ups through the item key (#2789). One pure helper decides it,
 Consequence: instance subscribers no longer appear in the poller's fan-out, so
 the Event Log stops showing their per-event `wake-already-armed` drops. A role
 whose template is switched off now wakes none of its instances either.
+
+## Amendment 17 — removed instances stay readable (#2944)
+
+Reaping an instance used to keep only a copy of its session log, readable from
+nowhere in the UI, and drop its DM chat with the Matrix room. Now:
+
+- **Archive** — every reap path (`done`, `idle-timeout`, `hard-timeout`,
+  `pr-closed`, and a manual delete, `deleted`) passes its reason on
+  `DELETE /internal/agents/:id?reason=`, and `gracefulPoolTeardown` →
+  `archivePoolInstance` writes `teams/<team>/pool-archive/<instanceId>~<epochMs>/`
+  before the files are deleted: `sessions/` (rotations included), `chat.json`
+  (the DM room's messages, oldest first, fetched with a 10 s bound) and
+  `archived-at.json` (instance, role, item, repo, spawned/removed, reason,
+  whether chat was kept). It is built under `.tmp-<key>` and renamed into place
+  last, so a failure leaves no entry — it is logged and never blocks teardown.
+  An item reaped twice keeps an archive per lifetime.
+- **Retention** — `retainLogsMs` defaults to **30 days** (was 7). The prune pass
+  reads the role's current value, so a change applies on the next sweep;
+  archives of a role that no longer exists are pruned at the default. Deleting
+  the team deletes its archives.
+- **Agent Chat** — a pooled role's rail entry gets a collapsed
+  "Removed instances (N)" group (hidden when empty). An entry opens
+  `/chats/<role>?archive=<key>`: the chat and session log rendered like a live
+  one, read-only. Access is the role's own (`/api/agents/:role/pool-archive…`,
+  work-plane gated). Archives from before this change list without chat and
+  say so.
+- **GitHub Event Log** — an event of a removed instance links to its archive
+  while one exists, else shows the old "no longer exists" notice.

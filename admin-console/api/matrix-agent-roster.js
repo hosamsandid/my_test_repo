@@ -66,12 +66,14 @@ function poolWaitingFields(waitingMap, id, spawnedAt) {
  * @param {(id: string) => string|null} deps.readDmRoomId      dm-room.json's roomId or null
  * @param {(envId: string) => string|null} deps.readEnvironmentName  environment.json's name or null
  * @param {(teamId: string) => object|null} deps.readPoolWaiting  the team's pool-waiting.json
+ * @param {(id: string, cfg: object) => number} [deps.countPoolArchives]  a pooled role's
+ *        listable removed-instance archives (#2944)
  * @param {(cfg: object) => object} deps.agentMetaForScope     the scope meta of one config
  * @param {(id: string, err: Error) => void} [deps.onEntryError]  a skipped agent
  * @returns {{id: string, meta: object, isTeam: boolean, admission: object, head: object, tail: object}[]}
  */
 function buildRosterEntries(ids, {
-  readConfig, readDmRoomId, readEnvironmentName, readPoolWaiting, agentMetaForScope, onEntryError,
+  readConfig, readDmRoomId, readEnvironmentName, readPoolWaiting, countPoolArchives, agentMetaForScope, onEntryError,
 }) {
   const envNames = new Map();
   const poolWaitingByTeam = new Map();
@@ -139,6 +141,9 @@ function buildRosterEntries(ids, {
           // (`null` = no per-role cap); absent on every non-pooled row.
           ...(!cfg.poolInstance && cfg.pool && typeof cfg.pool === 'object' && cfg.pool.enabled === true ? {
             poolMaxInstances: Number.isInteger(cfg.pool.maxInstances) && cfg.pool.maxInstances >= 1 ? cfg.pool.maxInstances : null,
+            // #2944: how many removed instances are still readable — the rail's
+            // collapsed "Removed instances (N)" group, hidden at 0.
+            poolArchiveCount: typeof countPoolArchives === 'function' ? countPoolArchives(id, cfg) : 0,
           } : {}),
         },
       });

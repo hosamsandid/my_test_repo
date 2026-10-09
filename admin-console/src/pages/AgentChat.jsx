@@ -19,6 +19,7 @@ import { loadShowDisabled, saveShowDisabled, matrixAgentsUrl } from './agent-cha
 import { isChatOpenable, agentState } from './agent-lifecycle/agent-lifecycle-menu.js';
 import { revealTargetFrom, isAwaitingReveal, revealPlan, revealEmptyStateCopy, REVEAL_WAIT_MS, REVEAL_RETRY_MS } from './agent-chat/reveal-agent.js';
 import ChatPanel from './agent-chat/ChatPanel';
+import ArchivedInstanceView from './agent-chat/ArchivedInstanceView.jsx';
 import RightRail from './agent-chat/RightRail';
 import AgentSettingsPanel from './agent-chat/AgentSettingsPanel';
 import ShareTeamPanel from './agent-chat/ShareTeamPanel.jsx';
@@ -737,6 +738,18 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
     navigate(`/chats/${id}`);
   }, [navigate]);
 
+  // #2944: a removed pool instance's archive, read-only in place of the chat
+  // and right rail — `/chats/<roleId>?archive=<key>` (a query, not a route of
+  // its own, so it lives under the role it belongs to).
+  const archiveKey = searchParams.get('archive');
+  const showArchive = !!archiveKey && !!agentId && !subjectIsTeam;
+  const handleOpenArchive = useCallback((roleId, key) => {
+    navigate(`/chats/${encodeURIComponent(roleId)}?archive=${encodeURIComponent(key)}`);
+  }, [navigate]);
+  const handleCloseArchive = useCallback(() => {
+    navigate(`/chats/${encodeURIComponent(agentId)}`);
+  }, [navigate, agentId]);
+
   const handleMarkAsUnread = useCallback((id) => {
     manuallyUnreadRef.current.add(id);
     const viewed = loadLastViewed();
@@ -1003,6 +1016,8 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
               directory={directory}
               viewerId={viewerId}
               revealRequest={revealRequest}
+              onOpenArchive={handleOpenArchive}
+              selectedArchiveKey={showArchive ? archiveKey : null}
             />
           )}
         </div>
@@ -1032,6 +1047,14 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
            left list, its own divider and the SessionsActiveProvider above are
            unaffected either way. */
         <TeamConfigSurface team={routedAgent} onAgentConfigChanged={refetch} />
+      ) : showArchive ? (
+        <ArchivedInstanceView
+          key={archiveKey}
+          roleId={agentId}
+          roleAgent={routedAgent}
+          archiveKey={archiveKey}
+          onBack={handleCloseArchive}
+        />
       ) : (
         <>
           {/* Chat panel */}

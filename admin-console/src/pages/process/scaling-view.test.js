@@ -199,3 +199,13 @@ test('scalingDraftDirty: false right after deriving the draft from the pool, tru
   assert.equal(scalingDraftDirty(draft, pool), false);
   assert.equal(scalingDraftDirty({ ...draft, maxInstancesText: '5' }, pool), true);
 });
+
+test('#2944 AC6: the Retain logs field states the 30-day default, equal to the orchestrator', async () => {
+  const { RETAIN_LOGS_DEFAULT_MINUTES, RETAIN_LOGS_PLACEHOLDER, RETAIN_LOGS_FIELD_HINT, RETAIN_LOGS_HINT } = await import('./scaling-view.js');
+  const { createRequire } = await import('node:module');
+  const { TEARDOWN_DEFAULTS } = createRequire(import.meta.url)('../../../../orchestrator/agent-pool.js');
+  assert.equal(RETAIN_LOGS_DEFAULT_MINUTES * 60 * 1000, TEARDOWN_DEFAULTS.retainLogsMs);
+  assert.equal(RETAIN_LOGS_PLACEHOLDER, '30 days');
+  assert.equal(RETAIN_LOGS_FIELD_HINT, 'Default: 30 days');
+  assert.match(RETAIN_LOGS_HINT, /30 days \(43200 min\)/);
+});

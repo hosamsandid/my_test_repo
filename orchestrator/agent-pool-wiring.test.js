@@ -139,8 +139,8 @@ test("the hard-timeout reaper actually stamps needs-human, not just a console.wa
 
 test("mutation-proved: a reaper that only logs (the pre-fix shape) would fail the check above", () => {
   const buggy = fn("poolReapSweepTeam").replace(
-    /if \(cfg\.poolRepo[\s\S]*?await _internalSelfDelete\(id\);/,
-    'console.warn(`marking item ${cfg.poolItem} needs-human`);\n      await _internalSelfDelete(id);',
+    /if \(cfg\.poolRepo[\s\S]*?await _internalSelfDelete\(id, "hard-timeout"\);/,
+    'console.warn(`marking item ${cfg.poolItem} needs-human`);\n      await _internalSelfDelete(id, "hard-timeout");',
   );
   assert.doesNotMatch(buggy, /stampMirrorLabel\(/);
 });
@@ -231,7 +231,7 @@ test("#2301: gracefulPoolTeardown stamps archived-at.json so the prune pass neve
   assert.ok(end > start, "expected inspectAgentRepoDivergence to follow gracefulPoolTeardown");
   const body = FULL_SRC.slice(start, end);
   assert.match(body, /archived-at\.json/);
-  assert.match(body, /archivedAt:\s*new Date\(\)\.toISOString\(\)/);
+  assert.match(body, /archivedAt:\s*new Date\(archivedAtMs\)\.toISOString\(\)/);
 });
 
 test("#2301: poolReapSweepTeam invokes the archive-prune pass every tick, best-effort", () => {
@@ -239,15 +239,16 @@ test("#2301: poolReapSweepTeam invokes the archive-prune pass every tick, best-e
   assert.match(src, /_pruneArchivedPoolLogs\(teamId, now, fleet\)/); // #569: the tick's snapshot rides along
 });
 
-test("#2301: _pruneArchivedPoolLogs reads the archived-at.json stamp, not fs.statSync mtime", () => {
+test("#2301: _pruneArchivedPoolLogs reads the archived-at.json stamp; the mtime is only a fallback (#2944)", () => {
   const start = FULL_SRC.indexOf("function _pruneArchivedPoolLogs(");
   assert.ok(start > 0, "_pruneArchivedPoolLogs not found");
   const end = FULL_SRC.indexOf("// Admission-control reconcile tick", start);
   assert.ok(end > start, "expected the admission-control section header to follow _pruneArchivedPoolLogs");
   const body = FULL_SRC.slice(start, end);
   assert.match(body, /archived-at\.json/);
-  assert.doesNotMatch(body, /statSync/);
-  assert.match(body, /agentPool\.isArchiveExpired\(/);
+  // The stamp is what is judged; the directory mtime only stands in for an
+  // archive with no readable stamp (pure core: archivePruneDecision).
+  assert.match(body, /agentPool\.archivePruneDecision\(\{\s*archivedAt: meta && meta\.archivedAt,\s*mtimeMs,/);
 });
 
 test("#2595 AC10: gracefulPoolTeardown archives the transcript without the resumable session pointer", () => {

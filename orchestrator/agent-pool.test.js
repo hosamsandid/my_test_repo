@@ -556,3 +556,52 @@ test('#569 poolWaitingNeedsWrite: skip only an unchanged map over a clean file',
   const torn = pool.parsePoolWaitingFile('{"a":');
   assert.equal(pool.poolWaitingNeedsWrite({ intact: torn.intact, prev: torn.waiting, next: {} }), true);
 });
+
+// ─── Removed-instance archive (#2944) ────────────────────────────────────────
+
+test('#2944 AC6: the default retention is 30 days', () => {
+  assert.equal(pool.TEARDOWN_DEFAULTS.retainLogsMs, 30 * 24 * 60 * 60 * 1000);
+  assert.equal(pool.normalizePoolConfig({ enabled: true }).teardown.retainLogsMs, 30 * 24 * 60 * 60 * 1000);
+  assert.equal(pool.normalizePoolConfig({ enabled: true, teardown: { retainLogsMs: 60_000 } }).teardown.retainLogsMs, 60_000);
+});
+
+test('normalizeReapReason: known reasons pass, anything else is a plain delete', () => {
+  for (const r of ['done', 'idle-timeout', 'hard-timeout', 'pr-closed', 'deleted']) {
+    assert.equal(pool.normalizeReapReason(r), r);
+  }
+  assert.equal(pool.normalizeReapReason(null), 'deleted');
+  assert.equal(pool.normalizeReapReason('../x'), 'deleted');
+});
+
+test('poolArchiveKey: the same instance archived twice gets two keys', () => {
+  assert.equal(pool.poolArchiveKey('t-dev-i7', 1000.7), 't-dev-i7~1000');
+  assert.notEqual(pool.poolArchiveKey('t-dev-i7', 1000), pool.poolArchiveKey('t-dev-i7', 2000));
+});
+
+test('archiveRoleId: the stamped role wins, a legacy archive maps by prefix, an orphan maps to nothing', () => {
+  const roles = ['t-dev', 't-dev-x'];
+  assert.equal(pool.archiveRoleId('t-dev-i7~1', { roleId: 't-dev' }, roles), 't-dev');
+  assert.equal(pool.archiveRoleId('t-dev-i7~1', { roleId: 't-old' }, roles), null, 'renamed/removed role');
+  assert.equal(pool.archiveRoleId('t-dev-i7', { archivedAt: 'x' }, roles), 't-dev');
+  assert.equal(pool.archiveRoleId('t-dev-x-i7', null, roles), 't-dev-x', 'longest prefix');
+  assert.equal(pool.archiveRoleId('t-dev-i', null, roles), null);
+  assert.equal(pool.archiveRoleId('t-qa-i7', null, roles), null);
+});
+
+test('archivePruneDecision: AC7 role retention applies to existing archives, AC8 orphans use the default', () => {
+  const day = 24 * 60 * 60 * 1000;
+  const now = Date.parse('2026-10-09T00:00:00Z');
+  const archivedAt = new Date(now - 10 * day).toISOString();
+  assert.deepEqual(pool.archivePruneDecision({ archivedAt, roleRetainLogsMs: 7 * day }, now), { retainLogsMs: 7 * day, expired: true });
+  assert.deepEqual(pool.archivePruneDecision({ archivedAt, roleRetainLogsMs: 60 * day }, now), { retainLogsMs: 60 * day, expired: false });
+  assert.equal(pool.archivePruneDecision({ archivedAt, roleRetainLogsMs: null }, now).expired, false);
+  assert.equal(pool.archivePruneDecision({ archivedAt: new Date(now - 31 * day).toISOString(), roleRetainLogsMs: null }, now).expired, true);
+  // No readable stamp → the directory mtime stands in; never kept forever.
+  assert.equal(pool.archivePruneDecision({ archivedAt: null, mtimeMs: now - 31 * day }, now).expired, true);
+  assert.equal(pool.archivePruneDecision({ archivedAt: null, mtimeMs: now - day }, now).expired, false);
+});
+
+test('isPoolArchiveTmpName: only the in-progress prefix', () => {
+  assert.equal(pool.isPoolArchiveTmpName('.tmp-t-dev-i7~1'), true);
+  assert.equal(pool.isPoolArchiveTmpName('t-dev-i7~1'), false);
+});

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
-import { MessageCircle, Bot, Server, Users, ChevronDown, ChevronRight, GripVertical, MoreVertical, Loader2, AlertTriangle } from 'lucide-react';
+import { MessageCircle, Bot, Server, Users, ChevronDown, ChevronRight, GripVertical, MoreVertical, Loader2, AlertTriangle, ExternalLink } from 'lucide-react';
 
 import { computeReorder, dropPosition } from './agent-list-dnd.js';
 import { groupEnvironmentName, rowEnvironmentName } from './agent-list-env.js';
@@ -9,6 +9,9 @@ import { teamMembershipIndicator, membershipsByTeam, fitAdminNames } from './tea
 import { computeTeamAttention } from '../../context/agent-statuses.js';
 import { agentState, isChatOpenable } from '../agent-lifecycle/agent-lifecycle-menu.js';
 import { revealPlan } from './reveal-agent.js';
+import {
+  removedInstancesLabel, showRemovedInstances, removedInstanceName, removedInstanceFacts, itemUrl,
+} from './removed-instance-view.js';
 import {
   SHOW_ALL, NO_SELECTION_HINT, INDIVIDUAL_LABEL, selectionEntries, shownEntries, reorderAllowed,
 } from './list-selection.js';
@@ -67,6 +70,8 @@ const EMPTY_MEMBERSHIPS = [];
 const DEFAULT_COLLAPSED = {
   team: false,
   pool: false,
+  // #2944 AC3: a role's removed instances are history, not live activity.
+  archive: true,
 };
 
 /**
@@ -154,6 +159,9 @@ function saveOrder(order) {
  *   ids to display names for that indicator.
  * @param {string|null} viewerId  The viewing user's id, so a team-of-one reads
  *   as "Private" for its owner and as that person's name for anyone else.
+ * @param {(roleId:string, key:string)=>void} onOpenArchive  Opens a removed pool
+ *   instance's archive (#2944). Omitted → no "Removed instances" groups.
+ * @param {string|null} selectedArchiveKey  The archive open in the chat area.
  */
 export default function AgentList({
   agents,
@@ -169,6 +177,8 @@ export default function AgentList({
   directory = EMPTY_MEMBERSHIPS,
   viewerId = null,
   revealRequest = null,
+  onOpenArchive = null,
+  selectedArchiveKey = null,
 }) {
   // Index memberships by team id once per membership change (#2381). Rebuilds
   // only when the polled `memberships` array identity changes — the hook keeps
@@ -400,6 +410,8 @@ export default function AgentList({
             directory={directory}
             viewerId={viewerId}
             revealId={group.id === revealTeamId ? revealId : null}
+            onOpenArchive={onOpenArchive}
+            selectedArchiveKey={selectedArchiveKey}
           />
         ))}
 
@@ -465,6 +477,8 @@ const GroupSection = React.memo(function GroupSection({
   directory,
   viewerId,
   revealId = null,
+  onOpenArchive = null,
+  selectedArchiveKey = null,
 }) {
   const Icon = Users;
   const stubs = group.stubs || [];
@@ -591,6 +605,19 @@ const GroupSection = React.memo(function GroupSection({
                   statuses={statuses}
                   busyIds={busyIds}
                   onRequestMenu={onRequestMenu}
+                />
+              )}
+              {/*
+               * Its removed instances (#2944 AC3), read-only archives kept for the
+               * role's retention — collapsed by default, hidden when there are none.
+               */}
+              {onOpenArchive && showRemovedInstances(agent) && (
+                <RemovedInstancesSection
+                  roleAgent={agent}
+                  collapsed={isEntityCollapsed({ kind: 'archive', id: agent.id })}
+                  onToggle={onToggle}
+                  onOpenArchive={onOpenArchive}
+                  selectedKey={agent.id === selectedAgentId ? selectedArchiveKey : null}
                 />
               )}
             </React.Fragment>
@@ -795,6 +822,174 @@ function PoolInstancesSection({ roleAgent, instances, groupEnv, collapsed, onTog
     </div>
   );
 }
+
+/**
+ * "Removed instances (N)" — a pooled role's reaped instances whose chat history
+ * and session log are still archived (#2944). Persisted collapse state like
+ * "Instances" (`{kind:'archive', id:<roleId>}`), collapsed by default. The
+ * roster only carries the count; the entries are fetched while the group is
+ * open, and again when the count moves.
+ *
+ * An entry is not an agent any more, so it is not an `AgentRow`: no status dot,
+ * no menu — a "Removed" badge (never a faded row), its facts, and a link to its
+ * GitHub item. Clicking it opens the read-only archive view.
+ */
+function RemovedInstancesSection({ roleAgent, collapsed, onToggle, onOpenArchive, selectedKey }) {
+  const [hovered, setHovered] = useState(false);
+  const [entries, setEntries] = useState(null);
+  const [error, setError] = useState(null);
+  const count = roleAgent.poolArchiveCount;
+  const label = removedInstancesLabel(count);
+  const handleToggle = useCallback(
+    () => onToggle({ kind: 'archive', id: roleAgent.id }),
+    [onToggle, roleAgent.id],
+  );
+  useEffect(() => {
+    if (collapsed) return undefined;
+    let live = true;
+    setError(null);
+    fetch(`/api/agents/${encodeURIComponent(roleAgent.id)}/pool-archive`)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(data => { if (live) setEntries(Array.isArray(data?.entries) ? data.entries : []); })
+      .catch(e => { if (live) setError(e.message); });
+    return () => { live = false; };
+  }, [collapsed, roleAgent.id, count]);
+  return (
+    <div role="listitem">
+      <button
+        type="button"
+        onClick={handleToggle}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        aria-expanded={!collapsed}
+        title={`Removed pool instances of ${roleAgent.displayName || roleAgent.id} whose chat history and session log are still readable`}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--eb-space-2)',
+          width: '100%',
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          paddingLeft: 'calc(var(--eb-space-3) + var(--eb-space-4))',
+          background: hovered ? 'var(--eb-bg-hover)' : 'transparent',
+          border: 'none',
+          fontSize: 'var(--eb-text-xs)',
+          fontWeight: 'var(--eb-font-medium)',
+          color: 'var(--eb-text-muted)',
+          cursor: 'pointer',
+          fontFamily: 'inherit',
+          textAlign: 'left',
+          transition: 'background var(--eb-transition-fast)',
+        }}
+      >
+        {collapsed
+          ? <ChevronRight size={12} style={{ flexShrink: 0 }} />
+          : <ChevronDown  size={12} style={{ flexShrink: 0 }} />}
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {label}
+        </span>
+      </button>
+      {!collapsed && (
+        <div role="list" aria-label={label}>
+          {error && (
+            <div role="listitem" style={{ ...REMOVED_ROW_STYLE, color: 'var(--eb-status-error)' }}>
+              Could not load removed instances ({error})
+            </div>
+          )}
+          {!error && entries === null && (
+            <div role="listitem" style={{ ...REMOVED_ROW_STYLE, color: 'var(--eb-text-muted)' }}>Loading…</div>
+          )}
+          {(entries || []).map((entry) => (
+            <RemovedInstanceRow
+              key={entry.key}
+              entry={entry}
+              roleAgent={roleAgent}
+              selected={entry.key === selectedKey}
+              onOpen={onOpenArchive}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const REMOVED_ROW_STYLE = {
+  padding: 'var(--eb-space-1) var(--eb-space-3)',
+  paddingLeft: 'calc(var(--eb-space-3) + var(--eb-space-4) * 2)',
+  fontSize: 'var(--eb-text-xs)',
+};
+
+function RemovedInstanceRow({ entry, roleAgent, selected, onOpen }) {
+  const [hovered, setHovered] = useState(false);
+  const name = removedInstanceName(entry, roleAgent);
+  const url = itemUrl(entry.repo, entry.item);
+  const facts = removedInstanceFacts(entry);
+  const open = useCallback(() => onOpen(roleAgent.id, entry.key), [onOpen, roleAgent.id, entry.key]);
+  return (
+    <div
+      role="listitem"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        ...REMOVED_ROW_STYLE,
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 'var(--eb-space-2)',
+        background: selected ? 'var(--eb-bg-selected)' : (hovered ? 'var(--eb-bg-hover)' : 'transparent'),
+        borderLeft: selected ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
+      }}
+    >
+      <button
+        type="button"
+        onClick={open}
+        aria-current={selected ? 'true' : undefined}
+        title={`Open the archived chat history and session log of ${entry.instanceId}`}
+        style={{ ...BARE_BUTTON_STYLE, flex: 1, minWidth: 0, flexDirection: 'column', alignItems: 'stretch', gap: 2 }}
+      >
+        <span style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', minWidth: 0 }}>
+          <span style={{
+            flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)',
+          }}>
+            {name}
+          </span>
+          <span style={REMOVED_BADGE_STYLE}>Removed</span>
+        </span>
+        {facts.map(([k, v]) => (
+          <span key={k} style={{ color: 'var(--eb-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {k}: {v}
+          </span>
+        ))}
+      </button>
+      {url && (
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`Open ${entry.repo}#${entry.item} on GitHub`}
+          aria-label={`Open ${entry.repo}#${entry.item} on GitHub`}
+          style={{ flexShrink: 0, color: 'var(--eb-accent-primary)', display: 'inline-flex', paddingTop: 2 }}
+        >
+          <ExternalLink size={12} />
+        </a>
+      )}
+    </div>
+  );
+}
+
+// Same badge as a row's "Disabled"/"Not initialised" state (#2944 AC3: a badge,
+// not opacity).
+const REMOVED_BADGE_STYLE = {
+  flexShrink: 0,
+  padding: '0 4px',
+  borderRadius: 'var(--eb-radius-sm)',
+  border: '1px solid var(--eb-border-default)',
+  fontSize: 'var(--eb-text-xs)',
+  lineHeight: 1.5,
+  color: 'var(--eb-text-muted)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.04em',
+};
 
 function CollapsibleHeader({ label, icon: Icon, subtle, count, attention, membershipIndicator, collapsed, selected, onToggle, onActivate, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu }) {
   const [hovered, setHovered] = useState(false);

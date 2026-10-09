@@ -573,8 +573,9 @@ function Message({
           {/* #2310 AC7: only a confirmed (non-optimistic, non-thinking) message
               has a stable event_id worth sharing. Fades in on hover so the
               timestamp row stays uncluttered otherwise; "Copied" pins it
-              visible until the confirmation itself fades. */}
-          {!thinking && !message.isOptimistic && (
+              visible until the confirmation itself fades. An archived
+              message (#2944, no agentId) has no live room to link to. */}
+          {!thinking && !message.isOptimistic && agentId && (
             <button
               type="button"
               onClick={copyMessageLink}

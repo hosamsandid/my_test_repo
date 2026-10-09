@@ -19,6 +19,8 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MESSAGE = fs.readFileSync(path.join(HERE, 'Message.jsx'), 'utf8');
 const CHAT_PANEL = fs.readFileSync(path.join(HERE, 'ChatPanel.jsx'), 'utf8');
+// The backfill + scroll-up mapping, shared with the archived chat (#2944).
+const CHAT_EVENTS = fs.readFileSync(path.join(HERE, 'chat-event-message.js'), 'utf8');
 
 function at(src, needle) {
   const i = src.indexOf(needle);
@@ -103,10 +105,14 @@ test('the badge stylesheet is injected once at the document level, not per bubbl
 /* ── ChatPanel.jsx ───────────────────────────────────────────────────────── */
 
 test('every message-building site carries the author field', () => {
-  // Backfill, scroll-up pagination, the live SSE handler and the reload path.
-  const authored = CHAT_PANEL.match(/\[AUTHOR_FIELD\]:\s+ev\.content\?\.\[AUTHOR_FIELD\] \|\| null,/g) || [];
-  const askAnswers = CHAT_PANEL.match(/\[ASK_ANSWER_FIELD\]:\s+ev\.content\?\.\[ASK_ANSWER_FIELD\] \|\| null,/g) || [];
-  assert.equal(askAnswers.length, 4, 'there are still four message-building sites');
+  // The live SSE handler and the reload path build in ChatPanel; backfill and
+  // scroll-up pagination both go through `chatMessagesFromEvents` (#2944).
+  const src = CHAT_PANEL + CHAT_EVENTS;
+  const authored = src.match(/\[AUTHOR_FIELD\]:\s+ev\.content\?\.\[AUTHOR_FIELD\] \|\| null,/g) || [];
+  const askAnswers = src.match(/\[ASK_ANSWER_FIELD\]:\s+ev\.content\?\.\[ASK_ANSWER_FIELD\] \|\| null,/g) || [];
+  assert.equal(askAnswers.length, 3, 'there are still three message-building sites');
+  assert.equal((CHAT_PANEL.match(/= chatMessagesFromEvents\(chunk\);/g) || []).length, 2,
+    'backfill and scroll-up pagination share the mapping');
   assert.equal(authored.length, askAnswers.length,
     'the author field is read on every site that builds a message');
 });

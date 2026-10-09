@@ -52,6 +52,9 @@ const POOL_WAITING = {
   },
 };
 
+// #2944: removed-instance archives per pooled role.
+const POOL_ARCHIVES = { 'squad-a-dev': 2 };
+
 function makeIo() {
   const calls = { config: 0, dm: 0, env: [], poolWaiting: [] };
   const io = {
@@ -59,6 +62,7 @@ function makeIo() {
     readDmRoomId: (id) => { calls.dm += 1; return DM_ROOMS[id] || null; },
     readEnvironmentName: (envId) => { calls.env.push(envId); return ENVS[envId]?.name || null; },
     readPoolWaiting: (teamId) => { calls.poolWaiting.push(teamId); return POOL_WAITING[teamId] || null; },
+    countPoolArchives: (id) => POOL_ARCHIVES[id] || 0,
     agentMetaForScope,
   };
   return { io, calls };
@@ -119,6 +123,7 @@ function legacyRoster(scope, { includeDisabled, includeStubs }) {
       } : {}),
       ...(!cfg.poolInstance && cfg.pool && typeof cfg.pool === 'object' && cfg.pool.enabled === true ? {
         poolMaxInstances: Number.isInteger(cfg.pool.maxInstances) && cfg.pool.maxInstances >= 1 ? cfg.pool.maxInstances : null,
+        poolArchiveCount: POOL_ARCHIVES[id] || 0,
       } : {}),
     });
   }
@@ -165,6 +170,8 @@ test('the fixture exercises every optional field (guards a vacuous parity test)'
   assert.equal(byId['squad-a'].canManageTeam, true);
   assert.equal(byId['squad-a'].environmentName, 'Env One');
   assert.equal(byId['squad-a-dev'].poolMaxInstances, 3);
+  assert.equal(byId['squad-a-dev'].poolArchiveCount, 2);
+  assert.equal(byId['squad-a-dev-i12'].poolArchiveCount, undefined, 'only on the role, never on an instance');
   assert.equal(byId['squad-a-dev-i12'].poolWaiting, true);
   assert.equal(byId['squad-a-dev-i12'].poolWaitingPr, 41);
   assert.equal(byId['squad-a-dev-i13'].poolWaiting, undefined, 'an earlier spawn\'s record is ignored');

@@ -164,7 +164,7 @@ test("mutation-proved: dropping the running-filter would fail the check above", 
 
 test("recurringPoolSweepTeam gates only the dispatch half on control state — the reap pass runs unconditionally", () => {
   const src = fn("recurringPoolSweepTeam", { async: true });
-  const reapIdx = src.indexOf("_internalSelfDelete(instanceId)");
+  const reapIdx = src.indexOf("_internalSelfDelete(instanceId, \"done\")");
   const gateIdx = src.search(/if \(agentPool\.poolControlState\(poolControl, roleId\) !== ['"]running['"]\) continue;/);
   const dispatchIdx = src.indexOf("selectRecurringDispatch(");
   assert.ok(reapIdx > 0 && gateIdx > 0 && dispatchIdx > 0, "one of the three anchors is missing — this guard needs re-pointing");
@@ -179,7 +179,7 @@ test("mutation-proved: a gate placed BEFORE the reap loop (blocking teardown too
     "const roleId = agentPool.roleIdFromMemberId(role.id, teamId);",
     `const roleId = agentPool.roleIdFromMemberId(role.id, teamId);\n    ${gate.trim()}`,
   );
-  const reapIdx = buggy.indexOf("_internalSelfDelete(instanceId)");
+  const reapIdx = buggy.indexOf("_internalSelfDelete(instanceId, \"done\")");
   const gateIdx = buggy.search(/if \(agentPool\.poolControlState\(poolControl, roleId\) !== ['"]running['"]\) continue;/);
   assert.ok(gateIdx < reapIdx, "sanity: the mutated fixture really does move the gate before the reap loop");
 });

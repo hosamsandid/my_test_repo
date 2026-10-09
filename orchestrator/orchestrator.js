@@ -3161,14 +3161,18 @@ async function getTeamFlowBoard(teamId, { refresh = false } = {}) {
 // instance gets EXACTLY the same fast/background split, plugin-scope reap and
 // (via `isGracefulDeleteRole`, widened below) graceful commit-before-delete
 // every other agent delete gets — one delete implementation, not two.
-function _internalSelfDelete(agentId) {
+//
+// `reason` (#2944) is why the instance goes — stamped into its archive so the
+// "Removed instances" list can say done / idle timeout / hard timeout.
+function _internalSelfDelete(agentId, reason = null) {
   return new Promise((resolve) => {
     const headers = {};
     if (process.env.INTERNAL_API_TOKEN) headers.Authorization = `Bearer ${process.env.INTERNAL_API_TOKEN}`;
     const req = http.request({
       hostname: "127.0.0.1",
       port: 4002,
-      path: `/internal/agents/${encodeURIComponent(agentId)}`,
+      path: `/internal/agents/${encodeURIComponent(agentId)}` +
+        (reason ? `?reason=${encodeURIComponent(reason)}` : ""),
       method: "DELETE",
       headers,
       timeout: 15_000,
@@ -3334,7 +3338,7 @@ async function _reapPooledInstancesForTicket(teamId, laneKey) {
     const instanceId = agentPool.poolInstanceId(teamId, roleId, itemKey);
     if (!loadAgentConfig(instanceId)) continue;
     console.log(`[AgentPool] ${teamId}: reaping ${instanceId} — its ticket was released`);
-    await _internalSelfDelete(instanceId);
+    await _internalSelfDelete(instanceId, "done");
   }
 }
 
@@ -3449,7 +3453,7 @@ async function poolReapSweepTeam(teamId, now = Date.now(), fleet = null) {
         } else {
           console.warn(`[AgentPool] ${teamId}: ${id} has no poolRepo/poolItem recorded — cannot mark needs-human`);
         }
-        await _internalSelfDelete(id);
+        await _internalSelfDelete(id, "hard-timeout");
         continue;
       }
 
@@ -3461,7 +3465,7 @@ async function poolReapSweepTeam(teamId, now = Date.now(), fleet = null) {
       if (agentPool.waitJustEnded(prev, rec, idle)) {
         console.log(`[AgentPool] ${teamId}: ${id} no longer has an open PR — reaping`);
         delete nextWaiting[id];
-        await _internalSelfDelete(id);
+        await _internalSelfDelete(id, "pr-closed");
         continue;
       }
       const status = _readInstanceStatus(id);
@@ -3473,7 +3477,7 @@ async function poolReapSweepTeam(teamId, now = Date.now(), fleet = null) {
       }, now)) {
         console.log(`[AgentPool] ${teamId}: ${id} idle for over its ${idleTimeoutMs}ms budget — reaping`);
         delete nextWaiting[id];
-        await _internalSelfDelete(id);
+        await _internalSelfDelete(id, "idle-timeout");
       }
     }
   }
@@ -3508,11 +3512,16 @@ async function poolReapSweepTeam(teamId, now = Date.now(), fleet = null) {
 
 // #2301 gap 4: `retainLogsMs` was normalized (`agent-pool.js`) but never
 // consumed — the pruning pass was a TODO and archived pool session logs
-// (`gracefulPoolTeardown`'s `pool-archive/<id>/` copy) lived forever. Reads
-// the `archived-at.json` stamp `gracefulPoolTeardown` writes at archive time
+// (`gracefulPoolTeardown`'s `pool-archive/<key>/` copy) lived forever. Reads
+// the `archived-at.json` stamp `archivePoolInstance` writes at archive time
 // (never the directory's mtime — `fs.cpSync` can leave it carrying the
 // copied files' own, older mtimes). Best-effort per entry: one unreadable
 // stamp or failed `rmSync` never blocks the rest.
+//
+// #2944: walks EVERY archive, not just those of the currently pooled roles —
+// an archive whose role was renamed, removed or is no longer pooled is judged
+// by the default retention instead of being kept forever (AC8), and a stamp-
+// less one by its mtime. Leftover `.tmp-` dirs of a failed archive go too.
 function _pruneArchivedPoolLogs(teamId, now = Date.now(), fleet = null) {
   const seg = knowledgeFeed.safeTeamSegment(teamId || "");
   if (!seg) return;
@@ -3523,31 +3532,46 @@ function _pruneArchivedPoolLogs(teamId, now = Date.now(), fleet = null) {
   } catch {
     return;
   }
-  for (const role of _teamPooledRoles(teamId, fleet)) {
-    const prefix = `${role.id}-i`;
-    if (!entries.some((e) => e.isDirectory() && e.name.startsWith(prefix))) continue;
-    // #569 review: the rmSync below is irreversible — `retainLogsMs` comes
-    // from the role as it is on disk now, not from the tick's snapshot.
-    const live = _rereadPooledRole(teamId, role.id);
-    if (!live) continue;
-    const retainLogsMs = live.pool.teardown.retainLogsMs;
-    for (const e of entries) {
-      if (!e.isDirectory() || !e.name.startsWith(prefix)) continue;
-      const dir = path.join(archiveRoot, e.name);
-      let archivedAt = null;
-      try {
-        archivedAt = JSON.parse(fs.readFileSync(path.join(dir, "archived-at.json"), "utf8")).archivedAt;
-      } catch {
-        continue; // no stamp yet (still archiving, or a pre-#2301 archive) — never guess
-      }
-      if (!agentPool.isArchiveExpired({ archivedAt, retainLogsMs }, now)) continue;
-      try {
-        fs.rmSync(dir, { recursive: true, force: true });
-        console.log(`[AgentPool] ${teamId}: pruned expired pool-archive/${e.name} (retainLogsMs=${retainLogsMs})`);
-      } catch (err) {
-        console.warn(`[AgentPool] ${teamId}: could not prune pool-archive/${e.name}: ${err.message}`);
-      }
+  const roleIds = _teamPooledRoles(teamId, fleet).map((r) => r.id);
+  // #569 review: the rmSync below is irreversible — `retainLogsMs` comes
+  // from the role as it is on disk now, not from the tick's snapshot.
+  const liveRetention = new Map();
+  const retentionOf = (roleId) => {
+    if (!roleId) return null;
+    if (!liveRetention.has(roleId)) {
+      const live = _rereadPooledRole(teamId, roleId);
+      liveRetention.set(roleId, live ? live.pool.teardown.retainLogsMs : null);
     }
+    return liveRetention.get(roleId);
+  };
+  const prune = (name, why) => {
+    try {
+      fs.rmSync(path.join(archiveRoot, name), { recursive: true, force: true });
+      console.log(`[AgentPool] ${teamId}: pruned expired pool-archive/${name} (${why})`);
+    } catch (err) {
+      console.warn(`[AgentPool] ${teamId}: could not prune pool-archive/${name}: ${err.message}`);
+    }
+  };
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const dir = path.join(archiveRoot, e.name);
+    let mtimeMs = null;
+    try { mtimeMs = fs.statSync(dir).mtimeMs; } catch { continue; }
+    if (agentPool.isPoolArchiveTmpName(e.name)) {
+      if (now - mtimeMs >= agentPool.POOL_ARCHIVE_TMP_MAX_AGE_MS) prune(e.name, "unfinished archive");
+      continue;
+    }
+    let meta = null;
+    try {
+      meta = JSON.parse(fs.readFileSync(path.join(dir, "archived-at.json"), "utf8"));
+    } catch { /* pre-#2301 archive — judged by its mtime below */ }
+    const roleId = agentPool.archiveRoleId(e.name, meta, roleIds);
+    const { retainLogsMs, expired } = agentPool.archivePruneDecision({
+      archivedAt: meta && meta.archivedAt,
+      mtimeMs,
+      roleRetainLogsMs: retentionOf(roleId),
+    }, now);
+    if (expired) prune(e.name, `retainLogsMs=${retainLogsMs}`);
   }
 }
 
@@ -4101,7 +4125,7 @@ async function recurringPoolSweepTeam(teamId, { now = Date.now(), fleet = null }
       const itemId = itemOfInstance(instanceId);
       if (itemId == null || !_recurringItemComplete(workSource.outputDir, itemId)) continue;
       console.log(`[AgentPool] ${teamId}: reaping ${instanceId} — item ${itemId} completed this cycle`);
-      await _internalSelfDelete(instanceId);
+      await _internalSelfDelete(instanceId, "done");
       reaped.push(instanceId);
     }
 
@@ -5990,7 +6014,7 @@ function listWorkspaceClones(workspace) {
 // Best-effort throughout, on purpose: a pool instance is torn down because its
 // TICKET already finished (or timed out) — a flush failure must never turn a
 // completed unit of work into a stuck delete.
-async function gracefulPoolTeardown(id, cfg) {
+async function gracefulPoolTeardown(id, cfg, { reason = "deleted", archive = true } = {}) {
   const workspace = agentDir(id);
   const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
   const declaredRepos = Array.isArray(env?.repositories) ? env.repositories : [];
@@ -6024,31 +6048,125 @@ async function gracefulPoolTeardown(id, cfg) {
     }
   }
 
-  // Archive the session transcript so the work log survives the wipe even
-  // though the PR/ledger/event log already do (concept §4/§8: "otherwise the
-  // actual work log dies with the container"). Retention (pool.teardown.
-  // retainLogsMs) is `_pruneArchivedPoolLogs` (#2301), its own sweep on
-  // `poolReapSweepTeam`'s tick — this just copies and stamps WHEN it copied,
-  // in an `archived-at.json` sibling of the `sessions/` copy: the prune pass
-  // reads that stamp rather than the directory's mtime, which `fs.cpSync`
-  // can leave carrying the copied files' own (older) mtimes.
+  if (archive) await archivePoolInstance(id, cfg, reason);
+}
+
+// Archive what a removed instance did (#2944) so it stays readable, read-only,
+// in Agent Studio: its session transcript (concept §4/§8: "otherwise the
+// actual work log dies with the container") AND its DM room's chat history,
+// which is otherwise unreachable once the instance's Matrix user is gone.
+// Retention (pool.teardown.retainLogsMs) is `_pruneArchivedPoolLogs` (#2301),
+// its own sweep on `poolReapSweepTeam`'s tick — this just copies and stamps
+// WHEN it copied, in an `archived-at.json` sibling of the `sessions/` copy:
+// the prune pass reads that stamp rather than the directory's mtime, which
+// `fs.cpSync` can leave carrying the copied files' own (older) mtimes.
+//
+// Built under a `.tmp-` name and renamed into place only when complete, so a
+// failure half-way never lists a broken entry (AC11); a failure is logged and
+// never blocks the teardown itself.
+async function archivePoolInstance(id, cfg, reason) {
+  const seg = knowledgeFeed.safeTeamSegment(cfg.parentTeamId || "");
+  if (!seg) return;
+  const archivedAtMs = Date.now();
+  const key = agentPool.poolArchiveKey(id, archivedAtMs);
+  const poolArchiveDir = path.join(HILL_CLIMB_TEAMS_DIR, seg, "pool-archive");
+  const archiveRoot = path.join(poolArchiveDir, `${agentPool.POOL_ARCHIVE_TMP_PREFIX}${key}`);
   try {
-    const seg = knowledgeFeed.safeTeamSegment(cfg.parentTeamId || "");
+    let roomId = null;
+    try {
+      roomId = JSON.parse(fs.readFileSync(path.join(agentDir(id), "dm-room.json"), "utf8")).roomId || null;
+    } catch { /* no DM room was ever created — nothing to read */ }
+    const chat = roomId ? await fetchDmRoomChat(roomId) : null;
     const sessionsDir = agentStatePath(id, "sessions");
-    if (seg && fs.existsSync(sessionsDir)) {
-      const archiveRoot = path.join(HILL_CLIMB_TEAMS_DIR, seg, "pool-archive", id);
+    const hasSessions = fs.existsSync(sessionsDir);
+    if (!hasSessions && !chat) return;
+
+    fs.mkdirSync(archiveRoot, { recursive: true });
+    if (hasSessions) {
       const archiveDir = path.join(archiveRoot, "sessions");
-      fs.mkdirSync(path.dirname(archiveDir), { recursive: true });
       // The transcript is archived, the resumable session pointer is not
       // (#2595 AC10) — it dies with the instance.
       fs.cpSync(sessionsDir, archiveDir, { recursive: true, filter: agentPool.isArchivableSessionPath });
-      fs.writeFileSync(
-        path.join(archiveRoot, "archived-at.json"),
-        JSON.stringify({ archivedAt: new Date().toISOString() }),
-      );
+    }
+    if (chat) fs.writeFileSync(path.join(archiveRoot, "chat.json"), JSON.stringify(chat));
+    fs.writeFileSync(
+      path.join(archiveRoot, "archived-at.json"),
+      JSON.stringify({
+        archivedAt: new Date(archivedAtMs).toISOString(),
+        instanceId: id,
+        roleId: cfg.poolOf || null,
+        teamId: cfg.parentTeamId || null,
+        item: cfg.poolItem != null ? String(cfg.poolItem) : null,
+        repo: cfg.poolRepo || null,
+        spawnedAt: cfg.poolSpawnedAt || null,
+        reason,
+        roomId,
+        chat: !!chat,
+      }),
+    );
+    fs.renameSync(archiveRoot, path.join(poolArchiveDir, key));
+    if (roomId && !chat) {
+      console.warn(`[AgentPool] ${id}: chat history could not be read — archived the session log only`);
     }
   } catch (err) {
     console.warn(`[AgentPool] ${id}: session-log archive failed: ${err.message}`);
+    try { fs.rmSync(archiveRoot, { recursive: true, force: true }); } catch { /* the prune pass retries */ }
+  }
+}
+
+// The DM room's message events, oldest first (#2944), read with the admin
+// token — the admin is joined to every agent DM room (`provisionAgentDmRoom`,
+// the console's `ensureAgentDmRoom`), so it sees what Agent Chat showed. Bounded
+// in events and time so a huge room never stalls the teardown; `truncated`
+// says the oldest part was left out. `null` when the room cannot be read.
+const POOL_ARCHIVE_CHAT_MAX_EVENTS = 5000;
+const POOL_ARCHIVE_CHAT_TIMEOUT_MS = 10_000;
+async function fetchDmRoomChat(roomId) {
+  if (!HOMESERVER || !CONDUWUIT_ADMIN_TOKEN) return null;
+  const deadline = Date.now() + POOL_ARCHIVE_CHAT_TIMEOUT_MS;
+  const events = [];
+  let from = null;
+  let truncated = false;
+  try {
+    for (;;) {
+      const q = new URLSearchParams({ dir: "b", limit: "200" });
+      if (from) q.set("from", from);
+      const resp = await fetch(
+        `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages?${q}`,
+        {
+          headers: { Authorization: `Bearer ${CONDUWUIT_ADMIN_TOKEN}` },
+          signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+        },
+      );
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      const chunk = Array.isArray(data.chunk) ? data.chunk : [];
+      for (const ev of chunk) if (ev && ev.type === "m.room.message") events.push(ev);
+      if (!chunk.length || !data.end || data.end === from) break;
+      if (events.length >= POOL_ARCHIVE_CHAT_MAX_EVENTS || Date.now() >= deadline) {
+        truncated = true;
+        break;
+      }
+      from = data.end;
+    }
+  } catch (err) {
+    if (!events.length) {
+      console.warn(`[AgentPool] chat history of ${roomId} unreadable: ${err.message}`);
+      return null;
+    }
+    truncated = true;
+  }
+  return { roomId, truncated, events: events.slice(0, POOL_ARCHIVE_CHAT_MAX_EVENTS).reverse() };
+}
+
+// A deleted team's removed-instance archives (#2944) — best-effort.
+function removeTeamPoolArchive(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId || "");
+  if (!seg) return;
+  try {
+    fs.rmSync(path.join(HILL_CLIMB_TEAMS_DIR, seg, "pool-archive"), { recursive: true, force: true });
+  } catch (err) {
+    console.warn(`[AgentPool] could not remove pool archives of deleted team '${teamId}': ${err.message}`);
   }
 }
 
@@ -17248,9 +17366,14 @@ async function main() {
       return;
     }
 
-    const deleteMatch = req.method === 'DELETE' && req.url.match(/^\/internal\/agents\/([^/]+)$/);
+    const deleteMatch = req.method === 'DELETE' && req.url.match(/^\/internal\/agents\/([^/?]+)(?:\?(.*))?$/);
     if (deleteMatch) {
       const id = decodeURIComponent(deleteMatch[1]);
+      // Why the agent goes (#2944) — only the pool reapers send one; a delete
+      // from the console reads as `deleted` in the instance's archive.
+      const reapReason = agentPool.normalizeReapReason(
+        new URLSearchParams(deleteMatch[2] || "").get("reason"),
+      );
       (async () => {
         // Ids we armed in the teardown registry — cleared on a fast-phase error
         // (so a retry isn't blocked) and, on success, one at a time as each
@@ -17319,7 +17442,9 @@ async function main() {
           // NOTE for #1962 reviewers: this is deliberately still routed through
           // isGracefulDeleteRole rather than hard-coded false, so "which roles
           // flush on shutdown" keeps its one named, unit-tested home.
-          const fastTeardown = async (targetId, cfg, deactivateMatrix) => {
+          // `archive: false` for the members of a team being deleted: their
+          // archives would go with the team anyway (#2944).
+          const fastTeardown = async (targetId, cfg, deactivateMatrix, { archive = true } = {}) => {
             stopAgentProcess(targetId);
             if (cfg) {
               // Reap plugin-owned resources BEFORE the config (and with it the
@@ -17337,7 +17462,7 @@ async function main() {
             // proceed exactly as a force-removed agent would. Best-effort: a
             // failure here must never block the delete itself.
             if (graceful && cfg) {
-              await gracefulPoolTeardown(targetId, cfg).catch((err) =>
+              await gracefulPoolTeardown(targetId, cfg, { reason: reapReason, archive }).catch((err) =>
                 console.warn(`[AgentPool] graceful teardown for ${targetId} failed: ${err.message}`));
             }
             deleteAgentFiles(targetId);
@@ -17361,7 +17486,9 @@ async function main() {
             try {
               // Materialized child (has a token) → best-effort Matrix
               // cleanup in the background phase; a stub has no Matrix user.
-              await fastTeardown(childId, childCfg, !!childCfg.token);
+              await fastTeardown(childId, childCfg, !!childCfg.token, {
+                archive: !(parentCfg && parentCfg.role === 'team'),
+              });
               cascaded.push(childId);
             } catch (err) {
               // One child failing its fast steps doesn't abort the rest (or the
@@ -17454,6 +17581,9 @@ async function main() {
               if (t.id === id && parentCfg && parentCfg.role === 'team') {
                 try { purgeTeamKnowledge(agentKnowledgeTeamId(parentCfg)); }
                 catch (err) { console.warn(`[Orchestrator] knowledge purge for '${id}': ${err.message}`); }
+                // Removed-instance archives go with their team (#2944): a
+                // later same-id team must not list the dead team's runs.
+                removeTeamPoolArchive(id);
               }
             } catch (err) {
               console.error(`[Orchestrator] background teardown for '${t.id}' failed: ${err.message}`);

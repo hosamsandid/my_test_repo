@@ -49,8 +49,10 @@ export function findFinishedSessionMatch(history, correlationId) {
 // session lives in the instance's chat, not the role's:
 // - `{ kind: 'agent', agentId }` — open this agent's chat (the instance while it
 //   still exists; the recorded agent for every non-pooled or pre-#2596 row);
+// - `{ kind: 'archived', instanceName, poolRoleId, archiveKey }` — the instance
+//   was removed but its archive is still readable (#2944): open it read-only;
 // - `{ kind: 'reaped', instanceName, poolRoleId, poolRoleName }` — the instance
-//   was removed, so there is no chat to open; the caller says so and offers
+//   was removed and nothing is archived any more; the caller says so and offers
 //   the pooled role's chat, labelled as such, instead of silently opening it.
 // `instanceExists` is filled in by GET /api/github-events; a row without it is
 // treated as existing, so a missing flag never hides a working link.
@@ -60,6 +62,15 @@ export function sessionLinkTarget(outcome) {
   const instanceId = typeof outcome.instanceId === 'string' && outcome.instanceId ? outcome.instanceId : null;
   if (!instanceId) return outcome.agentId ? { kind: 'agent', agentId: outcome.agentId } : null;
   if (outcome.instanceExists !== false) return { kind: 'agent', agentId: instanceId };
+  // #2944: the removed instance's chat + session log are still archived.
+  if (outcome.instanceArchiveKey && outcome.agentId) {
+    return {
+      kind: 'archived',
+      instanceName: outcome.instanceName || instanceId,
+      poolRoleId: outcome.agentId,
+      archiveKey: outcome.instanceArchiveKey,
+    };
+  }
   return {
     kind: 'reaped',
     instanceName: outcome.instanceName || instanceId,
@@ -71,5 +82,11 @@ export function sessionLinkTarget(outcome) {
 // The notice shown instead of a link when the instance is gone (#2596 AC5).
 export function reapedInstanceNotice(target) {
   if (!target || target.kind !== 'reaped') return null;
-  return `${target.instanceName} no longer exists — pool instances are removed after their ticket is done, so this session can no longer be opened.`;
+  return `${target.instanceName} no longer exists and no archive of it is readable any more — pool instances are removed after their ticket is done, so this session can no longer be opened.`;
+}
+
+// Where a removed instance's archive opens (#2944): its pooled role's chat page
+// in read-only archive mode.
+export function archiveChatPath(poolRoleId, archiveKey) {
+  return `/chats/${encodeURIComponent(poolRoleId)}?archive=${encodeURIComponent(archiveKey)}`;
 }

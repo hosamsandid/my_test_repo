@@ -89,7 +89,7 @@ test("no GitHub call anywhere in the sweep — proves the binding is domain-neut
 
 test("release (D4) happens BEFORE dispatch, so a just-completed slot is free the same tick", () => {
   const src = fn("recurringPoolSweepTeam");
-  const reapAt = src.indexOf("_internalSelfDelete(instanceId)");
+  const reapAt = src.indexOf("_internalSelfDelete(instanceId, \"done\")");
   const dispatchAt = src.indexOf("selectRecurringDispatch(");
   assert.ok(reapAt > 0 && dispatchAt > 0, "expected both a reap call and a dispatch selection in the sweep");
   assert.ok(reapAt < dispatchAt, "reap must run before the dispatch selection, not after");

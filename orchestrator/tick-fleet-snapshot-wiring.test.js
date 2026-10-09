@@ -315,6 +315,7 @@ function reapHarness({ diskRole, snapshotMaxRuntimeMs = 1_000, archivedAgoMs = n
       return [{ name: inst, isDirectory: () => true }];
     },
     readFileSync: () => JSON.stringify({ archivedAt: new Date(now - archivedAgoMs).toISOString() }),
+    statSync: () => ({ mtimeMs: now }),
     rmSync: (p) => pruned.push(p),
   };
   const ctx = vm.createContext({
@@ -370,7 +371,13 @@ test('the archive prune reads retainLogsMs from the role as it is on disk', asyn
   await raised.run();
   assert.deepEqual(raised.pruned, [], 'a raised retention keeps the archive');
 
+  // #2944 AC8: a role no longer pooled falls back to the default retention
+  // (30 days) — its 1 s snapshot value never prunes, a month-old archive goes.
   const off = reapHarness({ archivedAgoMs: 3_600_000, diskRole: { ...REAP_BASE_ROLE, pool: { enabled: false } } });
   await off.run();
-  assert.deepEqual(off.pruned, [], 'a role no longer pooled prunes nothing');
+  assert.deepEqual(off.pruned, [], 'a role no longer pooled keeps an archive within the default retention');
+
+  const offOld = reapHarness({ archivedAgoMs: 31 * 86_400_000, diskRole: { ...REAP_BASE_ROLE, pool: { enabled: false } } });
+  await offOld.run();
+  assert.equal(offOld.pruned.length, 1, 'a role no longer pooled never keeps an archive forever');
 });

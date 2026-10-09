@@ -89,6 +89,7 @@ const WORK_PLANE_AGENT_PREFIXES = Object.freeze([
   '/api/agents/:agentId/commands',
   '/api/agents/:agentId/context',
   '/api/agents/:agentId/git-info',
+  '/api/agents/:agentId/pool-archive',
   '/api/agents/:agentId/github-events',
   '/api/agents/:agentId/session',
   '/api/agents/:agentId/sessions',

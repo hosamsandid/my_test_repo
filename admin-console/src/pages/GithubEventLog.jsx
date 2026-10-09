@@ -7,7 +7,7 @@ import PageHelpButton from '../components/PageHelpButton';
 import WhenCell from '../components/WhenCell';
 import RowContextMenu from '../components/RowContextMenu';
 import ConfirmDialog from '../components/ConfirmDialog';
-import { buildTriggerCorrelationId, sessionLinkTarget, reapedInstanceNotice } from './github-event-session';
+import { buildTriggerCorrelationId, sessionLinkTarget, reapedInstanceNotice, archiveChatPath } from './github-event-session';
 import {
   kindLabel, kindTooltip, entryDetail, entryHoverDetail, labelChip, totalPending, totalHeld,
   pendingRowMenu, reassignPickerState, reassignTargetLabel, pendingReassignError, pendingReassignSuccess,
@@ -92,7 +92,7 @@ function OutcomeMarker({ marker, color }) {
   return <span aria-hidden="true" style={{ ...outcomeMarkerStyle, color }}>{marker}</span>;
 }
 
-function OutcomeLine({ outcome, eventId, onOpenSession, onOpenChat, refireNote = null }) {
+function OutcomeLine({ outcome, eventId, onOpenSession, onOpenChat, onOpenArchive, refireNote = null }) {
   const [hover, setHover] = useState(false);
   const [showReaped, setShowReaped] = useState(false);
   const { label, marker, markerColor, textColor } = outcomePresentation(outcome, { refired: !!refireNote });
@@ -147,6 +147,33 @@ function OutcomeLine({ outcome, eventId, onOpenSession, onOpenChat, refireNote =
           </div>
         )}
       </div>
+    );
+  }
+  // #2944: a removed instance whose archive is still readable opens it.
+  if (target && target.kind === 'archived' && correlationId && onOpenArchive) {
+    return (
+      <button
+        type="button"
+        onClick={() => onOpenArchive(target.poolRoleId, target.archiveKey)}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        aria-label={`Open the archive of removed instance ${target.instanceName}`}
+        title={`${explain}\n\n${target.instanceName} was removed. Click to open its archived chat history and session log (read-only).`}
+        style={{
+          ...outcomeLineStyle,
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          margin: 0,
+          textAlign: 'left',
+          fontFamily: 'inherit',
+          cursor: 'pointer',
+          color: hover ? 'var(--eb-accent-hover)' : 'var(--eb-accent-primary)',
+        }}
+      >
+        <OutcomeMarker marker={marker} color={markerColor} />
+        <span style={{ ...outcomeTextStyle, textDecoration: 'underline', textUnderlineOffset: 2 }}>{label} (instance removed — archived)</span>
+      </button>
     );
   }
   if (target && target.kind === 'agent' && correlationId && onOpenSession) {
@@ -407,6 +434,11 @@ function ProcessedEventsView() {
     if (!agentId) return;
     navigate(`/chats/${encodeURIComponent(agentId)}`);
   }, [navigate]);
+  // A removed instance's archive, read-only on its role's chat page (#2944).
+  const openArchive = useCallback((roleId, archiveKey) => {
+    if (!roleId || !archiveKey) return;
+    navigate(archiveChatPath(roleId, archiveKey));
+  }, [navigate]);
 
   const since = useMemo(() => {
     const preset = RANGE_PRESETS.find(r => r.key === rangeKey) || RANGE_PRESETS[0];
@@ -499,7 +531,7 @@ function ProcessedEventsView() {
       return (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, minWidth: COL_FLOOR.outcomes }}>
           {row.noMatchingTrigger ? <NoMatchLine /> : list.map((o, i) => (
-            <OutcomeLine key={i} outcome={o} eventId={row.eventId} onOpenSession={openSession} onOpenChat={openChat} refireNote={refireNote(row)} />
+            <OutcomeLine key={i} outcome={o} eventId={row.eventId} onOpenSession={openSession} onOpenChat={openChat} onOpenArchive={openArchive} refireNote={refireNote(row)} />
           ))}
         </div>
       );

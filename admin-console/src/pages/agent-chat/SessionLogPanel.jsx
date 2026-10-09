@@ -81,11 +81,14 @@ import {
  *     new rows don't yank the view away.
  *   onRevealMissing()          — the load finished without a row of the
  *     requested run; the parent shows its "not found" notice.
+ *   backfillUrl                — read the transcript from this URL instead of
+ *     the agent's live session route (#2944: a removed pool instance's
+ *     archive). Use with `staticOnly`; the response has the same shape.
  */
 export default function SessionLogPanel({
   agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate,
   todoCloseSignal = 0, embedded = false, scopeCorrelationId = null, staticOnly = false,
-  revealRequest = null, onRevealMissing,
+  revealRequest = null, onRevealMissing, backfillUrl = null,
 }) {
   const [events, setEvents]       = useState([]);
   const [cursor, setCursor]       = useState(0);
@@ -134,7 +137,7 @@ export default function SessionLogPanel({
   // Which (agent, room, scope) the last *finished* backfill was for. A reveal
   // (#2603) only judges found/missing against a settled load — right after a
   // mount `loading` is still false before the backfill effect has run.
-  const loadKey = `${agentId}|${roomId}|${scopeCids ? scopeCids.join(',') : ''}`;
+  const loadKey = `${agentId}|${roomId}|${scopeCids ? scopeCids.join(',') : ''}|${backfillUrl || ''}`;
   const [loadedKey, setLoadedKey] = useState(null);
 
   /* ─── 1. Backfill on agent/room change ──────────────────────────────── */
@@ -153,7 +156,7 @@ export default function SessionLogPanel({
     const scopeQuery = scopeCids
       ? scopeCids.map(c => `&correlationId=${encodeURIComponent(c)}`).join('')
       : '';
-    fetch(`/api/agents/${encodeURIComponent(agentId)}/session/${encodeURIComponent(roomId)}?limit=500${scopeQuery}`)
+    fetch(backfillUrl || `/api/agents/${encodeURIComponent(agentId)}/session/${encodeURIComponent(roomId)}?limit=500${scopeQuery}`)
       .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
@@ -174,10 +177,10 @@ export default function SessionLogPanel({
       .finally(() => {
         if (reqId === reqIdRef.current) {
           setLoading(false);
-          setLoadedKey(`${agentId}|${roomId}|${scopeCids ? scopeCids.join(',') : ''}`);
+          setLoadedKey(`${agentId}|${roomId}|${scopeCids ? scopeCids.join(',') : ''}|${backfillUrl || ''}`);
         }
       });
-  }, [agentId, roomId, scopeCids]);
+  }, [agentId, roomId, scopeCids, backfillUrl]);
 
   useEffect(() => { loadBackfill(); }, [loadBackfill]);
 

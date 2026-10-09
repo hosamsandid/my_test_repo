@@ -18074,7 +18074,7 @@ async function main() {
           run = { kind: 'chat', roomId, eventId, sender: decided.sender,
             ...(decided.author ? { author: decided.author } : {}) };
         }
-        const r = pluginRunRegistry.begin(id, payload.key, run);
+        const r = pluginRunRegistry.begin(id, payload.key, run, { live: payload.live });
         return sendJson(res, r.ok ? 200 : 403, r);
       }).catch((err) => { if (!res.headersSent) sendJson(res, 400, { ok: false, error: err.message }); });
       return;

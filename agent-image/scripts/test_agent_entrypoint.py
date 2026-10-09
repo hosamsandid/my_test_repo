@@ -5392,10 +5392,14 @@ class PluginRunIdentity(unittest.TestCase):
 
     def setUp(self):
         self._saved_key = entrypoint._PLUGIN_RUN_KEY
+        self._saved_live = set(entrypoint._PLUGIN_LIVE_RUNS)
         entrypoint._PLUGIN_RUN_KEY = None
+        entrypoint._PLUGIN_LIVE_RUNS.clear()
 
     def tearDown(self):
         entrypoint._PLUGIN_RUN_KEY = self._saved_key
+        entrypoint._PLUGIN_LIVE_RUNS.clear()
+        entrypoint._PLUGIN_LIVE_RUNS.update(self._saved_live)
 
     def _env(self, **extra):
         return patch.dict(os.environ, {"AGENT_ID": "team-a-dev", "AEE_AGENT_CALLER_TOKEN": "aeecall1.x.y", **extra})
@@ -5469,9 +5473,55 @@ class PluginRunIdentity(unittest.TestCase):
                 entrypoint._call_claude_once("p", "!r", "$e", None, None, 10,
                                              {"chatEvent": {"roomId": "!r", "eventId": "$e"}})
         self.assertEqual(calls, [
-            ("/runs", {"key": "k", "kind": "chat", "roomId": "!r", "eventId": "$e"}),
+            ("/runs", {"key": "k", "kind": "chat", "roomId": "!r", "eventId": "$e", "live": []}),
             ("/runs/end", {"key": "k", "runId": "run-1"}),
         ])
+        self.assertEqual(entrypoint._PLUGIN_LIVE_RUNS, set())
+
+    def test_a_run_in_flight_is_listed_in_the_next_declaration(self):
+        entrypoint._PLUGIN_RUN_KEY = "k"
+        bodies = []
+        ids = iter(["run-1", "run-2"])
+
+        def post(route, body, timeout=10):
+            if route == "/runs":
+                bodies.append(body["live"])
+                return 200, {"ok": True, "runId": next(ids)}
+            return 200, {"ok": True}
+
+        with patch.object(entrypoint, "_plugin_identity_post", post):
+            first = entrypoint._plugin_run_begin({})
+            entrypoint._plugin_run_begin({})  # a second run while the first is in flight
+            entrypoint._plugin_run_end(first)
+        self.assertEqual(bodies, [[], ["run-1"]])
+        self.assertEqual(entrypoint._PLUGIN_LIVE_RUNS, {"run-2"})
+
+    def test_the_end_is_retried_only_while_the_orchestrator_is_unreachable(self):
+        entrypoint._PLUGIN_RUN_KEY = "k"
+        answers = [ConnectionRefusedError(), (0, {}), (403, {"reason": "bad-run-key"}), (200, {"ok": True})]
+        calls = []
+
+        def post(route, body, timeout=10):
+            calls.append(route)
+            a = answers.pop(0)
+            if isinstance(a, BaseException):
+                raise a
+            return a
+
+        with patch.object(entrypoint, "_plugin_identity_post", post), \
+                patch.object(entrypoint.time, "sleep") as sleep:
+            entrypoint._plugin_run_end("run-1", attempts=5)
+        self.assertEqual(calls, ["/runs/end"] * 3)  # stops at the first real answer (403)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_an_end_that_never_arrives_still_leaves_the_live_set(self):
+        entrypoint._PLUGIN_RUN_KEY = "k"
+        entrypoint._PLUGIN_LIVE_RUNS.add("run-1")
+        with patch.object(entrypoint, "_plugin_identity_post", side_effect=ConnectionRefusedError()) as post, \
+                patch.object(entrypoint.time, "sleep"):
+            entrypoint._plugin_run_end("run-1", attempts=3)
+        self.assertEqual(post.call_count, 3)
+        self.assertEqual(entrypoint._PLUGIN_LIVE_RUNS, set())
 
     def test_a_failed_declaration_never_blocks_the_run(self):
         entrypoint._PLUGIN_RUN_KEY = "k"

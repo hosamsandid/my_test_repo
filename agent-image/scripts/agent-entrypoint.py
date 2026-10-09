@@ -963,7 +963,16 @@ def _internal_headers(extra: dict | None = None) -> dict:
 #
 # Every step is best-effort for the run: a failed declaration never blocks a
 # turn, it only means plugin calls in that turn are refused.
+#
+# The runner also tracks which of its declared runs are still in flight
+# (`_PLUGIN_LIVE_RUNS`) and sends that list with every new declaration. A run
+# whose end never reached the orchestrator is gone from this set, so the next
+# declaration drops it — instead of the stale entry making every plugin call
+# `ambiguous-run` until its TTL (#2952). A run that really is still in flight
+# stays in the list, so two live runs are still refused.
 _PLUGIN_RUN_KEY: str | None = None
+_PLUGIN_LIVE_RUNS: set[str] = set()
+_PLUGIN_LIVE_RUNS_LOCK = threading.Lock()
 _PR_SET_DUMPABLE = 4
 
 
@@ -1045,7 +1054,9 @@ def _plugin_run_declaration(run_context: dict | None) -> dict:
 def _plugin_run_begin(run_context: dict | None) -> str | None:
     if not _PLUGIN_RUN_KEY:
         return None
-    body = {"key": _PLUGIN_RUN_KEY, **_plugin_run_declaration(run_context)}
+    with _PLUGIN_LIVE_RUNS_LOCK:
+        live = sorted(_PLUGIN_LIVE_RUNS)
+    body = {"key": _PLUGIN_RUN_KEY, **_plugin_run_declaration(run_context), "live": live}
     try:
         status, out = _plugin_identity_post("/runs", body)
     except ConnectionRefusedError:
@@ -1054,16 +1065,36 @@ def _plugin_run_begin(run_context: dict | None) -> str | None:
     if not run_id:
         print(f"[Runner] plugin run declaration ({body['kind']}) refused: HTTP {status} "
               f"{out.get('reason') if isinstance(out, dict) else ''}", file=sys.stderr)
+        return None
+    with _PLUGIN_LIVE_RUNS_LOCK:
+        _PLUGIN_LIVE_RUNS.add(run_id)
     return run_id
 
 
-def _plugin_run_end(run_id: str | None) -> None:
-    if not run_id or not _PLUGIN_RUN_KEY:
+def _plugin_run_end(run_id: str | None, attempts: int = 3, delay_sec: float = 1.0) -> None:
+    """End a declared run. The run is over either way, so it leaves the live
+    set first; the end call is then retried while the orchestrator is
+    unreachable (refused connection or no answer), because a lost end used to
+    leave a stale declaration that refused every plugin call (#2951). Any answer
+    — including a 403 — is final. If every attempt fails, the next declaration
+    still drops the stale entry (see _PLUGIN_LIVE_RUNS)."""
+    if not run_id:
         return
-    try:
-        _plugin_identity_post("/runs/end", {"key": _PLUGIN_RUN_KEY, "runId": run_id})
-    except ConnectionRefusedError:
-        pass
+    with _PLUGIN_LIVE_RUNS_LOCK:
+        _PLUGIN_LIVE_RUNS.discard(run_id)
+    if not _PLUGIN_RUN_KEY:
+        return
+    for i in range(max(1, attempts)):
+        try:
+            status, _ = _plugin_identity_post("/runs/end", {"key": _PLUGIN_RUN_KEY, "runId": run_id})
+        except ConnectionRefusedError:
+            status = 0
+        if status != 0:
+            return
+        if i + 1 < attempts:
+            time.sleep(delay_sec)
+    print(f"[Runner] plugin run end ({run_id}): orchestrator unreachable after {attempts} attempts "
+          "— the next run declaration drops it", file=sys.stderr)
 
 
 _push_client: _StatePushClient | None = None

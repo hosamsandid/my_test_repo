@@ -119,13 +119,24 @@ class RunRegistry {
   // Declare a run. `run` = { kind: 'chat', roomId, eventId, sender, author? }
   // (sender + the `io.aee.author` stamp already resolved from the homeserver by
   // the caller) | { kind: 'autonomous' }.
+  // `live` (#2952) = the runner's own list of run ids it still has in flight.
+  // Any other declaration of this agent is one whose end never arrived, so it is
+  // dropped here rather than making every plugin call `ambiguous-run` until the
+  // TTL. A run that is really still in flight is in `live` and kept, so two live
+  // runs are still refused. Without `live` (an older runner) nothing is dropped.
   // → { ok: true, runId } | { ok: false, reason }
-  begin(agentId, key, run) {
+  begin(agentId, key, run, { live } = {}) {
     const auth = this._authorize(agentId, key);
     if (!auth.ok) return auth;
     const kind = run && run.kind;
     if (kind !== 'chat' && kind !== 'autonomous') return { ok: false, reason: 'bad-kind' };
     if (kind === 'chat' && !(run.sender && run.roomId && run.eventId)) return { ok: false, reason: 'bad-chat-run' };
+    if (Array.isArray(live)) {
+      const keep = new Set(live.map(String));
+      for (const runId of auth.state.runs.keys()) {
+        if (!keep.has(runId)) auth.state.runs.delete(runId);
+      }
+    }
     const runId = this.randomBytes(12).toString('hex');
     auth.state.runs.set(runId, {
       runId,

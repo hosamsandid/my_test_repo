@@ -78,7 +78,7 @@ test("the sweep piggybacks on the flow's own wipLimit — no wipLimit, no dispat
 test("the sweep requires an opt-in AND at least one pooled role — never fires on a flow that never configured either", () => {
   const src = fn("flowSupervisorSweepTeam");
   assert.match(src, /autoDispatch\.enabled !== true/);
-  assert.match(src, /_teamPooledRoles\(teamId\)/);
+  assert.match(src, /_freshTeamPooledRoles\(teamId, fleet\)/); // #569: re-read per role, never the snapshot
   assert.match(src, /pooledRoleIds\.size === 0\) return null;/);
 });
 
@@ -154,6 +154,6 @@ test("mutation-proved: a sweep that never persists the budget would fail the che
 
 test("a per-team failure in the tick loop is caught and logged, never escapes to stop the other teams", () => {
   const src = arrowConst("runFlowSupervisorTick");
-  assert.match(src, /await flowSupervisorSweepTeam\(teamId\);/);
+  assert.match(src, /await flowSupervisorSweepTeam\(teamId, \{ fleet \}\);/);
   assert.match(src, /console\.warn\(`\[FlowSupervisor\] \$\{teamId\}: sweep failed/);
 });

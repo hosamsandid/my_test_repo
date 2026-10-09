@@ -61,7 +61,7 @@ test('Fix C: issue-numbered branch alone still links (no closing keyword needed)
 
 test('Fix C wiring: admissionSweepTeam computes `closes` via parseCloses, not the loose linker', () => {
   const src = fs.readFileSync(path.join(__dirname, 'orchestrator.js'), 'utf8');
-  const start = src.indexOf('async function admissionSweepTeam(teamId)');
+  const start = src.indexOf('async function admissionSweepTeam(teamId, ');
   const end = src.indexOf('const reconciled = admissionControl.reconcileInFlight');
   assert.ok(start !== -1 && end !== -1 && start < end, 'admissionSweepTeam body not found');
   const body = src.slice(start, end);

@@ -36,4 +36,32 @@ function readMaintenanceState() {
   }
 }
 
-module.exports = { readMaintenanceState, defaultState, STATE_FILE };
+// A short-TTL memo of `read()` for the hot agent pull (#569): every agent
+// asks GET /internal/maintenance-mode several times a minute, each a read of
+// the shared state file. The only writer is the admin console, in another
+// process (possibly another pod), so this can't be invalidated by a
+// watch — a toggle reaches the agents at most `ttlMs` later, well inside the
+// agents' own poll interval. Every other caller keeps the uncached read.
+function createMaintenanceStateCache({ read = readMaintenanceState, ttlMs = 2000, now = Date.now } = {}) {
+  let value = null;
+  let readAt = 0;
+  return function readCached() {
+    const t = now();
+    if (value === null || !(ttlMs > 0) || t - readAt >= ttlMs || t < readAt) {
+      value = read();
+      readAt = t;
+    }
+    return value;
+  };
+}
+
+const CACHE_TTL_MS = (() => {
+  const n = Number.parseInt(process.env.AEE_MAINTENANCE_CACHE_MS, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 2000;
+})();
+
+const readMaintenanceStateCached = createMaintenanceStateCache({ ttlMs: CACHE_TTL_MS });
+
+module.exports = {
+  readMaintenanceState, readMaintenanceStateCached, createMaintenanceStateCache, defaultState, STATE_FILE,
+};

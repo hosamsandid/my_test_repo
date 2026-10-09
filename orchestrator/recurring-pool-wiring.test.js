@@ -72,7 +72,7 @@ test("mutation-proved: a tick with the maintenance check removed would fail the 
 
 test("a per-team failure in the tick loop is caught and logged, never escapes to stop the other teams", () => {
   const src = arrowConst("runRecurringPoolTick");
-  assert.match(src, /await recurringPoolSweepTeam\(teamId\);/);
+  assert.match(src, /await recurringPoolSweepTeam\(teamId, \{ fleet \}\);/);
   assert.match(src, /console\.warn\(`\[AgentPool\] \$\{teamId\}: recurring-pool sweep failed/);
 });
 

@@ -95,7 +95,8 @@ test('the tick follows the established pattern: overlap guard + unref + interval
   assert.match(src, /if \(provisioningReapBusy\) return;/); // edge case 2: no double-act across ticks
   assert.match(src, /provisioningReapBusy = true;/);
   assert.match(src, /provisioningReapBusy = false;/);
-  assert.match(src, /await provisioningReapSweep\(\)/);
+  assert.match(src, /fleet = buildTickFleet\("provisioning-reap"\);/); // #569
+  assert.match(src, /await provisioningReapSweep\(Date\.now\(\), \{ fleet \}\)/);
   // The timer is registered and unref'd like every sibling tick.
   assert.match(SRC, /const provisioningReapTimer = setInterval\(runProvisioningReapTick, PROVISIONING_REAP_TICK_INTERVAL_MS\);/);
   assert.match(SRC, /if \(typeof provisioningReapTimer\.unref === "function"\) provisioningReapTimer\.unref\(\);/);

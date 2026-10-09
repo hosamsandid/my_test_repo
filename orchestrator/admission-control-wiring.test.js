@@ -73,7 +73,7 @@ const CHECKS = {
   // Pushing it before the try, or in a finally, would let a GitHub outage
   // release every ticket and open the lane.
   'sweep-fails-closed-on-fetch-error'(src) {
-    const body = slice(src, 'async function admissionSweepTeam(teamId)', 'const reconciled = admissionControl.reconcileInFlight', 4000);
+    const body = slice(src, 'async function admissionSweepTeam(teamId, { fleet = null } = {})', 'const reconciled = admissionControl.reconcileInFlight', 4000);
     const cont = body.indexOf('errors.push(`${repo}: ${err.message}`);');
     const push = body.indexOf('repos.push(repo);');
     return cont !== -1 && push !== -1 && cont < push && /continue;\n    \}\n    repos\.push\(repo\);/.test(body);
@@ -93,7 +93,7 @@ const CHECKS = {
   'idle-lane-short-circuits-before-any-request'(src) {
     // The slice ends at the first line that does real work, so BOTH early
     // returns must be inside it — that is the whole claim.
-    const body = slice(src, 'async function admissionSweepTeam(teamId)', 'const { members, envIds } = _flowTeamMembers(teamId);', 1300);
+    const body = slice(src, 'async function admissionSweepTeam(teamId, { fleet = null } = {})', 'const { members, envIds } = _flowTeamMembers(teamId, fleet);', 1300);
     return /limitInForce\(teamCfg && teamCfg\.wipLimit\)/.test(body)
       && /if \(wipLimit === null\) return null;/.test(body)
       && /if \(!admissionControl\.laneNeedsRefresh\(lane\)\) return null;/.test(body);
@@ -111,7 +111,7 @@ const CHECKS = {
   // One team's failure must not stop the others, and must not escape the timer.
   'tick-isolates-per-team-failures'(src) {
     const body = slice(src, 'const runAdmissionTick = async () => {', 'const admissionTimer = setInterval', 1600);
-    return /await admissionSweepTeam\(teamId\);/.test(body)
+    return /await admissionSweepTeam\(teamId, \{ fleet \}\);/.test(body)
       && /\} catch \(err\) \{/.test(body)
       && /admissionBusy = false;/.test(body);
   },
@@ -206,7 +206,7 @@ const MUTATIONS = [
     '    if (admissionBusy) return; // overlap guard — a slow sweep must not stack\n    admissionBusy = true;',
     '    if (admissionBusy) return;\n    const maint = readMaintenanceState();\n    admissionBusy = true;'],
   ['tick-isolates-per-team-failures',
-    '          await admissionSweepTeam(teamId);', '          void teamId;'],
+    '          await admissionSweepTeam(teamId, { fleet });', '          void teamId;'],
   ['tick-timer-registered-and-unrefd',
     'if (typeof admissionTimer.unref === "function") admissionTimer.unref();', ''],
   ['lane-path-uses-control-or-pool',

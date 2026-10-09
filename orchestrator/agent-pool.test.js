@@ -515,3 +515,44 @@ test('#2789 planPoolDispatch: AC4 — waiting instances do not count toward maxI
   const reuse = pool.planPoolDispatch({ teamId: 't', roleId: 'developer', pool: P, itemKey: 2, existingInstanceIds: ids });
   assert.equal(reuse.instanceId, 't-developer-i2');
 });
+
+test('#569 sameWaitingMap: key order aside, equal maps are equal; any record change is not', () => {
+  const rec = { spawnedAt: 's', waiting: true, prs: [3], unknown: false, waitingSince: 'w', waitedMs: 0, checkedAt: 'c' };
+  assert.equal(pool.sameWaitingMap({}, {}), true);
+  assert.equal(pool.sameWaitingMap(null, {}), true);
+  assert.equal(pool.sameWaitingMap({ a: rec, b: { ...rec } }, { b: { ...rec }, a: { ...rec } }), true);
+  const reordered = Object.fromEntries(Object.entries(rec).reverse());
+  assert.equal(pool.sameWaitingMap({ a: rec }, { a: reordered }), true);
+  assert.equal(pool.sameWaitingMap({ a: rec }, { a: { ...rec, checkedAt: 'c2' } }), false);
+  assert.equal(pool.sameWaitingMap({ a: rec }, { a: { ...rec, prs: [3, 4] } }), false);
+  assert.equal(pool.sameWaitingMap({ a: rec }, {}), false);
+});
+
+test('#569 parsePoolWaitingFile: a clean file is intact; torn, non-map or lossy content is not; no file is', () => {
+  const rec = { spawnedAt: 's', waiting: true, prs: [3], unknown: false, waitingSince: 'w', waitedMs: 0, checkedAt: 'c' };
+  assert.deepEqual(pool.parsePoolWaitingFile(null), { waiting: {}, intact: true });
+  assert.deepEqual(pool.parsePoolWaitingFile('{}'), { waiting: {}, intact: true });
+  const clean = pool.parsePoolWaitingFile(JSON.stringify({ a: rec }, null, 2));
+  assert.equal(clean.intact, true);
+  assert.deepEqual(clean.waiting, { a: rec });
+  // Torn mid-write / garbage — normalizes to {} but must not read as intact.
+  assert.deepEqual(pool.parsePoolWaitingFile('{"a": {"spawnedAt": "s", "wai'), { waiting: {}, intact: false });
+  assert.deepEqual(pool.parsePoolWaitingFile(''), { waiting: {}, intact: false });
+  assert.equal(pool.parsePoolWaitingFile('[]').intact, false);
+  assert.equal(pool.parsePoolWaitingFile('null').intact, false);
+  // A record the normalizer drops or reshapes leaves the raw file unclean.
+  assert.equal(pool.parsePoolWaitingFile(JSON.stringify({ a: 'junk' })).intact, false);
+  assert.equal(pool.parsePoolWaitingFile(JSON.stringify({ a: { ...rec, prs: [3, -1] } })).intact, false);
+});
+
+test('#569 poolWaitingNeedsWrite: skip only an unchanged map over a clean file', () => {
+  const rec = { spawnedAt: 's', waiting: false, prs: [], unknown: false, waitingSince: null, waitedMs: 0, checkedAt: 'c' };
+  assert.equal(pool.poolWaitingNeedsWrite({ intact: true, prev: {}, next: {} }), false);
+  assert.equal(pool.poolWaitingNeedsWrite({ intact: false, prev: {}, next: {} }), true, 'a torn file is rewritten even with nothing to say');
+  assert.equal(pool.poolWaitingNeedsWrite({ prev: {}, next: {} }), true, 'unknown cleanliness is not clean');
+  assert.equal(pool.poolWaitingNeedsWrite({ intact: true, prev: {}, next: { a: rec } }), true);
+  assert.equal(pool.poolWaitingNeedsWrite({ intact: true, prev: { a: rec }, next: { a: { ...rec } } }), false);
+  // End to end: the torn file the review found reads as {} yet still rewrites.
+  const torn = pool.parsePoolWaitingFile('{"a":');
+  assert.equal(pool.poolWaitingNeedsWrite({ intact: torn.intact, prev: torn.waiting, next: {} }), true);
+});

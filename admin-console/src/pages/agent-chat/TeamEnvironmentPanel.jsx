@@ -9,7 +9,7 @@ import RepoPropagationDialog from '../../components/RepoPropagationDialog';
 import McpServerRows from '../../components/McpServerRows';
 import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning } from '../toolchain-select-view.js';
 import { mcpChangeNotice, mcpApplySummary } from '../working-env-mcp-view.js';
-import { promptRebuildSummary } from '../working-env-context-view.js';
+import { promptRebuildSummary, modelWarningsSummary } from '../working-env-context-view.js';
 import { classifyRepositoryChanges, hasRepositoryChanges } from '../working-env-repo-diff.js';
 import { describeWorkingEnvSubmitState } from '../working-env-submit-state.js';
 import { providerOptionLabel } from '../provider-option-view.js';
@@ -17,6 +17,8 @@ import { personalProviderNoticeText } from '../provider-health-view.js';
 import { initialTeamEnvForm, teamEnvSubmitBody } from './team-environment-view.js';
 import { describeCredentialRef } from '../credential-ref-legibility.js';
 import { describeEffectiveCredential } from '../effective-identity-view.js';
+import { Link } from 'react-router';
+import { describeEffectiveSigning, signingRecommendation } from '../commit-signing-view.js';
 import { recheckReducer, initialRecheckState, remainingBusyMs, describeRecheck } from './github-health-recheck.js';
 
 /**
@@ -188,6 +190,8 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
   const [mcpReport, setMcpReport] = useState(null);
   // #2688: what the save did to existing members' CLAUDE.md (promptRebuildSummary), or null.
   const [contextReport, setContextReport] = useState(null);
+  // #2813 AC9: members' model pins the new provider does not serve (modelWarningsSummary), or null.
+  const [modelReport, setModelReport] = useState(null);
   // #2323: set when a save is blocked for a repo-backed env with no GitHub token;
   // holds the server message and drives the reference-only opt-out prompt.
   const [tokenWarn, setTokenWarn] = useState(null);
@@ -282,7 +286,7 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
     // reference-only opt-out below — strict-check it so an `onClick={() => save()}`
     // (event) or any truthy leak can never silently acknowledge.
     const ack = acknowledgeNoToken === true;
-    setSaving(true); setSaveError(null); setNotice(''); setMcpReport(null); setContextReport(null);
+    setSaving(true); setSaveError(null); setNotice(''); setMcpReport(null); setContextReport(null); setModelReport(null);
     if (!ack) setTokenWarn(null);
     try {
       const body = teamEnvSubmitBody(baseline, form);
@@ -294,6 +298,7 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
       setNotice('Saved.');
       setMcpReport(mcpApplySummary(saved?.mcpApply));
       setContextReport(promptRebuildSummary(saved?.promptRebuild));
+      setModelReport(modelWarningsSummary(saved?.modelWarnings));
       const agents = Array.isArray(saved?.agents) ? saved.agents : (Array.isArray(baseline?.agents) ? baseline.agents : []);
       const diff = classifyRepositoryChanges(saved?.previousRepositories, saved?.repositories);
       if (agents.length > 0 && hasRepositoryChanges(diff)) {
@@ -345,7 +350,7 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
       {notice && !saveError && (
         <div style={{ ...helpTextStyle, color: 'var(--eb-status-success)' }}>{notice}</div>
       )}
-      {!saveError && [mcpReport, contextReport].filter(Boolean).map((report, idx) => (
+      {!saveError && [mcpReport, contextReport, modelReport].filter(Boolean).map((report, idx) => (
         <div key={idx} role={report.tone === 'warn' ? 'alert' : undefined} style={report.tone === 'warn' ? warnBoxStyle : helpTextStyle}>
           {report.tone === 'warn' && (
             <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1, color: 'var(--eb-status-warning)' }} />
@@ -892,10 +897,33 @@ function EffectiveGithubIdentity({ agentId }) {
           )}
         </div>
       ))}
+      {data.signing && <EffectiveSigningRow view={data.signing} />}
       <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>
         Used for automatic runs and the agents' own <code>gh</code>/<code>git</code> calls; a change takes effect at the
         agents' next start. An interactive push or pull request uses the chatting person's own personal credential.
       </div>
+    </div>
+  );
+}
+
+// #2938: which SSH key signs this team's commits (personal → team → global), and
+// a non-blocking recommendation when none does — commits then stay unsigned.
+function EffectiveSigningRow({ view }) {
+  const d = describeEffectiveSigning(view);
+  const hint = view.source === 'none' ? signingRecommendation([], { context: 'team' }) : null;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-0-5)' }}>
+      <div>
+        <span style={{ color: 'var(--eb-text-muted)' }}>Commit signing: </span>
+        <span style={{ color: 'var(--eb-text-primary)' }}>{d.headline}</span>
+      </div>
+      <div style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' }}>{d.detail}</div>
+      {hint && (
+        <div style={warnBoxStyle}>
+          <Info size={12} aria-hidden="true" style={{ flexShrink: 0, marginTop: '2px' }} />
+          <span>{hint.text} <Link to={hint.href}>Set up a signing key</Link></span>
+        </div>
+      )}
     </div>
   );
 }

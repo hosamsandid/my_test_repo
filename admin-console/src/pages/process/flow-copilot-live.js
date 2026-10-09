@@ -11,7 +11,7 @@
 // run, with the HTTP transport injected.
 //
 //   diffLiveProposal(live, proposed)      grouped, named change items (AC3/AC14)
-//   carryUnauthored(live, proposed)       keep what the copilot cannot author (autoDispatch, hillClimb, pool)
+//   carryUnauthored(live, proposed)       keep what the copilot cannot author (autoDispatch, hillClimb, pool, portable role settings)
 //   planLiveApply(diff, ctx)              ordered write steps + "not applied" (AC6)
 //   runLiveApply(plan, call)              sequential, continues past failures (AC7)
 //   summarizeLiveApply(diff, result)      what the result message says
@@ -113,6 +113,10 @@ function fieldValue(role, f) {
 // trigger (labelFilter, claim, transport, prompt, …) is never cleared. Such a
 // trigger only counts as changed when the merged result differs, and the
 // dropped keys are reported as not applied (`dropped`) instead of claimed.
+// Exception: a key the route clears on an explicit `null` (CLEARABLE) is sent
+// as null — a dropped readiness gate is the Copilot switching it off (#2915),
+// the same write the trigger dialog makes.
+const CLEARABLE_TRIGGER_KEYS = ['readinessGate'];
 function triggerChanges(before, after) {
   const b = new Map(authoredTriggers(before).map(t => [t.id, t]));
   const a = new Map(authoredTriggers(after).map(t => [t.id, t]));
@@ -120,8 +124,10 @@ function triggerChanges(before, after) {
   for (const [id, t] of a) {
     if (!b.has(id)) { out.added.push(t); continue; }
     const prev = b.get(id);
-    if (!same(prev, { ...prev, ...t })) out.changed.push(t);
-    const keys = Object.keys(prev).filter(k => prev[k] !== undefined && t[k] === undefined);
+    const cleared = CLEARABLE_TRIGGER_KEYS.filter(k => prev[k] !== undefined && t[k] === undefined);
+    const body = cleared.length ? { ...t, ...Object.fromEntries(cleared.map(k => [k, null])) } : t;
+    if (!same(prev, { ...prev, ...body })) out.changed.push(body);
+    const keys = Object.keys(prev).filter(k => prev[k] !== undefined && t[k] === undefined && !cleared.includes(k));
     if (keys.length) out.dropped.push({ id, keys });
   }
   for (const [id, t] of b) if (!a.has(id)) out.removed.push(t);
@@ -133,8 +139,11 @@ function triggerChanges(before, after) {
 // there means "not expressed", never "removed". Carrying the live value over
 // keeps a copilot turn from switching off the Flow Supervisor, flagging the
 // hill-climb collector, or un-pooling a role.
-const UNAUTHORED_TEAM_KEYS = ['autoDispatch', 'hillClimb'];
-const UNAUTHORED_ROLE_KEYS = ['pool'];
+// #2813: the portable role settings (memory, model, prompt mode) and the
+// team prompt are not copilot-authored either — a proposal that omits them
+// must not read as "clear them".
+const UNAUTHORED_TEAM_KEYS = ['autoDispatch', 'hillClimb', 'teamPrompt'];
+const UNAUTHORED_ROLE_KEYS = ['pool', 'memoryLimit', 'model', 'promptMode'];
 
 export function carryUnauthored(live, proposed) {
   const L = live || {};

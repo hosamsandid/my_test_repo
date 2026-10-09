@@ -583,8 +583,10 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   // Deep-link to a right-rail tab (#2537): `?rail=triggers` opens the rail on
   // that tab — the GitHub Event Log's repository status links "no trigger"
   // rows here. Same cold-nav-safe wait + read-once-then-strip as `?session=`.
+  // `&trigger=<id>` (#2914) also opens that trigger's edit panel.
   const consumedRailRef = useRef(null);
   const requestedRail = searchParams.get('rail');
+  const requestedTrigger = searchParams.get('trigger');
   useEffect(() => {
     if (!requestedRail || loading || !agents) return;
     if (!agents.find(a => a.id === agentId)) return;
@@ -592,12 +594,13 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
     consumedRailRef.current = `${agentId}:${requestedRail}`;
     if (requestedRail === 'triggers') {
       setLogOpen(true);
-      setRailTabRequest({ tab: 'triggers', ts: Date.now() });
+      setRailTabRequest({ tab: 'triggers', ...(requestedTrigger ? { triggerId: requestedTrigger } : {}), ts: Date.now() });
     }
     const next = new URLSearchParams(searchParams);
     next.delete('rail');
+    next.delete('trigger');
     setSearchParams(next, { replace: true });
-  }, [requestedRail, loading, agents, agentId, searchParams, setSearchParams]);
+  }, [requestedRail, requestedTrigger, loading, agents, agentId, searchParams, setSearchParams]);
 
   // Deep-link to one chat message (#2310): a `?msg=<event_id>` query param
   // means "scroll the transcript to this message and briefly highlight it".

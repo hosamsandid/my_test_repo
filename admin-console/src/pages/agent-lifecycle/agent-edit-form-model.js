@@ -106,6 +106,9 @@ export function buildInitialForm(agent) {
     // Only a team-member carries `pool`; a blank/disabled draft off-role is
     // harmless (never submitted — see `buildEditSubmit`).
     poolDraft: scalingDraftFromPool(isMember ? a.pool : null),
+    // Role memory requirement (#2813) — empty = platform default. A team
+    // holder runs no container of its own, so it never carries one.
+    memoryLimit: a.role === 'team' ? '' : (a.memoryLimit || ''),
   };
 }
 
@@ -134,13 +137,19 @@ export function buildEditSubmit(agent, form, opts = {}) {
   // the form and #1962 removed it from the config, so sending it would be this
   // surface re-introducing a key nothing reads.
   const submit = {
-    displayName: form.displayName,
+    displayName: typeof form.displayName === 'string' ? form.displayName.trim() : form.displayName,
   };
   if (hasOwnSkills(a.role)) {
     submit.skills = form.skills;
   }
   if (a.role === 'team') {
     submit.systemPromptTemplate = form.systemPromptTemplate;
+  } else {
+    // Memory requirement (#2813): sent only when edited, so an unrelated save
+    // never re-validates (or touches) a stored value; null clears it back to
+    // the platform default.
+    const mem = String(form.memoryLimit || '').trim();
+    if (mem !== String(a.memoryLimit || '').trim()) submit.memoryLimit = mem || null;
   }
   if (a.role === 'team-member') {
     // System-prompt mode (#1511). `promptMode` selects one of the three modes;
@@ -168,6 +177,18 @@ export function buildEditSubmit(agent, form, opts = {}) {
 }
 
 /**
+ * Why the Display Name blocks the Save, or `null` when it doesn't (#2679).
+ * The field is required, and a whitespace-only name would leave the agent
+ * nameless — the API refuses it too, this just says so before the round trip.
+ *
+ * @returns {?string} a reason, or `null` when the name may be saved.
+ */
+export function displayNameError(form) {
+  const name = form?.displayName;
+  return typeof name === 'string' && name.trim() ? null : 'Display name is required.';
+}
+
+/**
  * Whether the form's Scaling draft may be saved right now, and why not if
  * not — the same gate `ScalingSection`'s own button used to enforce, now
  * checked by the host before it calls `buildEditSubmit` (#2295 AC11: an
@@ -192,7 +213,11 @@ function samePoolDraft(a, b) {
     && a.workspace === b.workspace
     && a.idleText === b.idleText
     && a.hardText === b.hardText
-    && a.retainText === b.retainText;
+    && a.retainText === b.retainText
+    && a.itemsText === b.itemsText
+    && a.outputDirText === b.outputDirText
+    && a.inputDirText === b.inputDirText
+    && a.baseBranch === b.baseBranch;
 }
 
 /**
@@ -227,5 +252,6 @@ export function isFormDirty(agent, form) {
     // pre-fill left behind by flipping back to Inherit is not a change.
     || (!form.inheritMcp && !sameMcpRows(base.mcpRows, form.mcpRows))
     || !samePoolDraft(base.poolDraft, form.poolDraft)
+    || String(base.memoryLimit || '').trim() !== String(form.memoryLimit || '').trim()
   );
 }

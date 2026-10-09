@@ -5,6 +5,7 @@
     "test": "node --test"
   },
   "dependencies": {
+    "compression": "^1.8.2",
     "cors": "^2.8.5",
     "express": "^5.2.1",
     "express-rate-limit": "^7.5.1",

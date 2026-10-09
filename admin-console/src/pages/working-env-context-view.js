@@ -36,4 +36,14 @@ export function promptRebuildSummary(promptRebuild) {
   return { tone: failed.length ? 'warn' : 'ok', lines };
 }
 
-export default { promptRebuildSummary };
+/**
+ * #2813 AC9: model pins dropped because the environment's new model provider
+ * does not serve them (`modelWarnings` on the PUT response), or null.
+ * @returns {{tone: 'warn', lines: string[]} | null}
+ */
+export function modelWarningsSummary(modelWarnings) {
+  const lines = (Array.isArray(modelWarnings) ? modelWarnings : []).filter(w => typeof w === 'string' && w);
+  return lines.length ? { tone: 'warn', lines } : null;
+}
+
+export default { promptRebuildSummary, modelWarningsSummary };

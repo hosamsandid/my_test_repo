@@ -1279,6 +1279,126 @@ def _acting_sender_env_value(run_context: dict | None) -> str:
     return requested_by["matrixUserId"] if requested_by else ""
 
 
+# ---- SSH commit signing (#2938) ----
+#
+# Asked once per invocation: which stored key (personal → team → global) signs
+# this run's commits. The answer carries only the PUBLIC key and the commit
+# identity; git is pointed at `aee-ssh-sign`, which sends each payload to the
+# orchestrator to sign, so the private key never enters this container. The
+# config rides in GIT_CONFIG_* env, so it covers every git commit-creating
+# command (commit/amend/cherry-pick/rebase/merge, the knowledge CLI) without
+# touching any repo's .git/config.
+SSH_SIGN_PROGRAM = "/usr/local/bin/aee-ssh-sign"
+
+
+def _signing_config_pairs(signing: dict | None) -> tuple[list, dict]:
+    """Pure: the git config pairs + extra env vars for a signing-config answer.
+    No signing → ([], {}) — commits stay unsigned exactly as before. A configured
+    but unusable key still turns signing ON with an error marker, so the signer
+    fails every commit with a clear message instead of committing unsigned."""
+    if not isinstance(signing, dict):
+        return [], {}
+    label = str(signing.get("label") or "configured SSH signing key")
+    error = signing.get("error")
+    pub = str(signing.get("publicKey") or "").strip()
+    name = str(signing.get("name") or "").strip()
+    email = str(signing.get("email") or "").strip()
+    if not error and not (pub and name and email):
+        return [], {}
+    pairs = [
+        ("gpg.format", "ssh"),
+        ("user.signingkey", "key::" + (pub or "ssh-ed25519 unavailable")),
+        ("commit.gpgsign", "true"),
+        ("gpg.ssh.program", SSH_SIGN_PROGRAM),
+    ]
+    # committer.* (never user.*): GitHub verifies against the COMMITTER email;
+    # the author — `<id>@agents.local`, the loop-protection marker — is kept.
+    if name and email:
+        pairs += [("committer.name", name), ("committer.email", email)]
+    extra = {"AEE_SIGNING_LABEL": label}
+    if error:
+        extra["AEE_SIGNING_ERROR"] = str(error)
+    return pairs, extra
+
+
+def _with_git_config_env(env: dict, pairs: list) -> dict:
+    """Append config pairs to env's GIT_CONFIG_COUNT/KEY_n/VALUE_n list (mirror
+    of orchestrator/commit-signing.js withGitConfigEnv)."""
+    if not pairs:
+        return env
+    try:
+        n = max(0, int(env.get("GIT_CONFIG_COUNT") or "0"))
+    except ValueError:
+        n = 0
+    for key, value in pairs:
+        env[f"GIT_CONFIG_KEY_{n}"] = key
+        env[f"GIT_CONFIG_VALUE_{n}"] = value
+        n += 1
+    env["GIT_CONFIG_COUNT"] = str(n)
+    return env
+
+
+# Set on a run whose signing config could not be read: signing is switched ON
+# with this error, so every commit fails loudly instead of silently going out
+# unsigned while a key may well be configured (AC9).
+SIGNING_CONFIG_UNREADABLE = ("could not read this run's commit-signing config from the orchestrator "
+                             "({detail}) — start a new run")
+
+
+def _fetch_signing_config(acting_sender: str, timeout: float = 10) -> dict | None:
+    """POST /internal/agents/<id>/git/signing-config → the `signing` object or
+    None (no key → unsigned, as before). Fails CLOSED: an orchestrator that
+    errors, times out, cannot be reached or answers garbage yields an `error`
+    signing object, so the run's commits fail with a clear message rather than
+    being created unsigned. Only a 404 (an older orchestrator without the route)
+    and a run outside an agent container (no AGENT_ID) stay unsigned."""
+    agent_id = os.environ.get("AGENT_ID", "")
+    if not agent_id:
+        return None
+    base = os.environ.get("ORCHESTRATOR_INTERNAL_URL", "http://localhost:4002").rstrip("/")
+    url = f"{base}/internal/agents/{urllib.parse.quote(agent_id, safe='')}/git/signing-config"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps({"actingSender": acting_sender or ""}).encode(),
+        method="POST",
+        headers=_internal_headers({"Content-Type": "application/json"}),
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode() or "{}")
+        if not isinstance(data, dict):
+            raise ValueError("not a JSON object")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print("[Runner] commit signing: the orchestrator has no signing-config route — commits stay unsigned",
+                  file=sys.stderr)
+            return None
+        detail = f"HTTP {e.code}"
+        print(f"[Runner] commit signing: could not read the signing config ({detail}) — commits will fail",
+              file=sys.stderr)
+        return {"label": "run's SSH signing key", "error": SIGNING_CONFIG_UNREADABLE.format(detail=detail)}
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        detail = str(getattr(e, "reason", None) or e) or type(e).__name__
+        print(f"[Runner] commit signing: could not read the signing config ({detail}) — commits will fail",
+              file=sys.stderr)
+        return {"label": "run's SSH signing key", "error": SIGNING_CONFIG_UNREADABLE.format(detail=detail)}
+    signing = data.get("signing")
+    return signing if isinstance(signing, dict) else None
+
+
+def _apply_commit_signing(env: dict) -> dict:
+    """Add this run's signing config to the Claude subprocess env (in place)."""
+    signing = _fetch_signing_config(env.get("AEE_ACTING_SENDER", ""))
+    pairs, extra = _signing_config_pairs(signing)
+    if not pairs:
+        return env
+    _with_git_config_env(env, pairs)
+    env.update(extra)
+    print(f"[Runner] commit signing: {extra.get('AEE_SIGNING_LABEL')}"
+          + (" (UNUSABLE — commits will fail)" if "AEE_SIGNING_ERROR" in extra else ""), file=sys.stderr)
+    return env
+
+
 def build_usage_record(ctx: dict) -> dict:
     """Pure assembler for a §4.1 token-usage record (#654). Takes a run-context
     dict (identity + trigger/github/git provenance + the captured `resultEvent`
@@ -3761,6 +3881,9 @@ def _call_claude_once_inner(prompt: str, room_id: str, correlation_id: str,
     # anything that isn't a live chat turn (cron/github-event/loop/DM-less run),
     # which is exactly what keeps autonomous runs unaffected (the ticket's AC).
     env["AEE_ACTING_SENDER"] = _acting_sender_env_value(run_context)
+    # SSH commit signing (#2938): resolved per run, keyed on the same acting
+    # sender, so a key added/replaced/removed applies from the next run on.
+    _apply_commit_signing(env)
     if resume_id:
         env["KNOWLEDGE_SESSION_ID"] = resume_id
     # `aee-ask` sentinel for THIS invocation (#2523): the CLI writes the queued

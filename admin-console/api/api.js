@@ -10,6 +10,7 @@ const http = require('http');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { runArchiveTool, streamArchiveTool, describeArchiveFailure } = require('./archive');
+const { normalizeDisplayName } = require('./agent-display-name');
 const {
   WORKSPACE_ZIP_MAX_BYTES,
   WORKSPACE_ZIP_MAX_FILES,
@@ -20,6 +21,8 @@ const {
 const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
+const requestTiming = require('./request-timing');
+const { createCompressionMiddleware, setStaticCacheHeaders, INDEX_CACHE_CONTROL } = require('./http-delivery');
 const { chatUploadBaseName, uniqueFileName } = require('./chat-upload-name');
 const internalAuthClient = require('./internal-auth-client');
 const githubEventLog = require('./github-event-log');
@@ -38,7 +41,17 @@ const {
 } = require('./html-preview');
 const { discoverBoundAgents, hiddenBlastRadius, projectRespawnOutcome, respawnWithConcurrency } = require('./respawn-agents');
 const { githubApiBase } = require('./github-api-base');
-const { createTtlCache } = require('./ttl-cache');
+const { createTtlCache, ttlMsFromEnv } = require('./ttl-cache');
+const { createSwrCache } = require('./swr-cache');
+const { createProcessesSource } = require('./agent-processes-view');
+const { indexAgentsByEnvironment, environmentAgentRows, firstAgentIdUsingEnvironment } = require('./environment-agents');
+const { invalidateOnSuccessfulWrite } = require('./invalidate-on-write');
+const knowledgeFleetLib = require('./knowledge-fleet');
+const { listStoreFiles, fileSignature, readStoreFiles, createFingerprintCache } = require('./knowledge-entries-cache');
+const {
+  knowledgeGraphCacheKey, mutationInvalidatesKnowledgeGraph, knowledgeGraphTtlMsFromEnv, knowledgeAugmentTimeoutMsFromEnv,
+  knowledgeGraphKeyStaleForEvent, claimKnowledgeEventOffset, knowledgeEventMarkForFileSize,
+} = require('./knowledge-graph-cache');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, isTeamAdminOfAny, canManageAgent,
         visibleEnvironment, canManageEnvironment, canCreateEnvironment, canRetierEnvironment,
         visibleUser, describeAuthz,
@@ -86,6 +99,7 @@ const { listPersonalResources } = require('./personal-resource-view');
 // client override behind the flag ("mark a personal credential as service", #2360).
 const { resolveStampedIdentity } = require('./credential-identity');
 const { credentialName, isValidNewCredentialId, sshPrivateKeyError } = require('./credential-input');
+const { parseSigningInput, applySigning, publicKeyFromBlob } = require('./ssh-signing');
 const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
         WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
 const { createChatWriteGates } = require('./chat-write-access');
@@ -124,6 +138,7 @@ const {
   resolveContextMounts,
 } = require('./context-mount');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
+const { parseItemsQuery, selectItemsPage, graphWithoutItems, lessonTexts } = require('./knowledge-items-page');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { applyPushedBy } = require('./push-producer-filter');
@@ -132,7 +147,7 @@ const { missingWakeLabels, wakeLabelRepos, missingWakeLabelLints, missingWakeLab
 const { normalizeBranchFilter } = require('./branch-filter');
 const { normalizeCommentFilter } = require('./comment-filter');
 const { newTriggerIdError, annotateTriggerList, stripTriggerAnnotations, resolveTriggerIndex } = require('./trigger-validate');
-const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext, normalizeReadinessGate, cleanReadiness, readinessError } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext, normalizeReadinessGate, cleanReadiness, readinessError, resolveBundleModels, staleModelPin, promptModeWarnings, portableTeamPrompt, substituteVars, applyChannelTriggerReadiness } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { rederiveTeamDataFlow } = require('./derived-data-flow');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
@@ -147,6 +162,7 @@ const { buildCredentialDescriptor } = require('./credential-descriptor');
 const draftAccess = require('./draft-access');
 // Team-member system-prompt modes (#1511): inherit / additional / exclusive.
 const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require('./prompt-modes');
+const { memoryCeiling, memoryLimitError, normalizeMemoryLimit, resolveEffectiveMemory, DEFAULT_PLATFORM_MEMORY } = require('./memory-limit');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
 const { normalizeTemplatePorts } = require('./catalog-ports');
@@ -187,8 +203,10 @@ const { reposFromEnv, repoVars } = require('./team-repo-resolve');
 const { planCreatorMembership, creatorEnvironmentOwnership } = require('./creator-membership');
 const { validateTeamProviderAvailability } = require('./team-provider-check');
 const { pruneTeamFromProviders } = require('./provider-team-prune');
-const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
-const { admitsToChatList } = require('./matrix-agent-list');
+const { buildAgentStatus } = require('./agent-statuses');
+const {
+  buildRosterEntries, projectRoster, mutationInvalidatesRoster, rosterTtlMsFromEnv,
+} = require('./matrix-agent-roster');
 const { parseMemberMaterialize } = require('./member-materialize');
 const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentBaseId } = require('./quickstart-llm');
 const { validatePluginManifest } = require('./plugin-manifest');
@@ -345,13 +363,28 @@ const app = express();
 // Trust one hop (the GKE/IAP load balancer) so express-rate-limit can read
 // the real client IP from X-Forwarded-For without throwing a ValidationError.
 app.set('trust proxy', 1);
+// Request timing (#555). The FIRST /api middleware, so it observes every /api
+// request — CORS preflights, body-parse time, the global limiter's 429s and the
+// auth gate's denials included. It only attaches finish/close listeners and
+// decides nothing. Logs a request over AEE_SLOW_REQUEST_MS at once (capped per
+// route); the `[perf]` summary (top routes + event-loop delay) is printed once a
+// minute by the reporter started in app.listen. AEE_PERF_LOG=0 disables both.
+const perfTiming = requestTiming.createPerfTiming({
+  env: process.env, log: (line) => console.log(line),
+});
+if (perfTiming.enabled) app.use('/api', perfTiming.middleware);
+// gzip/brotli for static assets and JSON (#2919); SSE and NDJSON streams are
+// excluded so they keep streaming. Before express.static and every route.
+app.use(createCompressionMiddleware());
 app.use(cors());
 // Document-bundle endpoints (process drafts, the unified flow graph, imported
 // BriefingPack flows) carry the full brief.md / prompt bodies inline, which
 // easily exceeds body-parser's 100kb default. Raise the limit so importing /
 // rendering / saving a multi-BP flow doesn't 413 (#377). Behind the auth gate.
 app.use(express.json({ limit: '10mb' }));
-app.use(express.static(STATIC_DIR));
+// Content-hashed /assets/* are immutable for a year; index.html is revalidated
+// on every load so a deploy takes effect immediately (#2919).
+app.use(express.static(STATIC_DIR, { setHeaders: setStaticCacheHeaders }));
 
 // Allowlist for ids that turn into filesystem path segments. The dotted-
 // segment pattern explicitly rejects "..", leading/trailing dots and
@@ -470,6 +503,17 @@ auth.registerAuthRoutes(app, {
 });
 app.use('/api', auth.gate);
 
+// The chat roster's shared cache (#566) is cleared when a roster-affecting
+// console mutation succeeds, so a create/rename/enable done here shows on the
+// next roster fetch instead of one TTL later; the knowledge-graph cache (#571)
+// likewise, so the page's post-mutation reload never reads the pre-mutation
+// graph. Behind the auth gate (an unauthenticated request never reaches them),
+// decided on the handler's own `res.end` and its real final status
+// (invalidate-on-write.js). The allowlists are `mutationInvalidatesRoster` and
+// `mutationInvalidatesKnowledgeGraph`.
+app.use('/api', invalidateOnSuccessfulWrite(mutationInvalidatesRoster, invalidateRosterCache));
+app.use('/api', invalidateOnSuccessfulWrite(mutationInvalidatesKnowledgeGraph, invalidateKnowledgeGraphCache));
+
 // Team-share room sync (#2174, epic #2166 B2). Mirrors the `auditMutations`
 // pattern above: mounted before the two routes it watches and listening for
 // `res.on('finish')` rather than wrapping their handlers, so it needs no
@@ -566,11 +610,12 @@ app.get('/api/helper/tour-manifest', (req, res) => {
 });
 
 // ─── Context-help topics (#1872, spec docs/context-help-system-concept.md §3) ──
-// GET /api/helper/page-help returns the whole curated topic set once (a few KB;
-// the client resolves the current route → topic locally so face-switching is
+// GET /api/helper/page-help returns the whole curated topic set once (~350 KB,
+// so the client fetches it on the Help panel's first open, #2918; the client
+// resolves the current route → topic locally so face-switching is
 // instant/offline). The SAME help-topics/ files ground the chat corpus above, so
 // there is no vendoring/parity drift. Behind the global /api auth gate like every
-// other /api route. Topics are small + static; load once and memoize.
+// other /api route. Topics are static; load once and memoize.
 const _helpRegistryModule = require('./helper-chat/help-registry');
 let _pageHelpCache = null;
 app.get('/api/helper/page-help', (req, res) => {
@@ -1070,7 +1115,9 @@ function podmanRequest(method, urlPath) {
   });
 }
 
-function readJsonFile(filePath, fallback = null) {
+// `onError(err)`, when given, hears the real cause of a failed read/parse
+// (the return value is still `fallback`).
+function readJsonFile(filePath, fallback = null, onError = null) {
   if (typeof filePath !== 'string') return fallback;
   // Confine reads under an allowed root before the value reaches readFileSync.
   // Same containPathUnderRoot() return-value barrier as writeJsonAtomic; reads
@@ -1083,7 +1130,8 @@ function readJsonFile(filePath, fallback = null) {
   if (safe === null) return fallback;
   try {
     return JSON.parse(fs.readFileSync(safe, 'utf8'));
-  } catch {
+  } catch (err) {
+    if (onError) onError(err);
     return fallback;
   }
 }
@@ -1594,25 +1642,25 @@ function generateOpensshEd25519Keypair(comment) {
   return { privateKey: privatePem, publicKey: publicSsh, pubBlob };
 }
 
+// Every agent config, read once and indexed by environmentId (#570). A caller
+// answering several environments builds this once and passes it to
+// `agentsUsingEnvironment` instead of letting each call re-read the fleet.
+function agentsByEnvironment() {
+  return indexAgentsByEnvironment(listAgentDirs().map(id => ({
+    id, cfg: readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {}),
+  })));
+}
+
+// The first agent (disk order) bound to this environment, regardless of the
+// caller's scope — the delete guard must see every binding — or null.
 function environmentInUse(envId) {
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (cfg.environmentId === envId) return id;
-  }
-  return null;
+  return firstAgentIdUsingEnvironment(agentsByEnvironment(), envId);
 }
 
 // All agents referencing this environment, scoped to what the caller may see
 // (same team/visibility rules as GET /api/agents — #302, #439).
-function agentsUsingEnvironment(envId, scope) {
-  const agents = [];
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (cfg.environmentId === envId && visibleAgent(scope, agentMetaForScope(cfg))) {
-      agents.push({ id, displayName: cfg.displayName || id });
-    }
-  }
-  return agents;
+function agentsUsingEnvironment(envId, scope, byEnv = agentsByEnvironment()) {
+  return environmentAgentRows(byEnv, envId, cfg => visibleAgent(scope, agentMetaForScope(cfg)));
 }
 
 function sshKeyInUse(keyId) {
@@ -2337,16 +2385,16 @@ app.get('/api/agents', (req, res) => {
 // buildAgentStatus (agent-statuses.js, #1677).
 async function buildAllAgentStatuses() {
   let runningIds = new Set();
-  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
-  try {
-    const resp = await fetch(`${orchestratorUrl}/internal/agents/processes`);
-    if (resp.ok) {
-      const processes = await resp.json();
-      for (const p of processes) {
-        if (p.running) runningIds.add(p.id);
-      }
-    }
-  } catch { /* orchestrator unreachable — all agents appear offline */ }
+  // Bounded (#570, agent-processes-view.js): the build waits at most
+  // AGENT_PROCESSES_WAIT_MS on the one outstanding orchestrator request, then
+  // uses the last good runtime view while that request is still running (slow,
+  // not down) or for AGENT_PROCESSES_LAST_VIEW_MAX_MS after a failed one. With
+  // no view, all agents read offline and the build rejects with that set as
+  // `err.entries` (see agentStatusEntries).
+  const view = await agentProcesses.read();
+  for (const p of view.processes || []) {
+    if (p && p.id && p.running) runningIds.add(p.id);
+  }
 
   const entries = [];
   for (const id of listAgentDirs()) {
@@ -2362,30 +2410,77 @@ async function buildAllAgentStatuses() {
     }
     entries.push({ cfg, status: buildAgentStatus({ id, cfg, running, status, dmRoom, sessionFileExists }) });
   }
+  if (view.source === 'none') {
+    const err = new Error('orchestrator processes unavailable — no runtime view');
+    err.entries = entries;
+    throw err;
+  }
   return entries;
 }
 
-// Short-TTL single-flight cache over the full status set. Several console
-// surfaces poll this endpoint on a 5s beat (Shell nav badge, Agent-Chat list,
-// Maintenance Mode); the front end now shares one poll (#1677), but multiple
-// tabs/users and scope-varying callers can still land close together — a ~2s
-// TTL collapses those onto one filesystem + orchestrator sweep. Caching the
-// in-flight promise also dedups concurrent rebuilds.
-let _statusCache = null; // { builtAt, promise }
-const STATUS_CACHE_TTL_MS = Number(process.env.AGENT_STATUSES_TTL_MS) || 2000;
+// Stale-while-revalidate, single-flight cache over the full status set (#570).
+// Several console surfaces poll this endpoint on a 5s beat (Shell nav badge,
+// Agent-Chat list, Maintenance Mode); the front end shares one poll (#1677),
+// but every tab and user still lands here. Within AGENT_STATUSES_TTL_MS a poll
+// gets the cached set; after that, up to AGENT_STATUSES_MAX_STALE_MS, it gets
+// the cached set at once while one rebuild runs in the background — so a poll
+// no longer waits on the orchestrator hop (observed p90 5–15 s under load). A
+// roster-affecting console mutation invalidates it (`invalidateRosterCache`):
+// the next poll still gets the cached set and starts the rebuild, so a
+// create/enable/disable shows one rebuild later instead of costing a cold wait.
+// `0` turns the cache off, like AGENT_ROSTER_TTL_MS (#566).
+const STATUS_CACHE_TTL_MS = ttlMsFromEnv(process.env.AGENT_STATUSES_TTL_MS, 5000);
+const STATUS_CACHE_MAX_STALE_MS = ttlMsFromEnv(process.env.AGENT_STATUSES_MAX_STALE_MS, 30_000);
+// The orchestrator processes hop (#570, agent-processes-view.js). Observed under
+// load: p90 5–15 s, and up to ~60 s while the orchestrator's event loop stalls.
+//   WAIT 3 s   — how long one build waits on the request before the last view
+//                stands in; short, because a cold poll waits on it.
+//   TIMEOUT 60 s — the request's hard deadline, at or above the observed stall,
+//                so a stall that clears is answered, not abandoned; only one
+//                request is ever outstanding, so nothing piles up behind it.
+//   LAST_VIEW 15 s — how long the last view outlives a FAILED answer. While a
+//                request is still outstanding it vouches for the view up to its
+//                deadline instead. Worst cases: down (fast failures) 15 s +
+//                max-stale 30 s; hung (no answer at all) 15 + 60 + 30 s.
+const AGENT_PROCESSES_WAIT_MS = ttlMsFromEnv(process.env.AGENT_PROCESSES_WAIT_MS, 3000) || 3000;
+const AGENT_PROCESSES_TIMEOUT_MS = ttlMsFromEnv(process.env.AGENT_PROCESSES_TIMEOUT_MS, 60_000) || 60_000;
+const AGENT_PROCESSES_LAST_VIEW_MAX_MS = ttlMsFromEnv(process.env.AGENT_PROCESSES_LAST_VIEW_MAX_MS, 15_000);
+const agentProcesses = createProcessesSource({
+  fetchProcesses: async () => {
+    const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+    const resp = await fetch(`${orchestratorUrl}/internal/agents/processes`, {
+      signal: AbortSignal.timeout(AGENT_PROCESSES_TIMEOUT_MS),
+    });
+    return resp.ok ? resp.json() : null;
+  },
+  waitMs: AGENT_PROCESSES_WAIT_MS,
+  timeoutMs: AGENT_PROCESSES_TIMEOUT_MS,
+  viewMaxMs: AGENT_PROCESSES_LAST_VIEW_MAX_MS,
+});
+// A failed build is held for one fresh window (`failureBackoffMs`): during an
+// outage every poll would otherwise run its own config sweep + orchestrator
+// wait. A failure streak logs once when it starts and once when it ends.
+const agentStatusCache = createSwrCache({
+  freshMs: STATUS_CACHE_TTL_MS,
+  maxStaleMs: STATUS_CACHE_MAX_STALE_MS,
+  failureBackoffMs: STATUS_CACHE_TTL_MS,
+  onError: (err) => console.warn(`[statuses] rebuild failing: ${err.message} — serving the last good set while it lasts`),
+  onRecover: ({ failures }) => console.warn(`[statuses] rebuild recovered after ${failures} failed attempt(s)`),
+});
 
-function agentStatusEntries() {
-  const now = Date.now();
-  if (_statusCache && statusCacheFresh(_statusCache.builtAt, now, STATUS_CACHE_TTL_MS)) {
-    return _statusCache.promise;
-  }
-  const promise = buildAllAgentStatuses().catch(err => {
-    // Don't cache a failed build — let the next request retry.
-    if (_statusCache && _statusCache.promise === promise) _statusCache = null;
+// A build with no runtime view (orchestrator down past the last-view window)
+// rejects instead of resolving, so the cache never stores an all-offline set
+// and keeps serving the previous good one up to its max-stale (review on PR
+// #573). A caller that has to wait — cold cache, or past max-stale — still gets
+// the all-offline set; it is held only as the failure backoff, never as the
+// cached value, so the poll after the backoff retries the orchestrator.
+async function agentStatusEntries() {
+  try {
+    return await agentStatusCache.get(buildAllAgentStatuses);
+  } catch (err) {
+    if (Array.isArray(err.entries)) return err.entries;
     throw err;
-  });
-  _statusCache = { builtAt: now, promise };
-  return promise;
+  }
 }
 
 app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
@@ -2981,7 +3076,13 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // validation below, so the gate check sees the name that is persisted.
   const liveSuffix = teamLabelSuffixFor(cfg);
   if (liveSuffix) req.body = stampLiveLabels(req.body || {}, liveSuffix, { keep: teamForeignLabelsFor(id, cfg) });
-  const { displayName, role, enabled, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, wipLimit, autoDispatch, pool, github, channels, assistLlmEndpointId } = req.body;
+  const { displayName, role, enabled, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, wipLimit, autoDispatch, pool, github, channels, assistLlmEndpointId, memoryLimit } = req.body;
+
+  // ── Display name (#2679) ──────────────────────────────────────────────────
+  // Required: trimmed and non-empty, or the agent renders nameless. Checked up
+  // front so a blank name can't ride along with a half-applied write.
+  const normDisplayName = normalizeDisplayName(displayName);
+  if (normDisplayName.error) return res.status(400).json({ error: normDisplayName.error });
 
   // ── Label registry (#928/#981) ────────────────────────────────────────────
   // The gate/brake flags live on the TEAM agent (like `stages`) — the live
@@ -3055,6 +3156,26 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
         return res.status(400).json({ error: 'assistLlmEndpointId cannot be an oauth-token provider (subscription seats are not billable for server-side synthesis)' });
       }
       normAssistEndpointId = assistLlmEndpointId;
+    }
+  }
+
+  // ── Role memory requirement (#2813) ───────────────────────────────────────
+  // `memoryLimit` ("4g", "512m"; ''/null clears → toolchain / platform
+  // default) sizes the agent's container at its NEXT start. Validated up front
+  // against the operator ceiling (AEE_AGENT_MEM_CEILING, default 8g) with the
+  // same rule the bundle validator runs, so a live edit and an imported draft
+  // agree. A team agent hosts no container, so it is refused there.
+  let normMemoryLimit; // undefined = untouched, null = clear
+  if (memoryLimit !== undefined) {
+    if (cfg.role === 'team') {
+      return res.status(400).json({ error: 'memoryLimit is set on a role/agent, not on the team agent' });
+    }
+    if (memoryLimit === null || (typeof memoryLimit === 'string' && !memoryLimit.trim())) {
+      normMemoryLimit = null;
+    } else {
+      const merr = memoryLimitError(memoryLimit, { role: id, ceiling: memoryCeiling(process.env) });
+      if (merr) return res.status(400).json({ error: merr });
+      normMemoryLimit = normalizeMemoryLimit(memoryLimit);
     }
   }
 
@@ -3190,7 +3311,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // (The orchestrator's enable/disable already wrote enabled itself; the
   // team-prompt and team-skills branches above also wrote canonically.)
   const fresh = readJsonFile(cfgPath, cfg);
-  if (displayName !== undefined) fresh.displayName = displayName;
+  if (normDisplayName.value !== undefined) fresh.displayName = normDisplayName.value;
   if (role !== undefined) fresh.role = role;
   // ── Team-owned skill grant (skill-grants.js) ──────────────────────────────
   // `skills` lives on the construct itself: a team agent carries the team's
@@ -3404,6 +3525,14 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
       if (!norm) delete fresh.pool;
       else fresh.pool = norm;
     }
+  }
+
+  // Role memory requirement (#2813) — validated into normMemoryLimit above.
+  // Read by the orchestrator at the next container start; a running container
+  // (and a running pool instance) keeps the limit it was created with.
+  if (normMemoryLimit !== undefined) {
+    if (normMemoryLimit) fresh.memoryLimit = normMemoryLimit;
+    else delete fresh.memoryLimit;
   }
 
   // Named human roles, team-agent only (#987) — validated into normHumans above.
@@ -4469,6 +4598,9 @@ app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
   const materializePref = parseMemberMaterialize(inBody);
   if (materializePref.error) return res.status(400).json({ error: materializePref.error });
   const { materialize } = materializePref;
+  // #2813: a free-form member's memory requirement is checked like a save.
+  const memErr = memoryLimitError(inBody.memoryLimit, { role: inBody.id || teamId, ceiling: memoryCeiling(process.env) });
+  if (memErr) return res.status(400).json({ error: memErr });
   let outBody = { ...inBody, materialize };
   if (typeof inBody.templateId === 'string' && inBody.templateId) {
     const template = loadAgentTemplate(inBody.templateId);
@@ -5873,6 +6005,48 @@ app.patch('/api/agents/:id/model', apiLimiter, (req, res) => {
   res.json({ override: modelId });
 });
 
+// ── Role memory requirement read-out (#2813) ────────────────────────────────
+// The platform side of the effective-limit display: the fleet default
+// (AEE_AGENT_MEM_LIMIT) and the operator ceiling (AEE_AGENT_MEM_CEILING). The
+// draft inspector has no agent yet, so it reads this alone.
+function platformMemoryInfo() {
+  return {
+    platform: normalizeMemoryLimit(process.env.AEE_AGENT_MEM_LIMIT) || DEFAULT_PLATFORM_MEMORY,
+    ceiling: memoryCeiling(process.env),
+  };
+}
+
+app.get('/api/memory-limits', (req, res) => {
+  res.json(platformMemoryInfo());
+});
+
+// Per agent: its own value, the toolchain's `resources.memoryLimit` (via its
+// Working Environment), the platform default and ceiling, and the resolved
+// effective limit + source — the same role → toolchain → platform order the
+// orchestrator applies at the next container start.
+app.get('/api/agents/:id/memory', (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  const scope = getScope(req);
+  if (!visibleAgent(scope, agentMetaForScope(cfg))) {
+    return res.status(404).json({ error: 'Agent not found' });
+  }
+  const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  const tc = env && env.toolchainId ? listToolchains().find((t) => t.id === env.toolchainId) : null;
+  const toolchain = normalizeMemoryLimit(tc && tc.resources && tc.resources.memoryLimit);
+  const plat = platformMemoryInfo();
+  const effective = resolveEffectiveMemory({ role: cfg.memoryLimit, toolchain, platform: plat.platform, ceiling: plat.ceiling });
+  res.json({
+    memoryLimit: cfg.memoryLimit || null,
+    toolchain,
+    toolchainId: (env && env.toolchainId) || null,
+    ...plat,
+    effective: { limit: effective.limit, source: effective.source, clamped: effective.clamped },
+  });
+});
+
 // Switch the Model Provider (LLM endpoint) for a single agent. Unlike the model
 // override (read live by the runtime), the provider is injected at container
 // spawn time, so a change requires a one-agent respawn — done best-effort after
@@ -5936,6 +6110,29 @@ function pruneIncompatibleModelOverride(cfg, endpointId) {
   if (!ep || !(ep.models || []).some(m => m.id === cfg.modelOverride)) {
     delete cfg.modelOverride;
   }
+}
+
+// #2813 AC9: after an environment's provider changed, drop every bound
+// member's model pin the new provider does not serve (see staleModelPin).
+// Returns one warning per dropped pin; no provider bound → pins stay pending.
+function dropStaleEnvModelPins(env) {
+  const endpoint = env && env.llmEndpointId
+    ? (listLlmEndpoints().find(e => e.id === env.llmEndpointId) || null)
+    : null;
+  if (!endpoint) return [];
+  const warnings = [];
+  for (const id of listAgentDirs()) {
+    const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
+    const cfg = readJsonFile(cfgPath, null);
+    if (!cfg || cfg.environmentId !== env.id) continue;
+    const note = staleModelPin(cfg, endpoint);
+    if (!note) continue;
+    delete cfg.modelOverride;
+    writeJsonAtomic(cfgPath, cfg);
+    console.warn(`[api] ${note}`);
+    warnings.push(note);
+  }
+  return warnings;
 }
 
 // Ask the orchestrator to recreate the agent's running container so a new
@@ -6855,6 +7052,12 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   normalizeCommentFilter(merged);
   // Readiness gate (#2795) — as on POST; `null` clears it.
   normalizeReadinessGate(merged);
+  // A gate edited on a flow-derived channel listener (#2912) is written back
+  // to the consumer's PR channel ports — the reconcile regenerates the listener
+  // from them, so the Flow editor and Agent Chat show the same gate.
+  const channelWriteBack = isChannelTrigger(prev) && reqTrigger && 'readinessGate' in reqTrigger
+    ? applyChannelTriggerReadiness(agentCfg && agentCfg.channels, id, triggerId, merged.readinessGate || null)
+    : null;
   // Producer filter (#2571) — same route-level check as POST; `null` clears it.
   const pbf = applyPushedBy(merged, { ownerId: id, lookupAgent: readAgentConfigForFilter });
   if (pbf.error) return res.status(400).json({ error: pbf.error });
@@ -6876,10 +7079,21 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
     if (!merged.activatedAt) merged.activatedAt = now;
   }
   triggers[idx] = merged;
+  if (channelWriteBack) {
+    const cfgPath = path.join(agentDir, 'config.json');
+    const fresh = readJsonFile(cfgPath, agentCfg);
+    fresh.channels = channelWriteBack;
+    writeJsonAtomic(cfgPath, fresh);
+  }
   try {
     await putTriggers(id, triggers);
   } catch (err) {
     return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
+  }
+  // The ports changed: re-derive the team's channel listeners (#380), exactly
+  // as a Flow-editor port write does.
+  if (channelWriteBack && agentCfg && agentCfg.parentTeamId) {
+    await reconcileTeamGithubChannels(agentCfg.parentTeamId);
   }
   // Consumer write (#1007) — see the POST handler.
   await reconcileTeamOutcomesForAgent(id);
@@ -7173,6 +7387,8 @@ app.post('/api/process/graph', (req, res) => {
     humans: Array.isArray(bundle.humans) ? bundle.humans : [],
     // Auto-repairs applied on import (#2579) — non-fatal, surfaced to the client.
     ...(coercions.length ? { coercions } : {}),
+    // Prompt-mode lints (#2813) — e.g. an inherit role with no team prompt.
+    ...(promptModeWarnings(bundle).length ? { promptWarnings: promptModeWarnings(bundle) } : {}),
     ...buildProcessGraph(agents, { labels: bundle.labels, humans: bundle.humans }),
   });
 });
@@ -7189,8 +7405,6 @@ app.post('/api/process/graph', (req, res) => {
 
 const KNOWLEDGE_CLONE_ROOT = path.join(WORKSPACE, 'knowledge');
 const KNOWLEDGE_EVENTS_FILE = path.join(WORKSPACE, 'knowledge-events', 'events.jsonl');
-const KB_KINDS = ['fact', 'entity', 'convention'];
-const KB_DEFAULT_DIRS = { fact: 'facts', entity: 'entities', convention: 'conventions' };
 const KB_DEFAULT_STORE_PATH = 'docs/agent-knowledge/';
 
 function kbParseLine(line) {
@@ -7216,90 +7430,62 @@ function agentKnowledgeTeam(cfg) {
 // caller can see the HUMAN team any of its agents belongs to. Admin scopes
 // (all:true) short-circuit. Falls back to a direct id match so a membership that
 // (unusually) names the squad id keeps working.
-function knowledgeTeamVisible(scope, knowledgeTeamId) {
-  if (!scope) return false;
-  if (scope.all) return true;
-  if (visibleTeam(scope, knowledgeTeamId)) return true;
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (agentKnowledgeTeam(cfg) !== knowledgeTeamId) continue;
-    if (visibleTeam(scope, cfg.teamId)) return true;
-  }
-  return false;
+//
+// #571: every helper below takes an optional `fleet` (knowledge-fleet.js) — one
+// read of every agent config, built once per request by the knowledge routes
+// that call several helpers and threaded through. Without one a helper builds
+// its own. The cheap checks run before any fleet is built.
+// An unreadable config is warned about with its real cause, once per broken
+// streak (knowledge-fleet.js `createEntryWarnings`).
+const _knowledgeFleetWarnings = knowledgeFleetLib.createEntryWarnings();
+
+function buildKnowledgeFleetNow() {
+  return knowledgeFleetLib.buildKnowledgeFleet(listAgentDirs(), {
+    readConfig: (id) => {
+      let cause = null;
+      const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null, (err) => { cause = err; });
+      if (cause) throw cause;
+      return cfg;
+    },
+    onEntryError: (id, err) => {
+      if (_knowledgeFleetWarnings.shouldWarn(id, err)) console.warn(`[knowledge] config of ${id} unreadable, read as empty: ${err.message}`);
+    },
+    onEntryOk: (id) => _knowledgeFleetWarnings.ok(id),
+    agentKnowledgeTeam,
+    agentMetaForScope,
+  });
+}
+
+// `fleet` may be a fleet or a thunk returning one; without either the lib
+// builds one lazily, only past its cheap checks.
+function knowledgeTeamVisible(scope, knowledgeTeamId, fleet = null) {
+  return knowledgeFleetLib.knowledgeTeamVisible(fleet || buildKnowledgeFleetNow, scope, knowledgeTeamId, { visibleTeam });
 }
 
 // Resolve a team's KB store-relative path (e.g. docs/agent-knowledge/) from any
 // of its agents' environments — a team shares one env → one KB config.
-function resolveTeamStorePath(teamId) {
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (agentKnowledgeTeam(cfg) !== teamId || !cfg.environmentId) continue;
-    // #570: the KB store path is keyed per team — overlay the team's overrides.
-    const env = knowledgeSuggestions.mergeTeamKnowledgeConfig(loadEnvironment(cfg.environmentId), loadTeamKnowledgeOverrides(teamId));
-    const p = env && env.knowledgeStore && typeof env.knowledgeStore.path === 'string'
-      ? env.knowledgeStore.path : null;
-    if (p) return p.replace(/^\/+|\/+$/g, '') + '/';
-  }
-  return KB_DEFAULT_STORE_PATH;
-}
-
-// Resolve a team's KB repo web URL for provenance links (sourceRefs → PR/issue).
-function resolveTeamRepoUrl(teamId) {
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (agentKnowledgeTeam(cfg) !== teamId || !cfg.environmentId) continue;
-    // #570: the KB repoRef is keyed per team — overlay the team's overrides.
-    const env = knowledgeSuggestions.mergeTeamKnowledgeConfig(loadEnvironment(cfg.environmentId), loadTeamKnowledgeOverrides(teamId));
-    const ref = env && env.knowledgeStore && env.knowledgeStore.repoRef;
-    if (ref && ref.url) return ref.url;
-    const repos = (env && env.repositories) || [];
-    if (repos[0] && repos[0].url) return repos[0].url;
-  }
-  return null;
-}
-
-function teamAgentIds(teamId) {
-  return listAgentDirs().filter(id => {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    return agentKnowledgeTeam(cfg) === teamId;
+// #570: the KB store path is keyed per team — the team's overrides are overlaid.
+function resolveTeamStorePath(teamId, fleet = null) {
+  return knowledgeFleetLib.resolveTeamStorePath(fleet || buildKnowledgeFleetNow(), teamId, {
+    loadEnvironment,
+    loadTeamKnowledgeOverrides,
+    mergeTeamKnowledgeConfig: knowledgeSuggestions.mergeTeamKnowledgeConfig,
+    defaultStorePath: KB_DEFAULT_STORE_PATH,
   });
 }
 
-// Kind → { dir, file }, honouring a store's manifest if present, else defaults.
-function kbKindDirs(storeRoot) {
-  const m = readJsonFile(path.join(storeRoot, 'knowledge.manifest.json'), null);
-  if (m && m.kinds && typeof m.kinds === 'object') {
-    const out = [];
-    for (const k of KB_KINDS) {
-      const e = m.kinds[k];
-      if (e && typeof e.dir === 'string' && typeof e.file === 'string') {
-        out.push({ dir: e.dir.replace(/\/+$/, ''), file: e.file });
-      }
-    }
-    if (out.length) return out;
-  }
-  return KB_KINDS.map(k => ({ dir: KB_DEFAULT_DIRS[k], file: `${KB_DEFAULT_DIRS[k]}.jsonl` }));
+// Resolve a team's KB repo web URL for provenance links (sourceRefs → PR/issue).
+// #570: the KB repoRef is keyed per team — the team's overrides are overlaid.
+function resolveTeamRepoUrl(teamId, fleet = null) {
+  return knowledgeFleetLib.resolveTeamRepoUrl(fleet || buildKnowledgeFleetNow(), teamId, {
+    loadEnvironment,
+    loadTeamKnowledgeOverrides,
+    mergeTeamKnowledgeConfig: knowledgeSuggestions.mergeTeamKnowledgeConfig,
+  });
 }
 
-function kbReadStore(entries, storeRoot) {
-  for (const { dir, file } of kbKindDirs(storeRoot)) {
-    const kindDir = path.join(storeRoot, dir);
-    const shardsDir = path.join(kindDir, 'shards');
-    let shardNames = [];
-    try { shardNames = fs.readdirSync(shardsDir).filter(n => n.endsWith('.jsonl')); } catch { /* none */ }
-    const files = shardNames.map(n => path.join(shardsDir, n));
-    const canonical = path.join(kindDir, file);
-    if (fs.existsSync(canonical)) files.push(canonical);
-    for (const fp of files) {
-      let raw;
-      try { raw = fs.readFileSync(fp, 'utf8'); } catch { continue; }
-      for (const line of raw.split('\n')) {
-        if (!line.trim()) continue;
-        const e = kbParseLine(line);
-        if (e) entries.push(e);
-      }
-    }
-  }
+function teamAgentIds(teamId, fleet = null) {
+  return knowledgeFleetLib.teamAgentIds(fleet || buildKnowledgeFleetNow(), teamId);
 }
 
 // originAgent → knowledge team, for re-homing entries at read time. Entries are
@@ -7307,13 +7493,8 @@ function kbReadStore(entries, storeRoot) {
 // the human tenant team ('default' for everyone) — and two squads can share one
 // env, i.e. one KB store, so the store location alone can't separate them
 // either. The recording agent's squad is authoritative.
-function knowledgeTeamByAgent() {
-  const map = new Map();
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    map.set(id, agentKnowledgeTeam({ ...cfg, id: cfg.id || id }));
-  }
-  return map;
+function knowledgeTeamByAgent(fleet = null) {
+  return knowledgeFleetLib.knowledgeTeamByAgent(fleet || buildKnowledgeFleetNow());
 }
 
 const KNOWLEDGE_ARCHIVED_DIR = path.join(WORKSPACE, 'knowledge-archived');
@@ -7352,82 +7533,109 @@ function readTriggersFor(teamId) {
 // Entries are re-homed to their origin agent's squad, and the operator-decision
 // overlays (archive, supervised review) are re-applied at read time so they hold
 // even when the git-sync side lags (see overlayStatuses).
-function gatherTeamEntries(teamId) {
-  let entries = [];
-  const warnings = [];
-  if (!AGENT_ID_RE.test(teamId)) return { entries, warnings };
-  const storeRel = resolveTeamStorePath(teamId);
+//
+// #2920: the store sits on the shared (NFS) volume with hundreds of shard files,
+// so it is read with async fs (never blocking the event loop) and the result is
+// cached per team for as long as its fingerprint — every store and sidecar
+// file's size + mtime, plus the fleet-derived inputs — is unchanged. A write
+// changes the fingerprint, so the next call rebuilds. The returned entries are
+// shared between callers and must not be mutated.
+const teamEntriesCache = createFingerprintCache({ maxEntries: 64 });
+
+async function pathExists(p) {
+  try { await fs.promises.access(p); return true; } catch { return false; }
+}
+
+// The sidecar files the overlays below read: this team's plus (legacy) 'default'.
+function teamOverlayFiles(teamId) {
+  const ids = teamId !== 'default' ? [teamId, 'default'] : [teamId];
+  const dirs = [KNOWLEDGE_ARCHIVED_DIR, KNOWLEDGE_REVIEW_DIR, KNOWLEDGE_VALIDITY_DIR, KNOWLEDGE_TRIGGERS_DIR];
+  return dirs.flatMap((dir) => ids.map((id) => path.join(dir, `${path.basename(id)}.json`)));
+}
+
+async function gatherTeamEntries(teamId, { fleet = null } = {}) {
+  if (!AGENT_ID_RE.test(teamId)) return { entries: [], warnings: [] };
+  const kfleet = fleet || buildKnowledgeFleetNow();
+  const storeRel = resolveTeamStorePath(teamId, kfleet);
   const cloneRoot = path.join(KNOWLEDGE_CLONE_ROOT, path.basename(teamId));
   const cloneStore = path.join(cloneRoot, storeRel);
-  if (fs.existsSync(path.join(cloneRoot, '.git')) && fs.existsSync(cloneStore)) {
-    kbReadStore(entries, cloneStore);
+  const fsp = fs.promises;
+  let stores;
+  const warnings = [];
+  if (await pathExists(path.join(cloneRoot, '.git')) && await pathExists(cloneStore)) {
+    stores = [cloneStore];
   } else {
-    for (const agentId of teamAgentIds(teamId)) {
-      const store = path.join(AGENTS_DIR, agentId, 'knowledge', storeRel);
-      if (fs.existsSync(store)) kbReadStore(entries, store);
-    }
+    const candidates = teamAgentIds(teamId, kfleet).map((agentId) => path.join(AGENTS_DIR, agentId, 'knowledge', storeRel));
+    const present = await Promise.all(candidates.map(pathExists));
+    stores = candidates.filter((_, i) => present[i]);
     warnings.push(`no canonical KB clone for team '${teamId}'; read from agent checkouts`);
   }
+  const listed = await Promise.all(stores.map((store) => listStoreFiles(store, { fsp })));
+  const storeFiles = listed.flatMap((l) => l.files);
+  const originTeams = knowledgeTeamByAgent(kfleet);
+  const reviewOn = knowledgeReviewOn(teamKnowledgeEnv(teamId, kfleet)); // #570: per-team config
+  const fingerprint = [
+    storeRel, reviewOn ? 'review' : 'open',
+    JSON.stringify([...originTeams].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))),
+    await fileSignature([...listed.map((l) => l.manifest), ...storeFiles, ...teamOverlayFiles(teamId)], { fsp }),
+  ].join('\n');
 
-  // Re-home each entry to its origin agent's squad; an unknown origin keeps the
-  // entry in the team whose store we are reading. Then drop sibling squads'
-  // entries (a shared env means a shared store — the canonical clone can carry
-  // both squads' shards).
-  const originTeams = knowledgeTeamByAgent();
-  entries = entries
-    .map((e) => {
-      if (!e || typeof e !== 'object') return e;
-      const t = (typeof e.originAgent === 'string' && originTeams.get(e.originAgent)) || teamId;
-      return e.teamId === t ? e : { ...e, teamId: t };
-    })
-    .filter((e) => !e || typeof e !== 'object' || e.teamId === teamId);
+  const entries = await teamEntriesCache.get(teamId, fingerprint, async () => {
+    let read = await readStoreFiles(storeFiles, { fsp, parseLine: kbParseLine });
 
-  // Operator-decision overlays: this team's stores plus (legacy) the 'default'
-  // human-team store, so decisions taken before the squad re-homing still hold.
-  const archived = new Set(readArchivedIdsFor(teamId));
-  const decisions = { ...readReviewDecisionsFor(teamId) };
-  if (teamId !== 'default') {
-    for (const id of readArchivedIdsFor('default')) archived.add(id);
-    for (const [k, v] of Object.entries(readReviewDecisionsFor('default'))) {
-      if (!(k in decisions)) decisions[k] = v;
+    // Re-home each entry to its origin agent's squad; an unknown origin keeps the
+    // entry in the team whose store we are reading. Then drop sibling squads'
+    // entries (a shared env means a shared store — the canonical clone can carry
+    // both squads' shards).
+    read = read
+      .map((e) => {
+        if (!e || typeof e !== 'object') return e;
+        const t = (typeof e.originAgent === 'string' && originTeams.get(e.originAgent)) || teamId;
+        return e.teamId === t ? e : { ...e, teamId: t };
+      })
+      .filter((e) => !e || typeof e !== 'object' || e.teamId === teamId);
+
+    // Operator-decision overlays: this team's stores plus (legacy) the 'default'
+    // human-team store, so decisions taken before the squad re-homing still hold.
+    const archived = new Set(readArchivedIdsFor(teamId));
+    const decisions = { ...readReviewDecisionsFor(teamId) };
+    if (teamId !== 'default') {
+      for (const id of readArchivedIdsFor('default')) archived.add(id);
+      for (const [k, v] of Object.entries(readReviewDecisionsFor('default'))) {
+        if (!(k in decisions)) decisions[k] = v;
+      }
     }
-  }
-  const reviewOn = knowledgeReviewOn(teamKnowledgeEnv(teamId)); // #570: per-team config
-  entries = overlayStatuses(entries, { archivedIds: archived, decisions, reviewOn });
-  // #916: validity is a field overlay (never a status) — same legacy-'default'
-  // merge as the archive store so pre-re-homing decisions still hold.
-  const validity = { ...readValidityFor(teamId) };
-  if (teamId !== 'default') {
-    for (const [k, v] of Object.entries(readValidityFor('default'))) {
-      if (!(k in validity)) validity[k] = v;
+    read = overlayStatuses(read, { archivedIds: archived, decisions, reviewOn });
+    // #916: validity is a field overlay (never a status) — same legacy-'default'
+    // merge as the archive store so pre-re-homing decisions still hold.
+    const validity = { ...readValidityFor(teamId) };
+    if (teamId !== 'default') {
+      for (const [k, v] of Object.entries(readValidityFor('default'))) {
+        if (!(k in validity)) validity[k] = v;
+      }
     }
-  }
-  entries = overlayValidity(entries, validity);
-  // #917: auto-load triggers — same authoritative field overlay + legacy merge.
-  const triggers = { ...readTriggersFor(teamId) };
-  if (teamId !== 'default') {
-    for (const [k, v] of Object.entries(readTriggersFor('default'))) {
-      if (!(k in triggers)) triggers[k] = v;
+    read = overlayValidity(read, validity);
+    // #917: auto-load triggers — same authoritative field overlay + legacy merge.
+    const triggers = { ...readTriggersFor(teamId) };
+    if (teamId !== 'default') {
+      for (const [k, v] of Object.entries(readTriggersFor('default'))) {
+        if (!(k in triggers)) triggers[k] = v;
+      }
     }
-  }
-  entries = overlayLoadTriggers(entries, triggers);
-  return { entries, warnings };
+    return overlayLoadTriggers(read, triggers);
+  });
+  return { entries, warnings, fingerprint };
 }
 
 // Which teams does this scope + membership resolve to?
-function knowledgeScopeTeams(parsed, scope) {
+// global: every team that has agents, narrowed by membership scope.
+function knowledgeScopeTeams(parsed, scope, fleet = null) {
   if (parsed.kind === 'team') return [parsed.id];
-  if (parsed.kind === 'agent') {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, parsed.id, 'config.json'), {});
-    return [agentKnowledgeTeam({ ...cfg, id: cfg.id || parsed.id })];
-  }
-  // global: every team that has agents, narrowed by membership scope.
-  const teams = new Set();
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    teams.add(agentKnowledgeTeam({ ...cfg, id: cfg.id || id }));
-  }
-  return [...teams].filter(t => knowledgeTeamVisible(scope, t));
+  const kfleet = fleet || buildKnowledgeFleetNow();
+  return knowledgeFleetLib.knowledgeScopeTeams(kfleet, parsed, {
+    agentKnowledgeTeam,
+    isVisible: (t) => knowledgeTeamVisible(scope, t, kfleet),
+  });
 }
 
 // Fire-and-forget refresh of a team's canonical clone before we read it, so the
@@ -7444,18 +7652,9 @@ function refreshTeamCloneBestEffort(teamId) {
   }).catch(() => {}).finally(() => clearTimeout(timer));
 }
 
-function gatherKnowledgeAgents(scope, teamIds) {
-  const set = new Set(teamIds);
-  const agents = [];
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (cfg.role === 'team') continue; // template holder, not a contributor
-    const teamId = agentKnowledgeTeam({ ...cfg, id: cfg.id || id });
-    if (!set.has(teamId)) continue;
-    if (!visibleAgent(scope, agentMetaForScope(cfg))) continue;
-    agents.push({ id, parentTeamId: teamId, environmentId: cfg.environmentId || null, displayName: cfg.displayName || id });
-  }
-  return agents;
+// A team template holder is not a contributor and is left out.
+function gatherKnowledgeAgents(scope, teamIds, fleet = null) {
+  return knowledgeFleetLib.gatherKnowledgeAgents(fleet || buildKnowledgeFleetNow(), scope, teamIds, { visibleAgent });
 }
 
 // The provenance.json a Phase-3 promotion writes beside SKILL.md — carries the
@@ -7466,7 +7665,7 @@ function readSkillProvenance(dir) {
   return p && typeof p === 'object' ? p : null;
 }
 
-function gatherKnowledgeSkills(scope) {
+function gatherKnowledgeSkills(scope, fleet = null) {
   const skills = [];
   const poolSkillsDir = path.join(POOL_DIR, 'skills');
   try {
@@ -7482,8 +7681,11 @@ function gatherKnowledgeSkills(scope) {
       skills.push(s);
     });
   } catch { /* no pool skills */ }
+  // Built at most once, and only if some team's visibility needs it.
+  let kfleet = fleet;
+  const lazyFleet = () => (kfleet = kfleet || buildKnowledgeFleetNow());
   for (const ts of listTeamSkills(null)) {
-    if (!knowledgeTeamVisible(scope, ts.teamId)) continue;
+    if (!knowledgeTeamVisible(scope, ts.teamId, lazyFleet)) continue;
     const s = { name: ts.name, tier: 'team', teamId: ts.teamId };
     const dir = safeTeamSkillDir(ts.teamId, ts.name);
     const prov = dir ? readSkillProvenance(dir) : null;
@@ -7503,31 +7705,107 @@ function knowledgeScopeParam(req) {
   return parsed;
 }
 
-app.get('/api/knowledge/graph', async (req, res) => {
-  const scope = getScope(req);
-  const parsed = knowledgeScopeParam(req);
-  const teamIds = knowledgeScopeTeams(parsed, scope);
+// #571: one graph build per (scope, includeArchived, viewer) per TTL, shared by
+// concurrent callers (single-flight). The cached value is the finished graph —
+// knowledge entries + display data, no configs or tokens — and is never
+// mutated once cached. Cleared by a successful knowledge/skill/agent/team/env/
+// membership mutation (`mutationInvalidatesKnowledgeGraph`, wired behind
+// the auth gate), and by every event the knowledge stream tails (the
+// orchestrator's own writes — harvest, consolidation — before the client's
+// feed-driven reload): only the graphs that event can change, once per event
+// however many streams are open (`invalidateKnowledgeGraphCacheForEvent`).
+// Writes no open stream reports (sidecars, seeded skills) show up within one
+// TTL. `KNOWLEDGE_GRAPH_TTL_MS=0` turns the cache off entirely.
+const KNOWLEDGE_GRAPH_TTL_MS = knowledgeGraphTtlMsFromEnv(process.env);
+const knowledgeGraphCache = createTtlCache({ ttlMs: KNOWLEDGE_GRAPH_TTL_MS, maxEntries: 50 });
+function invalidateKnowledgeGraphCache() { knowledgeGraphCache.clear(); }
+
+// Byte offset in KNOWLEDGE_EVENTS_FILE through which tailed events have already
+// invalidated (shared by every open stream; knowledge-graph-cache.js).
+let knowledgeEventsInvalidatedThrough = 0;
+function noteKnowledgeEventsFileSize(size) {
+  knowledgeEventsInvalidatedThrough = knowledgeEventMarkForFileSize(knowledgeEventsInvalidatedThrough, size);
+}
+function invalidateKnowledgeGraphCacheForEvent(ev, endOffset) {
+  const claim = claimKnowledgeEventOffset(knowledgeEventsInvalidatedThrough, endOffset);
+  knowledgeEventsInvalidatedThrough = claim.mark;
+  if (claim.invalidate) knowledgeGraphCache.deleteWhere((key) => knowledgeGraphKeyStaleForEvent(key, ev));
+}
+
+async function buildKnowledgeGraphResponse(scope, parsed, includeArchived) {
+  // One read of every agent config for the whole build (#571).
+  const fleet = buildKnowledgeFleetNow();
+  const teamIds = knowledgeScopeTeams(parsed, scope, fleet);
 
   await Promise.all(teamIds.map(refreshTeamCloneBestEffort));
 
   const entries = [];
   const warnings = [];
   for (const teamId of teamIds) {
-    const g = gatherTeamEntries(teamId);
+    const g = await gatherTeamEntries(teamId, { fleet });
     entries.push(...g.entries);
     warnings.push(...g.warnings);
   }
-  const agents = gatherKnowledgeAgents(scope, teamIds);
-  const skills = gatherKnowledgeSkills(scope);
-  const includeArchived = req.query.includeArchived === '1' || req.query.includeArchived === 'true';
+  const agents = gatherKnowledgeAgents(scope, teamIds, fleet);
+  const skills = gatherKnowledgeSkills(scope, fleet);
   const graph = buildKnowledgeGraph({ scope: parsed.scope, entries, skills, agents, now: Date.now(), warnings, includeArchived });
   augmentPendingPromotions(graph, teamIds);
-  augmentSkillActivation(graph, parsed);
-  await augmentDigestInclusion(graph, teamIds);
-  await augmentSkillRoles(graph, teamIds);
+  augmentSkillActivation(graph, parsed, fleet);
   augmentDisplaySummary(graph, entries);
-  await augmentRetrievalStats(graph, teamIds);
-  res.json(graph);
+  // The three orchestrator overlays write disjoint node fields (inDigest /
+  // roles / lastUsedAt+usage), so they run side by side, each fetch bounded
+  // by KNOWLEDGE_AUGMENT_TIMEOUT_MS: a stalled orchestrator costs one timeout
+  // and degrades to "no badges" instead of three serial hangs.
+  await Promise.all([
+    augmentDigestInclusion(graph, teamIds),
+    augmentSkillRoles(graph, teamIds),
+    augmentRetrievalStats(graph, teamIds),
+  ]);
+  return graph;
+}
+
+// The (cached) knowledge graph for a scope as this viewer sees it. Shared by the
+// graph and the paged items route; callers must never mutate the result.
+function loadKnowledgeGraph(scope, parsed, includeArchived) {
+  const build = () => buildKnowledgeGraphResponse(scope, parsed, includeArchived);
+  return KNOWLEDGE_GRAPH_TTL_MS > 0
+    ? knowledgeGraphCache.getOrCompute(
+      knowledgeGraphCacheKey({ scope: parsed.scope, includeArchived, viewerScope: scope }), build)
+    : build();
+}
+
+// ?items=none (#2921): the graph without its per-entry item nodes — the
+// Knowledge page pages the entries in via GET /api/knowledge/items instead of
+// downloading (and rendering) every entry of a large team at once.
+app.get('/api/knowledge/graph', async (req, res) => {
+  const scope = getScope(req);
+  const parsed = knowledgeScopeParam(req);
+  const includeArchived = req.query.includeArchived === '1' || req.query.includeArchived === 'true';
+  try {
+    const graph = await loadKnowledgeGraph(scope, parsed, includeArchived);
+    res.json(req.query.items === 'none' ? graphWithoutItems(graph) : graph);
+  } catch (err) {
+    console.error(`[knowledge] graph build failed: ${err.message}`);
+    res.status(500).json({ error: 'knowledge graph build failed' });
+  }
+});
+
+// One page of a team's knowledge items (#2921), filtered + sorted server-side:
+// ?team=&offset=&limit=&q=&kind=&converged=1&today=1&agent=&sort=created|used-desc|used-asc
+// &includeArchived=1. Served from the same cached graph as /api/knowledge/graph.
+app.get('/api/knowledge/items', async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.query.team === 'string' ? req.query.team : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const includeArchived = req.query.includeArchived === '1' || req.query.includeArchived === 'true';
+  try {
+    const graph = await loadKnowledgeGraph(scope, parseScope(`team:${teamId}`), includeArchived);
+    res.json({ team: teamId, ...selectItemsPage(graph, parseItemsQuery(req.query)) });
+  } catch (err) {
+    console.error(`[knowledge] items page failed: ${err.message}`);
+    res.status(500).json({ error: 'knowledge items failed' });
+  }
 });
 
 // Overlay the human-readable summary (#635) on every item node: `summary` is the
@@ -7558,12 +7836,17 @@ function augmentDisplaySummary(graph, entries) {
 // with the same pure builder that writes knowledge-digest.md, so the badge can
 // never disagree with the file the agents import. Best-effort: an unreachable
 // orchestrator just means no badges.
+// #571: the per-call bound on the three orchestrator augment fetches below.
+const KNOWLEDGE_AUGMENT_TIMEOUT_MS = knowledgeAugmentTimeoutMsFromEnv(process.env);
+
 async function augmentDigestInclusion(graph, teamIds) {
   if (!graph || !Array.isArray(graph.nodes)) return;
   const included = new Set();
   await Promise.all((teamIds || []).map(async (teamId) => {
     try {
-      const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/digest-status`);
+      const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/digest-status`, {
+        signal: AbortSignal.timeout(KNOWLEDGE_AUGMENT_TIMEOUT_MS),
+      });
       if (!resp.ok) return;
       const data = await resp.json();
       for (const id of (Array.isArray(data.includedIds) ? data.includedIds : [])) included.add(id);
@@ -7587,7 +7870,9 @@ async function augmentRetrievalStats(graph, teamIds) {
   let anyStats = false;
   await Promise.all((teamIds || []).map(async (teamId) => {
     try {
-      const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/retrieval-stats`);
+      const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/retrieval-stats`, {
+        signal: AbortSignal.timeout(KNOWLEDGE_AUGMENT_TIMEOUT_MS),
+      });
       if (!resp.ok) return;
       const data = await resp.json();
       anyStats = true;
@@ -7628,6 +7913,7 @@ async function augmentSkillRoles(graph, teamIds) {
       const resp = await fetch(`${ORCH_URL()}/internal/knowledge/domains`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ teamId, op: 'read' }),
+        signal: AbortSignal.timeout(KNOWLEDGE_AUGMENT_TIMEOUT_MS),
       });
       if (!resp.ok) return;
       const data = await resp.json().catch(() => ({}));
@@ -7653,19 +7939,17 @@ async function augmentSkillRoles(graph, teamIds) {
 // added. Also adds ghost nodes for adopted global skills that the lane filter
 // wouldn't render (active list ∌ origin team). Mutates `graph` in place; no-op
 // outside team scope or when the squad has no team agent.
-function augmentSkillActivation(graph, parsed) {
+function augmentSkillActivation(graph, parsed, fleet = null) {
   if (!graph || !Array.isArray(graph.nodes) || parsed.kind !== 'team') return;
   const teamId = parsed.id;
-  const teamCfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
-  if (!teamCfg || teamCfg.role !== 'team') return;
-  const teamSkills = Array.isArray(teamCfg.skills) ? teamCfg.skills : [];
+  const kfleet = fleet || buildKnowledgeFleetNow();
+  const grant = knowledgeFleetLib.teamSkillGrant(kfleet, teamId);
+  if (!grant) return;
+  const teamSkills = grant.skills;
 
-  let members = [];
-  try {
-    members = fs.readdirSync(AGENTS_DIR)
-      .map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null))
-      .filter(c => c && c.role === 'team-member' && c.parentTeamId === teamId);
-  } catch { /* no agents dir */ }
+  // Slim member rows (knowledge-fleet.js `teamMembers`): `provisioned` stands
+  // in for the Matrix token, which the fleet never carries.
+  const members = knowledgeFleetLib.teamMembers(kfleet, teamId);
   const manifests = new Map(members.map(m => [
     m.id,
     readJsonFile(path.join(resolveAgentStateDir(path.join(AGENTS_DIR, m.id)), 'seeded-skills.json'), {}) || {},
@@ -7713,7 +7997,7 @@ function augmentSkillActivation(graph, parsed) {
         const granted = hasOverride ? m.skillsOverride.includes(name) : inList;
         const seededEntry = (manifests.get(m.id) || {})[name];
         const seeded = !!seededEntry;
-        const state = !m.token ? 'stub'
+        const state = !m.provisioned ? 'stub'
           : (hasOverride && !granted) ? 'excluded-override'
           : seeded ? 'active'
           : granted ? 'pending'
@@ -7797,13 +8081,25 @@ function augmentPendingPromotions(graph, teamIds) {
   }
 }
 
+// #2920: the badge is fetched on every chat open/switch. Its counters are kept
+// per (scope, teams) while every team's entries fingerprint is unchanged —
+// within the minute, since "today" is a rolling 24 h window.
+const knowledgeSummaryCache = createFingerprintCache({ maxEntries: 256 });
+
 app.get('/api/knowledge/summary', async (req, res) => {
   const scope = getScope(req);
   const parsed = knowledgeScopeParam(req);
-  const teamIds = knowledgeScopeTeams(parsed, scope);
-  const entries = [];
-  for (const teamId of teamIds) entries.push(...gatherTeamEntries(teamId).entries);
-  res.json(summarizeKnowledge({ scope: parsed.scope, entries, now: Date.now() }));
+  const fleet = buildKnowledgeFleetNow(); // #571: one config read for every team
+  const teamIds = knowledgeScopeTeams(parsed, scope, fleet);
+  const gathered = await Promise.all(teamIds.map((teamId) => gatherTeamEntries(teamId, { fleet })));
+  const now = Date.now();
+  const fingerprint = [Math.floor(now / 60_000), ...gathered.map((g) => g.fingerprint)].join('\n');
+  const summary = await knowledgeSummaryCache.get(`${parsed.scope}|${teamIds.join(',')}`, fingerprint, () => {
+    const entries = [];
+    for (const g of gathered) entries.push(...g.entries);
+    return summarizeKnowledge({ scope: parsed.scope, entries, now });
+  });
+  res.json(summary);
 });
 
 // Read-side retrieval aggregate (#915): per-entry "last used" truth + the
@@ -7823,15 +8119,16 @@ app.get('/api/knowledge/retrieval-stats', async (req, res) => {
   }
 });
 
-app.get('/api/knowledge/item/:id', (req, res) => {
+app.get('/api/knowledge/item/:id', async (req, res) => {
   const scope = getScope(req);
   const { id } = req.params;
   const teamId = typeof req.query.teamId === 'string' ? req.query.teamId : '';
   if (!/^[0-9a-f]{12}$/.test(id)) return res.status(400).json({ error: 'invalid id' });
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'invalid teamId' });
-  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const fleet = buildKnowledgeFleetNow(); // #571: one config read for the whole request
+  if (!knowledgeTeamVisible(scope, teamId, fleet)) return res.status(404).json({ error: 'not found' });
 
-  const { entries } = gatherTeamEntries(teamId);
+  const { entries } = await gatherTeamEntries(teamId, { fleet });
   // Prefer a live entry over a merge tombstone of the same id (Phase 3).
   const entry = entries.find(e => e && e.id === id && e.status !== 'merged')
     || entries.find(e => e && e.id === id) || null;
@@ -7840,7 +8137,7 @@ app.get('/api/knowledge/item/:id', (req, res) => {
   const originAgent = typeof entry.originAgent === 'string' ? entry.originAgent : null;
   const correlationId = typeof entry.correlationId === 'string' ? entry.correlationId : null;
   const roomId = originAgent && correlationId ? findRoomForCorrelation(originAgent, correlationId) : null;
-  const repoUrl = resolveTeamRepoUrl(teamId);
+  const repoUrl = resolveTeamRepoUrl(teamId, fleet);
   const sourceRefs = Array.isArray(entry.sourceRefs) ? entry.sourceRefs : [];
 
   const links = {
@@ -7999,6 +8296,7 @@ app.get('/api/knowledge/stream', (req, res) => {
   }
 
   let lineBuf = '';
+  let lineStart = cursor; // byte offset of lineBuf's first byte
   let fileWatcher = null;
   let dirWatcher = null;
   let draining = false;
@@ -8012,9 +8310,17 @@ app.get('/api/knowledge/stream', (req, res) => {
   writeCursor();
   const heartbeat = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* noop */ } }, 15000);
 
-  const emitLine = (line) => {
+  const emitLine = (line, endOffset) => {
     const ev = kbParseLine(line);
-    if (ev && knowledgeLinks.matchesScope(ev, scope)) writeEvent(ev);
+    if (!ev) return;
+    // #571: a feed event is a knowledge write (often the orchestrator's own —
+    // harvest, consolidation, promotion — which never passes the console's
+    // mutation middleware). Clear the graphs it touches BEFORE the client
+    // hears of it, so the reload the event triggers rebuilds instead of being
+    // served the pre-event graph — and staying on it if no further event
+    // follows. Keyed by the line's end offset, so N open streams clear once.
+    invalidateKnowledgeGraphCacheForEvent(ev, endOffset);
+    if (knowledgeLinks.matchesScope(ev, scope)) writeEvent(ev);
   };
 
   const drain = () => {
@@ -8026,7 +8332,8 @@ app.get('/api/knowledge/stream', (req, res) => {
       if (!fs.existsSync(filepath)) { draining = false; if (pending) { pending = false; setImmediate(drain); } return; }
       size = fs.statSync(filepath).size;
     } catch { draining = false; return; }
-    if (size < cursor) { cursor = 0; lineBuf = ''; writeEvent({ type: '_truncated' }); }
+    noteKnowledgeEventsFileSize(size);
+    if (size < cursor) { cursor = 0; lineBuf = ''; lineStart = 0; writeEvent({ type: '_truncated' }); }
     if (size === cursor) { draining = false; if (pending) { pending = false; setImmediate(drain); } return; }
     const stream = fs.createReadStream(filepath, { start: cursor, end: size - 1, encoding: 'utf8' });
     stream.on('data', (chunk) => {
@@ -8035,7 +8342,8 @@ app.get('/api/knowledge/stream', (req, res) => {
       while ((idx = lineBuf.indexOf('\n')) >= 0) {
         const line = lineBuf.slice(0, idx);
         lineBuf = lineBuf.slice(idx + 1);
-        if (line.trim()) emitLine(line);
+        lineStart += Buffer.byteLength(line, 'utf8') + 1;
+        if (line.trim()) emitLine(line, lineStart);
       }
     });
     stream.on('error', () => { draining = false; if (pending) { pending = false; setImmediate(drain); } });
@@ -8183,11 +8491,11 @@ app.post('/api/knowledge/promotion-suggestions/:id/draft', heavyLimiter, async (
 // Resolve an operator-selected set of KB entry ids into an ad-hoc candidate
 // (manual "combine into skill" — no stored candidate exists). Prefers live
 // entries over merge tombstones, exactly like /api/knowledge/item/:id.
-function adHocCandidate(teamId, entryIds) {
+async function adHocCandidate(teamId, entryIds) {
   const ids = [...new Set((Array.isArray(entryIds) ? entryIds : [])
     .filter(x => typeof x === 'string' && /^[0-9a-f]{12}$/.test(x)))];
   if (ids.length === 0) return null;
-  const { entries } = gatherTeamEntries(teamId);
+  const { entries } = await gatherTeamEntries(teamId);
   const picked = [];
   for (const id of ids) {
     const e = entries.find(x => x && x.id === id && x.status !== 'merged')
@@ -8207,7 +8515,7 @@ app.post('/api/knowledge/draft', heavyLimiter, async (req, res) => {
   const teamId = typeof req.body?.team === 'string' ? req.body.team : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
   if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
-  const cand = adHocCandidate(teamId, req.body?.entryIds);
+  const cand = await adHocCandidate(teamId, req.body?.entryIds);
   if (!cand) return res.status(404).json({ error: 'no matching KB entries' });
 
   const heuristic = knowledgeSuggestions.buildHeuristicSkillDraft(cand);
@@ -8247,10 +8555,11 @@ app.post('/api/knowledge/summaries/backfill', heavyLimiter, async (req, res) => 
   const teamId = typeof req.body?.team === 'string' ? req.body.team
     : (typeof req.body?.teamId === 'string' ? req.body.teamId : '');
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
-  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const fleet = buildKnowledgeFleetNow(); // #571: one config read for the whole request
+  if (!knowledgeTeamVisible(scope, teamId, fleet)) return res.status(404).json({ error: 'not found' });
 
   const MAX_PER_REQUEST = 40;
-  const { entries } = gatherTeamEntries(teamId);
+  const { entries } = await gatherTeamEntries(teamId, { fleet });
   const missing = (Array.isArray(entries) ? entries : []).filter(
     (e) => e && typeof e.id === 'string' && /^[0-9a-f]{12}$/.test(e.id)
       && e.status !== 'merged'
@@ -8325,7 +8634,7 @@ app.post('/api/knowledge/extend-draft', heavyLimiter, async (req, res) => {
   const cand = (req.body?.suggestionId
     ? readCandidateStore(teamId).find(c => c && c.id === req.body.suggestionId) || null
     : null)
-    || adHocCandidate(teamId, req.body?.entryIds);
+    || await adHocCandidate(teamId, req.body?.entryIds);
   if (!cand) return res.status(404).json({ error: 'no matching KB entries' });
 
   const heuristic = knowledgeSuggestions.buildHeuristicSkillExtension(target.existingSkillMd, cand);
@@ -8445,7 +8754,7 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     const cand = (req.body.suggestionId
       ? readCandidateStore(teamId).find(c => c && c.id === req.body.suggestionId) || null
       : null)
-      || adHocCandidate(teamId, v.entryIds);
+      || await adHocCandidate(teamId, v.entryIds);
 
     const existingProv = readSkillProvenance(target.dir) || {};
     const extendedBy = (req.user && (req.user.sub || req.user.username)) || 'operator';
@@ -8526,7 +8835,7 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
   const cand = (req.body.suggestionId
     ? readCandidateStore(teamId).find(c => c && c.id === req.body.suggestionId) || null
     : null)
-    || (v.from === 'team' ? adHocCandidate(teamId, v.entryIds) : null);
+    || (v.from === 'team' ? await adHocCandidate(teamId, v.entryIds) : null);
 
   // #2592: a domain card may only create its own domain skill (never a lesson-named one).
   const dc = knowledgeSuggestions.checkDomainCardTarget(
@@ -8830,18 +9139,8 @@ app.post('/api/skills/resync', apiLimiter, async (req, res) => {
 
 // The environment a team shares (from any of its agents' configs). Mirrors the
 // orchestrator's resolveTeamEnvId; used only to read/display config here.
-function teamEnvironment(teamId) {
-  let ids;
-  try { ids = fs.readdirSync(AGENTS_DIR); } catch { return null; }
-  for (const id of ids) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
-    if (!cfg) continue;
-    if (agentKnowledgeTeam({ ...cfg, id: cfg.id || id }) === teamId && cfg.environmentId) {
-      const env = loadEnvironment(cfg.environmentId);
-      if (env) return env;
-    }
-  }
-  return null;
+function teamEnvironment(teamId, fleet = null) {
+  return knowledgeFleetLib.teamEnvironment(fleet || buildKnowledgeFleetNow(), teamId, { loadEnvironment });
 }
 
 // Per-team knowledge-config overrides (#570). The orchestrator persists the four
@@ -8856,8 +9155,8 @@ function loadTeamKnowledgeOverrides(teamId) {
 // The team's effective knowledge env: the shared environment overlaid with the
 // team's per-team overrides (#570). Every knowledge read path resolves config
 // through this so two teams sharing one env report independent settings.
-function teamKnowledgeEnv(teamId) {
-  return knowledgeSuggestions.mergeTeamKnowledgeConfig(teamEnvironment(teamId), loadTeamKnowledgeOverrides(teamId));
+function teamKnowledgeEnv(teamId, fleet = null) {
+  return knowledgeSuggestions.mergeTeamKnowledgeConfig(teamEnvironment(teamId, fleet), loadTeamKnowledgeOverrides(teamId));
 }
 
 // Auto-resync gate (#629 AC5): after a source skill is EDITED, fan the drift-
@@ -8885,9 +9184,10 @@ function autoResyncOnEdit(skillName, { tier, teamId } = {}) {
       }
     }
   }
+  const fleet = targetTeams.length ? buildKnowledgeFleetNow() : null; // #571: one read for every team
   for (const tid of targetTeams) {
     let mode;
-    try { mode = knowledgeSuggestions.resolveSkillResyncMode(teamKnowledgeEnv(tid)); } catch { mode = null; }
+    try { mode = knowledgeSuggestions.resolveSkillResyncMode(teamKnowledgeEnv(tid, fleet)); } catch { mode = null; }
     if (mode !== 'auto') continue; // default `review`: leave copies outdated
     fetch(`${orchestratorUrl}/internal/skills/resync`, {
       method: 'POST',
@@ -8963,12 +9263,13 @@ app.get('/api/knowledge/gates', (req, res) => {
   const scope = getScope(req);
   const teamId = typeof req.query.team === 'string' ? req.query.team : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
-  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const fleet = buildKnowledgeFleetNow(); // #571: one config read for the whole request
+  if (!knowledgeTeamVisible(scope, teamId, fleet)) return res.status(404).json({ error: 'not found' });
   // #570: knowledge config (autonomy / review / gates / storage) is keyed PER
   // TEAM, so overlay the team's own overrides onto its shared environment. Two
   // teams reusing one environment therefore report independent settings, and the
   // config is no longer "shared with" sibling teams (sharedWith is always empty).
-  const env = teamKnowledgeEnv(teamId);
+  const env = teamKnowledgeEnv(teamId, fleet);
   res.json({
     team: teamId,
     autonomy: teamAutonomyLevel(env),
@@ -9119,6 +9420,11 @@ app.post('/api/knowledge/domains', apiLimiter, async (req, res) => {
   }
   try {
     const forward = { ...req.body, teamId, op };
+    // #2921: the Knowledge page no longer holds every entry, so the lessons the
+    // bootstrap proposes domains over are read here (same cached team graph).
+    if (op === 'bootstrap' && !(Array.isArray(forward.lessons) && forward.lessons.length)) {
+      forward.lessons = lessonTexts(await loadKnowledgeGraph(scope, parseScope(`team:${teamId}`), false));
+    }
     if (assistTarget && assistTarget.endpointId) {
       forward.assistEndpointId = assistTarget.endpointId; // env fallback (endpointId=null) → orchestrator uses .env
       forward.model = assistTarget.model;
@@ -9318,12 +9624,13 @@ app.get('/api/knowledge/review-queue', async (req, res) => {
   const scope = getScope(req);
   const teamId = typeof req.query.team === 'string' ? req.query.team : '';
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
-  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  const fleet = buildKnowledgeFleetNow(); // #571: one config read for the whole request
+  if (!knowledgeTeamVisible(scope, teamId, fleet)) return res.status(404).json({ error: 'not found' });
   await refreshTeamCloneBestEffort(teamId);
-  const { entries, warnings } = gatherTeamEntries(teamId);
+  const { entries, warnings } = await gatherTeamEntries(teamId, { fleet });
   const only = req.query.include === 'rejected' ? null : 'pending';
   const items = selectReviewQueue(entries, { only });
-  res.json({ team: teamId, review: knowledgeReviewOn(teamKnowledgeEnv(teamId)), items, warnings }); // #570: per-team config
+  res.json({ team: teamId, review: knowledgeReviewOn(teamKnowledgeEnv(teamId, fleet)), items, warnings }); // #570: per-team config
 });
 
 // ── Approve / reject / reset a held KB entry ────────────────────────────────
@@ -10189,6 +10496,8 @@ app.post('/api/flows/graph', (req, res) => {
     humans: bundleHumans,
     // Auto-repairs applied on import (#2579) — non-fatal, surfaced to the client.
     ...(coercions.length ? { coercions } : {}),
+    // Prompt-mode lints (#2813) — e.g. an inherit role with no team prompt.
+    ...(promptModeWarnings(bundle).length ? { promptWarnings: promptModeWarnings(bundle) } : {}),
     ...buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels, humans: bundleHumans }),
   });
 });
@@ -10208,8 +10517,16 @@ app.get('/api/process/template', (req, res) => {
   let teamHillClimb = null;
   let teamWipLimit = null;
   let teamAutoDispatch = null;
+  let teamPrompt = '';
   if (team) {
     const teamCfg = readJsonFile(path.join(AGENTS_DIR, team, 'config.json'), null);
+    // The team prompt template inherit/additional members compose from (#2813).
+    // Lifted to placeholders so the bundle carries no repository; omitted when
+    // it is still the platform default, which materialise regenerates for the
+    // target team (repo-aware) anyway.
+    const tpl = typeof teamCfg?.systemPromptTemplate === 'string' ? teamCfg.systemPromptTemplate : '';
+    const tplVars = { teamName: teamCfg?.displayName || team, repoFullName: memberRepoFullName(teamCfg) };
+    teamPrompt = tpl.trim() === defaultTeamPrompt(tplVars).trim() ? '' : portableTeamPrompt(tpl, tplVars);
     if (teamCfg?.displayName) teamName = teamCfg.displayName;
     if (Array.isArray(teamCfg?.stages)) teamStages = teamCfg.stages.filter(s => typeof s === 'string');
     // Hill-climb collector config (#1222) round-trips like stages; normalizeHillClimb
@@ -10230,7 +10547,13 @@ app.get('/api/process/template', (req, res) => {
     const tlist = Array.isArray(triggers) ? triggers : [];
     // Effective prompt the agent actually runs (rendered AGENT-PROMPT.md),
     // falling back to the config override.
-    const systemPrompt = readAgentSystemPrompt(id) || cfg.systemPrompt || '';
+    // #2813: an inherit/additional member exports its OWN text (the addition,
+    // or nothing) plus its promptMode, never the flattened prompt — otherwise
+    // the round trip would turn it into an exclusive copy of today's team prompt.
+    const promptMode = resolvePromptMode(cfg);
+    const systemPrompt = promptMode === PROMPT_MODES.EXCLUSIVE
+      ? (readAgentSystemPrompt(id) || cfg.systemPrompt || '')
+      : (cfg.systemPrompt || '');
     // Lift any legacy trigger-level emit to the agent level (#783) so the export
     // carries label hand-offs canonically and loses no edge.
     const emits = liftAgentEmits(cfg.emits, tlist);
@@ -10263,6 +10586,15 @@ app.get('/api/process/template', (req, res) => {
       // (e.g. Developer → Code Reviewer "PR"). buildProcessTemplate reduces the
       // member-id `from` to a portable role key via remapChannel.
       ...(Array.isArray(cfg.channels) && cfg.channels.length ? { channels: cfg.channels } : {}),
+      // PR/issue producer flags (#380) — buildProcessTemplate serializes
+      // `r.github`, but the export never handed it over (#2813 AC11).
+      ...(cfg.github && typeof cfg.github === 'object' ? { github: cfg.github } : {}),
+      // Portable role settings (#2813): prompt mode, model pin (omitted on the
+      // environment default), memory requirement (omitted on platform default).
+      // Repos, mounts, env, provider, MCP, skills and plugins never travel.
+      promptMode,
+      ...(typeof cfg.modelOverride === 'string' && cfg.modelOverride ? { model: cfg.modelOverride } : {}),
+      ...(cfg.memoryLimit ? { memoryLimit: cfg.memoryLimit } : {}),
       // Agent instance pools (#2246): the member's opt-in pooling config. It MUST
       // ride the exported ROLE — buildProcessTemplate's `normalizePool(r.pool)`
       // only serializes what it is given, so without this the pooled role exports
@@ -10292,6 +10624,7 @@ app.get('/api/process/template', (req, res) => {
     wipLimit: teamWipLimit,
     // The Flow Supervisor's opt-in (#2247) rides along on the team agent, same as above.
     autoDispatch: teamAutoDispatch,
+    teamPrompt,
   }));
 });
 
@@ -16170,12 +16503,13 @@ app.get('/api/environments', (req, res) => {
       // of team assignment — `isGlobalEnvironment` re-reads its own
       // preconditions, so this can never widen past what the record currently
       // qualifies for.
-      : !isTemplateEnvironment(e) && (visibleEnvironment(scope, e) || isGlobalEnvironment(e)))
+      : !isTemplateEnvironment(e) && (visibleEnvironment(scope, e) || isGlobalEnvironment(e)));
+  const byEnv = envs.length ? agentsByEnvironment() : new Map(); // one fleet read for the whole list (#570)
+  res.json(envs
     .map(e => {
-      const agents = agentsUsingEnvironment(e.id, scope); // (#439)
+      const agents = agentsUsingEnvironment(e.id, scope, byEnv); // (#439)
       return { ...e, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, e) };
-    });
-  res.json(envs);
+    }));
 });
 
 app.get('/api/environments/:id', (req, res) => {
@@ -16903,6 +17237,13 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
   // image is immutable for its whole lifetime, so a toolchain change reaches a
   // RUNNING agent only by recreating it. The console warns about the interruption
   // before the save, as the personal-credential rotate panel does.
+  // #2813 AC9: a model pin the bound members carry (e.g. one kept pending
+  // when the team was created before a provider was bound) is checked against
+  // the NEW provider before the respawn below, so no member starts on a model
+  // its provider does not serve. Dropped pins are named in the response.
+  const modelPinsDropped = (env.llmEndpointId || null) !== prevLlmEndpointId
+    ? dropStaleEnvModelPins(env)
+    : [];
   if ((env.githubTokenId || null) !== prevGithubTokenId) {
     notifyEnvCredentialChange(env.id, 'githubTokenId-changed');
   } else if ((env.toolchainId || null) !== prevToolchainId) {
@@ -16927,6 +17268,7 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
   res.json({
     ...env,
     previousRepositories: prevRepositories,
+    ...(modelPinsDropped.length ? { modelWarnings: modelPinsDropped } : {}),
     ...(mcpApply ? { mcpApply } : {}),
     ...(promptRebuild ? { promptRebuild } : {}),
   });
@@ -17540,6 +17882,31 @@ app.delete('/api/agent-templates/:id', (req, res) => {
   res.json({ deleted: id, revertedToDefault: hasDefault });
 });
 
+// The team agent's prompt template at materialise (#2813): the bundle's own
+// `teamPrompt` (placeholders substituted for THIS team) when it carries one,
+// else the platform default.
+function bundleTeamPrompt(bundle, vars) {
+  const tpl = bundle && typeof bundle.teamPrompt === 'string' ? bundle.teamPrompt : '';
+  return tpl.trim() ? substituteVars(tpl, vars) : defaultTeamPrompt(vars);
+}
+
+// Model availability for a materialising team (#2813 AC9): resolves each
+// planned member template's `model` against the provider bound on the team's
+// environment. Returns the warnings and a lookup giving the (possibly
+// model-less) template for a planned member.
+function gateBundleModels(planned, envId) {
+  const templates = [...new Set((planned || []).map(p => p.template))];
+  let endpoint = null;
+  try {
+    const env = loadEnvironment(envId);
+    const epId = env && env.llmEndpointId;
+    endpoint = epId ? (listLlmEndpoints().find(e => e.id === epId) || null) : null;
+  } catch { endpoint = null; }
+  const { roles, warnings } = resolveBundleModels(templates, endpoint);
+  const byTemplate = new Map(templates.map((t, i) => [t, roles[i]]));
+  return { warnings, templateFor: (t) => byTemplate.get(t) || t };
+}
+
 // Generic, role-agnostic team prompt. Each member can override this with
 // its role-specific prompt; members that don't override inherit this text
 // and pick up edits via /api/agents/:id PUT (systemPromptTemplate).
@@ -17960,12 +18327,15 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   // loop below (var substitution over prompt + triggers).
   let customRolesRaw = Array.isArray(body.customRoles) ? body.customRoles : [];
   let importCoercions = [];
+  let modelWarnings = [];
   if (body.processTemplate) {
     // Repair safe cross-field inconsistencies before validating (#2579) and reuse
     // the coerced bundle for EVERY downstream read (stages/labels/humans/wipLimit/
     // autoDispatch below), so an older/leaky export materialises consistently
     // instead of being rejected outright.
-    const coerced = coerceImportBundle(body.processTemplate);
+    // #2813 AC5: a role memory above the ceiling is clamped (with a warning)
+    // so the team is still created — validation alone would refuse it.
+    const coerced = coerceImportBundle(body.processTemplate, { clampMemory: true });
     body.processTemplate = coerced.bundle;
     importCoercions = coerced.warnings;
     const v = validateProcessTemplate(body.processTemplate);
@@ -18312,7 +18682,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     // first-member auto-create (the wizard adds members itself with role
     // overrides in Phase C).
     if (!teamExists) {
-      const teamPrompt = defaultTeamPrompt(vars);
+      const teamPrompt = bundleTeamPrompt(body.processTemplate, vars);
       const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -18380,6 +18750,10 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     // Phase C — team-members, one per selected role. Each one carries a
     // role-specific prompt override (so the team's generic prompt stays
     // useful as a fallback) and the role's full triggers.json.
+    // #2813 AC9: a role's model pin becomes the member's modelOverride only
+    // when the environment's provider serves it; otherwise the default + a warning.
+    const modelGate = gateBundleModels(toCreate, envId);
+    modelWarnings = modelGate.warnings;
     for (const p of toCreate) {
       const memberVars = { ...vars, agentId: p.memberId };
       // Member display name is the role name only (optionally numbered for
@@ -18392,7 +18766,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
       // Single source of truth for the member-create body (shared with the
       // streaming endpoint and the Flow Editor's add-role-from-template, #586):
       // prompt + triggers substituted per-member; declarative ports carried.
-      const memberBody = buildMemberFromTemplate(p.template, {
+      const memberBody = buildMemberFromTemplate(modelGate.templateFor(p.template), {
         teamId, memberId: p.memberId, memberDisplayName, vars: memberVars,
         materialize: materializeMembers,
       });
@@ -18465,8 +18839,8 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
       dms: created.dms,
       // Suffix collisions + any import auto-repairs (#2579) share the one
       // non-fatal `warnings` channel.
-      ...((suffixWarnings.length || importCoercions.length)
-        ? { warnings: [...importCoercions, ...suffixWarnings] } : {}),
+      ...((suffixWarnings.length || importCoercions.length || modelWarnings.length)
+        ? { warnings: [...importCoercions, ...modelWarnings, ...suffixWarnings] } : {}),
     });
 
     // Phase E — label provisioning (best-effort, after response sent).
@@ -18706,10 +19080,13 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // `processTemplate` bundle (Process Canvas import / wizard Process step, #422).
   let customRolesRaw = Array.isArray(body.customRoles) ? body.customRoles : [];
   let importCoercions = [];
+  let modelWarnings = [];
   if (body.processTemplate) {
     // Repair safe cross-field inconsistencies before validating (#2579), reusing
     // the coerced bundle for every downstream read — parity with POST /api/teams.
-    const coerced = coerceImportBundle(body.processTemplate);
+    // #2813 AC5: a role memory above the ceiling is clamped (with a warning)
+    // so the team is still created — validation alone would refuse it.
+    const coerced = coerceImportBundle(body.processTemplate, { clampMemory: true });
     body.processTemplate = coerced.bundle;
     importCoercions = coerced.warnings;
     const v = validateProcessTemplate(body.processTemplate);
@@ -19071,7 +19448,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
 
     if (!teamExists) {
       emit({ type: 'step', id: 'team', status: 'running' });
-      const teamPrompt = defaultTeamPrompt(vars);
+      const teamPrompt = bundleTeamPrompt(body.processTemplate, vars);
       const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -19135,6 +19512,10 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       emit({ type: 'step', id: 'team', status: 'done' });
     }
 
+    // #2813 AC9 — parity with POST /api/teams.
+    const modelGate = gateBundleModels(toCreate, envId);
+    modelWarnings = modelGate.warnings;
+    for (const w of modelWarnings) emit({ type: 'warning', message: w });
     for (const p of toCreate) {
       const stepId = `member:${p.memberId}`;
       emit({ type: 'step', id: stepId, status: 'running' });
@@ -19151,7 +19532,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       // non-streaming handler does (#1955) — this is the request path both UI
       // surfaces use, so leaving it to the orchestrator default is what made the
       // Materialize dialog's checkbox inert.
-      const memberBody = buildMemberFromTemplate(p.template, {
+      const memberBody = buildMemberFromTemplate(modelGate.templateFor(p.template), {
         teamId, memberId: p.memberId, memberDisplayName, vars: memberVars,
         materialize: materializeMembers,
       });
@@ -19255,8 +19636,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
         dms: created.dms,
         // Import auto-repairs (#2579) + suffix collisions + label-provisioning
         // warnings all share the one non-fatal `warnings` channel.
-        ...((importCoercions.length || suffixWarnings.length || provWarn.length)
-          ? { warnings: [...importCoercions, ...suffixWarnings, ...provWarn] } : {}),
+        ...((importCoercions.length || modelWarnings.length || suffixWarnings.length || provWarn.length)
+          ? { warnings: [...importCoercions, ...modelWarnings, ...suffixWarnings, ...provWarn] } : {}),
       },
     });
     res.end();
@@ -19406,6 +19787,19 @@ app.put('/api/blueprints/:id/memory/:file', apiLimiter, express.text({ type: '*/
 
 /* ─── SSH Keys ──────────────────────────────────────────────────────── */
 
+// A signing key (#2938) carries its public key in list/create responses so the
+// UI can show what to upload on GitHub as a "Signing Key". Derived from the
+// stored OpenSSH private key on read (only the PUBLIC half is returned); null
+// for a legacy PEM key — the UI then explains `ssh-keygen -y`.
+function withSigningPublicKey(cred) {
+  if (!cred || !cred.signing || !SSH_KEY_ID_RE.test(String(cred.id || ''))) return cred;
+  let publicKey = null;
+  try {
+    publicKey = publicKeyFromBlob(extractOpensshPubBlob(fs.readFileSync(path.join(SSH_KEYS_DIR, path.basename(cred.id)), 'utf8')));
+  } catch { /* unreadable key file — publicKey stays null */ }
+  return { ...cred, publicKey };
+}
+
 app.get('/api/ssh-keys', (req, res) => {
   // Return only metadata — never the private key. Scoped to the caller (#798):
   // Team Admins see system credentials assigned to a team they administer plus
@@ -19413,7 +19807,7 @@ app.get('/api/ssh-keys', (req, res) => {
   const scope = getScope(req);
   const keys = listSshKeys();
   // #2655: mark which personal key the runtime resolves (the owner's first one).
-  res.json(markActivePersonal(keys.map(normalizeCredential).filter(k => visibleCredential(scope, k)), keys));
+  res.json(markActivePersonal(keys.map(normalizeCredential).filter(k => visibleCredential(scope, k)), keys).map(withSigningPublicKey));
 });
 
 app.post('/api/ssh-keys', apiLimiter, (req, res) => {
@@ -19435,6 +19829,9 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
   // armour lines used to be stored and only failed when an agent cloned.
   const keyError = sshPrivateKeyError(trimmed);
   if (keyError) return res.status(400).json({ error: keyError });
+  // Optional commit-signing identity (#2938): makes this a signing key.
+  const signingInput = parseSigningInput(req.body?.signing);
+  if (signingInput.error) return res.status(400).json({ error: signingInput.error });
 
   const existing = listSshKeys();
   let id;
@@ -19472,6 +19869,7 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
     identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity }),
     fingerprint: sshKeyFingerprint(trimmed),
     createdAt: new Date().toISOString(),
+    ...(signingInput.action === 'set' ? { signing: signingInput.signing } : {}),
   };
   const after = [...existing, entry];
   saveSshKeysIndex(after);
@@ -19481,7 +19879,7 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
   const ownerAgentsRestarted = entry.scope === 'personal'
     && ownerRespawnNeeded({ before: existing, after, userId: entry.userId });
   if (ownerAgentsRestarted) notifyOwnerCredentialChange(entry.userId, 'personal-ssh-key-set');
-  res.status(201).json({ ...normalizeCredential(entry), ...(entry.scope === 'personal' ? { ownerAgentsRestarted } : {}) });
+  res.status(201).json({ ...withSigningPublicKey(normalizeCredential(entry)), ...(entry.scope === 'personal' ? { ownerAgentsRestarted } : {}) });
 });
 
 // Server-side keypair generation. Returns the public key once so the user
@@ -19511,6 +19909,10 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
     }
   }
 
+  // Optional commit-signing identity (#2938): makes this a signing key.
+  const signingInput = parseSigningInput(req.body?.signing);
+  if (signingInput.error) return res.status(400).json({ error: signingInput.error });
+
   const safeComment = (typeof comment === 'string' && comment.trim()) || `aee-${id}`;
   const { privateKey: privText, publicKey: pubText, pubBlob } = generateOpensshEd25519Keypair(safeComment);
 
@@ -19533,6 +19935,7 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
     identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity }),
     fingerprint: sshFingerprintFromPubBlob(pubBlob),
     createdAt: new Date().toISOString(),
+    ...(signingInput.action === 'set' ? { signing: signingInput.signing } : {}),
   };
   const after = [...existing, entry];
   saveSshKeysIndex(after);
@@ -19559,10 +19962,16 @@ app.patch('/api/ssh-keys/:id', apiLimiter, (req, res) => {
   if (!canManageCredential(scope, cred)) {
     return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
   }
-  const updated = applyCredentialPatch({ res, cred, scope, body: req.body, inUse: sshKeyInUse(id), label: 'SSH key' });
-  if (!updated) return; // applyCredentialPatch already sent the error
+  // Set / clear the commit-signing identity (#2938). Validated before the
+  // ownership patch so a bad identity writes nothing. Takes effect on the next
+  // run — signing resolves per run, so no respawn.
+  const signingInput = parseSigningInput(req.body?.signing);
+  if (signingInput.error) return res.status(400).json({ error: signingInput.error });
+  const patched = applyCredentialPatch({ res, cred, scope, body: req.body, inUse: sshKeyInUse(id), label: 'SSH key' });
+  if (!patched) return; // applyCredentialPatch already sent the error
+  const updated = applySigning(patched, signingInput);
   saveSshKeysIndex(keys.map(k => (k.id === id ? updated : k)));
-  res.json(normalizeCredential(updated));
+  res.json(withSigningPublicKey(normalizeCredential(updated)));
 });
 
 app.delete('/api/ssh-keys/:id', apiLimiter, (req, res) => {
@@ -20184,99 +20593,61 @@ jobs:
 // opt-in changes the default response (AC8), and the admission rule itself is
 // the pure `matrix-agent-list.js`. Visibility scoping (#302) is unchanged, so an
 // opt-in can only ever widen the list within what this caller may already see.
-// #2789: roster fields for a pool instance waiting on an open PR. Only a
-// record for THIS spawn counts (a recycled instance id must not inherit an
-// earlier instance's state); primitives only, the roster diff is shallow.
-function poolWaitingFields(waitingMap, id, spawnedAt) {
-  const rec = waitingMap && typeof waitingMap === 'object' ? waitingMap[id] : null;
-  if (!rec || typeof rec !== 'object' || rec.waiting !== true) return {};
-  if ((rec.spawnedAt || null) !== (spawnedAt || null)) return {};
-  const prs = Array.isArray(rec.prs) ? rec.prs.filter((n) => Number.isInteger(n) && n > 0) : [];
-  return { poolWaiting: true, poolWaitingPr: prs.length ? Math.min(...prs) : null };
+// #566: the fleet is read ONCE per TTL into caller-independent entries (pure
+// `matrix-agent-roster.js` `buildRosterEntries`), shared by every tab and every
+// query variant behind a single-flight cache — the same shape as
+// `/api/agents/statuses`. Admission, scoping and the caller-specific fields are
+// applied per request (`projectRoster`), so a member still sees only their
+// Agent Teams. A successful roster-affecting console mutation clears the cache
+// (`mutationInvalidatesRoster`, wired behind the auth gate) so a
+// create/rename/enable shows on the next fetch; orchestrator-side changes (a
+// pool spawn/reap, an idle reclaim) surface within the TTL.
+// `AGENT_ROSTER_TTL_MS=0` turns caching off (a full unscoped sweep per request).
+const ROSTER_CACHE_TTL_MS = rosterTtlMsFromEnv(process.env);
+const rosterCache = createTtlCache({ ttlMs: ROSTER_CACHE_TTL_MS, maxEntries: 1 });
+
+function invalidateRosterCache() {
+  rosterCache.clear();
+  agentStatusCache.invalidate(); // #570: same configs; revalidate, keep serving the old set meanwhile
 }
 
-app.get('/api/matrix/agents', (req, res) => {
+// An agent skipped from the build is logged once per (agent, error), not on
+// every 2 s rebuild.
+const rosterEntryErrorsLogged = new Set();
+
+function buildRoster() {
+  return buildRosterEntries(listAgentDirs(), {
+    readConfig: (id) => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null),
+    readDmRoomId: (id) => matrix.getAgentDmRoom(id)?.roomId || null,
+    readEnvironmentName: (envId) => loadEnvironment(envId)?.name || null,
+    // #2789: each team's pool-waiting record (orchestrator `poolReapSweepTeam`).
+    readPoolWaiting: (teamId) => readJsonFile(controlOrAgentPath(teamId, 'pool-waiting.json'), null),
+    agentMetaForScope,
+    onEntryError: (id, err) => {
+      const key = `${id}\u0000${err && err.message}`;
+      if (rosterEntryErrorsLogged.has(key)) return;
+      rosterEntryErrorsLogged.add(key);
+      console.error(`[Admin] Chat roster skipped agent ${id}: ${err && err.message}`);
+    },
+  });
+}
+
+const ROSTER_ACCESS = { visibleAgent, canManageAgent, canChatAgent, canManageTeam };
+
+app.get('/api/matrix/agents', async (req, res) => {
   const scope = getScope(req);
   const includeDisabled = req.query.includeDisabled === '1' || req.query.includeDisabled === 'true';
   const includeStubs = req.query.includeStubs === '1' || req.query.includeStubs === 'true';
-  const ids = listAgentDirs();
-  const out = [];
-  // #2789: each team's pool-waiting record (orchestrator `poolReapSweepTeam`),
-  // read once per team per request.
-  const poolWaitingByTeam = new Map();
-  const poolWaitingOf = (teamId) => {
-    if (!poolWaitingByTeam.has(teamId)) {
-      poolWaitingByTeam.set(teamId, readJsonFile(controlOrAgentPath(teamId, 'pool-waiting.json'), null));
-    }
-    return poolWaitingByTeam.get(teamId);
-  };
-  for (const id of ids) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
-    if (!cfg) continue;
-    if (!admitsToChatList(cfg, { includeDisabled, includeStubs })) continue;
-    if (!visibleAgent(scope, agentMetaForScope(cfg))) continue; // team + visibility scoping (#302)
-    const dm = matrix.getAgentDmRoom(id);
-    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-    out.push({
-      id,
-      displayName: cfg.displayName || id,
-      role: cfg.role || 'agent',
-      userId: cfg.userId || `@${id}:local`,
-      enabled: cfg.enabled !== false,
-      // Whether the agent has ever been provisioned — never the token itself.
-      // Shipped so the shared `agentState()` can tell "paused" from "stub" on
-      // this payload too; since #1957 it is the field that *identifies* the stub
-      // rows `?includeStubs=1` admits (it was always true before that).
-      hasToken: !!cfg.token,
-      // Whether THIS caller may run management actions on the agent — the same
-      // boundary the mutating routes enforce (#989), so the chat's lifecycle
-      // menu can disable what the server would reject (mirrors `canSwitch` on
-      // GET /api/agents/:id/model).
-      canManage: canManageAgent(scope, agentMetaForScope(cfg)),
-      // Whether THIS caller may WRITE in the agent's chat (#2713) — false only
-      // for a System Admin outside the agent's team (scope.js `canChatAgent`,
-      // the predicate the send and chat-upload routes enforce). The composer
-      // renders read-only on false instead of re-deriving the rule.
-      canChat: canChatAgent(scope, agentMetaForScope(cfg)),
-      // Whether THIS caller may change the team's MEMBER LIST — the predicate
-      // `POST`/`DELETE /api/admin/memberships` enforce, shipped so the Share
-      // panel (#2082) can offer a read-only list instead of buttons that 403.
-      // For a `role: 'team'` row `canManage` above happens to resolve to the
-      // same thing (`agentMetaForScope().teamId === cfg.id`, so `canManageAgent`
-      // falls through to `canManageTeam`), and that coincidence is exactly why
-      // this is a separate field: a later change to the agent predicate must
-      // not silently open the member list (#2041 §7.1). Only on team rows —
-      // absent elsewhere, so a caller cannot read it as "not permitted".
-      ...(cfg.role === 'team' ? { canManageTeam: canManageTeam(scope, id) } : {}),
-      dmRoomId: dm?.roomId || null,
-      environmentId: cfg.environmentId || null,
-      environmentName: env?.name || cfg.environmentId || null,
-      parentTeamId: cfg.parentTeamId || null,
-      parentOrchestratorId: cfg.parentOrchestratorId || null,
-      // Pool instance markers (#2297): present only on an ephemeral
-      // `<team>-<role>-i<item>` spawned from a pooled role — `poolOf` names the
-      // role template's own agent id, which is what lets the rail
-      // (`agent-list-model.js` `buildGroups`) nest the instance under it
-      // instead of listing it as a flat sibling. Absent on every other row, same
-      // shape convention as `canManageTeam` above.
-      ...(cfg.poolInstance ? {
-        poolInstance: true,
-        poolOf: cfg.poolOf || null,
-        poolItem: cfg.poolItem != null ? cfg.poolItem : null,
-        poolSpawnedAt: cfg.poolSpawnedAt || null,
-        // #2789: idle and kept alive for its open PR — `poolWaitingPr` is the
-        // lowest open PR number (null when GitHub could not be read).
-        ...poolWaitingFields(cfg.parentTeamId ? poolWaitingOf(cfg.parentTeamId) : null, id, cfg.poolSpawnedAt),
-      } : {}),
-      // #2760 AC5: a pooled role TEMPLATE's "Max parallel instances" cap, so
-      // the rail can show its "Instances (n)" count against it ("5 / 3").
-      // `null` = no per-role cap; absent on every non-pooled row.
-      ...(!cfg.poolInstance && cfg.pool && typeof cfg.pool === 'object' && cfg.pool.enabled === true ? {
-        poolMaxInstances: Number.isInteger(cfg.pool.maxInstances) && cfg.pool.maxInstances >= 1 ? cfg.pool.maxInstances : null,
-      } : {}),
-    });
+  let entries;
+  try {
+    entries = await rosterCache.getOrCompute('roster', buildRoster);
+  } catch (err) {
+    // Only a fleet-wide failure gets here (one bad agent is skipped inside the
+    // build); the detail stays in the server log.
+    console.error(`[Admin] Chat roster build failed: ${err && err.message}`);
+    return res.status(500).json({ error: 'Failed to read the agent roster' });
   }
-  res.json(out);
+  res.json(projectRoster(entries, scope, { includeDisabled, includeStubs }, ROSTER_ACCESS));
 });
 
 // 2. Idempotent create-or-get DM room with an agent.
@@ -20344,6 +20715,8 @@ async function ensureAgentDmRoom(agentId) {
     createdAt: new Date().toISOString(),
     createdBy: adminUserId,
   });
+  // The roster ships `dmRoomId` (#566): show the new room on the next fetch.
+  invalidateRosterCache();
   // Nudge a running agent to re-pull dm-room.json now, so an isolated agent
   // learns its DM room for trigger/claim posts without waiting for the next
   // 60s sync (#185 Phase 2). No-op if the agent isn't running yet.
@@ -21349,12 +21722,19 @@ async function readGitDirty(abs) {
   return { isDirty: lines.length > 0, changesCount: lines.length };
 }
 
-// Short-lived cache for git-info dirty results: collapses concurrent pollers
-// (multiple browser tabs on the same agent) onto one `git status` and serves a
+// Cache for git-info dirty results: collapses concurrent pollers (multiple
+// browser tabs on the same agent) onto one `git status` and serves a
 // recently-computed result without re-spawning (#1683). Branch is read fresh
 // from .git/HEAD on every request (cheap) and never cached.
+// `git status` takes 0.8–2.2 s in large workspaces (#2923), so the TTL sits
+// above ChatPanel's 30-s poll and an expired result is served stale-while-
+// revalidate: every poll after the first answers from memory, and a single
+// background `git status` per agent repo and TTL window refreshes it. Only a
+// first look (or one after GIT_INFO_STALE_MS of silence) waits for git.
+const GIT_INFO_STALE_MS = 10 * 60_000;
 const gitInfoCache = createTtlCache({
-  ttlMs: Number.parseInt(process.env.AEE_GIT_INFO_TTL_MS, 10) || 5000,
+  ttlMs: Number.parseInt(process.env.AEE_GIT_INFO_TTL_MS, 10) || 35_000,
+  staleMs: GIT_INFO_STALE_MS,
 });
 
 app.get('/api/agents/:agentId/git-info', async (req, res) => {
@@ -21369,7 +21749,7 @@ app.get('/api/agents/:agentId/git-info', async (req, res) => {
   try {
     const repos = discoverGitRepos(agentRoot);
     const out = await Promise.all(repos.map(async (r) => {
-      const dirty = await gitInfoCache.getOrCompute(
+      const dirty = await gitInfoCache.getStaleWhileRevalidate(
         `${agentId}::${r.repoPath}`,
         () => readGitDirty(r.abs),
       );
@@ -22923,6 +23303,7 @@ app.get('/api/agents/:agentId/session/:roomId/stream', (req, res) => {
 
 app.get('*path', spaLimiter, (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Not found' });
+  res.setHeader('Cache-Control', INDEX_CACHE_CONTROL);
   res.sendFile(path.join(STATIC_DIR, 'index.html'));
 });
 
@@ -23041,4 +23422,5 @@ app.listen(4000, '0.0.0.0', () => {
     if (failed) setTimeout(() => { sweepInternalTransport().catch(logSweepError); }, 60_000).unref();
   }).catch(logSweepError);
   try { startLlmHealthPoller(); } catch (err) { console.error(`[Admin] Model Provider health poller failed to start: ${err.message}`); }
+  try { perfTiming.start(); } catch (err) { console.error(`[Admin] Perf reporter failed to start: ${err.message}`); }
 });

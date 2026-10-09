@@ -217,6 +217,9 @@ export const liveOps = {
   // of ScalingSection's own. `pool` is the already-built PUT body
   // (`scalingSaveDecision`'s payload — `null` clears it).
   setPool: (roleId, pool) => apiCall('PUT', `/api/agents/${roleId}`, { pool }),
+  // Memory requirement (#2813) — empty clears it (platform default). Applies
+  // on the next container start; the server validates against the ceiling.
+  setMemoryLimit: (roleId, memoryLimit) => apiCall('PUT', `/api/agents/${roleId}`, { memoryLimit: memoryLimit || null }),
 
   // ── stages (live, #674): the ordered list drives the layered-DAG layout. It
   // lives on the TEAM agent config (role 'team'); members carry a per-agent
@@ -568,6 +571,21 @@ export function makeDraftOps(getBundle, persist) {
       const b = clone(getBundle());
       const r = role(b, roleId);
       if (r) r.systemPrompt = systemPrompt;
+      await persist(b);
+    },
+    // Portable role settings (#2813): `promptMode`, `model`, `memoryLimit` on
+    // the bundle role. An empty value deletes the key — legacy prompt-mode
+    // inference, the environment's default model, the platform memory default.
+    setRoleSettings: async (roleId, patch) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      if (r) {
+        for (const key of ['promptMode', 'model', 'memoryLimit']) {
+          if (!(key in (patch || {}))) continue;
+          const v = typeof patch[key] === 'string' ? patch[key].trim() : patch[key];
+          if (v) r[key] = v; else delete r[key];
+        }
+      }
       await persist(b);
     },
     setStage: async (roleId, stage) => {

@@ -22,6 +22,9 @@
 //   - A brand-new stage typed inline is registered on the ordered stage list
 //     (ops.addStage) BEFORE being assigned (ops.setStage), so it lands in the
 //     layout order and never leaves a phantom stage (AC2).
+//   - Memory (#2813, both modes), Prompt mode + Model (#2813, draft) are
+//     validated/applied here too; the memory value is pre-flighted like
+//     Scaling so an invalid size blocks the whole save.
 //   - The Agent id is renamed LAST and ONLY in draft mode: it rewires
 //     references and re-keys the selection, so every op above still resolves
 //     the role by its old id. A live agent's id is immutable (AC6).
@@ -33,6 +36,7 @@
 // already committed server-side).
 
 import { scalingSaveDecision, scalingDraftDirty } from './scaling-view.js';
+import { memoryLimitError } from '../memory-limit-view.js';
 
 async function step(label, fn) {
   try {
@@ -47,7 +51,7 @@ async function step(label, fn) {
  * A message with no recognised label (or none at all) reports `label: null`. */
 export function parseSaveError(message) {
   const text = message || '';
-  const m = /^(Display name|Agent prompt|Stage|Parent|Scaling|Agent ID):\s*(.*)$/s.exec(text);
+  const m = /^(Display name|Agent prompt|Prompt mode|Model|Memory|Stage|Parent|Scaling|Agent ID):\s*(.*)$/s.exec(text);
   return m ? { label: m[1], message: m[2] } : { label: null, message: text };
 }
 
@@ -80,6 +84,15 @@ export async function applyDetailsSave(ops, node, fields, opts = {}) {
     poolDirty = scalingDraftDirty(fields.pool.draft, fields.pool.initialPool);
   }
 
+  // Pre-flight the memory requirement too (#2813 AC4) — empty clears it.
+  const mem = fields.memory;
+  const memText = mem ? String(mem.value || '').trim() : '';
+  const memDirty = !!mem && memText !== String(mem.initial || '').trim();
+  if (memDirty) {
+    const err = memoryLimitError(memText, { ceiling: mem.ceiling });
+    if (err) throw new Error(`Memory: ${err}`);
+  }
+
   if (name !== currentName && ops.renameRole) {
     await step('Display name', () => ops.renameRole(node.id, name));
   }
@@ -94,6 +107,24 @@ export async function applyDetailsSave(ops, node, fields, opts = {}) {
       ? (lp.promptMode !== lp.initialPromptMode || lp.text !== lp.initialText)
       : (lp.text !== lp.initialText);
     if (dirty) await step('Agent prompt', () => ops.setLivePrompt(node.id, lp));
+  }
+
+  // Portable role settings (#2813). Draft: prompt mode + model ride on the
+  // bundle role (empty clears = legacy inference / environment default).
+  if (mode === 'draft' && ops.setRoleSettings) {
+    if (fields.promptMode !== undefined && fields.promptMode !== (node.promptMode || '')) {
+      await step('Prompt mode', () => ops.setRoleSettings(node.id, { promptMode: fields.promptMode }));
+    }
+    if (fields.model !== undefined && String(fields.model).trim() !== (node.model || '')) {
+      await step('Model', () => ops.setRoleSettings(node.id, { model: String(fields.model).trim() }));
+    }
+  }
+  if (memDirty) {
+    if (mode === 'draft' && ops.setRoleSettings) {
+      await step('Memory', () => ops.setRoleSettings(node.id, { memoryLimit: memText }));
+    } else if (mode === 'live' && ops.setMemoryLimit) {
+      await step('Memory', () => ops.setMemoryLimit(node.id, memText));
+    }
   }
 
   // Register a freshly-typed stage before assigning it (no phantom stage).

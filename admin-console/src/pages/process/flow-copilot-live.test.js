@@ -7,6 +7,7 @@ import {
   diffLiveProposal, groupItems, describeLiveItem,
   planLiveApply, runLiveApply, summarizeLiveApply,
   inProgressFor, gateWarnings, liveConfirmModel, liveResultStatus,
+  carryUnauthored,
 } from './flow-copilot-live.js';
 
 // The server-side copilot pipeline (sanitize → ops) every live proposal passes
@@ -334,4 +335,41 @@ test('B2: a dropped setting next to a real edit — the edit applies, the drop i
   const plan = planLiveApply(diff, { teamId: 'acme', memberIds: MEMBERS });
   assert.deepEqual(plan.steps.map(s => s.label), ['update trigger rv']);
   assert.deepEqual(plan.notApplied.map(it => it.key), ['role:changed:reviewer#triggerSettings']);
+});
+
+test('carryUnauthored keeps portable role settings and the team prompt a proposal omits (#2813)', () => {
+  const live = {
+    teamPrompt: 'Team {{teamName}}',
+    roles: [{ id: 'dev', memoryLimit: '4g', model: 'm1', promptMode: 'additional', pool: { enabled: true } }],
+  };
+  const out = carryUnauthored(live, { roles: [{ id: 'dev', displayName: 'Dev' }] });
+  assert.equal(out.teamPrompt, 'Team {{teamName}}');
+  assert.deepEqual(
+    { memoryLimit: out.roles[0].memoryLimit, model: out.roles[0].model, promptMode: out.roles[0].promptMode },
+    { memoryLimit: '4g', model: 'm1', promptMode: 'additional' },
+  );
+  // An explicit value in the proposal still wins.
+  assert.equal(carryUnauthored(live, { roles: [{ id: 'dev', memoryLimit: '2g' }] }).roles[0].memoryLimit, '2g');
+});
+
+test('#2915: switching a trigger\'s readiness gate off is written as null, not reported as not applied', () => {
+  const live = GH_LIVE();
+  live.roles[1].triggers[0].readinessGate = { ci: true, conflict: true };
+  const proposed = clone(live);
+  delete proposed.roles[1].triggers[0].readinessGate;
+  const diff = diffLiveProposal(live, proposed);
+  assert.deepEqual(diff.items.map(it => [it.key, it.applicable]), [['role:changed:reviewer', true]]);
+  const plan = planLiveApply(diff, { teamId: 'acme', memberIds: MEMBERS });
+  assert.deepEqual(plan.steps.map(s => s.label), ['update trigger rv']);
+  assert.equal(plan.steps[0].body.readinessGate, null, 'the route clears the gate on null');
+  assert.deepEqual(plan.notApplied, []);
+});
+
+test('#2915: setting a trigger\'s readiness gate is a plain trigger update', () => {
+  const live = GH_LIVE();
+  const proposed = clone(live);
+  proposed.roles[1].triggers[0].readinessGate = { ci: true, conflict: false };
+  const plan = planLiveApply(diffLiveProposal(live, proposed), { teamId: 'acme', memberIds: MEMBERS });
+  assert.deepEqual(plan.steps.map(s => s.label), ['update trigger rv']);
+  assert.deepEqual(plan.steps[0].body.readinessGate, { ci: true, conflict: false });
 });

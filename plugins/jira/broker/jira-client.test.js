@@ -279,6 +279,125 @@ test('getComment: reads one comment in full as plain text (show --comment, the r
   });
 });
 
+// ── listComments (CLI `comments`, #2899) ─────────────────────────────────────
+
+const adfDoc = (...content) => ({ type: 'doc', version: 1, content });
+const para = (text) => ({ type: 'paragraph', content: [{ type: 'text', text }] });
+const jiraComment = (id, created, body, { author = 'Jane', updated = created } = {}) => ({
+  id, created, updated, author: { displayName: author }, body,
+});
+const commentsResponse = (total, comments) => ({ ok: true, status: 200, text: async () => JSON.stringify({ startAt: 0, total, comments }) });
+
+test('listComments: newest first with id, author, created, updated, body and origin (AC1, AC3, edited)', async () => {
+  const agentBody = adfDoc(para('Posted by an agent on team "team-1" via Agent Studio.'), para('Picked this up.'));
+  await withFetch((url) => {
+    assert.match(url, /\/rest\/api\/3\/issue\/KAN-10\/comment\?orderBy=-created&startAt=0&maxResults=20$/);
+    return commentsResponse(3, [
+      jiraComment('103', '2026-10-03T10:00:00.000+0000', adfDoc(para('Third')), { author: 'Anna', updated: '2026-10-04T08:00:00.000+0000' }),
+      jiraComment('102', '2026-10-02T10:00:00.000+0000', agentBody, { author: 'Service Bot' }),
+      jiraComment('101', '2026-10-01T10:00:00.000+0000', adfDoc(para('First')), { author: 'Ben' }),
+    ]);
+  }, async () => {
+    const r = await jc.listComments(CRED, 'KAN-10', { ownWrites: { comments: {} }, env: CRED.env });
+    assert.deepEqual(r.comments, [
+      { id: '103', author: 'Anna', created: '2026-10-03T10:00:00.000+0000', updated: '2026-10-04T08:00:00.000+0000', body: 'Third', bodyTruncated: false, origin: 'human' },
+      { id: '102', author: 'Service Bot', created: '2026-10-02T10:00:00.000+0000', updated: '2026-10-02T10:00:00.000+0000', body: 'Picked this up.', bodyTruncated: false, origin: 'agent' },
+      { id: '101', author: 'Ben', created: '2026-10-01T10:00:00.000+0000', updated: '2026-10-01T10:00:00.000+0000', body: 'First', bodyTruncated: false, origin: 'human' },
+    ]);
+    assert.equal(r.issue, 'KAN-10');
+    assert.equal(r.count, 3);
+    assert.equal(r.total, 3);
+    assert.equal(r.hasMore, false);
+    assert.ok(!('nextOffset' in r));
+  });
+});
+
+test('listComments: origin = agent from the own-writes registry even without the provenance line (AC3)', async () => {
+  await withFetch(() => commentsResponse(2, [
+    jiraComment('7', '2026-10-02T10:00:00Z', adfDoc(para('mine'))),
+    jiraComment('6', '2026-10-01T10:00:00Z', adfDoc(para('theirs'))),
+  ]), async () => {
+    const r = await jc.listComments(CRED, 'KAN-10', { ownWrites: { comments: { 'KAN-10:c7': '2026-10-02T10:00:00Z' } }, env: CRED.env });
+    assert.deepEqual(r.comments.map((c) => [c.id, c.origin]), [['7', 'agent'], ['6', 'human']]);
+  });
+});
+
+test('listComments: 60 comments → newest 20 by default, hasMore + nextOffset, older page via offset (AC2)', async () => {
+  const all = Array.from({ length: 60 }, (_, i) => jiraComment(String(1060 - i), `2026-10-01T10:${String(59 - i).padStart(2, '0')}:00Z`, adfDoc(para(`c${60 - i}`))));
+  await withFetch((url) => {
+    const q = new URL(url).searchParams;
+    const startAt = Number(q.get('startAt'));
+    const max = Number(q.get('maxResults'));
+    return commentsResponse(60, all.slice(startAt, startAt + max));
+  }, async (calls) => {
+    const first = await jc.listComments(CRED, 'KAN-10', { env: CRED.env });
+    assert.equal(first.count, 20);
+    assert.equal(first.comments[0].id, '1060');
+    assert.equal(first.hasMore, true);
+    assert.equal(first.nextOffset, 20);
+    assert.match(first.note, /40 older comment\(s\) not listed — read them with aee-jira comments KAN-10 --offset 20/);
+
+    const last = await jc.listComments(CRED, 'KAN-10', { offset: '40', limit: '50', env: CRED.env });
+    assert.match(calls[calls.length - 1].url, /startAt=40&maxResults=50$/);
+    assert.equal(last.count, 20);
+    assert.equal(last.comments[19].id, '1001');
+    assert.equal(last.hasMore, false);
+    assert.equal(last.offset, 40);
+  });
+});
+
+test('listComments: a long body is cut like a wake with bodyTruncated; mentions / code / tables read as text (AC4)', async () => {
+  const long = 'y'.repeat(5000);
+  const rich = adfDoc(
+    { type: 'paragraph', content: [{ type: 'mention', attrs: { text: '@Anna' } }, { type: 'text', text: ' see' }] },
+    { type: 'codeBlock', content: [{ type: 'text', text: 'npm test' }] },
+    { type: 'table', content: [{ type: 'tableRow', content: [{ type: 'tableCell', content: [para('a')] }, { type: 'tableCell', content: [para('b')] }] }] },
+  );
+  await withFetch(() => commentsResponse(2, [
+    jiraComment('2', '2026-10-02T10:00:00Z', adfDoc(para(long))),
+    jiraComment('1', '2026-10-01T10:00:00Z', rich),
+  ]), async () => {
+    const r = await jc.listComments(CRED, 'KAN-10', { env: CRED.env });
+    const ee = require('./event-extract');
+    assert.equal(r.comments[0].bodyTruncated, true);
+    assert.equal(r.comments[0].body.length, ee.COMMENT_BODY_MAX);
+    assert.ok(r.comments[0].body.endsWith('…'));
+    assert.equal(r.comments[1].bodyTruncated, false);
+    assert.match(r.comments[1].body, /^@Anna see\nnpm test\n/);
+    assert.match(r.comments[1].body, /a\s+b/);
+  });
+});
+
+test('listComments: no comments → empty list with a note, not an error (AC5)', async () => {
+  await withFetch(() => commentsResponse(0, []), async () => {
+    const r = await jc.listComments(CRED, 'KAN-10', { env: CRED.env });
+    assert.deepEqual(r.comments, []);
+    assert.equal(r.count, 0);
+    assert.equal(r.hasMore, false);
+    assert.equal(r.note, 'KAN-10 has no comments.');
+  });
+});
+
+test('listComments: an invisible issue is the standard out-of-scope refusal (AC7); bad limit / offset are 400 before Jira', async () => {
+  await withFetch(() => ({ ok: false, status: 404, text: async () => '{"errorMessages":["Issue does not exist"]}' }), async () => {
+    await assert.rejects(
+      () => jc.listComments(CRED, 'OTHER-1', { env: CRED.env }),
+      (e) => e.status === 404 && /^Issue OTHER-1 was not found, or it is outside this team's Jira scope/.test(e.message),
+    );
+  });
+  await withFetch(() => { throw new Error('no Jira call expected'); }, async (calls) => {
+    for (const opts of [{ limit: '0' }, { limit: 'x' }, { offset: '-1' }, { offset: '1.5' }]) {
+      await assert.rejects(() => jc.listComments(CRED, 'KAN-10', { ...opts, env: CRED.env }), (e) => e.status === 400);
+    }
+    await assert.rejects(() => jc.listComments(CRED, ' ', { env: CRED.env }), (e) => e.status === 400);
+    assert.equal(calls.length, 0);
+  });
+  await withFetch((url) => {
+    assert.match(url, /maxResults=100$/); // capped
+    return commentsResponse(0, []);
+  }, () => jc.listComments(CRED, 'KAN-10', { limit: 500, env: CRED.env }));
+});
+
 test('getIssue: a failed transitions lookup degrades to omitting availableTransitions (#2421)', async () => {
   await withFetch((url) => {
     if (isFieldList(url)) return fieldListResponse();
@@ -443,6 +562,56 @@ test('searchIssues: `parent` is a selectable --fields column (#2415)', async () 
   });
 });
 
+test('searchIssues: --fields names priority/labels/dueDate as columns, read from Jira only then (#2901 AC3)', async () => {
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return fieldListResponse();
+    assert.deepEqual(JSON.parse(opts.body).fields, ['summary', 'status', 'assignee', 'updated', 'issuetype', 'parent', 'priority', 'labels', 'duedate']);
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      isLast: true, issues: [
+        { key: 'ENG-1', fields: { summary: 'One', priority: { name: 'High' }, labels: ['backend'], duedate: '2026-10-31' } },
+        { key: 'ENG-2', fields: { summary: 'Two' } },
+      ],
+    }) };
+  }, async () => {
+    const issues = await jc.searchIssues(CRED, { jql: 'project = ENG', fields: ['key', 'priority', 'labels', 'dueDate'], env: CRED.env });
+    assert.deepEqual(issues, [
+      { key: 'ENG-1', priority: 'High', labels: ['backend'], dueDate: '2026-10-31' },
+      { key: 'ENG-2', priority: null, labels: [], dueDate: null },
+    ]);
+  });
+});
+
+test('searchIssues: reporter/components/fixVersions are selectable --fields columns (#2901)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      isLast: true, issues: [{ key: 'ENG-1', fields: { reporter: { displayName: 'Anna' }, components: [{ name: 'API' }], fixVersions: [{ name: '1.4' }] } }],
+    }) };
+  }, async () => {
+    const issues = await jc.searchIssues(CRED, { jql: 'project = ENG', fields: ['reporter', 'components', 'fixVersions'], env: CRED.env });
+    assert.deepEqual(issues, [{ key: 'ENG-1', reporter: 'Anna', components: ['API'], fixVersions: ['1.4'] }]);
+  });
+});
+
+test('searchIssues: without --fields the default row carries none of the #2901 columns (AC4)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      isLast: true, issues: [{ key: 'ENG-1', fields: { summary: 'One', priority: { name: 'High' } } }],
+    }) };
+  }, async () => {
+    const [row] = await jc.searchIssues(CRED, { jql: 'project = ENG', env: CRED.env });
+    assert.deepEqual(Object.keys(row), jc.AGENT_ISSUE_COLUMNS);
+  });
+});
+
+test('shapeStandardReadFields: drops non-string list entries, keeps names', () => {
+  assert.deepEqual(jc.shapeStandardReadFields({ components: [{ name: 'API' }, {}, null], labels: ['a', ''] }), {
+    priority: null, labels: ['a'], reporter: null, components: ['API'], fixVersions: [], dueDate: null,
+  });
+  assert.deepEqual(jc.shapeStandardReadFields(undefined).labels, []);
+});
+
 test('searchIssues: an empty JQL is a 400 before any HTTP call', async () => {
   let called = false;
   const orig = global.fetch;
@@ -577,6 +746,68 @@ test('getIssue: reads summary/status/issueType/assignee and builds a browse URL 
   });
 });
 
+test('getIssue: returns priority, labels, reporter, components, fix versions and due date (#2901 AC1)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    if (isTransitionList(url)) return transitionsResponse();
+    assert.match(url, /fields=[^&]*priority,labels,reporter,components,fixVersions,duedate/);
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      key: 'ENG-7', fields: {
+        summary: 'S', status: { name: 'Open' }, issuetype: { name: 'Bug' },
+        priority: { id: '2', name: 'High' },
+        labels: ['backend', 'urgent'],
+        reporter: { accountId: 'a-1', displayName: 'Anna' },
+        components: [{ id: '10', name: 'API' }],
+        fixVersions: [{ id: '20', name: '1.4' }],
+        duedate: '2026-10-31',
+      },
+    }) };
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-7', { env: CRED.env });
+    assert.equal(issue.priority, 'High');
+    assert.deepEqual(issue.labels, ['backend', 'urgent']);
+    assert.equal(issue.reporter, 'Anna');
+    assert.deepEqual(issue.components, ['API']);
+    assert.deepEqual(issue.fixVersions, ['1.4']);
+    assert.equal(issue.dueDate, '2026-10-31');
+  });
+});
+
+test('getIssue: unset/hidden standard fields are null or [] — never an error (#2901 AC2)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    if (isTransitionList(url)) return transitionsResponse();
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      // No priority key at all (project without a priority scheme); a reporter
+      // whose account was deleted carries no display name.
+      key: 'ENG-8', fields: { summary: 'S', labels: [], reporter: { accountId: 'gone' }, components: [], fixVersions: null, duedate: null },
+    }) };
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-8', { env: CRED.env });
+    assert.equal(issue.priority, null);
+    assert.deepEqual(issue.labels, []);
+    assert.equal(issue.reporter, null);
+    assert.deepEqual(issue.components, []);
+    assert.deepEqual(issue.fixVersions, []);
+    assert.equal(issue.dueDate, null);
+  });
+});
+
+test('getIssue: the #2901 fields are additive — earlier keys keep their order and shape (AC5)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    if (isTransitionList(url)) return transitionsResponse();
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'ENG-9', fields: { summary: 'S' } }) };
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-9', { env: CRED.env });
+    assert.deepEqual(Object.keys(issue).slice(0, 15), [
+      'key', 'summary', 'status', 'issueType', 'assignee', 'created', 'updated', 'parent', 'links', 'url',
+      'priority', 'labels', 'reporter', 'components', 'fixVersions',
+    ]);
+    assert.ok('dueDate' in issue);
+  });
+});
+
 test('getIssue: missing created/updated fields surface as null (#2414)', async () => {
   await withFetch((url) => {
     if (isFieldList(url)) return fieldListResponse();
@@ -653,6 +884,8 @@ test('partitionFields: standard columns vs custom-field names', () => {
   assert.deepEqual(jc.partitionFields(['status', 'Team', 'summary']), { columns: ['status', 'summary'], customNames: ['Team'] });
   assert.deepEqual(jc.partitionFields(undefined), { columns: [], customNames: [] });
   assert.deepEqual(jc.partitionFields(['Team']), { columns: [], customNames: ['Team'] });
+  // #2901 standard fields are columns, not custom-field names.
+  assert.deepEqual(jc.partitionFields(['priority', 'dueDate', 'Team']), { columns: ['priority', 'dueDate'], customNames: ['Team'] });
 });
 
 test('mergeCustomFieldNames: unions and de-dups case-insensitively, first spelling wins', () => {
@@ -1413,6 +1646,409 @@ test('addStoriesToEpic: no key / a malformed key / no stories / a story without 
   });
 });
 
+// ── standalone issue create (#2894) ─────────────────────────────────────────
+
+const PROJECT_TYPES = [
+  { id: '10001', name: 'Story', subtask: false, hierarchyLevel: 0 },
+  { id: '10002', name: 'Task', subtask: false, hierarchyLevel: 0 },
+  { id: '10004', name: 'Fehler', subtask: false, hierarchyLevel: 0 },
+  { id: '10000', name: 'Epic', subtask: false, hierarchyLevel: 1 },
+  { id: '10003', name: 'Subtask', subtask: true, hierarchyLevel: -1 },
+];
+const isProjectGet = (url) => /\/rest\/api\/3\/project\/[^/?]+$/.test(url);
+const isCreateMeta = (url) => /\/rest\/api\/3\/issue\/createmeta\//.test(url);
+const projectResponse = (key = 'KAN', issueTypes = PROJECT_TYPES) => ({ ok: true, status: 200, text: async () => JSON.stringify({ key, issueTypes }) });
+const createMetaResponse = (fields = [
+  { fieldId: 'summary', name: 'Summary', required: true, hasDefaultValue: false },
+  { fieldId: 'reporter', name: 'Reporter', required: true, hasDefaultValue: true },
+  { fieldId: 'project', name: 'Project', required: true, hasDefaultValue: false },
+  { fieldId: 'issuetype', name: 'Issue Type', required: true, hasDefaultValue: false },
+  { fieldId: 'priority', name: 'Priority', required: false, hasDefaultValue: true },
+]) => ({ ok: true, status: 200, text: async () => JSON.stringify({ startAt: 0, maxResults: 100, total: fields.length, fields }) });
+
+function standaloneJira({ project = projectResponse(), meta = createMetaResponse(), create, transitions = transitionsResponse() } = {}) {
+  return (url, opts) => {
+    if (isProjectGet(url)) return typeof project === 'function' ? project(url) : project;
+    if (isCreateMeta(url)) return typeof meta === 'function' ? meta(url) : meta;
+    if (isFieldList(url)) return createFieldList();
+    if (isCreate(url, opts)) return create(JSON.parse(opts.body).fields);
+    if (isTransitionList(url) && (!opts || opts.method !== 'POST')) return transitions;
+    if (isTransitionList(url) && opts.method === 'POST') return { ok: true, status: 204, text: async () => '' };
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  };
+}
+const created201 = (key) => ({ ok: true, status: 201, text: async () => JSON.stringify({ id: '9', key }) });
+
+test('createStandaloneIssue: a Bug with only a summary — key + URL, the project\'s type, no parent (#2894 AC1)', async () => {
+  let sent;
+  await withFetch(standaloneJira({
+    project: projectResponse('KAN', [...PROJECT_TYPES, { id: '10005', name: 'Bug', subtask: false, hierarchyLevel: 0 }]),
+    create: (f) => { sent = f; return created201('KAN-42'); },
+  }), async (calls) => {
+    const seen = [];
+    const r = await jc.createStandaloneIssue(CRED, {
+      projectKey: 'kan', issueType: 'bug', issue: { summary: ' Login fails ' }, allowList: [], onCreated: (k) => seen.push(k), env: CRED.env,
+    });
+    assert.deepEqual(r, { project: 'KAN', issueType: 'Bug', key: 'KAN-42', url: `${jc.apiBaseFor('acme', {})}/browse/KAN-42`, summary: 'Login fails' });
+    assert.deepEqual(sent, { project: { key: 'KAN' }, issuetype: { id: '10005' }, summary: 'Login fails' });
+    assert.deepEqual(seen, ['KAN-42']); // own-writes registration hook
+    assert.match(calls.find((c) => isCreateMeta(c.url)).url, /createmeta\/KAN\/issuetypes\/10005\?/);
+    assert.equal(calls.filter((c) => isTransitionList(c.url)).length, 0, 'no status → no transition');
+  });
+});
+
+test('createStandaloneIssue: Task, Story and a project-specific type name, matched case-insensitively (#2894 AC2)', async () => {
+  for (const [requested, id, name] of [['Task', '10002', 'Task'], ['STORY', '10001', 'Story'], ['fehler', '10004', 'Fehler']]) {
+    await withFetch(standaloneJira({ create: (f) => { assert.deepEqual(f.issuetype, { id }); return created201('KAN-1'); } }), async () => {
+      const r = await jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: requested, issue: { summary: 'S' }, allowList: [], env: CRED.env });
+      assert.equal(r.issueType, name);
+    });
+  }
+});
+
+test('createStandaloneIssue: description, assignee, priority, labels and custom fields on create; status as a follow-up transition (#2894 AC3)', async () => {
+  let sent;
+  await withFetch(standaloneJira({ create: (f) => { sent = f; return created201('KAN-7'); } }), async (calls) => {
+    const r = await jc.createStandaloneIssue(CRED, {
+      projectKey: 'KAN',
+      issueType: 'Task',
+      issue: {
+        summary: 'Do it', description: 'line one\n\nline two', assignee: 'acc-1', priority: 'High',
+        labels: ['web', ' regression '], status: 'In Progress', fields: { Team: '42', 'Story point estimate': '3' },
+      },
+      allowList: ['Team', 'Story point estimate'],
+      attribution: 'by an agent',
+      env: CRED.env,
+    });
+    assert.equal(sent.description.type, 'doc'); // ADF, like update / create-epic
+    assert.equal(sent.description.content.length, 4); // 3 lines (blank one kept) + attribution
+    assert.deepEqual(sent.assignee, { accountId: 'acc-1' });
+    assert.deepEqual(sent.priority, { name: 'High' });
+    assert.deepEqual(sent.labels, ['web', 'regression']);
+    assert.deepEqual(sent.customfield_20001, { id: '42' });
+    assert.equal(sent.customfield_10016, 3);
+    assert.equal('status' in sent, false, 'status is never a create field');
+    assert.equal(r.status, 'In Progress');
+    const createAt = calls.findIndex((c) => isCreate(c.url, c.opts));
+    const transitionAt = calls.findIndex((c) => isTransitionList(c.url) && c.opts && c.opts.method === 'POST');
+    assert.ok(transitionAt > createAt, 'the transition follows the create');
+  });
+});
+
+test('createStandaloneIssue: an unknown type is a 400 listing the project\'s standard types (#2894 AC4)', async () => {
+  await withFetch(standaloneJira({ create: () => { throw new Error('must not create'); } }), async () => {
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: 'Bug', issue: { summary: 'S' }, allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /no issue type "Bug"/.test(e.message) && /Available: Story, Task, Fehler\./.test(e.message),
+    );
+  });
+});
+
+test('createStandaloneIssue: an Epic type points at create-epic; a sub-task type is refused (#2894 AC5)', async () => {
+  await withFetch(standaloneJira({ create: () => { throw new Error('must not create'); } }), async () => {
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: 'epic', issue: { summary: 'S' }, allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /create-epic/.test(e.message),
+    );
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: 'Subtask', issue: { summary: 'S' }, allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /sub-task type/.test(e.message) && /parent/.test(e.message),
+    );
+  });
+  assert.equal(jc.classifyIssueType({ name: 'Épique', hierarchyLevel: 1 }, 'Epic'), 'epic'); // a localised Epic
+  assert.equal(jc.classifyIssueType({ name: 'Teilaufgabe', subtask: true, hierarchyLevel: -1 }, 'Epic'), 'subtask');
+  assert.equal(jc.classifyIssueType({ name: 'Bug', hierarchyLevel: 0 }, 'Epic'), 'standard');
+});
+
+test('createStandaloneIssue: required fields the call does not set are named, before the create (#2894 AC6)', async () => {
+  const meta = createMetaResponse([
+    { fieldId: 'summary', name: 'Summary', required: true, hasDefaultValue: false },
+    { fieldId: 'components', name: 'Components', required: true, hasDefaultValue: false },
+    { fieldId: 'customfield_20001', name: 'Team', required: true, hasDefaultValue: false },
+    { fieldId: 'customfield_30000', name: 'Severity', required: true, hasDefaultValue: true },
+  ]);
+  await withFetch(standaloneJira({ meta, create: () => { throw new Error('must not create'); } }), async () => {
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: 'Task', issue: { summary: 'S' }, allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /not provided: Components, Team\./.test(e.message) && /Nothing was created/.test(e.message),
+    );
+  });
+  // once Team is given, only Components is still missing
+  await withFetch(standaloneJira({ meta, create: () => { throw new Error('must not create'); } }), async () => {
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: 'Task', issue: { summary: 'S', fields: { Team: '1' } }, allowList: [], env: CRED.env }),
+      (e) => /not provided: Components\./.test(e.message),
+    );
+  });
+});
+
+test('createStandaloneIssue: unreadable create metadata skips the pre-check; Jira\'s 400 is mapped to field names', async () => {
+  await withFetch(standaloneJira({
+    meta: { ok: false, status: 403, text: async () => 'nope' },
+    create: () => ({ ok: false, status: 400, text: async () => JSON.stringify({ errorMessages: [], errors: { customfield_20001: 'Team is required.' } }) }),
+  }), async () => {
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: 'Task', issue: { summary: 'S' }, allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /Jira refused to create the issue: Team: Team is required\. Nothing was created\./.test(e.message),
+    );
+  });
+});
+
+test('createStandaloneIssue: an invalid assignee is refused clearly and nothing is created', async () => {
+  await withFetch(standaloneJira({
+    create: () => ({ ok: false, status: 400, text: async () => JSON.stringify({ errors: { assignee: 'User \'nobody\' cannot be assigned issues.' } }) }),
+  }), async (calls) => {
+    let registered = 0;
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, {
+        projectKey: 'KAN', issueType: 'Task', issue: { summary: 'S', assignee: 'nobody' }, allowList: [], onCreated: () => { registered += 1; }, env: CRED.env,
+      }),
+      (e) => e.status === 400 && /assignee "nobody" was rejected/.test(e.message) && /accountId/.test(e.message),
+    );
+    assert.equal(registered, 0);
+    assert.equal(calls.filter((c) => isCreate(c.url, c.opts)).length, 1, 'never retried');
+  });
+});
+
+test('createStandaloneIssue: a custom field off a non-empty allow-list is a 403 before any Jira call (#2894 AC7)', async () => {
+  await withFetch(() => { throw new Error('no HTTP expected'); }, async (calls) => {
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: 'Bug', issue: { summary: 'S', fields: { Team: '42' } }, allowList: ['Sprint'], env: CRED.env }),
+      (e) => e.status === 403 && /Team/.test(e.message),
+    );
+    assert.equal(calls.length, 0);
+  });
+});
+
+test('createStandaloneIssue: a project the account cannot see is outside the team\'s scope (#2894 AC8)', async () => {
+  await withFetch(standaloneJira({
+    project: { ok: false, status: 404, text: async () => '{"errorMessages":["No project could be found with key \'OTHER\'."]}' },
+    create: () => { throw new Error('must not create'); },
+  }), async () => {
+    await assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'OTHER', issueType: 'Bug', issue: { summary: 'S' }, allowList: [], env: CRED.env }),
+      (e) => e.status === 404 && /Project OTHER was not found, or it is outside this team's Jira scope/.test(e.message),
+    );
+  });
+});
+
+test('createStandaloneIssue: an impossible status transition still reports the created key + the reason (#2894 AC9)', async () => {
+  await withFetch(standaloneJira({ create: () => created201('KAN-9') }), async () => {
+    const r = await jc.createStandaloneIssue(CRED, {
+      projectKey: 'KAN', issueType: 'Task', issue: { summary: 'S', status: 'Released' }, allowList: [], env: CRED.env,
+    });
+    assert.equal(r.key, 'KAN-9');
+    assert.equal(r.status, undefined);
+    assert.match(r.statusError, /no transition to "Released"/);
+  });
+});
+
+test('createStandaloneIssue: no project / type / summary, or a label with a space, is a 400 up front', async () => {
+  await withFetch(() => { throw new Error('no HTTP expected'); }, async (calls) => {
+    const bad = (args, re) => assert.rejects(
+      () => jc.createStandaloneIssue(CRED, { projectKey: 'KAN', issueType: 'Bug', issue: { summary: 'S' }, allowList: [], env: CRED.env, ...args }),
+      (e) => e.status === 400 && (!re || re.test(e.message)),
+    );
+    await bad({ projectKey: '' });
+    await bad({ issueType: ' ' });
+    await bad({ issue: { summary: '  ' } });
+    await bad({ issue: undefined });
+    await bad({ issue: { summary: 'S', labels: ['two words'] } }, /"two words"/);
+    await bad({ issue: { summary: 'S', labels: 'web' } });
+    assert.equal(calls.length, 0);
+  });
+});
+
+// ── any standard issue type under an existing Epic (#2896) ──────────────────
+
+const EPIC_PROJECT_TYPES = [...PROJECT_TYPES, { id: '10005', name: 'Bug', subtask: false, hierarchyLevel: 0 }];
+
+function epicChildJira({ epicLinkId, project = projectResponse('KAN', EPIC_PROJECT_TYPES), meta = createMetaResponse(), create, transitions = transitionsResponse() } = {}) {
+  return (url, opts) => {
+    if (isIssueGet(url, opts)) return issueResponse('KAN-12', 'Epic', { hierarchyLevel: 1 });
+    if (isProjectGet(url)) return project;
+    if (isCreateMeta(url)) return typeof meta === 'function' ? meta(url) : meta;
+    if (isFieldList(url)) return createFieldList(epicLinkId);
+    if (isCreate(url, opts)) return create(JSON.parse(opts.body).fields);
+    if (isTransitionList(url) && (!opts || opts.method !== 'POST')) return transitions;
+    if (isTransitionList(url) && opts.method === 'POST') return { ok: true, status: 204, text: async () => '' };
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  };
+}
+
+test('addStoriesToEpic: a Bug and a Task under the Epic in one call, each with the parent + its own type (#2896 AC1/AC8)', async () => {
+  const sent = [];
+  await withFetch(epicChildJira({ create: (f) => { sent.push(f); return created201(`KAN-${40 + sent.length}`); } }), async (calls) => {
+    const seen = [];
+    const r = await jc.addStoriesToEpic(CRED, {
+      epicKey: 'KAN-12',
+      stories: [
+        { type: 'Bug', summary: 'Login fails', priority: 'High', labels: ['web', ' regression '] },
+        { type: 'Task', summary: 'Rotate keys', status: 'In Progress' },
+      ],
+      allowList: [],
+      onCreated: (k) => seen.push(k),
+      env: CRED.env,
+    });
+    assert.equal(r.created, 2);
+    assert.equal(r.failed, 0);
+    assert.deepEqual(r.stories.map((s) => [s.key, s.issueType, s.ok]), [['KAN-41', 'Bug', true], ['KAN-42', 'Task', true]]);
+    assert.equal(r.stories[1].status, 'In Progress');
+    assert.deepEqual(sent[0].issuetype, { id: '10005' });
+    assert.deepEqual(sent[1].issuetype, { id: '10002' });
+    for (const f of sent) assert.deepEqual(f.parent, { key: 'KAN-12' });
+    assert.deepEqual(sent[0].priority, { name: 'High' });
+    assert.deepEqual(sent[0].labels, ['web', 'regression']);
+    assert.deepEqual(seen, ['KAN-41', 'KAN-42'], 'each registered as an own write (origin = agent)');
+    assert.equal(calls.filter((c) => isProjectGet(c.url)).length, 1, 'project types read once');
+  });
+});
+
+test('addStoriesToEpic: --type is the default, matched case-insensitively against the project\'s own names; a per-issue type wins (#2896 AC2)', async () => {
+  const sent = [];
+  await withFetch(epicChildJira({ create: (f) => { sent.push(f); return created201(`KAN-${50 + sent.length}`); } }), async () => {
+    const r = await jc.addStoriesToEpic(CRED, {
+      epicKey: 'KAN-12', defaultType: 'fehler', stories: [{ summary: 'A' }, { summary: 'B', type: 'STORY' }], allowList: [], env: CRED.env,
+    });
+    assert.deepEqual(r.stories.map((s) => s.issueType), ['Fehler', 'Story']);
+    assert.deepEqual(sent.map((f) => f.issuetype.id), ['10004', '10001']);
+  });
+});
+
+test('addStoriesToEpic: company-managed — a typed issue is linked via the Epic Link field (#2896 edge case)', async () => {
+  await withFetch(epicChildJira({
+    epicLinkId: 'customfield_10014',
+    create: (f) => {
+      assert.equal(f.customfield_10014, 'KAN-12');
+      assert.equal('parent' in f, false);
+      return created201('KAN-60');
+    },
+  }), async () => {
+    const r = await jc.addStoriesToEpic(CRED, { epicKey: 'KAN-12', stories: [{ type: 'Task', summary: 'S' }], allowList: [], env: CRED.env });
+    assert.equal(r.stories[0].key, 'KAN-60');
+  });
+});
+
+test('addStoriesToEpic: no type anywhere is the unchanged Story create — no project / create-metadata reads (#2896 AC3)', async () => {
+  await withFetch(epicChildJira({
+    create: (f) => {
+      assert.deepEqual(f.issuetype, { name: 'Story' });
+      return created201('KAN-70');
+    },
+  }), async (calls) => {
+    const r = await jc.addStoriesToEpic(CRED, { epicKey: 'KAN-12', stories: [{ summary: 'S' }], allowList: [], env: CRED.env });
+    assert.deepEqual(r.stories, [{ summary: 'S', key: 'KAN-70', url: `${jc.apiBaseFor('acme', {})}/browse/KAN-70`, ok: true }]);
+    assert.equal(calls.filter((c) => isProjectGet(c.url) || isCreateMeta(c.url)).length, 0);
+  });
+});
+
+test('addStoriesToEpic: an unknown, Epic or sub-task type fails only that issue; the others are created (#2896 AC4)', async () => {
+  const sent = [];
+  await withFetch(epicChildJira({ create: (f) => { sent.push(f); return created201(`KAN-${80 + sent.length}`); } }), async () => {
+    const r = await jc.addStoriesToEpic(CRED, {
+      epicKey: 'KAN-12',
+      stories: [
+        { type: 'Improvement', summary: 'unknown' },
+        { type: 'epic', summary: 'nested epic' },
+        { type: 'Subtask', summary: 'sub' },
+        { type: 'Bug', summary: 'fine' },
+      ],
+      allowList: [],
+      env: CRED.env,
+    });
+    assert.equal(r.created, 1);
+    assert.equal(r.failed, 3);
+    assert.match(r.stories[0].error, /no issue type "Improvement"\. Available: Story, Task, Fehler, Bug\.$/);
+    assert.match(r.stories[1].error, /Epic is an Epic type — an Epic cannot be created under another Epic/);
+    assert.match(r.stories[2].error, /Subtask is a sub-task type/);
+    assert.equal(r.stories[3].key, 'KAN-81');
+    assert.equal(sent.length, 1);
+  });
+});
+
+test('addStoriesToEpic: a project-required field the issue does not set is named, per issue (#2896 AC5)', async () => {
+  const meta = (url) => (/issuetypes\/10005\?/.test(url)
+    ? createMetaResponse([{ fieldId: 'components', name: 'Components', required: true, hasDefaultValue: false }])
+    : createMetaResponse());
+  const sent = [];
+  await withFetch(epicChildJira({ meta, create: (f) => { sent.push(f); return created201('KAN-90'); } }), async (calls) => {
+    const r = await jc.addStoriesToEpic(CRED, {
+      epicKey: 'KAN-12', stories: [{ type: 'Bug', summary: 'b1' }, { type: 'Task', summary: 't' }, { type: 'bug', summary: 'b2' }], allowList: [], env: CRED.env,
+    });
+    assert.deepEqual(r.stories.map((s) => s.ok), [false, true, false]);
+    assert.match(r.stories[0].error, /requires field\(s\) for a Bug that were not provided: Components\./);
+    assert.equal(sent.length, 1);
+    assert.equal(calls.filter((c) => isCreateMeta(c.url)).length, 2, 'create metadata read once per type');
+  });
+});
+
+test('addStoriesToEpic: Jira\'s create 400 for a typed issue is mapped to field names, per issue', async () => {
+  await withFetch(epicChildJira({
+    meta: { ok: false, status: 403, text: async () => 'nope' },
+    create: () => ({ ok: false, status: 400, text: async () => JSON.stringify({ errors: { customfield_20001: 'Team is required.' } }) }),
+  }), async () => {
+    const r = await jc.addStoriesToEpic(CRED, { epicKey: 'KAN-12', stories: [{ type: 'Task', summary: 'S' }], allowList: [], env: CRED.env });
+    assert.equal(r.stories[0].ok, false);
+    assert.equal(r.stories[0].error, 'Jira refused to create the issue: Team: Team is required.');
+  });
+});
+
+test('addStoriesToEpic: a typed call on a non-Epic or an out-of-scope key is refused like before (#2896 AC6)', async () => {
+  await withFetch((url, opts) => {
+    if (isIssueGet(url, opts)) return issueResponse('KAN-7', 'Task', { hierarchyLevel: 0 });
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    await assert.rejects(
+      () => jc.addStoriesToEpic(CRED, { epicKey: 'KAN-7', defaultType: 'Bug', stories: [{ summary: 'S' }], allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /KAN-7 is a Task, not an Epic — add-stories only adds new issues under an existing Epic/.test(e.message),
+    );
+  });
+  await withFetch((url, opts) => {
+    if (isIssueGet(url, opts)) return { ok: false, status: 404, text: async () => '{}' };
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    await assert.rejects(
+      () => jc.addStoriesToEpic(CRED, { epicKey: 'NOPE-1', stories: [{ type: 'Bug', summary: 'S' }], allowList: [], env: CRED.env }),
+      (e) => e.status === 404 && /outside this team's Jira scope/.test(e.message),
+    );
+  });
+});
+
+test('addStoriesToEpic: a failed follow-up status still reports the typed issue as created (#2896 AC7)', async () => {
+  await withFetch(epicChildJira({ create: () => created201('KAN-95') }), async () => {
+    const r = await jc.addStoriesToEpic(CRED, { epicKey: 'KAN-12', stories: [{ type: 'Bug', summary: 'S', status: 'Released' }], allowList: [], env: CRED.env });
+    assert.equal(r.stories[0].ok, true);
+    assert.equal(r.stories[0].key, 'KAN-95');
+    assert.match(r.stories[0].statusError, /no transition to "Released"/);
+  });
+});
+
+test('addStoriesToEpic: a label with a space or a non-string type is a 400 before any Jira call', async () => {
+  await withFetch(() => { throw new Error('no HTTP expected'); }, async (calls) => {
+    const bad = (stories, re) => assert.rejects(
+      () => jc.addStoriesToEpic(CRED, { epicKey: 'KAN-12', stories, allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && re.test(e.message),
+    );
+    await bad([{ summary: 'S' }, { summary: 'T', labels: ['two words'] }], /"two words" \(issue #2\)/);
+    await bad([{ summary: 'S', labels: 'web' }], /labels must be a list/);
+    await bad([{ summary: 'S', type: 5 }], /type must be an issue type name/);
+    assert.equal(calls.length, 0);
+  });
+});
+
+test('missingRequiredFields: required, no default, not set — project/issuetype exempt', () => {
+  const meta = [
+    { fieldId: 'project', name: 'Project', required: true },
+    { fieldId: 'issuetype', name: 'Issue Type', required: true },
+    { fieldId: 'summary', name: 'Summary', required: true },
+    { fieldId: 'reporter', name: 'Reporter', required: true, hasDefaultValue: true },
+    { fieldId: 'duedate', name: 'Due date', required: true },
+    { fieldId: 'labels', name: 'Labels', required: false },
+  ];
+  assert.deepEqual(jc.missingRequiredFields(meta, { summary: 'S' }), ['Due date']);
+  assert.deepEqual(jc.missingRequiredFields(null, {}), []);
+});
+
 // ── board & sprint management (#2450) ───────────────────────────────────────
 
 const AGILE = 'http://fake-jira:8080/rest/agile/1.0';
@@ -2054,5 +2690,892 @@ test('removeIssueLink: a link that does not exist is a clear 404 and nothing is 
   await withFetch(linkJira(), async (calls) => {
     await assert.rejects(() => jc.removeIssueLink(CRED, { id: 'abc', env: CRED.env }), (e) => e.status === 400);
     assert.equal(calls.length, 0);
+  });
+});
+
+// ── parent Epic of EXISTING issues (#2895) ───────────────────────────────────
+
+// A tiny in-memory Jira: GET /issue/<KEY>?fields=… and PUT /issue/<KEY>, the
+// parent kept as the native `parent` (team-managed) or, with `epicLinkId`, in the
+// Epic Link field too (company-managed). `rejectParent` models an older classic
+// project that refuses a native `parent` write (400) and needs the Epic Link field.
+function parentJira(issues, { epicLinkId = null, rejectParent = false, put } = {}) {
+  const puts = [];
+  const handler = (url, opts) => {
+    if (isFieldList(url)) return fieldListResponse(epicLinkId);
+    const m = String(url).match(/\/rest\/api\/3\/issue\/([^/?]+)(\?fields=(.*))?$/);
+    if (!m) throw new Error(`unexpected ${opts && opts.method} ${url}`);
+    const key = decodeURIComponent(m[1]);
+    const issue = issues[key];
+    if (!issue) return { ok: false, status: 404, text: async () => '{"errorMessages":["Issue does not exist or you do not have permission to see it."]}' };
+    if (opts && opts.method === 'PUT') {
+      const { fields } = JSON.parse(opts.body);
+      puts.push({ key, fields });
+      if (put) { const r = put(key, fields); if (r) return r; }
+      if ('parent' in fields) {
+        if (rejectParent) return { ok: false, status: 400, text: async () => '{"errors":{"parent":"Field cannot be set."}}' };
+        issue.parent = fields.parent ? fields.parent.key : null;
+      } else if (epicLinkId && epicLinkId in fields) {
+        issue.parent = fields[epicLinkId];
+      }
+      return { ok: true, status: 204, text: async () => '' };
+    }
+    const f = {
+      summary: issue.summary || `${key} summary`,
+      issuetype: { name: issue.type, hierarchyLevel: issue.level, subtask: !!issue.subtask },
+    };
+    if (issue.parent) {
+      if (epicLinkId) f[epicLinkId] = issue.parent; else f.parent = { key: issue.parent };
+    }
+    if (m[3]) assert.ok(!epicLinkId || decodeURIComponent(m[3]).includes(epicLinkId) || /issuetype,summary$/.test(decodeURIComponent(m[3])));
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key, fields: f }) };
+  };
+  return { handler, puts };
+}
+
+const EPIC = (extra = {}) => ({ type: 'Epic', level: 1, ...extra });
+const STORY = (extra = {}) => ({ type: 'Story', level: 0, ...extra });
+
+test('setParentEpic: puts issues without a parent under the Epic in one call (#2895 AC1)', async () => {
+  const issues = { 'KAN-12': EPIC({ summary: 'Payments' }), 'KAN-30': STORY(), 'KAN-31': { type: 'Bug', level: 0 } };
+  const { handler, puts } = parentJira(issues);
+  await withFetch(handler, async () => {
+    const changed = [];
+    const r = await jc.setParentEpic(CRED, { epicKey: 'kan-12', issueKeys: ['KAN-30', 'kan-31'], env: CRED.env, onChanged: (k, d) => changed.push([k, d]) });
+    assert.deepEqual(r.epic, { key: 'KAN-12', url: 'https://acme.atlassian.net/browse/KAN-12', summary: 'Payments' });
+    assert.deepEqual(r.issues.map((i) => [i.issue, i.outcome, i.message]), [
+      ['KAN-30', 'added', 'added to KAN-12'],
+      ['KAN-31', 'added', 'added to KAN-12'],
+    ]);
+    assert.deepEqual([r.changed, r.unchanged, r.failed], [2, 0, 0]);
+    assert.deepEqual(puts.map((p) => p.fields), [{ parent: { key: 'KAN-12' } }, { parent: { key: 'KAN-12' } }]);
+    assert.deepEqual(changed, [['KAN-30', { from: null, to: 'KAN-12' }], ['KAN-31', { from: null, to: 'KAN-12' }]]);
+    assert.equal(issues['KAN-30'].parent, 'KAN-12');
+  });
+  // AC1 — `show` then reports the parent
+  await withFetch((url, opts) => {
+    if (isTransitionList(url)) return transitionsResponse();
+    return handler(url, opts);
+  }, async () => {
+    const shown = await jc.getIssue(CRED, 'KAN-30', { env: CRED.env });
+    assert.equal(shown.parent, 'KAN-12');
+  });
+});
+
+test('setParentEpic: moves an issue from another Epic; already-under is a success (#2895 AC2/AC4)', async () => {
+  const issues = { 'KAN-5': EPIC(), 'KAN-12': EPIC(), 'KAN-30': STORY({ parent: 'KAN-5' }), 'KAN-31': STORY({ parent: 'KAN-12' }) };
+  const { handler, puts } = parentJira(issues);
+  await withFetch(handler, async () => {
+    const changed = [];
+    const r = await jc.setParentEpic(CRED, { epicKey: 'KAN-12', issueKeys: ['KAN-30', 'KAN-31'], env: CRED.env, onChanged: (k, d) => changed.push([k, d]) });
+    assert.deepEqual(r.issues.map((i) => [i.issue, i.ok, i.outcome, i.message, i.from, i.to]), [
+      ['KAN-30', true, 'moved', 'moved from KAN-5 to KAN-12', 'KAN-5', 'KAN-12'],
+      ['KAN-31', true, 'unchanged', 'already under KAN-12', 'KAN-12', 'KAN-12'],
+    ]);
+    assert.deepEqual([r.changed, r.unchanged, r.failed], [1, 1, 0]);
+    assert.equal(puts.length, 1, 'no write for an issue already under the Epic');
+    assert.deepEqual(changed, [['KAN-30', { from: 'KAN-5', to: 'KAN-12' }]]);
+    assert.equal(issues['KAN-30'].parent, 'KAN-12');
+  });
+});
+
+test('setParentEpic: epicKey null takes issues out of their Epic; no parent is unchanged (#2895 AC3)', async () => {
+  const issues = { 'KAN-30': STORY({ parent: 'KAN-5' }), 'KAN-31': STORY() };
+  const { handler, puts } = parentJira(issues);
+  await withFetch(handler, async (calls) => {
+    const r = await jc.setParentEpic(CRED, { epicKey: null, issueKeys: ['KAN-30', 'KAN-31'], env: CRED.env });
+    assert.equal(r.epic, null);
+    assert.deepEqual(r.issues.map((i) => [i.issue, i.outcome, i.message]), [
+      ['KAN-30', 'removed', 'removed from KAN-5'],
+      ['KAN-31', 'unchanged', 'has no parent Epic'],
+    ]);
+    assert.deepEqual(puts.map((p) => p.fields), [{ parent: null }]);
+    assert.equal(issues['KAN-30'].parent, null);
+    assert.ok(!calls.some((c) => /\/issue\/null/.test(c.url)), 'no target lookup when removing');
+  });
+});
+
+test('setParentEpic: one bad key does not hide the others — per-issue reasons (#2895 AC5/AC7)', async () => {
+  const issues = {
+    'KAN-12': EPIC(), 'KAN-30': STORY(), 'KAN-13': EPIC(), 'KAN-40': { type: 'Sub-task', level: -1, subtask: true, parent: 'KAN-30' },
+    'KAN-41': STORY(), 'KAN-42': STORY(),
+  };
+  const { handler } = parentJira(issues, {
+    put: (key) => {
+      if (key === 'KAN-41') return { ok: false, status: 403, text: async () => '{"errorMessages":["You do not have permission to edit issues in this project."]}' };
+      if (key === 'KAN-42') return { ok: false, status: 400, text: async () => '{"errors":{"parent":"Issues from project OPS cannot be added to this Epic."}}' };
+      return null;
+    },
+  });
+  await withFetch(handler, async () => {
+    const r = await jc.setParentEpic(CRED, {
+      epicKey: 'KAN-12', issueKeys: ['NOPE-1', 'KAN-13', 'KAN-40', 'KAN-41', 'KAN-42', 'not a key', 'KAN-30'], env: CRED.env,
+    });
+    const by = Object.fromEntries(r.issues.map((i) => [i.issue, i]));
+    assert.equal(r.issues.length, 7, 'every key gets an outcome');
+    assert.match(by['NOPE-1'].error, /^NOPE-1 was not found, or it is outside this team's Jira scope/);
+    assert.match(by['KAN-13'].error, /KAN-13 is an Epic — an Epic cannot be put under/);
+    assert.match(by['KAN-40'].error, /KAN-40 is a Sub-task — a sub-task's parent is a standard issue/);
+    assert.match(by['KAN-41'].error, /the Jira account may not edit KAN-41 \(403\): You do not have permission to edit issues in this project/);
+    assert.match(by['KAN-42'].error, /Jira refused the change: parent: Issues from project OPS cannot be added to this Epic/);
+    assert.match(by['NOT A KEY'].error, /is not a Jira issue key/);
+    assert.equal(by['KAN-30'].outcome, 'added');
+    assert.deepEqual([r.changed, r.unchanged, r.failed], [1, 0, 6]);
+  });
+});
+
+test('setParentEpic: the target must be a visible Epic — refused before any change (#2895 AC6/AC8)', async () => {
+  const issues = { 'KAN-7': STORY(), 'KAN-30': STORY() };
+  const { handler, puts } = parentJira(issues);
+  await withFetch(handler, async () => {
+    await assert.rejects(() => jc.setParentEpic(CRED, { epicKey: 'KAN-7', issueKeys: ['KAN-30'], env: CRED.env }),
+      (e) => e.status === 400 && /KAN-7 is a Story, not an Epic .*Nothing was changed\./.test(e.message));
+    await assert.rejects(() => jc.setParentEpic(CRED, { epicKey: 'OTHER-1', issueKeys: ['KAN-30'], env: CRED.env }),
+      (e) => e.status === 404 && /Epic OTHER-1 was not found, or it is outside this team's Jira scope .*Nothing was changed\./.test(e.message));
+    await assert.rejects(() => jc.setParentEpic(CRED, { epicKey: 'KAN 12', issueKeys: ['KAN-30'], env: CRED.env }), (e) => e.status === 400);
+    await assert.rejects(() => jc.setParentEpic(CRED, { epicKey: 'KAN-12', issueKeys: [' '], env: CRED.env }),
+      (e) => e.status === 400 && /at least one issue key/.test(e.message));
+    assert.equal(puts.length, 0);
+  });
+});
+
+test('setParentEpic: company-managed — reads the Epic Link field, falls back to it when `parent` is refused (#2895 AC9)', async () => {
+  const issues = { 'KAN-5': EPIC(), 'KAN-12': EPIC(), 'KAN-30': STORY({ parent: 'KAN-5' }), 'KAN-31': STORY({ parent: 'KAN-12' }) };
+  const { handler, puts } = parentJira(issues, { epicLinkId: 'customfield_10014', rejectParent: true });
+  await withFetch(handler, async () => {
+    const r = await jc.setParentEpic(CRED, { epicKey: 'KAN-12', issueKeys: ['KAN-30', 'KAN-31'], env: CRED.env });
+    assert.deepEqual(r.issues.map((i) => i.outcome), ['moved', 'unchanged']); // KAN-31 read via the Epic Link field
+    assert.deepEqual(puts.map((p) => p.fields), [{ parent: { key: 'KAN-12' } }, { customfield_10014: 'KAN-12' }]);
+    assert.equal(issues['KAN-30'].parent, 'KAN-12');
+    const out = await jc.setParentEpic(CRED, { epicKey: null, issueKeys: ['KAN-30'], env: CRED.env });
+    assert.equal(out.issues[0].outcome, 'removed');
+    assert.deepEqual(puts.slice(-1)[0].fields, { customfield_10014: null });
+  });
+});
+
+test('setParentEpic: a key listed twice is handled once; a long list is never truncated (#2895 edge cases)', async () => {
+  const issues = { 'KAN-12': EPIC() };
+  const keys = [];
+  for (let i = 100; i < 150; i += 1) { issues[`KAN-${i}`] = STORY(); keys.push(`KAN-${i}`); }
+  const { handler, puts } = parentJira(issues);
+  await withFetch(handler, async () => {
+    const r = await jc.setParentEpic(CRED, { epicKey: 'KAN-12', issueKeys: [...keys, 'kan-100', 'KAN-101'], env: CRED.env });
+    assert.equal(r.issues.length, 50);
+    assert.equal(r.changed, 50);
+    assert.equal(puts.length, 50);
+  });
+});
+
+test('parentWriteRefusal: Jira\'s reason, readable; a 404 reads as outside the team scope', () => {
+  const err = (status, body) => Object.assign(new Error('mapped'), { status, body });
+  assert.match(jc.parentWriteRefusal(err(404, ''), 'KAN-1'), /^KAN-1 was not found, or it is outside this team's Jira scope/);
+  assert.equal(jc.parentWriteRefusal(err(400, '{"errorMessages":["Nope."]}'), 'KAN-1'), 'Jira refused the change: Nope');
+  assert.equal(jc.parentWriteRefusal(err(500, 'oops'), 'KAN-1'), 'mapped');
+});
+
+// ── standard fields of an existing issue (#2897) ─────────────────────────────
+
+// A tiny in-memory Jira for `edit`: GET /issue/<KEY>?fields=…, PUT /issue/<KEY>
+// (`fields` + `update` add/remove ops, applied like Jira does), the site's
+// priorities and the project's components / versions. `put` may answer a PUT
+// itself (a refusal).
+function editJira(issues, { put } = {}) {
+  const puts = [];
+  const PRIORITIES = [{ id: '1', name: 'Highest' }, { id: '2', name: 'High' }, { id: '3', name: 'Medium' }, { id: '4', name: 'Low' }];
+  const COMPONENTS = [{ id: '10', name: 'Backend' }, { id: '11', name: 'Frontend' }, { id: '12', name: 'API' }];
+  const VERSIONS = [{ id: '20', name: '1.0' }, { id: '21', name: '1.1' }, { id: '22', name: '2.0' }];
+  const json = (body, status = 200) => ({ ok: status < 400, status, text: async () => (body === undefined ? '' : JSON.stringify(body)) });
+  const handler = (url, opts) => {
+    const u = String(url);
+    if (/\/rest\/api\/3\/priority$/.test(u)) return json(PRIORITIES);
+    if (/\/rest\/api\/3\/project\/KAN\/components$/.test(u)) return json(COMPONENTS);
+    if (/\/rest\/api\/3\/project\/KAN\/versions$/.test(u)) return json(VERSIONS);
+    const m = u.match(/\/rest\/api\/3\/issue\/([^/?]+)(\?fields=(.*))?$/);
+    if (!m) throw new Error(`unexpected ${opts && opts.method} ${url}`);
+    const key = decodeURIComponent(m[1]);
+    const issue = issues[key];
+    if (!issue) return json({ errorMessages: ['Issue does not exist or you do not have permission to see it.'] }, 404);
+    if (opts && opts.method === 'PUT') {
+      const body = JSON.parse(opts.body);
+      puts.push({ key, body });
+      if (put) { const r = put(key, body); if (r) return r; }
+      Object.assign(issue, body.fields || {});
+      for (const [id, ops] of Object.entries(body.update || {})) {
+        let list = issue[id] || [];
+        const nameOf = (v) => (typeof v === 'object' ? v.name : v);
+        for (const op of ops) {
+          if (op.add !== undefined) list = [...list, op.add];
+          if (op.remove !== undefined) list = list.filter((x) => nameOf(x) !== nameOf(op.remove));
+        }
+        issue[id] = list;
+      }
+      return json(undefined, 204);
+    }
+    return json({ key, fields: { project: { key: 'KAN' }, ...issue } });
+  };
+  return { handler, puts };
+}
+
+const KAN10 = () => ({
+  summary: 'Old title',
+  assignee: { accountId: 'acc-anna', displayName: 'Anna' },
+  priority: { name: 'Medium' },
+  labels: ['web', 'urgent'],
+  components: [{ name: 'Frontend' }],
+  fixVersions: [{ name: '1.0' }],
+  duedate: null,
+});
+
+test('isIsoDate: a real YYYY-MM-DD only', () => {
+  assert.equal(jc.isIsoDate('2026-10-31'), true);
+  assert.equal(jc.isIsoDate('2028-02-29'), true);
+  for (const bad of ['2026-02-30', '2026-13-01', '31.10.2026', '2026-10-31T10:00:00Z', '', null, '2026-1-5']) {
+    assert.equal(jc.isIsoDate(bad), false, String(bad));
+  }
+});
+
+test('editIssueFields: changes the summary; `show` returns the new summary (#2897 AC1)', async () => {
+  const issues = { 'KAN-10': KAN10() };
+  const { handler, puts } = editJira(issues);
+  await withFetch(handler, async () => {
+    const seen = [];
+    const r = await jc.editIssueFields(CRED, 'kan-10', { changes: { summary: '  New title ' }, env: CRED.env, onChanged: (ids) => seen.push(ids) });
+    assert.equal(r.issue, 'KAN-10');
+    assert.equal(r.url, 'https://acme.atlassian.net/browse/KAN-10');
+    assert.deepEqual(r.fields, [{ field: 'summary', from: 'Old title', to: 'New title', outcome: 'changed' }]);
+    assert.deepEqual([r.changed, r.unchanged], [1, 0]);
+    assert.deepEqual(puts.map((p) => p.body), [{ fields: { summary: 'New title' } }]);
+    assert.deepEqual(seen, [['summary']]);
+  });
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return fieldListResponse();
+    if (isTransitionList(url)) return transitionsResponse();
+    return handler(url, opts);
+  }, async () => {
+    const shown = await jc.getIssue(CRED, 'KAN-10', { env: CRED.env });
+    assert.equal(shown.summary, 'New title');
+  });
+});
+
+test('editIssueFields: sets the assignee by accountId and unassigns (#2897 AC2)', async () => {
+  const issues = { 'KAN-10': KAN10() };
+  const { handler, puts } = editJira(issues);
+  await withFetch(handler, async () => {
+    let r = await jc.editIssueFields(CRED, 'KAN-10', { changes: { assignee: 'acc-bob' }, env: CRED.env });
+    assert.deepEqual(r.fields, [{ field: 'assignee', from: 'acc-anna', to: 'acc-bob', outcome: 'changed' }]);
+    r = await jc.editIssueFields(CRED, 'KAN-10', { changes: { assignee: null }, env: CRED.env });
+    assert.deepEqual(r.fields, [{ field: 'assignee', from: 'acc-bob', to: null, outcome: 'changed' }]);
+    assert.deepEqual(puts.map((p) => p.body), [{ fields: { assignee: { accountId: 'acc-bob' } } }, { fields: { assignee: null } }]);
+  });
+});
+
+test('editIssueFields: priority by name (case-insensitive); unknown lists the site priorities (#2897 AC3)', async () => {
+  const issues = { 'KAN-10': KAN10() };
+  const { handler, puts } = editJira(issues);
+  await withFetch(handler, async () => {
+    const r = await jc.editIssueFields(CRED, 'KAN-10', { changes: { priority: 'high' }, env: CRED.env });
+    assert.deepEqual(r.fields, [{ field: 'priority', from: 'Medium', to: 'High', outcome: 'changed' }]);
+    assert.deepEqual(puts[0].body, { fields: { priority: { name: 'High' } } });
+    await assert.rejects(
+      jc.editIssueFields(CRED, 'KAN-10', { changes: { priority: 'Blocker' }, env: CRED.env }),
+      (e) => e.status === 400 && /no priority "Blocker"\. Available: Highest, High, Medium, Low\. Nothing was changed/.test(e.message),
+    );
+    assert.equal(puts.length, 1);
+  });
+});
+
+test('editIssueFields: labels added/removed individually keep the others; replaced as a whole (#2897 AC4)', async () => {
+  const issues = { 'KAN-10': KAN10() };
+  const { handler, puts } = editJira(issues);
+  await withFetch(handler, async () => {
+    let r = await jc.editIssueFields(CRED, 'KAN-10', { changes: { labels: { add: ['backend', 'web'], remove: ['urgent', 'absent'] } }, env: CRED.env });
+    assert.deepEqual(r.fields, [{ field: 'labels', from: ['web', 'urgent'], to: ['web', 'backend'], outcome: 'changed' }]);
+    // only the real changes, as add/remove ops — the other labels are not resent
+    assert.deepEqual(puts[0].body, { update: { labels: [{ add: 'backend' }, { remove: 'urgent' }] } });
+    assert.deepEqual(issues['KAN-10'].labels, ['web', 'backend']);
+    r = await jc.editIssueFields(CRED, 'KAN-10', { changes: { labels: { set: ['ops'] } }, env: CRED.env });
+    assert.deepEqual(r.fields[0].to, ['ops']);
+    assert.deepEqual(puts[1].body, { fields: { labels: ['ops'] } });
+    r = await jc.editIssueFields(CRED, 'KAN-10', { changes: { labels: { set: [] } }, env: CRED.env });
+    assert.deepEqual(puts[2].body, { fields: { labels: [] } });
+  });
+});
+
+test('editIssueFields: components and fix versions by name; unknown lists the project values (#2897 AC5)', async () => {
+  const issues = { 'KAN-10': KAN10() };
+  const { handler, puts } = editJira(issues);
+  await withFetch(handler, async () => {
+    const r = await jc.editIssueFields(CRED, 'KAN-10', {
+      changes: { components: { add: ['backend'], remove: ['Frontend'] }, fixVersions: { set: ['1.1', '2.0'] } },
+      env: CRED.env,
+    });
+    assert.deepEqual(r.fields, [
+      { field: 'components', from: ['Frontend'], to: ['Backend'], outcome: 'changed' },
+      { field: 'fixVersions', from: ['1.0'], to: ['1.1', '2.0'], outcome: 'changed' },
+    ]);
+    assert.deepEqual(puts[0].body, {
+      fields: { fixVersions: [{ name: '1.1' }, { name: '2.0' }] },
+      update: { components: [{ add: { name: 'Backend' } }, { remove: { name: 'Frontend' } }] },
+    });
+    await assert.rejects(
+      jc.editIssueFields(CRED, 'KAN-10', { changes: { components: { add: ['Mobile'] } }, env: CRED.env }),
+      (e) => e.status === 400 && /project KAN has no component "Mobile"\. Available: Backend, Frontend, API/.test(e.message),
+    );
+    await assert.rejects(
+      jc.editIssueFields(CRED, 'KAN-10', { changes: { fixVersions: { remove: ['9.9'] } }, env: CRED.env }),
+      (e) => e.status === 400 && /project KAN has no version "9\.9"\. Available: 1\.0, 1\.1, 2\.0/.test(e.message),
+    );
+    assert.equal(puts.length, 1);
+  });
+});
+
+test('editIssueFields: due date set and cleared; an invalid date is refused before Jira is called (#2897 AC6)', async () => {
+  const issues = { 'KAN-10': KAN10() };
+  const { handler, puts } = editJira(issues);
+  await withFetch(handler, async (calls) => {
+    let r = await jc.editIssueFields(CRED, 'KAN-10', { changes: { dueDate: '2026-10-31' }, env: CRED.env });
+    assert.deepEqual(r.fields, [{ field: 'dueDate', from: null, to: '2026-10-31', outcome: 'changed' }]);
+    r = await jc.editIssueFields(CRED, 'KAN-10', { changes: { dueDate: null }, env: CRED.env });
+    assert.deepEqual(r.fields, [{ field: 'dueDate', from: '2026-10-31', to: null, outcome: 'changed' }]);
+    assert.deepEqual(puts.map((p) => p.body), [{ fields: { duedate: '2026-10-31' } }, { fields: { duedate: null } }]);
+    const before = calls.length;
+    for (const bad of ['31.10.2026', '2026-02-30']) {
+      await assert.rejects(
+        jc.editIssueFields(CRED, 'KAN-10', { changes: { dueDate: bad }, env: CRED.env }),
+        (e) => e.status === 400 && /is not a valid due date — use YYYY-MM-DD/.test(e.message),
+      );
+    }
+    assert.equal(calls.length, before, 'Jira was not called');
+  });
+});
+
+test('editIssueFields: several fields in ONE edit; unchanged ones are reported, not sent (#2897 AC7, edge case)', async () => {
+  const issues = { 'KAN-10': KAN10() };
+  const { handler, puts } = editJira(issues);
+  await withFetch(handler, async () => {
+    const seen = [];
+    const r = await jc.editIssueFields(CRED, 'KAN-10', {
+      changes: { summary: 'Old title', priority: 'Highest', labels: { add: ['web'] }, dueDate: '2026-12-01', assignee: 'acc-anna' },
+      env: CRED.env,
+      onChanged: (ids) => seen.push(ids),
+    });
+    assert.deepEqual(r.fields.map((f) => [f.field, f.outcome]), [
+      ['summary', 'unchanged'], ['assignee', 'unchanged'], ['priority', 'changed'], ['labels', 'unchanged'], ['dueDate', 'changed'],
+    ]);
+    assert.deepEqual([r.changed, r.unchanged], [2, 3]);
+    assert.equal(puts.length, 1);
+    assert.deepEqual(puts[0].body, { fields: { priority: { name: 'Highest' }, duedate: '2026-12-01' } });
+    assert.deepEqual(seen, [['priority', 'duedate']]);
+    // everything already at its value: success, no write, no own-write stamp
+    const again = await jc.editIssueFields(CRED, 'KAN-10', { changes: { priority: 'Highest' }, env: CRED.env, onChanged: (ids) => seen.push(ids) });
+    assert.deepEqual([again.changed, again.unchanged], [0, 1]);
+    assert.equal(puts.length, 1);
+    assert.equal(seen.length, 1);
+  });
+});
+
+test('editIssueFields: a Jira refusal is readable, names the field, and nothing is reported changed (#2897 AC7/AC8, edge case)', async () => {
+  const issues = { 'KAN-10': KAN10() };
+  const { handler } = editJira(issues, {
+    put: (key, body) => {
+      if (body.fields && body.fields.duedate) {
+        return { ok: false, status: 400, text: async () => JSON.stringify({ errors: { duedate: "Field 'duedate' cannot be set. It is not on the appropriate screen, or unknown." } }) };
+      }
+      if (body.fields && body.fields.assignee) {
+        return { ok: false, status: 400, text: async () => JSON.stringify({ errors: { assignee: "User 'acc-zed' cannot be assigned issues." } }) };
+      }
+      return null;
+    },
+  });
+  await withFetch(handler, async () => {
+    const seen = [];
+    await assert.rejects(
+      jc.editIssueFields(CRED, 'KAN-10', { changes: { summary: 'X', dueDate: '2026-12-01' }, env: CRED.env, onChanged: (ids) => seen.push(ids) }),
+      (e) => e.status === 400
+        && /Due date cannot be changed on KAN-10 — the field is not on the issue's edit screen in Jira/.test(e.message)
+        && /Nothing was changed\.$/.test(e.message),
+    );
+    await assert.rejects(
+      jc.editIssueFields(CRED, 'KAN-10', { changes: { assignee: 'acc-zed' }, env: CRED.env, onChanged: (ids) => seen.push(ids) }),
+      (e) => /Jira refused the edit of KAN-10: Assignee: User 'acc-zed' cannot be assigned issues/.test(e.message),
+    );
+    assert.deepEqual(seen, [], 'a refused edit is never stamped as changed');
+    assert.equal(issues['KAN-10'].summary, 'Old title');
+  });
+});
+
+test('editIssueFields: outside the team scope is the standard 404 refusal (#2897 AC10)', async () => {
+  const { handler, puts } = editJira({});
+  await withFetch(handler, async () => {
+    await assert.rejects(
+      jc.editIssueFields(CRED, 'OTHER-1', { changes: { summary: 'x' }, env: CRED.env }),
+      (e) => e.status === 404 && /OTHER-1 was not found, or it is outside this team's Jira scope/.test(e.message),
+    );
+    assert.equal(puts.length, 0);
+  });
+});
+
+test('normalizeIssueEdit: shape refusals before Jira (labels with spaces, set+add, empty, add+remove)', () => {
+  const bad = (changes, re) => assert.throws(() => jc.normalizeIssueEdit(changes), (e) => e.status === 400 && re.test(e.message));
+  bad({ labels: { add: ['needs review'] } }, /label "needs review" contains a space — Jira labels are single words \(use e\.g\. "needs-review"\)/);
+  bad({ labels: { set: ['a b'] } }, /contains a space/);
+  bad({ labels: { set: ['a'], add: ['b'] } }, /replace the whole list or add\/remove single values, not both/);
+  bad({ components: { add: ['API'], remove: ['api'] } }, /"API" is both added and removed/);
+  bad({ fixVersions: {} }, /nothing to set, add or remove/);
+  bad({ summary: '  ' }, /summary cannot be empty/);
+  bad({ priority: '' }, /a priority name is required/);
+  bad({}, /nothing to change/);
+  assert.deepEqual(jc.normalizeIssueEdit({ assignee: '', dueDate: '' }), { assignee: null, dueDate: null });
+  assert.deepEqual(jc.normalizeIssueEdit({ labels: { add: ['a', 'A', 'b'] } }), { labels: { add: ['a', 'b'], remove: [] } });
+});
+
+// ── user lookup (#2898) ─────────────────────────────────────────────────────
+
+const jiraUser = (id, name, extra = {}) => ({ accountId: id, displayName: name, active: true, accountType: 'atlassian', ...extra });
+const usersResponse = (list) => ({ ok: true, status: 200, text: async () => JSON.stringify(list) });
+
+test('searchUsers: name query → accountId, displayName, email only when Jira gives it, active, accountType (#2898 AC1/AC6)', async () => {
+  await withFetch((url) => {
+    const u = new URL(url);
+    assert.equal(u.pathname, '/rest/api/3/user/search');
+    assert.equal(u.searchParams.get('query'), 'Anna');
+    assert.equal(u.searchParams.get('maxResults'), '51'); // one extra row tells "more matches"
+    return usersResponse([
+      jiraUser('acc-1', 'Anna Schmidt', { emailAddress: 'anna@acme.com' }),
+      jiraUser('acc-2', 'Anna Berg', { emailAddress: '' }),
+    ]);
+  }, async () => {
+    const r = await jc.searchUsers(CRED, { query: ' Anna ', env: CRED.env });
+    assert.deepEqual(r, {
+      query: 'Anna', assignableOnly: false, count: 2, truncated: false, note: null,
+      users: [
+        { accountId: 'acc-1', displayName: 'Anna Schmidt', email: 'anna@acme.com', active: true, accountType: 'atlassian' },
+        { accountId: 'acc-2', displayName: 'Anna Berg', email: null, active: true, accountType: 'atlassian' },
+      ],
+    });
+  });
+});
+
+test('searchUsers: a full e-mail address is passed to Jira as the query (#2898 AC2)', async () => {
+  await withFetch((url) => {
+    assert.equal(new URL(url).searchParams.get('query'), 'anna@acme.com');
+    return usersResponse([jiraUser('acc-1', 'Anna Schmidt', { emailAddress: 'anna@acme.com' })]);
+  }, async () => {
+    const r = await jc.searchUsers(CRED, { query: 'anna@acme.com', env: CRED.env });
+    assert.deepEqual(r.users.map((u) => u.accountId), ['acc-1']);
+  });
+});
+
+test('searchUsers: --project checks scope, then searches assignable users and leaves inactive ones out (#2898 AC3/AC5)', async () => {
+  await withFetch((url) => {
+    const u = new URL(url);
+    if (u.pathname === '/rest/api/3/project/KAN') return usersResponse({ key: 'KAN' });
+    assert.equal(u.pathname, '/rest/api/3/user/assignable/search');
+    assert.equal(u.searchParams.get('project'), 'KAN');
+    return usersResponse([jiraUser('acc-1', 'Anna'), jiraUser('acc-9', 'Anna Gone', { active: false })]);
+  }, async (calls) => {
+    const r = await jc.searchUsers(CRED, { query: 'Anna', project: 'KAN', env: CRED.env });
+    assert.equal(r.assignableOnly, true);
+    assert.equal(r.project, 'KAN');
+    assert.deepEqual(r.users.map((u) => u.accountId), ['acc-1']);
+    assert.equal(calls.length, 2);
+  });
+});
+
+test('searchUsers: --issue narrows to people assignable to that issue (#2898 AC3)', async () => {
+  await withFetch((url) => {
+    const u = new URL(url);
+    if (u.pathname === '/rest/api/3/issue/KAN-10') return usersResponse({ key: 'KAN-10' });
+    assert.equal(u.pathname, '/rest/api/3/user/assignable/search');
+    assert.equal(u.searchParams.get('issueKey'), 'KAN-10');
+    assert.equal(u.searchParams.get('project'), null);
+    return usersResponse([jiraUser('acc-1', 'Anna')]);
+  }, async () => {
+    const r = await jc.searchUsers(CRED, { query: 'Anna', issue: 'KAN-10', env: CRED.env });
+    assert.equal(r.issue, 'KAN-10');
+    assert.equal(r.count, 1);
+  });
+});
+
+test('searchUsers: without narrowing, an inactive account is listed and marked; apps are marked (#2898 AC5, edge case)', async () => {
+  await withFetch(() => usersResponse([
+    jiraUser('acc-9', 'Anna Gone', { active: false }),
+    jiraUser('app-1', 'Anna Bot', { accountType: 'app' }),
+  ]), async () => {
+    const r = await jc.searchUsers(CRED, { query: 'Anna', env: CRED.env });
+    assert.deepEqual(r.users.map((u) => [u.accountId, u.active, u.accountType]), [['acc-9', false, 'atlassian'], ['app-1', true, 'app']]);
+    assert.match(r.note, /accountType "app" are apps \/ bots/);
+    assert.match(r.note, /active: false are deactivated accounts/);
+  });
+});
+
+test('searchUsers: no match is an empty result with a "no user found" note, not an error (#2898 AC4)', async () => {
+  await withFetch((url) => (/\/project\//.test(url) ? usersResponse({}) : usersResponse([])), async () => {
+    const r = await jc.searchUsers(CRED, { query: 'Zed', env: CRED.env });
+    assert.deepEqual([r.users, r.count, r.truncated, r.note], [[], 0, false, 'No user found matching "Zed".']);
+    const p = await jc.searchUsers(CRED, { query: 'Zed', project: 'KAN', env: CRED.env });
+    assert.equal(p.note, 'No user found matching "Zed" who can be assigned in project KAN.');
+  });
+});
+
+test('searchUsers: capped at 50 (or --limit) and says when there were more (#2898 AC7)', async () => {
+  const many = Array.from({ length: 51 }, (_, i) => jiraUser(`acc-${i}`, `Person ${i}`));
+  await withFetch((url) => {
+    const max = Number(new URL(url).searchParams.get('maxResults'));
+    return usersResponse(many.slice(0, max));
+  }, async () => {
+    const r = await jc.searchUsers(CRED, { query: 'Person', env: CRED.env });
+    assert.equal(r.count, jc.USER_SEARCH_LIMIT);
+    assert.equal(r.truncated, true);
+    assert.match(r.note, /More than 50 users match — only the first 50 are listed/);
+    const small = await jc.searchUsers(CRED, { query: 'Person', limit: '3', env: CRED.env });
+    assert.deepEqual([small.count, small.truncated], [3, true]);
+    const capped = await jc.searchUsers(CRED, { query: 'Person', limit: 500, env: CRED.env });
+    assert.equal(capped.count, 50);
+  });
+});
+
+test('searchUsers: several people with the same name are all returned and flagged (#2898 edge case)', async () => {
+  await withFetch(() => usersResponse([
+    jiraUser('acc-1', 'Anna Schmidt', { emailAddress: 'a1@acme.com' }),
+    jiraUser('acc-2', 'anna schmidt'),
+    jiraUser('acc-3', 'Anna Berg'),
+  ]), async () => {
+    const r = await jc.searchUsers(CRED, { query: 'Anna', env: CRED.env });
+    assert.equal(r.count, 3);
+    assert.match(r.note, /2 users are named "Anna Schmidt" — tell them apart by e-mail or accountId, do not guess/);
+    assert.doesNotMatch(r.note, /Anna Berg/);
+  });
+});
+
+test('searchUsers: a project or issue outside the team scope is the standard refusal, no user search (#2898 AC8)', async () => {
+  await withFetch(() => ({ ok: false, status: 404, text: async () => '{}' }), async (calls) => {
+    await assert.rejects(
+      jc.searchUsers(CRED, { query: 'Anna', project: 'OTHER', env: CRED.env }),
+      (e) => e.status === 404 && e.message === "Project OTHER was not found, or it is outside this team's Jira scope (the account cannot see it).",
+    );
+    await assert.rejects(
+      jc.searchUsers(CRED, { query: 'Anna', issue: 'OTHER-1', env: CRED.env }),
+      (e) => e.status === 404 && /^Issue OTHER-1 was not found, or it is outside this team's Jira scope/.test(e.message),
+    );
+    assert.ok(calls.every((c) => !/\/user\//.test(c.url)));
+  });
+});
+
+test('searchUsers: usage refusals before any HTTP (empty query, project + issue, bad limit)', async () => {
+  await withFetch(() => { throw new Error('no HTTP expected'); }, async () => {
+    const bad = (args, re) => assert.rejects(jc.searchUsers(CRED, { ...args, env: CRED.env }), (e) => e.status === 400 && re.test(e.message));
+    await bad({ query: '  ' }, /a search query is required/);
+    await bad({ query: 'A', project: 'KAN', issue: 'KAN-1' }, /--project OR --issue, not both/);
+    await bad({ query: 'A', limit: 'x' }, /--limit must be a whole number from 1 to 50/);
+    await bad({ query: 'A', limit: 0 }, /--limit must be a whole number/);
+  });
+});
+
+// ── new Sub-tasks under an existing standard issue (#2900) ──────────────────
+
+function subtaskJira({ parent = issueResponse('KAN-10', 'Story', { hierarchyLevel: 0 }), project = projectResponse(), meta = createMetaResponse(), create } = {}) {
+  const fallback = standaloneJira({ project, meta, create });
+  return (url, opts) => (isIssueGet(url, opts) ? parent : fallback(url, opts));
+}
+
+test('addSubtasksToIssue: three Sub-tasks under KAN-10 — parent set, the project\'s one sub-task type used unnamed (#2900 AC1)', async () => {
+  const sent = [];
+  await withFetch(subtaskJira({ create: (f) => { sent.push(f); return created201(`KAN-${10 + sent.length}`); } }), async (calls) => {
+    const seen = [];
+    const r = await jc.addSubtasksToIssue(CRED, {
+      parentKey: ' kan-10 ', subtasks: [{ summary: 'A' }, { summary: 'B' }, { summary: 'C' }], allowList: [], onCreated: (k) => seen.push(k), env: CRED.env,
+    });
+    assert.equal(r.project, 'KAN');
+    assert.equal(r.parent.key, 'KAN-10');
+    assert.equal(r.parent.issueType, 'Story');
+    assert.equal(r.created, 3);
+    assert.equal(r.failed, 0);
+    assert.deepEqual(r.subtasks.map((s) => [s.key, s.issueType]), [['KAN-11', 'Subtask'], ['KAN-12', 'Subtask'], ['KAN-13', 'Subtask']]);
+    assert.ok(sent.every((f) => f.parent.key === 'KAN-10' && f.issuetype.id === '10003' && f.project.key === 'KAN'));
+    assert.deepEqual(seen, ['KAN-11', 'KAN-12', 'KAN-13']); // own-writes registration hook
+    assert.equal(calls.filter((c) => isCreateMeta(c.url)).length, 1, 'create metadata read once per type');
+  });
+});
+
+test('addSubtasksToIssue: optional fields as in create-issue; status as a follow-up transition (#2900 AC2)', async () => {
+  let sent;
+  await withFetch(subtaskJira({ create: (f) => { sent = f; return created201('KAN-11'); } }), async () => {
+    const r = await jc.addSubtasksToIssue(CRED, {
+      parentKey: 'KAN-10',
+      subtasks: [{ summary: 'S', description: 'why', assignee: 'acc-1', priority: 'High', labels: ['web'], status: 'In Progress', fields: { Team: '42' } }],
+      allowList: [], attribution: 'by an agent', env: CRED.env,
+    });
+    assert.equal(sent.description.type, 'doc');
+    assert.deepEqual(sent.assignee, { accountId: 'acc-1' });
+    assert.deepEqual(sent.priority, { name: 'High' });
+    assert.deepEqual(sent.labels, ['web']);
+    assert.deepEqual(sent.customfield_20001, { id: '42' });
+    assert.equal(r.subtasks[0].status, 'In Progress');
+  });
+});
+
+test('addSubtasksToIssue: an Epic or a Sub-task as parent is refused before any create (#2900 AC3)', async () => {
+  for (const [parent, re] of [
+    [issueResponse('KAN-1', 'Epic', { hierarchyLevel: 1 }), /KAN-1 is an Epic — Jira does not allow Sub-tasks directly under an Epic.*Nothing was created\.$/],
+    [issueResponse('KAN-2', 'Unteraufgabe', { hierarchyLevel: -1 }), /KAN-2 is itself a Unteraufgabe — a Sub-task cannot have Sub-tasks.*Nothing was created\.$/],
+  ]) {
+    await withFetch(subtaskJira({ parent, create: () => { throw new Error('must not create'); } }), async () => {
+      await assert.rejects(jc.addSubtasksToIssue(CRED, { parentKey: 'KAN-1', subtasks: [{ summary: 'S' }], allowList: [], env: CRED.env }), (e) => e.status === 400 && re.test(e.message));
+    });
+  }
+});
+
+test('addSubtasksToIssue: a project without a sub-task type is refused (#2900 AC4)', async () => {
+  await withFetch(subtaskJira({ project: projectResponse('KAN', PROJECT_TYPES.filter((t) => !t.subtask)), create: () => { throw new Error('must not create'); } }), async () => {
+    await assert.rejects(
+      jc.addSubtasksToIssue(CRED, { parentKey: 'KAN-10', subtasks: [{ summary: 'S' }], allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /project KAN has no sub-task issue type — Sub-tasks are disabled there/.test(e.message),
+    );
+  });
+});
+
+test('addSubtasksToIssue: one failing Sub-task (missing required field, Jira refusal, wrong type) does not stop the others (#2900 AC5)', async () => {
+  const meta = createMetaResponse([
+    { fieldId: 'summary', name: 'Summary', required: true, hasDefaultValue: false },
+    { fieldId: 'parent', name: 'Parent', required: true, hasDefaultValue: false },
+    { fieldId: 'customfield_20001', name: 'Team', required: true, hasDefaultValue: false },
+  ]);
+  let n = 0;
+  await withFetch(subtaskJira({
+    meta,
+    create: (f) => {
+      if (f.summary === 'refused') return { ok: false, status: 400, text: async () => JSON.stringify({ errors: { assignee: 'User does not exist' } }) };
+      n += 1;
+      return created201(`KAN-${20 + n}`);
+    },
+  }), async () => {
+    const r = await jc.addSubtasksToIssue(CRED, {
+      parentKey: 'KAN-10',
+      subtasks: [
+        { summary: 'ok', fields: { Team: '1' } },
+        { summary: 'no team' },
+        { summary: 'refused', assignee: 'nobody', fields: { Team: '1' } },
+        { summary: 'a story', type: 'Story', fields: { Team: '1' } },
+        { summary: 'ok too', fields: { Team: '1' } },
+      ],
+      allowList: [], env: CRED.env,
+    });
+    assert.equal(r.created, 2);
+    assert.equal(r.failed, 3);
+    assert.deepEqual(r.subtasks.map((s) => s.key || null), ['KAN-21', null, null, null, 'KAN-22']);
+    assert.match(r.subtasks[1].error, /requires field\(s\) for a Subtask that were not provided: Team\./);
+    assert.match(r.subtasks[2].error, /assignee "nobody" was rejected \(User does not exist\)/);
+    assert.match(r.subtasks[3].error, /^Story is not a sub-task type\. Sub-task types: Subtask\.$/);
+  });
+});
+
+test('addSubtasksToIssue: a parent outside the team\'s scope is a 404 with the standard wording (#2900 AC6)', async () => {
+  await withFetch((url, opts) => {
+    if (isIssueGet(url, opts)) return { ok: false, status: 404, text: async () => '{"errorMessages":["Issue does not exist"]}' };
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    await assert.rejects(
+      jc.addSubtasksToIssue(CRED, { parentKey: 'OTHER-1', subtasks: [{ summary: 'S' }], allowList: [], env: CRED.env }),
+      (e) => e.status === 404 && e.message === "Issue OTHER-1 was not found, or it is outside this team's Jira scope (the account cannot see it). Nothing was created.",
+    );
+  });
+});
+
+test('addSubtasksToIssue: several sub-task types — a named type is matched case-insensitively; none named is refused listing them (edge case)', async () => {
+  const types = [...PROJECT_TYPES, { id: '10009', name: 'Unteraufgabe', subtask: true, hierarchyLevel: -1 }];
+  const sent = [];
+  await withFetch(subtaskJira({ project: projectResponse('KAN', types), create: (f) => { sent.push(f); return created201(`KAN-${30 + sent.length}`); } }), async (calls) => {
+    const r = await jc.addSubtasksToIssue(CRED, {
+      parentKey: 'KAN-10', defaultType: 'unteraufgabe', subtasks: [{ summary: 'A' }, { summary: 'B', type: 'SUBTASK' }], allowList: [], env: CRED.env,
+    });
+    assert.deepEqual(r.subtasks.map((s) => s.issueType), ['Unteraufgabe', 'Subtask']);
+    assert.deepEqual(sent.map((f) => f.issuetype.id), ['10009', '10003']);
+    const before = calls.length;
+    await assert.rejects(
+      jc.addSubtasksToIssue(CRED, { parentKey: 'KAN-10', subtasks: [{ summary: 'A' }], allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /several sub-task types \(Subtask, Unteraufgabe\) — name one with --type.*Nothing was created\./.test(e.message),
+    );
+    assert.equal(calls.slice(before).filter((c) => isCreate(c.url, c.opts)).length, 0);
+  });
+});
+
+test('addSubtasksToIssue: shape and allow-list guards run before any Jira call', async () => {
+  await withFetch(() => { throw new Error('no Jira call expected'); }, async (calls) => {
+    const bad = (args, status, re) => assert.rejects(jc.addSubtasksToIssue(CRED, { allowList: [], env: CRED.env, ...args }), (e) => e.status === status && re.test(e.message));
+    await bad({ subtasks: [{ summary: 'S' }] }, 400, /a --parent key is required/);
+    await bad({ parentKey: 'nope', subtasks: [{ summary: 'S' }] }, 400, /is not a Jira issue key/);
+    await bad({ parentKey: 'KAN-1', subtasks: [] }, 400, /at least one sub-task is required/);
+    await bad({ parentKey: 'KAN-1', subtasks: [{ summary: 'S' }, {}] }, 400, /sub-task #2 requires a summary/);
+    await bad({ parentKey: 'KAN-1', subtasks: [{ summary: 'S', labels: ['two words'] }] }, 400, /labels cannot contain spaces/);
+    await bad({ parentKey: 'KAN-1', subtasks: [{ summary: 'S', fields: { Team: '1' } }], allowList: ['Other'] }, 403, /not writable by agents: Team/);
+    assert.equal(calls.length, 0);
+  });
+});
+
+// ── project versions (#2902) ────────────────────────────────────────────────
+
+const NOW_0710 = () => Date.parse('2026-10-07T12:00:00Z');
+
+function versionsJira({ versions, unresolved = 0, onWrite = () => null } = {}) {
+  const writes = [];
+  const list = versions || [
+    { id: '1', name: '1.3', released: true, archived: false, releaseDate: '2026-09-01' },
+    { id: '2', name: '1.4', released: false, archived: false, startDate: '2026-09-02', releaseDate: '2026-10-01' },
+    { id: '3', name: '1.5', released: false, archived: false, self: 'https://acme.atlassian.net/rest/api/3/version/3' },
+    { id: '4', name: '0.9', released: false, archived: true },
+  ];
+  const ok = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+  const handler = (url, opts) => {
+    const u = new URL(url);
+    const method = (opts && opts.method) || 'GET';
+    if (u.pathname === '/rest/api/3/project/KAN') return ok({ id: '100', key: 'KAN' });
+    if (u.pathname === '/rest/api/3/project/KAN/versions') return ok(list);
+    if (u.pathname.startsWith('/rest/api/3/project/')) return { ok: false, status: 404, text: async () => '{}' };
+    if (/\/unresolvedIssueCount$/.test(u.pathname)) return ok({ issuesUnresolvedCount: unresolved, issuesCount: 5 });
+    if (u.pathname === '/rest/api/3/search/jql') {
+      assert.match(JSON.parse(opts.body).jql, /^fixVersion = \d+ AND resolution = EMPTY$/);
+      return ok({ issues: Array.from({ length: unresolved }, (_, i) => ({ key: `KAN-${i + 1}` })), isLast: true });
+    }
+    const body = opts && opts.body ? JSON.parse(opts.body) : undefined;
+    writes.push({ method, path: u.pathname, body });
+    return onWrite({ method, path: u.pathname, body }) || ok({ id: '9', ...body });
+  };
+  return { handler, writes };
+}
+
+test('shapeVersion / sortVersions: dates, flags, overdue (Jira\'s or derived), unreleased first (#2902 AC1)', () => {
+  const today = '2026-10-07';
+  assert.deepEqual(jc.shapeVersion({ id: 2, name: '1.4', description: 'd', startDate: '2026-09-02', releaseDate: '2026-10-01', released: false, archived: false }, today),
+    { id: '2', name: '1.4', description: 'd', startDate: '2026-09-02', releaseDate: '2026-10-01', released: false, archived: false, overdue: true });
+  assert.equal(jc.shapeVersion({ name: 'x', releaseDate: '2026-10-01', overdue: false }, today).overdue, false, 'Jira\'s own flag wins');
+  assert.equal(jc.shapeVersion({ name: 'x', releaseDate: '2026-10-01', released: true }, today).overdue, false);
+  assert.equal(jc.shapeVersion({ name: 'x' }, today).overdue, false);
+  const sorted = jc.sortVersions([{ name: 'a', released: true }, { name: 'b', released: false }, { name: 'c', released: true }, { name: 'd', released: false }]);
+  assert.deepEqual(sorted.map((v) => v.name), ['b', 'd', 'a', 'c']);
+});
+
+test('listProjectVersions: name, dates, released/archived state, unreleased first; archived listed but marked (#2902 AC1)', async () => {
+  const { handler } = versionsJira();
+  await withFetch(handler, async () => {
+    const r = await jc.listProjectVersions(CRED, { projectKey: 'kan', env: CRED.env, now: NOW_0710 });
+    assert.equal(r.project, 'KAN');
+    assert.equal(r.count, 4);
+    assert.equal(r.unreleased, 3);
+    assert.deepEqual(r.versions.map((v) => [v.name, v.released, v.archived]), [['1.4', false, false], ['1.5', false, false], ['0.9', false, true], ['1.3', true, false]]);
+    assert.equal(r.versions[0].overdue, true);
+  });
+});
+
+test('listProjectVersions: a project outside the team scope is the standard refusal (#2902 AC7)', async () => {
+  const { handler } = versionsJira();
+  await withFetch(handler, async () => {
+    await assert.rejects(jc.listProjectVersions(CRED, { projectKey: 'OTHER', env: CRED.env }),
+      (e) => e.status === 404 && /Project OTHER was not found, or it is outside this team's Jira scope/.test(e.message));
+  });
+});
+
+test('createProjectVersion: posts name, projectId, description and dates (#2902 AC2)', async () => {
+  const { handler, writes } = versionsJira();
+  await withFetch(handler, async () => {
+    const r = await jc.createProjectVersion(CRED, { projectKey: 'KAN', name: ' 1.6 ', description: 'Next', startDate: '2026-10-08', releaseDate: '2026-11-30', env: CRED.env, now: NOW_0710 });
+    assert.deepEqual(writes, [{ method: 'POST', path: '/rest/api/3/version', body: { name: '1.6', projectId: 100, description: 'Next', startDate: '2026-10-08', releaseDate: '2026-11-30' } }]);
+    assert.equal(r.project, 'KAN');
+    assert.deepEqual(r.version, { id: '9', name: '1.6', description: 'Next', startDate: '2026-10-08', releaseDate: '2026-11-30', released: false, archived: false, overdue: false });
+  });
+});
+
+test('createProjectVersion: refusals — duplicate name (any case), bad dates, release before start, outside scope, 403 (#2902 AC3/AC6/AC7)', async () => {
+  const { handler, writes } = versionsJira({ onWrite: () => ({ ok: false, status: 403, text: async () => '{"errorMessages":["no"]}' }) });
+  await withFetch(handler, async () => {
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'KAN', name: '1.5', env: CRED.env }),
+      (e) => e.status === 409 && e.message === 'project KAN already has a version "1.5" (unreleased). Nothing was created.');
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'KAN', name: '0.9', env: CRED.env }),
+      (e) => e.status === 409 && /\(unreleased, archived\)/.test(e.message));
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'KAN', name: '2.0', releaseDate: '31.12.2026', env: CRED.env }),
+      (e) => e.status === 400 && /"31\.12\.2026" is not a valid release date — use YYYY-MM-DD/.test(e.message));
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'KAN', name: '2.0', startDate: '2026-02-30', env: CRED.env }),
+      (e) => e.status === 400 && /not a valid start date/.test(e.message));
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'KAN', name: '2.0', startDate: '2026-11-01', releaseDate: '2026-10-31', env: CRED.env }),
+      (e) => e.status === 400 && /the release date 2026-10-31 is before the start date 2026-11-01/.test(e.message));
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'KAN', name: ' ', env: CRED.env }), (e) => e.status === 400);
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'OTHER', name: '2.0', env: CRED.env }),
+      (e) => e.status === 404 && /outside this team's Jira scope.*Nothing was created\./.test(e.message));
+    assert.equal(writes.length, 0, 'nothing reached Jira\'s create before the 403 case');
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'KAN', name: '2.0', env: CRED.env }),
+      (e) => e.status === 403 && /may not manage versions in project KAN \(403\) — creating and releasing versions needs the Jira "Administer Projects" permission on the project \(typically a project admin\)\. Nothing was created\./.test(e.message));
+  });
+});
+
+test('createProjectVersion: Jira\'s own "already exists" answer (a race) reads as the duplicate refusal (#2902 AC3)', async () => {
+  const { handler } = versionsJira({ onWrite: () => ({ ok: false, status: 400, text: async () => '{"errors":{"name":"A version with this name already exists in this project."}}' }) });
+  await withFetch(handler, async () => {
+    await assert.rejects(jc.createProjectVersion(CRED, { projectKey: 'KAN', name: '2.0', env: CRED.env }),
+      (e) => e.status === 409 && /already has a version "2\.0"/.test(e.message));
+  });
+});
+
+test('releaseProjectVersion: today by default; no unresolved issues (#2902 AC4)', async () => {
+  const { handler, writes } = versionsJira({ versions: [{ id: '2', name: '1.4', released: false }] });
+  await withFetch(handler, async () => {
+    const r = await jc.releaseProjectVersion(CRED, { projectKey: 'KAN', name: '1.4', env: CRED.env, now: NOW_0710 });
+    assert.deepEqual(writes, [{ method: 'PUT', path: '/rest/api/3/version/2', body: { released: true, releaseDate: '2026-10-07' } }]);
+    assert.equal(r.outcome, 'released');
+    assert.equal(r.version.released, true);
+    assert.equal(r.version.releaseDate, '2026-10-07');
+    assert.equal(r.unresolvedIssues, 0);
+    assert.equal(r.message, '1.4 released on 2026-10-07; it had no unresolved issues.');
+  });
+});
+
+test('releaseProjectVersion: a given date; unresolved issues stay without --move-to and the result says so (#2902 AC4/AC5)', async () => {
+  const { handler, writes } = versionsJira({ unresolved: 3 });
+  await withFetch(handler, async () => {
+    const r = await jc.releaseProjectVersion(CRED, { projectKey: 'KAN', name: '1.4', releaseDate: '2026-10-05', env: CRED.env, now: NOW_0710, onMoved: () => assert.fail('nothing moved') });
+    assert.deepEqual(writes[0].body, { released: true, releaseDate: '2026-10-05' });
+    assert.equal(r.unresolvedIssues, 3);
+    assert.equal(r.moved, 0);
+    assert.equal(r.movedTo, null);
+    assert.equal(r.message, '1.4 released on 2026-10-05; 3 unresolved issues stay assigned to 1.4 (pass --move-to <version> to move them).');
+  });
+});
+
+test('releaseProjectVersion: --move-to moves the unresolved issues via Jira\'s moveUnfixedIssuesTo and reports the keys (#2902 AC5)', async () => {
+  const { handler, writes } = versionsJira({ unresolved: 2 });
+  await withFetch(handler, async () => {
+    let moved;
+    const r = await jc.releaseProjectVersion(CRED, { projectKey: 'KAN', name: '1.4', moveTo: '1.5', env: CRED.env, now: NOW_0710, onMoved: (keys) => { moved = keys; } });
+    assert.deepEqual(writes[0].body, { released: true, releaseDate: '2026-10-07', moveUnfixedIssuesTo: 'https://acme.atlassian.net/rest/api/3/version/3' });
+    assert.deepEqual(moved, ['KAN-1', 'KAN-2']);
+    assert.equal(r.moved, 2);
+    assert.equal(r.movedTo, '1.5');
+    assert.equal(r.message, '1.4 released on 2026-10-07; its 2 unresolved issues were moved to 1.5.');
+  });
+});
+
+test('releaseProjectVersion: already released is reported, not an error, and writes nothing (#2902 edge case)', async () => {
+  const { handler, writes } = versionsJira();
+  await withFetch(handler, async () => {
+    const r = await jc.releaseProjectVersion(CRED, { projectKey: 'KAN', name: '1.3', moveTo: '1.5', env: CRED.env });
+    assert.equal(r.outcome, 'already-released');
+    assert.equal(r.message, '1.3 was already released on 2026-09-01 — nothing was changed and no issues were moved.');
+    assert.equal(writes.length, 0);
+  });
+});
+
+test('releaseProjectVersion: refusals — unknown version, unknown/same/archived move-to, date before start, outside scope, 403 (#2902 AC6/AC7)', async () => {
+  const { handler, writes } = versionsJira({ onWrite: () => ({ ok: false, status: 403, text: async () => '{}' }) });
+  await withFetch(handler, async () => {
+    const rejects = (args, status, re) => assert.rejects(jc.releaseProjectVersion(CRED, { projectKey: 'KAN', env: CRED.env, now: NOW_0710, ...args }),
+      (e) => e.status === status && re.test(e.message));
+    await rejects({ name: '9.9' }, 404, /project KAN has no version "9\.9"\. Available: 1\.3, 1\.4, 1\.5, 0\.9\. Nothing was changed\./);
+    await rejects({ name: '1.4', moveTo: '7.0' }, 404, /no version "7\.0" to move the unresolved issues to/);
+    await rejects({ name: '1.4', moveTo: '1.4' }, 400, /cannot move 1\.4's unresolved issues to 1\.4 itself/);
+    await rejects({ name: '1.4', moveTo: '0.9' }, 400, /version 0\.9 is archived/);
+    await rejects({ name: '1.4', releaseDate: '2026-09-01' }, 400, /the release date 2026-09-01 is before 1\.4's start date 2026-09-02/);
+    await rejects({ name: '1.4', releaseDate: 'today' }, 400, /not a valid release date/);
+    await rejects({ projectKey: 'OTHER', name: '1.4' }, 404, /Project OTHER was not found, or it is outside this team's Jira scope.*Nothing was changed\./);
+    assert.equal(writes.length, 0);
+    await rejects({ name: '1.4' }, 403, /may not manage versions in project KAN \(403\).*Administer Projects.*Nothing was changed\./);
   });
 });

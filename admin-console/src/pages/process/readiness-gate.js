@@ -104,3 +104,31 @@ export function readinessSummary(stored) {
   const what = [f.ci ? 'CI' : null, f.conflict ? 'a conflict-free PR' : null].filter(Boolean).join(' and ');
   return `Waits for ${what} (${f.timeoutMinutes} min, then ${TIMEOUT_LABEL}); on failure → ${f.failureLabel}`;
 }
+
+// The short "waits for …" hint of a gated hand-off — "CI + conflict-free",
+// "CI", "conflict-free" — or '' when no gate is on. Shared by the Flow
+// editor's routing rows and the Agent Chat trigger list (#2912).
+export function readinessWaitsFor(stored) {
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return '';
+  return [stored.ci === true ? 'CI' : null, stored.conflict === true ? 'conflict-free' : null].filter(Boolean).join(' + ');
+}
+
+// The gate after switching ONE toggle inline in the Inputs list (#2913): the
+// stored failure label and timeout are kept, both toggles off clears the gate
+// (null) — the same value the hand-off dialog would save for that state.
+// `{ error }` when the dialog would refuse it (e.g. a gate on the default
+// failure label's own hand-off), `{ readiness }` otherwise.
+export function toggleReadiness(stored, key, on, { wakeLabel = '' } = {}) {
+  if (key !== 'ci' && key !== 'conflict') throw new Error(`unknown readiness toggle "${key}"`);
+  const form = { ...readinessForm(stored), [key]: !!on };
+  const error = readinessFormError(form, { wakeLabel });
+  return error ? { error } : { readiness: readinessFromForm(form) };
+}
+
+// The compact tag a gated PR hand-off's canvas edge label carries (#2913):
+// "⏳CI", "⏳clean" or "⏳CI+clean" — '' when no gate is on.
+export function readinessChipTag(stored) {
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return '';
+  const what = [stored.ci === true ? 'CI' : null, stored.conflict === true ? 'clean' : null].filter(Boolean).join('+');
+  return what ? `⏳${what}` : '';
+}

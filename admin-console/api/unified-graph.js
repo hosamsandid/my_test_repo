@@ -222,6 +222,9 @@ function processEdgeToUnified(e) {
   // so the canvas can render the claim badge on the listener edge — same
   // pass-through shape as the loop stop-contract blob (#936).
   if (e.claim) u.claim = e.claim;
+  // Readiness gate (#2795) of a PR label hand-off listener, so the canvas can
+  // tag the gated edge (#2913).
+  if (e.readinessGate) u.readinessGate = e.readinessGate;
   return u;
 }
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, Suspense, lazy } from 'react';
 import { useNavigate, useLocation } from 'react-router';
 import {
   Users, Zap, Sparkles, Server,
@@ -23,11 +23,16 @@ import AccountMenu from './AccountMenu';
 import SettingsModal from './SettingsModal';
 import TranscriptionOverlay from './TranscriptionOverlay';
 import FlowCopilotIndicator from './FlowCopilotIndicator';
-import HelperChatPanel from './HelperChatPanel';
 import { useHelperChat } from '../context/HelperChatContext';
 import { useModelSelection } from '../context/ModelSelectionContext';
 import { breadcrumbFor } from './breadcrumbs';
 import { PageActionsContext } from '../context/PageActionsContext';
+
+// Lazy (#2918): the panel pulls in the full markdown + Shiki pipeline via
+// Message.jsx, so keeping it out of the shell chunk spares every page that
+// weight until Help is first opened. The shell's static import graph must not
+// reach `shiki` (pinned by shell-lazy-shiki.test.js).
+const HelperChatPanel = lazy(() => import('./HelperChatPanel'));
 import { formatVersionLabel } from './version-info';
 import { formatCommitTimestamp } from './version-info';
 
@@ -211,6 +216,10 @@ export default function Shell({ children }) {
   // Helper Chat (#1735): the header Help button toggles the app-level panel.
   // Opening now lands on the page-aware "This page" face (#1873, concept §4).
   const { isOpen: helpOpen, toggle: toggleHelp, openHelpFor } = useHelperChat();
+  // The Help panel is only mounted (and its chunk fetched) once it was first
+  // opened; it then stays mounted so its slide-out and state survive closing.
+  const [helpMounted, setHelpMounted] = useState(helpOpen);
+  useEffect(() => { if (helpOpen) setHelpMounted(true); }, [helpOpen]);
   const onHelpClick = () => { if (helpOpen) toggleHelp(); else openHelpFor(); };
   // Nav badge counts, derived from the shared agent-status poll (#1677) instead
   // of a Shell-owned interval — one /api/agents/statuses request now feeds every
@@ -731,8 +740,13 @@ export default function Shell({ children }) {
       <FlowCopilotIndicator />
 
       {/* Helper Chat panel (#1735) — a non-blocking slide-in help assistant,
-          mounted once here so it is available on every route without a backdrop. */}
-      <HelperChatPanel />
+          mounted once here so it is available on every route without a backdrop;
+          loaded on first open (#2918). */}
+      {(helpMounted || helpOpen) && (
+        <Suspense fallback={null}>
+          <HelperChatPanel />
+        </Suspense>
+      )}
 
       {/* User Settings modal (#1802) — opened from the header account menu;
           mounted once here so it overlays every route. */}

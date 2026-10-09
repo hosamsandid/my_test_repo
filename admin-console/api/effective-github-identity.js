@@ -77,6 +77,37 @@ function presentBaselineCredential(described, { kind, callerUserId = null, userL
 }
 
 /**
+ * #2938: the commit-SIGNING key the team's commits are signed with (or none —
+ * then they are unsigned, as before). Same redaction as above: another
+ * person's personal key is shown as its owner only — never its id, name or
+ * commit email; a team key keeps its id/name; a global key is a tier plus the
+ * commit identity it signs as (a service identity, not personal data).
+ * @param {object|null} described  the orchestrator's `describeSigning` result
+ */
+function presentSigning(described, { callerUserId = null, userLabel, credentialName } = {}) {
+  const labelOf = typeof userLabel === 'function' ? userLabel : () => null;
+  const nameOf = typeof credentialName === 'function' ? credentialName : () => null;
+  const d = described && typeof described === 'object' ? described : {};
+  const source = ['personal', 'team', 'global'].includes(d.source) && d.keyId ? d.source : 'none';
+  if (source === 'none') return { kind: 'signing', kindLabel: 'Signing key', source, owner: null, credential: null, identity: null };
+  const ownerId = d.ownerId ? String(d.ownerId) : null;
+  const isYou = !!(ownerId && callerUserId && ownerId === String(callerUserId));
+  const shown = source !== 'personal' || isYou;
+  const id = String(d.keyId);
+  const ident = d.identity && typeof d.identity === 'object' && d.identity.email
+    ? { name: String(d.identity.name || ''), email: String(d.identity.email) }
+    : null;
+  return {
+    kind: 'signing',
+    kindLabel: 'Signing key',
+    source,
+    owner: source === 'personal' ? { label: labelOf(ownerId) || 'the Team Admin', isYou } : null,
+    credential: shown && source !== 'global' ? { id, name: nameOf(id) || d.name || null } : null,
+    identity: shown ? ident : null,
+  };
+}
+
+/**
  * Both kinds for one team, as the console's `GET /api/agents/:id/effective-credentials` returns them.
  * @param {{ github?: object, ssh?: object }} described
  * @param {object} opts  { callerUserId, userLabel, githubName, sshName }
@@ -86,7 +117,8 @@ function presentEffectiveIdentity(described, { callerUserId = null, userLabel, g
   return {
     github: presentBaselineCredential(d.github, { kind: 'github', callerUserId, userLabel, credentialName: githubName }),
     ssh: presentBaselineCredential(d.ssh, { kind: 'ssh', callerUserId, userLabel, credentialName: sshName }),
+    signing: presentSigning(d.signing, { callerUserId, userLabel, credentialName: sshName }),
   };
 }
 
-module.exports = { KIND_LABELS, presentBaselineCredential, presentEffectiveIdentity };
+module.exports = { KIND_LABELS, presentBaselineCredential, presentSigning, presentEffectiveIdentity };

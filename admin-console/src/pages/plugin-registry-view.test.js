@@ -297,6 +297,7 @@ test('the remove confirm for a broken entry does not talk about a broker', () =>
 
 import {
   describeBuild,
+  formatBuildVersion,
   isAgentStudioImage,
   fetchedVersionText,
   brokerBuildLine,
@@ -316,7 +317,7 @@ const brokerManifest = (image = 'localhost/aee-plugin-jira:latest') => manifest(
 
 // AC4 / AC7: same formatter as the console's own version display.
 test('describeBuild: hash (with -dirty) and commit timestamp in version-info.js format', () => {
-  assert.deepStrictEqual(describeBuild(NEW), { known: true, hash: 'bbbbbbb', time: '2026-09-30 21:08 +0200', text: 'bbbbbbb · 2026-09-30 21:08 +0200' });
+  assert.deepStrictEqual(describeBuild(NEW), { known: true, hash: 'bbbbbbb', version: 'bbbbbbb', time: '2026-09-30 21:08 +0200', text: 'bbbbbbb · 2026-09-30 21:08 +0200' });
   assert.strictEqual(describeBuild({ ...NEW, dirty: 'dirty' }).hash, 'bbbbbbb-dirty');
   assert.strictEqual(describeBuild(OLD).time, '2026-09-29 08:05 +0000');
   assert.strictEqual(describeBuild({ commit: 'bbbbbbb', dirty: '', commitTime: '' }).text, 'bbbbbbb · time unknown');
@@ -325,8 +326,71 @@ test('describeBuild: hash (with -dirty) and commit timestamp in version-info.js 
 // AC6: never empty — unknown is said out loud.
 test('describeBuild: missing / unknown build → "unknown"', () => {
   for (const b of [null, undefined, {}, { commit: 'unknown', dirty: 'dirty', commitTime: '2026-09-30T21:08:25+02:00' }, { commit: '' }]) {
-    assert.deepStrictEqual(describeBuild(b), { known: false, hash: 'unknown', time: 'unknown', text: 'unknown' });
+    assert.deepStrictEqual(describeBuild(b), { known: false, hash: 'unknown', version: 'unknown', time: 'unknown', text: 'unknown' });
   }
+});
+
+// ─── release tag + distance (#2893) ─────────────────────────────────────────
+const TAGGED = { commit: '5500e15', dirty: '', commitTime: '2026-09-30T21:08:25+02:00', tag: 'v0.4.0', tagDistance: 12 };
+
+// AC1: a build exactly on the tag shows the tag alone.
+test('describeBuild: build on a release tag → the tag', () => {
+  const d = describeBuild({ ...TAGGED, tagDistance: 0 });
+  assert.strictEqual(d.version, 'v0.4.0');
+  assert.strictEqual(d.text, 'v0.4.0 · 2026-09-30 21:08 +0200');
+  assert.strictEqual(d.hash, '5500e15');
+});
+
+// AC2: N commits after the tag → tag+N with the short hash.
+test('describeBuild: build after a release tag → tag+N (hash)', () => {
+  const d = describeBuild(TAGGED);
+  assert.strictEqual(d.version, 'v0.4.0+12 (5500e15)');
+  assert.strictEqual(d.text, 'v0.4.0+12 (5500e15) · 2026-09-30 21:08 +0200');
+});
+
+// AC4: the -dirty suffix and the commit timestamp stay.
+test('describeBuild: dirty builds keep -dirty on the hash, even on the tag', () => {
+  assert.strictEqual(describeBuild({ ...TAGGED, dirty: 'dirty' }).text, 'v0.4.0+12 (5500e15-dirty) · 2026-09-30 21:08 +0200');
+  assert.strictEqual(describeBuild({ ...TAGGED, tagDistance: 0, dirty: 'dirty' }).version, 'v0.4.0 (5500e15-dirty)');
+  assert.strictEqual(describeBuild({ ...TAGGED, commitTime: '' }).text, 'v0.4.0+12 (5500e15) · time unknown');
+});
+
+// AC3 / AC7: no tag reachable, or a build recorded before #2893 → hash as today.
+test('describeBuild: no or unusable tag info → the hash alone, as before', () => {
+  const plain = { commit: '5500e15', dirty: '', commitTime: '2026-09-30T21:08:25+02:00' };
+  for (const extra of [{}, { tag: '', tagDistance: null }, { tag: 'v0.4.0' }, { tag: 'v0.4.0', tagDistance: -1 }, { tag: 'v0.4.0', tagDistance: '12' }, { tag: 'nightly', tagDistance: 3 }]) {
+    const d = describeBuild({ ...plain, ...extra });
+    assert.strictEqual(d.version, '5500e15', JSON.stringify(extra));
+    assert.strictEqual(d.text, '5500e15 · 2026-09-30 21:08 +0200', JSON.stringify(extra));
+  }
+  // An unknown commit stays "unknown", whatever tag info came along.
+  assert.strictEqual(describeBuild({ commit: 'unknown', tag: 'v0.4.0', tagDistance: 0 }).text, 'unknown');
+});
+
+test('formatBuildVersion: falls back to the given hash', () => {
+  assert.strictEqual(formatBuildVersion(null, 'abc1234'), 'abc1234');
+  assert.strictEqual(formatBuildVersion({ tag: 'v1.0.0', tagDistance: 1 }, 'abc1234'), 'v1.0.0+1 (abc1234)');
+});
+
+// AC5: every identity line — installed files / source, running broker, image.
+test('buildIdentity: the version rule applies to files, broker and image', () => {
+  const b = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: TAGGED, brokerBuild: { ...TAGGED }, imageBuild: { ...TAGGED, tagDistance: 0 } });
+  assert.strictEqual(b.files.version, 'v0.4.0+12 (5500e15)');
+  assert.strictEqual(b.broker.version, 'v0.4.0+12 (5500e15)');
+  assert.strictEqual(b.image.version, 'v0.4.0');
+  const pool = buildIdentity({ installed: false, manifest: brokerManifest(), sourceBuild: TAGGED });
+  assert.strictEqual(pool.filesLabel, 'Source');
+  assert.strictEqual(pool.files.text, 'v0.4.0+12 (5500e15) · 2026-09-30 21:08 +0200');
+});
+
+// AC6: hints keep comparing commits — tag info never causes or hides one.
+test('buildIdentity: mismatch hints compare commits, not tag info', () => {
+  const untagged = { commit: '5500e15', dirty: '', commitTime: TAGGED.commitTime };
+  const same = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: TAGGED, brokerBuild: untagged, imageBuild: { ...TAGGED, tag: 'v0.3.0', tagDistance: 40 } });
+  assert.strictEqual(same.mismatch, false);
+  assert.deepStrictEqual(same.hints, []);
+  const other = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: TAGGED, brokerBuild: { ...TAGGED, commit: 'aaaaaaa' }, imageBuild: TAGGED });
+  assert.deepStrictEqual(other.hints.map((h) => h.text), [BROKER_IMAGE_MISMATCH_HINT, BROKER_MISMATCH_HINT]);
 });
 
 test('isAgentStudioImage: reference broker images vs third-party images', () => {

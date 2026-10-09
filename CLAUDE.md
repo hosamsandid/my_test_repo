@@ -438,8 +438,10 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   its own ~5s beat (a shared singleton poll, mirroring `AgentStatusesContext`'s
   #1677 pattern; paused while the tab is hidden), diffed by `roster-diff.js` so
   only actually-changed rows re-render — a spawned/reaped/renamed instance (or
-  any other roster change) now appears/disappears/updates within ~5s with no
-  manual reload, instead of only at the next navigation or filter toggle.
+  any other roster change) now appears/disappears/updates with no manual reload:
+  within ~5s for a change made in this console (it clears the server's shared
+  roster cache, #566), within ~7s for one the orchestrator makes on its own
+  (one `AGENT_ROSTER_TTL_MS`, default 2s, plus one poll).
   The Parallelism/Scaling surface is **always on** — the former
   `AEE_POOLS_ENABLED` kill switch (#2302) and its `pools-mode.js` module were
   removed; `wipLimit` is configurable both in the Flow editor's Parallelism

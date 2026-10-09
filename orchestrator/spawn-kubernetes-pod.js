@@ -165,9 +165,20 @@ function parseMemoryQuantity(value) {
   const v = String(value || '').trim();
   if (!v) return undefined;
   if (/^\d+(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?$/.test(v)) return v;
-  const m = v.match(/^(\d+)\s*([kKmMgG])(?:i|b|ib)?$/);
+  const m = v.match(/^(\d+)\s*([kKmMgGtT])(?:i|b|ib)?$/);
   if (!m) return undefined;
   return `${m[1]}${m[2].toUpperCase()}i`;
+}
+
+// Bytes of a quantity `parseMemoryQuantity` returned (plain digits, or a
+// binary/decimal magnitude suffix). Used only to compare request vs limit.
+const QUANTITY_MULT = {
+  '': 1, Ki: 1024, Mi: 1024 ** 2, Gi: 1024 ** 3, Ti: 1024 ** 4, Pi: 1024 ** 5, Ei: 1024 ** 6,
+  K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15, E: 1e18,
+};
+function memoryQuantityBytes(quantity) {
+  const m = /^(\d+)(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?$/.exec(String(quantity || ''));
+  return m ? Number(m[1]) * QUANTITY_MULT[m[2] || ''] : NaN;
 }
 
 // Write to a handle stream only while it is still writable. The log stream,
@@ -458,7 +469,7 @@ function buildContextHostPathVolumes(contextMounts) {
   return { volumes, volumeMounts };
 }
 
-function buildPodManifest(id, env, podName, contextMounts, image, toolchain = null) {
+function buildPodManifest(id, env, podName, contextMounts, image, toolchain = null, memoryLimit = null) {
   // #2282 Band 1: a toolchain may declare `resources` to override the
   // fleet-wide default for agents bound to it (e.g. a JVM/Gradle build that
   // would otherwise OOM at AEE_AGENT_MEM_LIMIT). No override -> AGENT_MEM_LIMIT
@@ -477,8 +488,16 @@ function buildPodManifest(id, env, podName, contextMounts, image, toolchain = nu
   // suffix means MILLI, not mega, silently requesting ~0 memory instead of
   // 512 megabytes.
   const resources = toolchain && toolchain.resources ? toolchain.resources : null;
-  const memory = parseMemoryQuantity(resources && resources.memoryLimit) || parseMemoryQuantity(AGENT_MEM_LIMIT);
-  const memoryRequest = parseMemoryQuantity(resources && resources.memoryRequest) || '256Mi';
+  // #2813: a role's own `memoryLimit` (clamped to the operator ceiling by the
+  // orchestrator) wins over the toolchain's — role → toolchain → fleet.
+  const memory = parseMemoryQuantity(memoryLimit)
+    || parseMemoryQuantity(resources && resources.memoryLimit)
+    || parseMemoryQuantity(AGENT_MEM_LIMIT);
+  // A request above the limit makes the API server reject the pod, and a
+  // valid small role value (e.g. "128m") is below the 256Mi default request —
+  // so the request is capped to the effective limit.
+  let memoryRequest = parseMemoryQuantity(resources && resources.memoryRequest) || '256Mi';
+  if (memory && memoryQuantityBytes(memoryRequest) > memoryQuantityBytes(memory)) memoryRequest = memory;
   const cpuRequest = (resources && resources.cpuRequest) || '100m';
   // Seam #3 equivalent: the agent sees ONLY its own slice of the shared
   // workspace PVC via subPath, mounted at the same /workspace/agents/<id>
@@ -541,7 +560,7 @@ function buildPodManifest(id, env, podName, contextMounts, image, toolchain = nu
 // NON-default image: an image-pull failure is worded from it as AC7 requires,
 // and `resources` (#2282 Band 1) is passed into buildPodManifest to size the
 // pod's memory/cpu.
-function spawnContainer({ id, env, contextMounts, image, toolchain = null }) {
+function spawnContainer({ id, env, contextMounts, image, toolchain = null, memoryLimit = null }) {
   const handle = new EventEmitter();
   handle._toolchain = toolchain;
   handle._image = image;
@@ -598,7 +617,7 @@ function spawnContainer({ id, env, contextMounts, image, toolchain = null }) {
           'seam requires spawnContainer({ image }) (#1940) — see resolveAgentImage.',
         );
       }
-      const manifest = buildPodManifest(id, env, podName, contextMounts, image, toolchain);
+      const manifest = buildPodManifest(id, env, podName, contextMounts, image, toolchain, memoryLimit);
       for (const vm of manifest.spec.containers[0].volumeMounts) {
         if (!vm.name.startsWith('ctx-')) continue;
         const vol = manifest.spec.volumes.find((v) => v.name === vm.name);

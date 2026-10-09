@@ -70,6 +70,11 @@ services:
       # source on the host, not inside this container, so PODMAN_SOCK_PATH
       # (/var/run/podman.sock) would point at nothing there.
       PODMAN_HOST_SOCKET: ${PODMAN_HOST_SOCKET:-/run/user/501/podman/podman.sock}
+      # Per-agent container resource caps (spawn-container.js). Forwarded here
+      # so a .env override (e.g. to work around a broken host cgroup delegation
+      # that cannot create memory.max/pids.max) actually reaches the container.
+      AEE_AGENT_MEM_LIMIT: ${AEE_AGENT_MEM_LIMIT:-}
+      AEE_AGENT_PIDS_LIMIT: ${AEE_AGENT_PIDS_LIMIT:-}
       MATRIX_HOMESERVER: http://conduwuit:6167
       ADMIN_USER_ID: "@${ADMIN_USER:-admin}:local"
       # First-boot System-Admin seed (#2059). The orchestrator owns the user
@@ -119,6 +124,12 @@ services:
       # Lets multiple stacks share one Podman store without evicting each other's
       # agent containers. Defaults to COMPOSE_PROJECT_NAME when unset.
       AEE_INSTANCE_ID: "${AEE_INSTANCE_ID:-${COMPOSE_PROJECT_NAME:-agent-studio}}"
+      # Agent container memory (#2813): the fleet default and the ceiling a
+      # role's own memoryLimit may not exceed. Both read by the orchestrator
+      # (spawn) AND the console (save/bundle validation, effective-limit
+      # read-out), so they must agree — empty = 2g / 8g.
+      AEE_AGENT_MEM_LIMIT: "${AEE_AGENT_MEM_LIMIT:-}"
+      AEE_AGENT_MEM_CEILING: "${AEE_AGENT_MEM_CEILING:-}"
       # Internal-API authentication for :4002 (#1456, GOV-PLATFORM-2). Empty
       # (the default) leaves the gate inert. See .env.example for the ladder.
       # startAgentProcess strips both secrets from every agent container it
@@ -198,6 +209,12 @@ services:
       # Max simultaneous orchestrator respawn calls fired by
       # POST /api/llm-endpoints/:id/respawn-agents (see .env.example).
       RESPAWN_CONCURRENCY: "${RESPAWN_CONCURRENCY:-}"
+      # Agent container memory (#2813): the fleet default and the ceiling a
+      # role's own memoryLimit may not exceed. Both read by the orchestrator
+      # (spawn) AND the console (save/bundle validation, effective-limit
+      # read-out), so they must agree — empty = 2g / 8g.
+      AEE_AGENT_MEM_LIMIT: "${AEE_AGENT_MEM_LIMIT:-}"
+      AEE_AGENT_MEM_CEILING: "${AEE_AGENT_MEM_CEILING:-}"
     depends_on:
       conduwuit:
         condition: service_started

@@ -1,7 +1,7 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useSyncExternalStore } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { rehypeShikiSync } from '../../components/shiki-rehype';
+import { rehypeShikiSync, subscribeShiki, shikiVersion } from '../../components/shiki-rehype';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { Bot, User, Zap } from 'lucide-react';
 import { Link as LinkIcon, ScrollText } from 'lucide-react';
@@ -28,10 +28,13 @@ import { isStatusNote, statusNoteMarkdown } from './status-note.js';
  * and the active one is picked by CSS keyed off `<html data-theme>`, so a theme
  * switch never re-tokenizes. Wrapping this in React.memo means an unrelated
  * re-render of the surrounding bubble (e.g. a cross-panel hover) cannot re-run
- * Shiki.
+ * Shiki. The one exception is the lazily loaded highlighter (#2918): when it,
+ * or a grammar, finishes loading, the Shiki store version bumps and this render
+ * re-runs once so plain code blocks upgrade to highlighted ones.
  */
 const MarkdownFull = React.memo(function MarkdownFull({ body }) {
   useAgentChatMdCss();
+  useSyncExternalStore(subscribeShiki, shikiVersion);
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}

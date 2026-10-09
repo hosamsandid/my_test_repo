@@ -5,11 +5,11 @@ const assert = require('node:assert/strict');
 
 const { POLICY, REQUIRES_APPROVAL, authorizeWrite } = require('./broker-policy');
 
-test('POLICY mirrors the manifest: comment + transition + update + attach + set-field + create + sprint + link writes, team scope', () => {
+test('POLICY mirrors the manifest: comment + transition + update + attach + set-field + create + sprint + link + set-epic + edit + version writes, team scope', () => {
   const manifest = require('../plugin.json');
   assert.deepEqual(POLICY, manifest.policy);
   assert.deepEqual(Object.keys(POLICY).sort(),
-    ['attach', 'comment', 'create', 'link', 'set-field', 'sprint-advance', 'sprint-bulk-create', 'sprint-close', 'sprint-create', 'sprint-start', 'transition', 'unlink', 'update']);
+    ['attach', 'comment', 'create', 'edit', 'link', 'set-epic', 'set-field', 'sprint-advance', 'sprint-bulk-create', 'sprint-close', 'sprint-create', 'sprint-start', 'transition', 'unlink', 'update', 'version-create', 'version-release']);
 });
 
 test('requiresApproval is wired but empty (D3 — no confirmation pen in v1)', () => {
@@ -30,6 +30,10 @@ test('authorizeWrite: a team-scoped caller may run all three writes (D3 — rout
   assert.deepEqual(authorizeWrite('sprint-advance'), { allow: true });
   assert.deepEqual(authorizeWrite('link'), { allow: true });
   assert.deepEqual(authorizeWrite('unlink'), { allow: true });
+  assert.deepEqual(authorizeWrite('set-epic'), { allow: true });
+  assert.deepEqual(authorizeWrite('edit'), { allow: true });
+  assert.deepEqual(authorizeWrite('version-create'), { allow: true });
+  assert.deepEqual(authorizeWrite('version-release'), { allow: true });
 });
 
 test('authorizeWrite: an unlisted subcommand is unrestricted (every rule is opt-in)', () => {

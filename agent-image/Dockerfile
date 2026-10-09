@@ -55,7 +55,7 @@ RUN mkdir -p /root/.ssh \
   && chmod 600 /root/.ssh/config
 
 # Pin Claude Code CLI version for reproducible builds.
-ARG CLAUDE_CODE_VERSION=2.1.212
+ARG CLAUDE_CODE_VERSION=2.1.293
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
 # Python deps for the in-container Matrix DM listener (P4).
@@ -143,6 +143,14 @@ RUN chmod +x /opt/ace/scripts/aee-ask \
 # cannot drift. The wait is capped by the turn's AEE_RUN_DEADLINE.
 RUN chmod +x /opt/ace/scripts/aee-wait-ci \
     && ln -sf /opt/ace/scripts/aee-wait-ci /usr/local/bin/aee-wait-ci
+
+# `aee-ssh-sign` — git's `gpg.ssh.program` when a signing key resolves for a run
+# (#2938). The runtime sets it per invocation via GIT_CONFIG_* env; it forwards
+# each commit payload to the orchestrator, which signs with the stored key, so
+# the private key never enters the container. Other `ssh-keygen -Y` operations
+# pass through to the real ssh-keygen.
+RUN chmod +x /opt/ace/scripts/aee-ssh-sign \
+    && ln -sf /opt/ace/scripts/aee-ssh-sign /usr/local/bin/aee-ssh-sign
 
 # `usage` — read-only view of this agent's / its team's token usage (#679). On
 # PATH so agents call it directly: `usage me` / `usage team` query the

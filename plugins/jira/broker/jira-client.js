@@ -15,7 +15,7 @@
 // request with the runtime `fetch`. Same pure-core / I/O-edge split as
 // github-issues-broker/github-client.js and test-mgmt-broker/vendor-client.js.
 
-const { resolveJiraApiBase, adfToText } = require('./event-extract');
+const { resolveJiraApiBase, adfToText, commentBodyText, resolveCommentOrigin } = require('./event-extract');
 
 // One JQL search page is 100 issues; MAX_PAGES caps total issues considered for
 // a single project in a single poll (100 × 20 = 2000) — generous enough that a
@@ -299,7 +299,8 @@ async function resolveEpicLinkFieldId(base, auth) {
 
 // The agent-facing standard columns a `--fields` selection may name (below);
 // declared here so `partitionFields` can be defined before them.
-// (AGENT_ISSUE_COLUMNS is the source of truth — see near shapeAgentIssue.)
+// (AGENT_ISSUE_COLUMNS + STANDARD_READ_COLUMNS are the source of truth — see
+// near shapeAgentIssue.)
 
 // Split a caller's `--fields` list into standard columns (the projection over a
 // shaped issue) and custom-field names (resolved to ids and surfaced under
@@ -310,7 +311,7 @@ function partitionFields(fields) {
   const columns = [];
   const customNames = [];
   for (const f of list) {
-    if (AGENT_ISSUE_COLUMNS.includes(f)) columns.push(f);
+    if (SELECTABLE_COLUMNS.includes(f)) columns.push(f);
     else customNames.push(f);
   }
   return { columns, customNames };
@@ -475,7 +476,7 @@ async function getIssue(cred, issueKey, { env, customFields } = {}) {
   // agent-requested custom fields (#2416). Both read one cached field catalog.
   const epicLinkFieldId = await resolveEpicLinkFieldId(base, auth);
   const custom = await resolveCustomFieldSelection(base, auth, customFields);
-  const fieldList = ['summary', 'status', 'description', 'assignee', 'issuetype', 'attachment', 'created', 'updated', 'parent', 'issuelinks'];
+  const fieldList = ['summary', 'status', 'description', 'assignee', 'issuetype', 'attachment', 'created', 'updated', 'parent', 'issuelinks', ...Object.values(STANDARD_READ_FIELDS)];
   if (epicLinkFieldId) fieldList.push(epicLinkFieldId);
   for (const id of custom.ids) if (!fieldList.includes(id)) fieldList.push(id);
   const raw = await requestJson({
@@ -501,6 +502,9 @@ async function getIssue(cred, issueKey, { env, customFields } = {}) {
     // Always present — `[]` when the issue has none.
     links: shapeIssueLinks(fields.issuelinks, String(raw.key || issueKey)),
     url: `${resolveJiraApiBase(cred.siteUrl)}/browse/${encodeURIComponent(raw.key || issueKey)}`,
+    // Priority, labels, reporter, components, fix versions, due date (#2901).
+    // Always present — `null` / `[]` when unset.
+    ...shapeStandardReadFields(fields),
   };
   // Requested custom fields (#2416). Only surfaced when some were requested, so
   // a plain `show` is byte-identical to before. An unset field is `null` (not a
@@ -550,6 +554,68 @@ async function getComment(cred, issueKey, commentId, { env } = {}) {
     created: raw.created ? String(raw.created) : null,
     body: adfToText(raw.body),
   };
+}
+
+// An issue's comments, newest first (CLI `comments`, #2899) — one page of
+// `limit` (default 20, at most 100), skipping the newest `offset`. Each body is
+// the wake's plain text (event-extract.js `commentBodyText`): cut at the wake
+// length with `bodyTruncated`, read in full via `show <key> --comment <id>`.
+// `origin` is resolved like a wake's against the scope's own-writes snapshot.
+// Comments the credential may not see are simply not in Jira's answer. An
+// issue the credential cannot see is the standard out-of-scope refusal.
+const COMMENTS_DEFAULT_LIMIT = 20;
+const COMMENTS_MAX_LIMIT = 100;
+async function listComments(cred, issueKey, { limit, offset, ownWrites, env } = {}) {
+  const key = String(issueKey || '').trim();
+  if (!key) throw userErr(400, 'an issue key is required');
+  const wholeNumber = (v, min) => {
+    if (v === undefined || v === null || v === '') return undefined;
+    const n = Number(v);
+    return Number.isInteger(n) && n >= min ? n : null;
+  };
+  const lim = wholeNumber(limit, 1);
+  if (lim === null) throw userErr(400, `--limit must be a whole number from 1 to ${COMMENTS_MAX_LIMIT}`);
+  const cap = Math.min(lim === undefined ? COMMENTS_DEFAULT_LIMIT : lim, COMMENTS_MAX_LIMIT);
+  const off = wholeNumber(offset, 0);
+  if (off === null) throw userErr(400, '--offset must be a whole number of newer comments to skip (0 or more)');
+  const startAt = off === undefined ? 0 : off;
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  let raw;
+  try {
+    raw = await requestJson({
+      base,
+      path: `/rest/api/3/issue/${encodeURIComponent(key)}/comment?orderBy=-created&startAt=${startAt}&maxResults=${cap}`,
+      authHeader: auth,
+    });
+  } catch (err) {
+    if (err.status === 404) throw userErr(404, `${outOfScope('Issue ', key)}.`);
+    throw err;
+  }
+  const values = Array.isArray(raw.comments) ? raw.comments : [];
+  const comments = values.filter((c) => c && c.id != null).map((c) => {
+    const { text, truncated } = commentBodyText(c.body);
+    return {
+      id: String(c.id),
+      author: c.author && c.author.displayName ? String(c.author.displayName) : null,
+      created: c.created ? String(c.created) : null,
+      updated: c.updated ? String(c.updated) : null,
+      body: text,
+      bodyTruncated: truncated,
+      origin: resolveCommentOrigin(key, c, ownWrites),
+    };
+  });
+  const total = typeof raw.total === 'number' ? raw.total : startAt + values.length;
+  const nextOffset = startAt + values.length;
+  const hasMore = values.length > 0 && nextOffset < total;
+  const result = { issue: key, comments, count: comments.length, total, offset: startAt, limit: cap, hasMore };
+  if (hasMore) {
+    result.nextOffset = nextOffset;
+    result.note = `${total - nextOffset} older comment(s) not listed — read them with aee-jira comments ${key} --offset ${nextOffset}.`;
+  } else if (!comments.length) {
+    result.note = startAt ? `No comments past offset ${startAt} (${key} has ${total}).` : `${key} has no comments.`;
+  }
+  return result;
 }
 
 // The full (uncapped) attachment list for one issue — the ownership check
@@ -808,10 +874,145 @@ async function listProjectStatuses(cred, { projectKey, env } = {}) {
   }));
 }
 
+// ── user lookup: name / e-mail → accountId (#2898) ─────────────────────────
+// Jira addresses people by an opaque accountId, which `create-epic`,
+// `add-stories`, `create-issue` and `edit` take as `assignee`. `users` finds it
+// by a name or e-mail fragment: GET /rest/api/3/user/search, or — narrowed to
+// people who may be assigned in a project / to an issue —
+// GET /rest/api/3/user/assignable/search. Nothing is cached: every call asks
+// Jira, so no user list outlives the request.
+const USER_SEARCH_LIMIT = 50;
+
+const userErr = (status, message) => { const e = new Error(message); e.status = status; return e; };
+
+// One Jira user as an agent sees it. `email` only when Jira hands it to the
+// calling credential (privacy settings hide it → null; never derived).
+// `accountType` is Jira's own: atlassian (a person), app (a bot / integration)
+// or customer (a JSM portal customer).
+function shapeUser(raw) {
+  const r = raw || {};
+  const email = typeof r.emailAddress === 'string' && r.emailAddress.trim() ? r.emailAddress.trim() : null;
+  return {
+    accountId: String(r.accountId || ''),
+    displayName: r.displayName == null ? '' : String(r.displayName),
+    email,
+    active: r.active !== false,
+    accountType: r.accountType ? String(r.accountType) : null,
+  };
+}
+
+// The `users` result notes: no match, more matches than the cap, apps among the
+// matches, and several people sharing one name — the agent must tell them apart
+// (by e-mail / accountId), never guess.
+function userSearchNote({ query, users, truncated, limit, project, issue }) {
+  const where = project ? ` who can be assigned in project ${project}` : issue ? ` who can be assigned to ${issue}` : '';
+  if (!users.length) return `No user found matching "${query}"${where}.`;
+  const notes = [];
+  if (truncated) notes.push(`More than ${limit} users match — only the first ${limit} are listed; narrow the query (e.g. a full e-mail address).`);
+  const byName = new Map(); // lower-cased name → [display name, count]
+  for (const u of users) {
+    const k = u.displayName.trim().toLowerCase();
+    byName.set(k, [byName.has(k) ? byName.get(k)[0] : u.displayName, (byName.has(k) ? byName.get(k)[1] : 0) + 1]);
+  }
+  for (const [name, count] of byName.values()) {
+    if (count > 1) notes.push(`${count} users are named "${name}" — tell them apart by e-mail or accountId, do not guess.`);
+  }
+  if (users.some((u) => u.accountType === 'app')) notes.push('Entries with accountType "app" are apps / bots, not people.');
+  if (users.some((u) => !u.active)) notes.push('Entries with active: false are deactivated accounts and cannot be assigned.');
+  return notes.length ? notes.join(' ') : null;
+}
+
+// Search Jira users by a name or e-mail fragment (CLI `users`). With `project`
+// (or `issue`) only people assignable there are returned, and inactive accounts
+// are left out; without it every match is returned, inactive ones marked
+// `active: false`. Capped at `limit` (≤ 50): one extra row is requested so the
+// result can say `truncated` when there were more. A project / issue the
+// credential cannot see is the standard out-of-scope refusal.
+async function searchUsers(cred, { query, project, issue, limit, env } = {}) {
+  const q = String(query || '').trim();
+  if (!q) throw userErr(400, 'a search query is required (a name or e-mail address, or part of one)');
+  const projectKey = String(project || '').trim();
+  const issueKey = String(issue || '').trim();
+  if (projectKey && issueKey) throw userErr(400, 'pass --project OR --issue, not both');
+  const n = Number(limit);
+  const cap = limit === undefined || limit === null || limit === '' ? USER_SEARCH_LIMIT
+    : Number.isInteger(n) && n > 0 ? Math.min(n, USER_SEARCH_LIMIT) : null;
+  if (cap === null) throw userErr(400, `--limit must be a whole number from 1 to ${USER_SEARCH_LIMIT}`);
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const assignable = !!(projectKey || issueKey);
+  // Confirm the project / issue is visible first, so an out-of-scope key is the
+  // standard refusal and never an empty "no user found".
+  if (assignable) {
+    const lookup = projectKey
+      ? `/rest/api/3/project/${encodeURIComponent(projectKey)}`
+      : `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=project`;
+    try {
+      await requestJson({ base, path: lookup, authHeader: auth });
+    } catch (err) {
+      if (err.status === 404) throw userErr(404, `${outOfScope(projectKey ? 'Project ' : 'Issue ', projectKey || issueKey)}.`);
+      throw err;
+    }
+  }
+  const params = new URLSearchParams({ query: q, startAt: '0', maxResults: String(cap + 1) });
+  if (projectKey) params.set('project', projectKey);
+  if (issueKey) params.set('issueKey', issueKey);
+  const raw = await requestJson({
+    base,
+    path: `/rest/api/3/user/${assignable ? 'assignable/' : ''}search?${params.toString()}`,
+    authHeader: auth,
+  });
+  let users = (Array.isArray(raw) ? raw : []).map(shapeUser).filter((u) => u.accountId);
+  if (assignable) users = users.filter((u) => u.active);
+  const truncated = users.length > cap;
+  if (truncated) users = users.slice(0, cap);
+  const result = { query: q, assignableOnly: assignable, users, count: users.length, truncated };
+  if (projectKey) result.project = projectKey;
+  if (issueKey) result.issue = issueKey;
+  result.note = userSearchNote({ query: q, users, truncated, limit: cap, project: projectKey, issue: issueKey });
+  return result;
+}
+
 // The agent-facing field set both `list` and `search` request from Jira, and
 // the shaped shape they return — the columns an agent sees for a browsed issue.
 const AGENT_ISSUE_FIELDS = ['summary', 'status', 'assignee', 'updated', 'issuetype', 'parent'];
 const AGENT_ISSUE_COLUMNS = ['key', 'summary', 'status', 'issueType', 'assignee', 'updated', 'parent', 'url'];
+
+// Built-in fields `show` always returns and `search --fields` may name as extra
+// columns (#2901): agent column → Jira field id. Not part of the default
+// `search`/`list` row (AGENT_ISSUE_COLUMNS stays unchanged) — requested from
+// Jira only when a `--fields` selection names them.
+const STANDARD_READ_FIELDS = Object.freeze({
+  priority: 'priority',
+  labels: 'labels',
+  reporter: 'reporter',
+  components: 'components',
+  fixVersions: 'fixVersions',
+  dueDate: 'duedate',
+});
+const STANDARD_READ_COLUMNS = Object.keys(STANDARD_READ_FIELDS);
+// Every column a `--fields` selection may name, in output order.
+const SELECTABLE_COLUMNS = [...AGENT_ISSUE_COLUMNS, ...STANDARD_READ_COLUMNS];
+
+// The #2901 standard fields of one raw issue, agent-shaped. An unset (or
+// hidden — e.g. a project without a priority scheme) value is `null` for a
+// single value and `[]` for a list, so "empty" is distinguishable from "not
+// read". A reporter without a display name (deleted account) is `null`.
+function shapeStandardReadFields(fields) {
+  const f = fields || {};
+  const names = (list) => (Array.isArray(list) ? list : [])
+    .map((x) => (x && typeof x === 'object' ? x.name : x))
+    .filter((n) => typeof n === 'string' && n)
+    .map(String);
+  return {
+    priority: f.priority && f.priority.name ? String(f.priority.name) : null,
+    labels: names(f.labels),
+    reporter: f.reporter && f.reporter.displayName ? String(f.reporter.displayName) : null,
+    components: names(f.components),
+    fixVersions: names(f.fixVersions),
+    dueDate: f.duedate ? String(f.duedate) : null,
+  };
+}
 
 // Narrow one raw search issue to the agent-facing columns (used by both
 // `listProjectIssues` and `searchIssues`). `siteBase` builds the browse URL;
@@ -844,9 +1045,9 @@ function agentRequestFields(epicLinkFieldId) {
 // silently-dropped field. `key` is always kept: it is the issue's identity.
 function assertColumns(fields) {
   if (!Array.isArray(fields) || fields.length === 0) return;
-  const unknown = fields.filter((f) => !AGENT_ISSUE_COLUMNS.includes(f));
+  const unknown = fields.filter((f) => !SELECTABLE_COLUMNS.includes(f));
   if (unknown.length) {
-    const e = new Error(`unknown --fields: ${unknown.join(', ')}. Valid columns: ${AGENT_ISSUE_COLUMNS.join(', ')}`);
+    const e = new Error(`unknown --fields: ${unknown.join(', ')}. Valid columns: ${SELECTABLE_COLUMNS.join(', ')}`);
     e.status = 400;
     throw e;
   }
@@ -856,7 +1057,7 @@ function pickAgentColumns(issue, fields) {
   if (!Array.isArray(fields) || fields.length === 0) return issue;
   const keep = new Set(['key', ...fields]);
   const out = {};
-  for (const col of AGENT_ISSUE_COLUMNS) if (keep.has(col)) out[col] = issue[col];
+  for (const col of SELECTABLE_COLUMNS) if (keep.has(col)) out[col] = issue[col];
   return out;
 }
 
@@ -941,7 +1142,9 @@ async function searchIssues(cred, { jql, fields, customFields, limit, env } = {}
   const siteBase = resolveJiraApiBase(cred.siteUrl);
   const epicLinkFieldId = await resolveEpicLinkFieldId(base, auth); // #2415
   const custom = await resolveCustomFieldSelection(base, auth, customFields); // #2416
-  const reqFields = [...agentRequestFields(epicLinkFieldId), ...custom.ids];
+  // #2901 standard columns are read from Jira only when `--fields` names them.
+  const extraColumns = (Array.isArray(fields) ? fields : []).filter((f) => STANDARD_READ_COLUMNS.includes(f));
+  const reqFields = [...agentRequestFields(epicLinkFieldId), ...extraColumns.map((c) => STANDARD_READ_FIELDS[c]), ...custom.ids];
   const issues = [];
   let nextPageToken;
   for (let page = 0; page < MAX_PAGES && issues.length < cap; page += 1) {
@@ -959,8 +1162,9 @@ async function searchIssues(cred, { jql, fields, customFields, limit, env } = {}
       },
     });
     for (const raw of Array.isArray(result.issues) ? result.issues : []) {
-      const shaped = shapeAgentIssue(raw, siteBase, epicLinkFieldId);
+      let shaped = shapeAgentIssue(raw, siteBase, epicLinkFieldId);
       if (!shaped.key) continue;
+      if (extraColumns.length) shaped = { ...shaped, ...shapeStandardReadFields(raw.fields) };
       const row = pickAgentColumns(shaped, fields);
       // Custom fields are additive: they ride alongside the projected columns
       // (never narrowed away by `--fields`), so `search --fields Team` returns
@@ -1663,17 +1867,27 @@ function statusApplier(cred, env) {
 // the native `parent`; company-managed (classic) uses the Epic Link custom field
 // — mirror the #2415 read side: a site with an Epic Link field id uses it, else
 // `parent`. A per-story failure is recorded and the loop continues (no
-// create-transaction); returns the per-story outcome list.
-async function createStoriesUnderEpic({ base, auth, projectKey, epicKey, storyList, storyTypeName, catalog, fieldMeta, attribution, applyStatus, browseUrl, onCreated }) {
+// create-transaction); returns the per-story outcome list. The optional
+// `prepare(spec, fields)` hook (add-stories, #2896) finishes one issue's create
+// body — its type, priority, labels — and may throw to refuse just that issue;
+// it returns extra outcome keys (e.g. `issueType`). `mapCreateError(err, fields)`
+// may turn Jira's create refusal into a readable one.
+async function createStoriesUnderEpic({ base, auth, projectKey, epicKey, storyList, storyTypeName, catalog, fieldMeta, attribution, applyStatus, browseUrl, onCreated, prepare, mapCreateError }) {
   const storyResults = [];
   for (const s of storyList) {
     try {
       const storyFields = buildCreateFields({ projectKey, issueTypeName: storyTypeName, spec: s, fieldMeta, attribution });
       if (catalog.epicLinkId) storyFields[catalog.epicLinkId] = epicKey;
       else storyFields.parent = { key: epicKey };
-      const created = await createIssue(base, auth, storyFields);
+      const extra = typeof prepare === 'function' ? await prepare(s, storyFields) : null;
+      let created;
+      try {
+        created = await createIssue(base, auth, storyFields);
+      } catch (e) {
+        throw (typeof mapCreateError === 'function' && mapCreateError(e, storyFields)) || e;
+      }
       if (typeof onCreated === 'function') onCreated(created.key);
-      const out = { summary: String(s.summary).trim(), key: created.key, url: browseUrl(created.key), ok: true };
+      const out = { summary: String(s.summary).trim(), ...(extra || {}), key: created.key, url: browseUrl(created.key), ok: true };
       await applyStatus(created.key, s.status, out);
       storyResults.push(out);
     } catch (err) {
@@ -1741,7 +1955,46 @@ async function createEpicWithStories(cred, { projectKey, epic, stories, allowLis
 //      the team's credential, which is the team's project scope) is a 404; an
 //      issue that is not an Epic is a 400 naming its actual type.
 //   4. name → id resolution of the custom fields (400 on an unknown name).
+//
+// Any standard issue type under the Epic (#2896): a story entry may name its
+// `type` (and the call a `defaultType`, the CLI's --type), plus `priority` and
+// `labels` — create-issue's field contract. As soon as a type is named, the
+// Epic's project types are read once and each issue's type is matched against
+// them case-insensitively; an unknown, Epic or sub-task type, or a field the
+// project requires for that type but the issue does not set, fails THAT issue
+// only — the others are still created. With no type anywhere the call is the
+// #2890 Story create, unchanged (no extra Jira reads).
 const ISSUE_KEY_RE = /^[A-Z][A-Z0-9_]*-\d+$/;
+
+// Per-issue refusals for a type under an Epic (#2896) — the other issues in
+// the call still go through, so no "Nothing was created" tail.
+const EPIC_CHILD_TYPE_REFUSALS = Object.freeze({
+  epic: (name) => `${name} is an Epic type — an Epic cannot be created under another Epic (use \`aee-jira create-epic\` for a new Epic)`,
+  subtask: (name) => `${name} is a sub-task type — a sub-task belongs under a Story or Task, not directly under an Epic`,
+  tail: '',
+});
+
+// Shape-check the add-stories extras up front, like create-issue: `labels` is a
+// list of single words, `type` a name. Pure — throws a 400.
+function validateEpicChildExtras(storyList) {
+  storyList.forEach((s, i) => {
+    if (s.type != null && typeof s.type !== 'string') throw createIssueError(400, `issue #${i + 1}: type must be an issue type name, e.g. "Bug"`);
+    if (s.labels == null) return;
+    if (!Array.isArray(s.labels)) throw createIssueError(400, `issue #${i + 1}: labels must be a list of words`);
+    const bad = s.labels.map((l) => String(l == null ? '' : l).trim()).filter((l) => l && !LABEL_RE.test(l));
+    if (bad.length) {
+      throw createIssueError(400, `Jira labels cannot contain spaces: ${bad.map((l) => `"${l}"`).join(', ')} (issue #${i + 1}). Nothing was created.`);
+    }
+  });
+}
+
+// `priority` / `labels` onto one create body (create-issue's contract). Pure.
+function applyPriorityAndLabels(spec, fields) {
+  const priority = spec.priority == null ? '' : String(spec.priority).trim();
+  if (priority) fields.priority = { name: priority };
+  const labels = (Array.isArray(spec.labels) ? spec.labels : []).map((l) => String(l == null ? '' : l).trim()).filter(Boolean);
+  if (labels.length) fields.labels = labels;
+}
 
 // An issue counts as an Epic when its type carries the Epic name (or the
 // payload's `issueTypes.epic` override, for a renamed type) or sits on Jira's
@@ -1752,12 +2005,15 @@ function isEpicIssueType(issuetype, epicTypeName) {
   return Number(issuetype.hierarchyLevel) === 1;
 }
 
-async function addStoriesToEpic(cred, { epicKey, stories, allowList, attribution, issueTypes, env, onCreated } = {}) {
+async function addStoriesToEpic(cred, { epicKey, stories, defaultType, allowList, attribution, issueTypes, env, onCreated } = {}) {
   const key = String(epicKey || '').trim().toUpperCase();
   if (!key) { const e = new Error('an --epic key is required'); e.status = 400; throw e; }
   if (!ISSUE_KEY_RE.test(key)) { const e = new Error(`"${String(epicKey).trim()}" is not a Jira issue key (expected e.g. KAN-12)`); e.status = 400; throw e; }
   const storyList = validateStoryList(stories);
   if (!storyList.length) { const e = new Error('at least one story is required'); e.status = 400; throw e; }
+  validateEpicChildExtras(storyList);
+  const fallbackType = String(defaultType || '').trim();
+  const typed = Boolean(fallbackType) || storyList.some((s) => String(s.type || '').trim());
 
   const usedNames = collectCustomFieldNames(null, storyList);
   assertCreateFieldsAllowed(usedNames, allowList);
@@ -1783,7 +2039,7 @@ async function addStoriesToEpic(cred, { epicKey, stories, allowList, attribution
   const actualKey = String(raw.key || key);
   if (!isEpicIssueType(fields.issuetype, epicTypeName)) {
     const typeName = (fields.issuetype && fields.issuetype.name) || 'unknown type';
-    const e = new Error(`${actualKey} is a ${typeName}, not an Epic — add-stories only adds Stories under an existing Epic. Nothing was created.`);
+    const e = new Error(`${actualKey} is a ${typeName}, not an Epic — add-stories only adds new issues under an existing Epic. Nothing was created.`);
     e.status = 400;
     throw e;
   }
@@ -1793,9 +2049,41 @@ async function addStoriesToEpic(cred, { epicKey, stories, allowList, attribution
   const siteBase = resolveJiraApiBase(cred.siteUrl);
   const browseUrl = (k) => `${siteBase}/browse/${encodeURIComponent(k)}`;
 
+  // (#2896) the Epic's project types, read once when any issue names a type.
+  let projectTypes = null;
+  if (typed) {
+    const proj = await requestJson({ base, path: `/rest/api/3/project/${encodeURIComponent(project)}`, authHeader: auth });
+    projectTypes = (proj && proj.issueTypes) || [];
+  }
+  const metaByType = new Map(); // type id → create metadata (or null), per call
+  const prepare = async (s, storyFields) => {
+    applyPriorityAndLabels(s, storyFields);
+    if (!typed) return null;
+    const wanted = String(s.type || '').trim() || fallbackType || storyTypeName;
+    const type = resolveProjectIssueType(project, projectTypes, wanted, epicTypeName, EPIC_CHILD_TYPE_REFUSALS);
+    if (type.id) {
+      storyFields.issuetype = { id: String(type.id) };
+      if (!metaByType.has(type.id)) metaByType.set(type.id, await readCreateFieldMeta(base, auth, project, type.id));
+      const meta = metaByType.get(type.id);
+      const missing = meta ? missingRequiredFields(meta, storyFields) : [];
+      if (missing.length) {
+        throw createIssueError(400,
+          `project ${project} requires field(s) for a ${type.name} that were not provided: ${missing.join(', ')}. `
+            + 'Pass them in "fields" by their Jira name.');
+      }
+    } else {
+      storyFields.issuetype = { name: String(type.name) };
+    }
+    return { issueType: String(type.name) };
+  };
+  const mapCreateError = (e, storyFields) => {
+    const msg = typed && e.status === 400 ? createRejectionMessage(e.body, catalog, storyFields, '') : null;
+    return msg ? createIssueError(400, msg) : null;
+  };
+
   const storyResults = await createStoriesUnderEpic({
     base, auth, projectKey: project, epicKey: actualKey, storyList, storyTypeName, catalog, fieldMeta, attribution,
-    applyStatus: statusApplier(cred, env), browseUrl, onCreated,
+    applyStatus: statusApplier(cred, env), browseUrl, onCreated, prepare, mapCreateError,
   });
 
   return {
@@ -1804,6 +2092,984 @@ async function addStoriesToEpic(cred, { epicKey, stories, allowList, attribution
     stories: storyResults,
     created: storyResults.filter((r) => r.ok).length,
     failed: storyResults.filter((r) => !r.ok).length,
+  };
+}
+
+// ── one standalone issue, no parent Epic (#2894) ─────────────────────────────
+//
+// The everyday Jira create: ONE new issue of any standard type the project
+// offers (Story, Task, Bug, a localised "Fehler", …), with no parent. Same field
+// contract as the create-epic / add-stories issues (summary / description /
+// assignee / status / custom `fields`), plus `priority` and `labels`. Jira has
+// no create-transaction, so every guard runs before the single create:
+//   1. shape validation — no project / issue type / summary, or a label with
+//      whitespace (Jira labels are single words), is a 400.
+//   2. the custom-field allow-list (403), as in set-field / create-epic.
+//   3. the project lookup — a project Jira does not return to the team's
+//      credential is outside the team's scope (404), worded like add-stories.
+//   4. the issue type, matched case-insensitively against the PROJECT's own
+//      type names (team- and company-managed alike): an unknown name is a 400
+//      listing the types the project offers; an Epic points at create-epic and
+//      a sub-task type is refused (both need a different command / a parent).
+//   5. name → id resolution of the custom fields (400 on an unknown name).
+//   6. the project's required fields for that type (create metadata): a
+//      required field without a default that the call does not set is a 400
+//      naming it, instead of Jira's raw error. An unreadable create metadata
+//      skips this pre-check; Jira's own 400 is then mapped to field names (7).
+//   7. the create itself — a 400 from Jira (e.g. an unknown assignee
+//      accountId) is reported per field, by name; nothing was created.
+// A requested `status` is a follow-up transition (statusApplier): its failure
+// is reported next to the created key, never a hard failure.
+const LABEL_RE = /^\S+$/;
+
+function createIssueError(status, message) {
+  const e = new Error(message);
+  e.status = status;
+  return e;
+}
+
+// Standard (creatable here) vs Epic vs sub-task, from a project issue type. Pure.
+function classifyIssueType(t, epicTypeName) {
+  if (t && (t.subtask === true || Number(t.hierarchyLevel) < 0)) return 'subtask';
+  if (isEpicIssueType(t, epicTypeName)) return 'epic';
+  return 'standard';
+}
+
+// Match the requested type name against the project's types and refuse the
+// ones the caller does not create. `refusals` words the Epic / sub-task refusal
+// and the message tail per command. Pure — throws a 400, returns the type.
+const STANDALONE_TYPE_REFUSALS = Object.freeze({
+  epic: (name) => `${name} is an Epic type — use \`aee-jira create-epic\` to create an Epic (with its Stories)`,
+  subtask: (name) => `${name} is a sub-task type, which always needs a parent issue — create-issue only creates standalone issues`,
+  tail: ' Nothing was created.',
+});
+
+function resolveProjectIssueType(projectKey, projectTypes, requested, epicTypeName, refusals) {
+  const want = String(requested || '').trim().toLowerCase();
+  const types = Array.isArray(projectTypes) ? projectTypes.filter((t) => t && t.name) : [];
+  const match = types.find((t) => String(t.name).trim().toLowerCase() === want);
+  if (!match) {
+    const standard = types.filter((t) => classifyIssueType(t, epicTypeName) === 'standard').map((t) => t.name);
+    throw createIssueError(400,
+      `project ${projectKey} has no issue type "${String(requested).trim()}". Available: ${standard.join(', ') || '(none)'}.${refusals.tail}`);
+  }
+  const kind = classifyIssueType(match, epicTypeName);
+  if (kind === 'epic' || kind === 'subtask') throw createIssueError(400, `${refusals[kind](match.name)}.${refusals.tail}`);
+  return match;
+}
+
+function resolveStandaloneIssueType(projectKey, projectTypes, requested, epicTypeName) {
+  return resolveProjectIssueType(projectKey, projectTypes, requested, epicTypeName, STANDALONE_TYPE_REFUSALS);
+}
+
+// The required fields Jira lists for (project, type) that have no default and
+// that `fields` (the create body) does not set. Pure.
+function missingRequiredFields(meta, fields) {
+  const exempt = new Set(['project', 'issuetype']);
+  return (Array.isArray(meta) ? meta : [])
+    .filter((f) => f && f.required && !f.hasDefaultValue)
+    .filter((f) => {
+      const id = String(f.fieldId || f.key || '');
+      return id && !exempt.has(id) && !(id in fields);
+    })
+    .map((f) => String(f.name || f.fieldId || f.key));
+}
+
+// The (project, type) field metadata from Jira's create-meta endpoint, all
+// pages. `null` when it cannot be read — the pre-check is then skipped.
+async function readCreateFieldMeta(base, auth, projectKey, issueTypeId) {
+  const out = [];
+  try {
+    for (let page = 0, startAt = 0; page < MAX_PAGES; page += 1) {
+      const res = await requestJson({
+        base,
+        path: `/rest/api/3/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes/${encodeURIComponent(issueTypeId)}?startAt=${startAt}&maxResults=${PAGE_SIZE}`,
+        authHeader: auth,
+      });
+      const items = Array.isArray(res.fields) ? res.fields : Array.isArray(res.results) ? res.results : [];
+      out.push(...items);
+      startAt += items.length;
+      if (!items.length || (res.total != null ? startAt >= Number(res.total) : items.length < PAGE_SIZE)) break;
+    }
+  } catch {
+    return null;
+  }
+  return out;
+}
+
+// Turn Jira's 400 answer to a create (`{ errorMessages, errors: { fieldId: msg } }`)
+// into one readable refusal, field ids named by their Jira names. `tail` ends
+// the message (add-stories reports per issue, so it passes ''). Pure.
+function createRejectionMessage(bodyText, catalog, fields, tail = ' Nothing was created.') {
+  const body = safeJson(bodyText || '');
+  const parts = [];
+  for (const [id, msg] of Object.entries(body && body.errors && typeof body.errors === 'object' ? body.errors : {})) {
+    if (id === 'assignee' && fields.assignee) {
+      parts.push(`assignee "${fields.assignee.accountId}" was rejected (${msg}) — pass a valid Atlassian accountId of someone assignable in this project`);
+      continue;
+    }
+    const meta = catalog && catalog.byId && catalog.byId.get(id);
+    parts.push(`${meta ? meta.name : id}: ${msg}`);
+  }
+  for (const msg of Array.isArray(body && body.errorMessages) ? body.errorMessages : []) parts.push(String(msg));
+  if (!parts.length) return null;
+  return `Jira refused to create the issue: ${parts.map((p) => p.replace(/[.\s]+$/, '')).join('; ')}.${tail}`;
+}
+
+async function createStandaloneIssue(cred, { projectKey, issueType, issue, allowList, attribution, issueTypes, env, onCreated } = {}) {
+  const requestedProject = String(projectKey || '').trim().toUpperCase();
+  if (!requestedProject) throw createIssueError(400, 'a --project key is required');
+  if (!String(issueType || '').trim()) throw createIssueError(400, 'an issue --type is required (e.g. Bug, Task, Story)');
+  const spec = issue && typeof issue === 'object' ? issue : {};
+  if (!String(spec.summary || '').trim()) throw createIssueError(400, 'the issue requires a summary');
+  if (spec.labels != null && !Array.isArray(spec.labels)) throw createIssueError(400, 'labels must be a list of words');
+  const labels = (spec.labels || []).map((l) => String(l == null ? '' : l).trim()).filter(Boolean);
+  const badLabels = labels.filter((l) => !LABEL_RE.test(l));
+  if (badLabels.length) {
+    throw createIssueError(400, `Jira labels cannot contain spaces: ${badLabels.map((l) => `"${l}"`).join(', ')}. Nothing was created.`);
+  }
+  const priority = spec.priority == null ? '' : String(spec.priority).trim();
+
+  const usedNames = collectCustomFieldNames(spec, []);
+  assertCreateFieldsAllowed(usedNames, allowList);
+
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const epicTypeName = String((issueTypes && issueTypes.epic) || EPIC_ISSUE_TYPE).trim() || EPIC_ISSUE_TYPE;
+
+  // (3) the project must be visible to the team's credential — its scope.
+  let project;
+  try {
+    project = await requestJson({ base, path: `/rest/api/3/project/${encodeURIComponent(requestedProject)}`, authHeader: auth });
+  } catch (e) {
+    if (e.status === 404) {
+      throw createIssueError(404, `Project ${requestedProject} was not found, or it is outside this team's Jira scope (the account cannot see it). Nothing was created.`);
+    }
+    throw e;
+  }
+  const projectKeyActual = String((project && project.key) || requestedProject);
+  // (4) the project's own type names
+  const type = resolveStandaloneIssueType(projectKeyActual, project && project.issueTypes, issueType, epicTypeName);
+
+  const { catalog, fieldMeta } = await resolveCreateFieldMeta(base, auth, usedNames);
+  const fields = buildCreateFields({ projectKey: projectKeyActual, issueTypeName: type.name, spec, fieldMeta, attribution });
+  if (type.id) fields.issuetype = { id: String(type.id) };
+  if (priority) fields.priority = { name: priority };
+  if (labels.length) fields.labels = labels;
+
+  // (6) required fields the call leaves unset
+  if (type.id) {
+    const meta = await readCreateFieldMeta(base, auth, projectKeyActual, type.id);
+    const missing = meta ? missingRequiredFields(meta, fields) : [];
+    if (missing.length) {
+      throw createIssueError(400,
+        `project ${projectKeyActual} requires field(s) for a ${type.name} that were not provided: ${missing.join(', ')}. `
+          + 'Pass them in "fields" by their Jira name. Nothing was created.');
+    }
+  }
+
+  // (7) the create — never retried (F6)
+  let created;
+  try {
+    created = await createIssue(base, auth, fields);
+  } catch (e) {
+    const msg = e.status === 400 ? createRejectionMessage(e.body, catalog, fields) : null;
+    if (msg) throw createIssueError(400, msg);
+    throw e;
+  }
+  if (typeof onCreated === 'function') onCreated(created.key);
+  const siteBase = resolveJiraApiBase(cred.siteUrl);
+  const out = {
+    project: projectKeyActual,
+    issueType: String(type.name),
+    key: created.key,
+    url: `${siteBase}/browse/${encodeURIComponent(created.key)}`,
+    summary: fields.summary,
+  };
+  await statusApplier(cred, env)(created.key, spec.status, out);
+  return out;
+}
+
+// ── new Sub-tasks under an EXISTING standard issue (#2900) ───────────────────
+//
+// Split a Story, Task or Bug into smaller pieces: N new Sub-tasks under the
+// issue named by its key, in the parent's own project. Per Sub-task the field
+// contract of create-issue (#2894): summary / description / assignee /
+// priority / labels / status / custom `fields`, plus an optional sub-task
+// `type` (the call's `defaultType`, the CLI's --type). Guards before any create:
+//   1. shape — a malformed parent key, no Sub-tasks, or one without a summary
+//      is a 400; the custom-field allow-list is a 403.
+//   2. the parent lookup — a key Jira does not return (absent, or outside the
+//      team's scope) is a 404; an Epic or a Sub-task as parent is a 400 (Jira
+//      allows neither).
+//   3. the project's sub-task types (team- and company-managed alike, matched
+//      by the project's own names — "Sub-task", "Unteraufgabe", …): none is a
+//      400 (Sub-tasks disabled); several with no type named is a 400 listing
+//      them. Exactly one is used without being named.
+// Then each Sub-task in turn: an unknown or non-sub-task type, a required field
+// it leaves unset, or Jira's own create refusal fails THAT Sub-task only — the
+// others are still created. A requested `status` is a follow-up transition.
+const SUBTASK_PARENT_REFUSALS = Object.freeze({
+  epic: (key, name) => `${key} is an ${name} — Jira does not allow Sub-tasks directly under an Epic; pick a Story, Task or Bug as the parent`,
+  subtask: (key, name) => `${key} is itself a ${name} — a Sub-task cannot have Sub-tasks; pick its parent issue instead`,
+});
+
+// Match one Sub-task's requested type against the project's sub-task types.
+// Pure — throws a 400 (no "Nothing was created" tail: per Sub-task), returns the type.
+function resolveSubtaskType(projectKey, projectTypes, subtaskTypes, requested) {
+  const want = String(requested || '').trim();
+  if (!want) return subtaskTypes[0]; // exactly one — checked up front
+  const names = subtaskTypes.map((t) => t.name).join(', ');
+  const match = (Array.isArray(projectTypes) ? projectTypes : [])
+    .find((t) => t && t.name && String(t.name).trim().toLowerCase() === want.toLowerCase());
+  if (!match) throw createIssueError(400, `project ${projectKey} has no issue type "${want}". Sub-task types: ${names}.`);
+  if (!subtaskTypes.includes(match)) throw createIssueError(400, `${match.name} is not a sub-task type. Sub-task types: ${names}.`);
+  return match;
+}
+
+async function addSubtasksToIssue(cred, { parentKey, subtasks, defaultType, allowList, attribution, issueTypes, env, onCreated } = {}) {
+  const key = String(parentKey || '').trim().toUpperCase();
+  if (!key) throw createIssueError(400, 'a --parent key is required');
+  if (!ISSUE_KEY_RE.test(key)) throw createIssueError(400, `"${String(parentKey).trim()}" is not a Jira issue key (expected e.g. KAN-10)`);
+  const list = Array.isArray(subtasks) ? subtasks : [];
+  if (!list.length) throw createIssueError(400, 'at least one sub-task is required');
+  list.forEach((s, i) => {
+    if (!s || typeof s !== 'object' || !String(s.summary || '').trim()) throw createIssueError(400, `sub-task #${i + 1} requires a summary`);
+  });
+  validateEpicChildExtras(list);
+  const fallbackType = String(defaultType || '').trim();
+
+  const usedNames = collectCustomFieldNames(null, list);
+  assertCreateFieldsAllowed(usedNames, allowList);
+
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const epicTypeName = String((issueTypes && issueTypes.epic) || EPIC_ISSUE_TYPE).trim() || EPIC_ISSUE_TYPE;
+
+  // (2) the parent must exist, be visible, and be a standard issue.
+  let raw;
+  try {
+    raw = await requestJson({ base, path: `/rest/api/3/issue/${encodeURIComponent(key)}?fields=issuetype,project,summary`, authHeader: auth });
+  } catch (e) {
+    if (e.status === 404) throw createIssueError(404, `${outOfScope('Issue ', key)}. Nothing was created.`);
+    throw e;
+  }
+  const fields = (raw && raw.fields) || {};
+  const actualKey = String(raw.key || key);
+  const parentKind = classifyIssueType(fields.issuetype, epicTypeName);
+  if (parentKind !== 'standard') {
+    const typeName = (fields.issuetype && fields.issuetype.name) || parentKind;
+    throw createIssueError(400, `${SUBTASK_PARENT_REFUSALS[parentKind](actualKey, typeName)}. Nothing was created.`);
+  }
+  const project = String((fields.project && fields.project.key) || actualKey.replace(/-\d+$/, ''));
+
+  // (3) the project's own sub-task types.
+  const proj = await requestJson({ base, path: `/rest/api/3/project/${encodeURIComponent(project)}`, authHeader: auth });
+  const projectTypes = ((proj && proj.issueTypes) || []).filter((t) => t && t.name);
+  const subtaskTypes = projectTypes.filter((t) => classifyIssueType(t, epicTypeName) === 'subtask');
+  if (!subtaskTypes.length) {
+    throw createIssueError(400, `project ${project} has no sub-task issue type — Sub-tasks are disabled there (a Jira admin can enable them). Nothing was created.`);
+  }
+  if (subtaskTypes.length > 1 && !fallbackType && list.some((s) => !String(s.type || '').trim())) {
+    throw createIssueError(400,
+      `project ${project} has several sub-task types (${subtaskTypes.map((t) => t.name).join(', ')}) — name one with --type or a per-sub-task "type". Nothing was created.`);
+  }
+
+  const { catalog, fieldMeta } = await resolveCreateFieldMeta(base, auth, usedNames);
+  const siteBase = resolveJiraApiBase(cred.siteUrl);
+  const browseUrl = (k) => `${siteBase}/browse/${encodeURIComponent(k)}`;
+  const applyStatus = statusApplier(cred, env);
+  const metaByType = new Map(); // type id → create metadata (or null), per call
+
+  const results = [];
+  for (const s of list) {
+    const summary = String(s.summary).trim();
+    try {
+      const type = resolveSubtaskType(project, projectTypes, subtaskTypes, String(s.type || '').trim() || fallbackType);
+      const createFields = buildCreateFields({ projectKey: project, issueTypeName: type.name, spec: s, fieldMeta, attribution });
+      createFields.parent = { key: actualKey };
+      applyPriorityAndLabels(s, createFields);
+      if (type.id) {
+        createFields.issuetype = { id: String(type.id) };
+        if (!metaByType.has(type.id)) metaByType.set(type.id, await readCreateFieldMeta(base, auth, project, type.id));
+        const meta = metaByType.get(type.id);
+        const missing = meta ? missingRequiredFields(meta, createFields) : [];
+        if (missing.length) {
+          throw createIssueError(400,
+            `project ${project} requires field(s) for a ${type.name} that were not provided: ${missing.join(', ')}. `
+              + 'Pass them in "fields" by their Jira name.');
+        }
+      }
+      let created;
+      try {
+        created = await createIssue(base, auth, createFields);
+      } catch (e) {
+        const msg = e.status === 400 ? createRejectionMessage(e.body, catalog, createFields, '') : null;
+        throw msg ? createIssueError(400, msg) : e;
+      }
+      if (typeof onCreated === 'function') onCreated(created.key);
+      const out = { summary, issueType: String(type.name), key: created.key, url: browseUrl(created.key), ok: true };
+      await applyStatus(created.key, s.status, out);
+      results.push(out);
+    } catch (err) {
+      results.push({ summary, ok: false, error: err.message });
+    }
+  }
+
+  return {
+    project,
+    parent: { key: actualKey, url: browseUrl(actualKey), summary: String(fields.summary || ''), issueType: String((fields.issuetype && fields.issuetype.name) || '') },
+    subtasks: results,
+    created: results.filter((r) => r.ok).length,
+    failed: results.filter((r) => !r.ok).length,
+  };
+}
+
+// ── put EXISTING issues under an Epic, move them, take them out (#2895) ──────
+//
+// Backlog grooming: set the parent Epic of one or more existing standard issues
+// (Story, Task, Bug, …) — or clear it (`epicKey` null). Only Epic ↔ standard
+// issue parenting: an Epic or a sub-task in the list is refused per issue.
+// Order of work:
+//   1. shape — a malformed target key or an empty list is a 400.
+//   2. the target lookup — a key Jira does not return (absent, or not visible to
+//      the team's credential = outside the team's scope) is a 404; an issue
+//      that is not an Epic is a 400 naming its type. Nothing is changed.
+//   3. each issue in turn (duplicates once, no cap): read it, refuse an Epic /
+//      sub-task, skip one already under the target (`unchanged`, a success),
+//      else write the parent. A per-issue failure is recorded and the loop
+//      continues, so one bad key never hides the others.
+// The write uses the native `parent` field — Jira Cloud's parent for both
+// project styles — and falls back to the site's Epic Link field when Jira
+// rejects `parent` (400) on an older company-managed configuration.
+
+// Jira's changelog names for a parent change on the child issue: `parent` /
+// `IssueParentAssociation` (native parent) and `Epic Link` (classic). The Epic
+// side logs `Epic Child`. The broker stamps these as own writes.
+const PARENT_CHANGE_FIELDS = Object.freeze(['parent', 'IssueParentAssociation', 'Epic Link']);
+const EPIC_CHILD_FIELD = 'Epic Child';
+
+const parentErr = (status, message) => { const e = new Error(message); e.status = status; return e; };
+const outOfScope = (what, key) => `${what}${key} was not found, or it is outside this team's Jira scope (the account cannot see it)`;
+
+// Jira's own reason for a refused edit (`{ errorMessages, errors }`), readable.
+function parentWriteRefusal(err, key) {
+  if (err.status === 404) return `${outOfScope('', key)}.`;
+  const body = safeJson(err.body || '');
+  const parts = [];
+  for (const [field, msg] of Object.entries(body && body.errors && typeof body.errors === 'object' ? body.errors : {})) parts.push(`${field}: ${msg}`);
+  for (const msg of Array.isArray(body && body.errorMessages) ? body.errorMessages : []) parts.push(String(msg));
+  if (!parts.length) return err.message;
+  const prefix = err.status === 403 ? `the Jira account may not edit ${key} (403)` : 'Jira refused the change';
+  return `${prefix}: ${parts.map((p) => p.replace(/[.\s]+$/, '')).join('; ')}`;
+}
+
+async function writeParent(base, auth, key, epicKey, epicLinkId) {
+  const viaParent = { parent: epicKey ? { key: epicKey } : null };
+  const attempts = epicLinkId ? [viaParent, { [epicLinkId]: epicKey || null }] : [viaParent];
+  let first = null;
+  for (const fields of attempts) {
+    try {
+      // A write — NOT retried on a transport failure (F6).
+      await requestJson({ base, path: `/rest/api/3/issue/${encodeURIComponent(key)}`, method: 'PUT', authHeader: auth, body: { fields } });
+      return;
+    } catch (e) {
+      if (!first) first = e;
+      if (e.status !== 400) throw e;
+    }
+  }
+  throw first;
+}
+
+// `onChanged(issueKey, { from, to })` fires the moment each parent write lands
+// (before the next one), so the own-writes registry knows it before any poll.
+async function setParentEpic(cred, { epicKey, issueKeys, issueTypes, env, onChanged } = {}) {
+  const removing = epicKey == null || String(epicKey).trim() === '';
+  const target = removing ? null : String(epicKey).trim().toUpperCase();
+  if (target && !ISSUE_KEY_RE.test(target)) throw parentErr(400, `"${String(epicKey).trim()}" is not a Jira issue key (expected e.g. KAN-12)`);
+  const keys = [];
+  for (const k of Array.isArray(issueKeys) ? issueKeys : []) {
+    const norm = String(k == null ? '' : k).trim().toUpperCase();
+    if (norm && !keys.includes(norm)) keys.push(norm);
+  }
+  if (!keys.length) throw parentErr(400, 'at least one issue key is required');
+
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const epicTypeName = String((issueTypes && issueTypes.epic) || EPIC_ISSUE_TYPE).trim() || EPIC_ISSUE_TYPE;
+  const siteBase = resolveJiraApiBase(cred.siteUrl);
+  const browseUrl = (k) => `${siteBase}/browse/${encodeURIComponent(k)}`;
+
+  let epic = null;
+  if (target) {
+    let raw;
+    try {
+      raw = await requestJson({ base, path: `/rest/api/3/issue/${encodeURIComponent(target)}?fields=issuetype,summary`, authHeader: auth });
+    } catch (e) {
+      if (e.status === 404) throw parentErr(404, `${outOfScope('Epic ', target)}. Nothing was changed.`);
+      throw e;
+    }
+    const f = (raw && raw.fields) || {};
+    const actual = String(raw.key || target);
+    if (classifyIssueType(f.issuetype, epicTypeName) !== 'epic') {
+      const typeName = (f.issuetype && f.issuetype.name) || 'unknown type';
+      throw parentErr(400, `${actual} is a ${typeName}, not an Epic — issues can only be put under an Epic. Nothing was changed.`);
+    }
+    epic = { key: actual, url: browseUrl(actual), summary: String(f.summary || '') };
+  }
+
+  const epicLinkId = await resolveEpicLinkFieldId(base, auth);
+  const readFields = ['issuetype', 'summary', 'parent', ...(epicLinkId ? [epicLinkId] : [])].join(',');
+  const results = [];
+  for (const key of keys) {
+    const out = { issue: key };
+    try {
+      if (!ISSUE_KEY_RE.test(key)) throw parentErr(400, `"${key}" is not a Jira issue key (expected e.g. KAN-30)`);
+      let raw;
+      try {
+        raw = await requestJson({ base, path: `/rest/api/3/issue/${encodeURIComponent(key)}?fields=${encodeURIComponent(readFields)}`, authHeader: auth });
+      } catch (e) {
+        if (e.status === 404) throw parentErr(404, `${outOfScope('', key)}.`);
+        throw e;
+      }
+      const f = (raw && raw.fields) || {};
+      const typeName = (f.issuetype && f.issuetype.name) || 'issue';
+      const kind = classifyIssueType(f.issuetype, epicTypeName);
+      if (kind === 'epic') throw parentErr(400, `${key} is an Epic — an Epic cannot be put under or taken out of another Epic`);
+      if (kind === 'subtask') throw parentErr(400, `${key} is a ${typeName} — a sub-task's parent is a standard issue, not an Epic; it is not moved`);
+      const from = parentKeyOf(f, epicLinkId);
+      out.from = from;
+      out.to = epic ? epic.key : null;
+      if ((from || null) === out.to) {
+        out.ok = true;
+        out.outcome = 'unchanged';
+        out.message = epic ? `already under ${epic.key}` : 'has no parent Epic';
+      } else {
+        try {
+          await writeParent(base, auth, key, out.to, epicLinkId);
+        } catch (e) {
+          throw parentErr(e.status, parentWriteRefusal(e, key));
+        }
+        if (typeof onChanged === 'function') onChanged(key, { from, to: out.to });
+        out.ok = true;
+        out.outcome = !epic ? 'removed' : from ? 'moved' : 'added';
+        out.message = !epic ? `removed from ${from}` : from ? `moved from ${from} to ${epic.key}` : `added to ${epic.key}`;
+      }
+    } catch (err) {
+      out.ok = false;
+      out.outcome = 'failed';
+      out.error = err.message;
+    }
+    results.push(out);
+  }
+
+  return {
+    epic,
+    issues: results,
+    changed: results.filter((r) => r.ok && r.outcome !== 'unchanged').length,
+    unchanged: results.filter((r) => r.outcome === 'unchanged').length,
+    failed: results.filter((r) => !r.ok).length,
+  };
+}
+
+// ── standard fields of an existing issue (#2897) ─────────────────────────────
+//
+// The everyday ticket upkeep `update` (description) and `set-field` (custom
+// fields) do not cover: summary, assignee, priority, labels, components, fix
+// versions and due date of ONE existing issue, several of them in one call.
+// Every guard runs before the single edit, so Jira either applies all requested
+// changes or none:
+//   1. shape validation (400, before Jira is called) — an empty summary, a label
+//      with whitespace (Jira labels are single words), a due date that is not a
+//      real `YYYY-MM-DD`, a list field given both a replacement and add/remove,
+//      or a name both added and removed.
+//   2. the issue lookup — a 404 means outside this team's scope (the account
+//      cannot see it), worded like set-epic.
+//   3. name resolution — a priority against the site's priorities, components /
+//      fix versions against the issue's project; an unknown name is a 400 that
+//      lists what exists. Nothing is created here (components / versions are
+//      managed in Jira, versions: #2902).
+//   4. the edit itself: ONE `PUT /issue/<key>` with only the fields that change
+//      (scalars in `fields`, list add/remove as `update` ops so other values on
+//      the issue are untouched). A field already at its target value is reported
+//      `unchanged` and not sent; when nothing changes, Jira is not written.
+//      Jira's refusal is mapped per field by name — a field missing from the
+//      issue's edit screen is named as such.
+// `onChanged(fieldIds)` fires after the edit lands, before the answer, so the
+// own-writes registry knows the echo's fields (Jira changelog `fieldId`s).
+
+// The editable standard fields: CLI/broker key → Jira field id + display label.
+const EDIT_FIELDS = Object.freeze({
+  summary: { id: 'summary', label: 'Summary' },
+  assignee: { id: 'assignee', label: 'Assignee' },
+  priority: { id: 'priority', label: 'Priority' },
+  labels: { id: 'labels', label: 'Labels' },
+  components: { id: 'components', label: 'Components' },
+  fixVersions: { id: 'fixVersions', label: 'Fix versions' },
+  dueDate: { id: 'duedate', label: 'Due date' },
+});
+const EDIT_LIST_FIELDS = ['labels', 'components', 'fixVersions'];
+const DUE_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+const editErr = (status, message) => { const e = new Error(message); e.status = status; return e; };
+
+// A real calendar date in `YYYY-MM-DD` (2026-02-30 is refused). Pure.
+function isIsoDate(value) {
+  const m = DUE_DATE_RE.exec(String(value == null ? '' : value));
+  if (!m) return false;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return d.getUTCFullYear() === Number(m[1]) && d.getUTCMonth() === Number(m[2]) - 1 && d.getUTCDate() === Number(m[3]);
+}
+
+// One list-field spec (`{ set } | { add?, remove? }`) as trimmed, de-duplicated
+// name arrays. Pure — throws a 400 on a bad shape.
+function normalizeListEdit(key, spec) {
+  const label = EDIT_FIELDS[key].label.toLowerCase();
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) throw editErr(400, `${label}: expected { set } or { add, remove }`);
+  const names = (v, what) => {
+    if (v === undefined) return undefined;
+    if (!Array.isArray(v)) throw editErr(400, `${label} to ${what} must be a list`);
+    const out = [];
+    for (const raw of v) {
+      const s = String(raw == null ? '' : raw).trim();
+      if (!s) throw editErr(400, `${label}: an empty name is not allowed`);
+      if (!out.some((o) => o.toLowerCase() === s.toLowerCase())) out.push(s);
+    }
+    return out;
+  };
+  const set = names(spec.set, 'set');
+  const add = names(spec.add, 'add') || [];
+  const remove = names(spec.remove, 'remove') || [];
+  if (set && (add.length || remove.length)) throw editErr(400, `${label}: replace the whole list or add/remove single values, not both`);
+  if (!set && !add.length && !remove.length) throw editErr(400, `${label}: nothing to set, add or remove`);
+  const both = add.filter((a) => remove.some((r) => r.toLowerCase() === a.toLowerCase()));
+  if (both.length) throw editErr(400, `${label}: "${both[0]}" is both added and removed`);
+  if (key === 'labels') {
+    const spaced = [...(set || []), ...add, ...remove].find((l) => /\s/.test(l));
+    if (spaced) throw editErr(400, `label "${spaced}" contains a space — Jira labels are single words (use e.g. "${spaced.replace(/\s+/g, '-')}")`);
+  }
+  return set ? { set } : { add, remove };
+}
+
+// The requested changes, validated and normalised (step 1). Pure.
+function normalizeIssueEdit(changes) {
+  const c = changes && typeof changes === 'object' ? changes : {};
+  const has = (k) => Object.prototype.hasOwnProperty.call(c, k) && c[k] !== undefined;
+  const out = {};
+  if (has('summary')) {
+    const s = String(c.summary == null ? '' : c.summary).trim();
+    if (!s) throw editErr(400, 'the summary cannot be empty');
+    if (/[\r\n]/.test(s)) throw editErr(400, 'the summary must be a single line');
+    out.summary = s;
+  }
+  if (has('assignee')) {
+    const a = c.assignee == null ? '' : String(c.assignee).trim();
+    out.assignee = a || null; // null = unassign
+  }
+  if (has('priority')) {
+    const p = String(c.priority == null ? '' : c.priority).trim();
+    if (!p) throw editErr(400, 'a priority name is required (e.g. "High")');
+    out.priority = p;
+  }
+  for (const key of EDIT_LIST_FIELDS) if (has(key)) out[key] = normalizeListEdit(key, c[key]);
+  if (has('dueDate')) {
+    const d = c.dueDate == null ? '' : String(c.dueDate).trim();
+    if (d && !isIsoDate(d)) throw editErr(400, `"${d}" is not a valid due date — use YYYY-MM-DD, e.g. 2026-10-31`);
+    out.dueDate = d || null; // null = clear
+  }
+  if (!Object.keys(out).length) {
+    throw editErr(400, 'nothing to change — name at least one of: summary, assignee, priority, labels, components, fix versions, due date');
+  }
+  return out;
+}
+
+// Match requested names against the existing ones (case-insensitive) and return
+// the canonical names; an unknown one is a 400 listing what exists. Pure.
+function resolveNamed(requested, existing, what, where) {
+  const avail = (Array.isArray(existing) ? existing : []).map((x) => String((x && x.name) || '')).filter(Boolean);
+  return requested.map((name) => {
+    const hit = avail.find((a) => a.toLowerCase() === name.toLowerCase());
+    if (!hit) throw editErr(400, `${where} has no ${what} "${name}". Available: ${avail.join(', ') || '(none)'}. Nothing was changed.`);
+    return hit;
+  });
+}
+
+const sameNames = (a, b) => a.length === b.length && a.every((x) => b.some((y) => y.toLowerCase() === x.toLowerCase()));
+
+// Jira's refusal of the edit, readable and per field (step 4). Pure.
+function editRefusalMessage(err, key) {
+  if (err.status === 404) return `${outOfScope('', key)}. Nothing was changed.`;
+  const body = safeJson(err.body || '');
+  const labelOf = (id) => {
+    const hit = Object.values(EDIT_FIELDS).find((f) => f.id.toLowerCase() === String(id).toLowerCase());
+    return hit ? hit.label : id;
+  };
+  const parts = [];
+  for (const [id, msg] of Object.entries(body && body.errors && typeof body.errors === 'object' ? body.errors : {})) {
+    const text = String(msg);
+    parts.push(/cannot be set|not on the appropriate screen/i.test(text)
+      ? `${labelOf(id)} cannot be changed on ${key} — the field is not on the issue's edit screen in Jira (${text.replace(/[.\s]+$/, '')})`
+      : `${labelOf(id)}: ${text}`);
+  }
+  for (const msg of Array.isArray(body && body.errorMessages) ? body.errorMessages : []) parts.push(String(msg));
+  if (!parts.length) return `${err.message} Nothing was changed.`;
+  const prefix = err.status === 403 ? `the Jira account may not edit ${key} (403)` : `Jira refused the edit of ${key}`;
+  return `${prefix}: ${parts.map((p) => p.replace(/[.\s]+$/, '')).join('; ')}. Nothing was changed.`;
+}
+
+async function editIssueFields(cred, issueKey, { changes, env, onChanged } = {}) {
+  const key = String(issueKey == null ? '' : issueKey).trim().toUpperCase();
+  if (!key) throw editErr(400, 'an issue key is required');
+  if (!ISSUE_KEY_RE.test(key)) throw editErr(400, `"${String(issueKey).trim()}" is not a Jira issue key (expected e.g. KAN-10)`);
+  const want = normalizeIssueEdit(changes);
+
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const readFields = ['project', ...Object.keys(want).map((k) => EDIT_FIELDS[k].id)].join(',');
+  let raw;
+  try {
+    raw = await requestJson({ base, path: `/rest/api/3/issue/${encodeURIComponent(key)}?fields=${encodeURIComponent(readFields)}`, authHeader: auth });
+  } catch (e) {
+    if (e.status === 404) throw editErr(404, `${outOfScope('', key)}. Nothing was changed.`);
+    throw e;
+  }
+  const cur = (raw && raw.fields) || {};
+  const projectKey = String((cur.project && cur.project.key) || key.replace(/-\d+$/, ''));
+  const names = (list) => (Array.isArray(list) ? list : []).map((x) => (x && typeof x === 'object' ? String(x.name || '') : String(x))).filter(Boolean);
+
+  // Name resolution (step 3) — only for the fields actually requested.
+  if (want.priority) {
+    const priorities = await requestJson({ base, path: '/rest/api/3/priority', authHeader: auth });
+    [want.priority] = resolveNamed([want.priority], priorities, 'priority', 'this Jira site');
+  }
+  for (const [k, what, sub] of [['components', 'component', 'components'], ['fixVersions', 'version', 'versions']]) {
+    if (!want[k]) continue;
+    const existing = await requestJson({ base, path: `/rest/api/3/project/${encodeURIComponent(projectKey)}/${sub}`, authHeader: auth });
+    for (const op of ['set', 'add', 'remove']) {
+      if (want[k][op]) want[k][op] = resolveNamed(want[k][op], existing, what, `project ${projectKey}`);
+    }
+  }
+
+  // Diff against the current values; only real changes go into the edit.
+  const fields = {};
+  const update = {};
+  const report = [];
+  const note = (k, from, to, changed) => report.push({ field: k, from, to, outcome: changed ? 'changed' : 'unchanged' });
+  if ('summary' in want) {
+    const from = cur.summary == null ? null : String(cur.summary);
+    const changed = from !== want.summary;
+    if (changed) fields.summary = want.summary;
+    note('summary', from, want.summary, changed);
+  }
+  if ('assignee' in want) {
+    const from = cur.assignee && cur.assignee.accountId ? String(cur.assignee.accountId) : null;
+    const changed = from !== want.assignee;
+    if (changed) fields.assignee = want.assignee ? { accountId: want.assignee } : null;
+    note('assignee', from, want.assignee, changed);
+  }
+  if ('priority' in want) {
+    const from = cur.priority && cur.priority.name ? String(cur.priority.name) : null;
+    const changed = !from || from.toLowerCase() !== want.priority.toLowerCase();
+    if (changed) fields.priority = { name: want.priority };
+    note('priority', from, want.priority, changed);
+  }
+  for (const k of EDIT_LIST_FIELDS) {
+    if (!want[k]) continue;
+    const from = names(cur[EDIT_FIELDS[k].id]);
+    const has = (n) => from.some((f) => f.toLowerCase() === n.toLowerCase());
+    const wrap = (n) => (k === 'labels' ? n : { name: n });
+    let to;
+    if (want[k].set) {
+      to = want[k].set;
+      if (!sameNames(from, to)) fields[EDIT_FIELDS[k].id] = to.map(wrap);
+    } else {
+      const adds = want[k].add.filter((n) => !has(n));
+      const removes = want[k].remove.filter(has);
+      const ops = [...adds.map((n) => ({ add: wrap(n) })), ...removes.map((n) => ({ remove: wrap(n) }))];
+      if (ops.length) update[EDIT_FIELDS[k].id] = ops;
+      to = [...from.filter((f) => !removes.some((r) => r.toLowerCase() === f.toLowerCase())), ...adds];
+    }
+    note(k, from, to, !sameNames(from, to));
+  }
+  if ('dueDate' in want) {
+    const from = cur.duedate ? String(cur.duedate) : null;
+    const changed = from !== want.dueDate;
+    if (changed) fields.duedate = want.dueDate;
+    note('dueDate', from, want.dueDate, changed);
+  }
+
+  const changedIds = [...Object.keys(fields), ...Object.keys(update)];
+  if (changedIds.length) {
+    const body = {};
+    if (Object.keys(fields).length) body.fields = fields;
+    if (Object.keys(update).length) body.update = update;
+    try {
+      // A write — NOT retried on a transport failure (F6).
+      await requestJson({ base, path: `/rest/api/3/issue/${encodeURIComponent(key)}`, method: 'PUT', authHeader: auth, body });
+    } catch (e) {
+      throw editErr(e.status, editRefusalMessage(e, key));
+    }
+    if (typeof onChanged === 'function') onChanged(changedIds);
+  }
+  const siteBase = resolveJiraApiBase(cred.siteUrl);
+  return {
+    issue: key,
+    url: `${siteBase}/browse/${encodeURIComponent(key)}`,
+    fields: report,
+    changed: report.filter((r) => r.outcome === 'changed').length,
+    unchanged: report.filter((r) => r.outcome === 'unchanged').length,
+  };
+}
+
+// ── project versions: list, create, release (#2902) ──────────────────────────
+//
+// Teams plan releases with project versions ("1.4"): issues carry a fix
+// version, and the version is marked released when it ships. Three calls:
+//   • READ  — a project's versions (GET /project/{key}/versions), unreleased
+//             first, archived ones listed but marked.
+//   • WRITE — create one version (POST /version); a name the project already
+//             has is refused before Jira is asked.
+//   • WRITE — release one version (PUT /version/{id} { released, releaseDate }),
+//             optionally moving its unresolved issues to another version the
+//             way Jira's own release dialog does (`moveUnfixedIssuesTo`).
+// A project the credential cannot see is the standard out-of-scope 404. Jira
+// answers a create / release without the project-admin permission with a 403,
+// mapped to a refusal that names the permission (never the raw body).
+
+const VERSION_PERMISSION_HINT = 'creating and releasing versions needs the Jira "Administer Projects" permission on the project (typically a project admin)';
+// The changelog names a fix-version change by id and display name; both are
+// stamped so the moved issues' `field_changed` echo reads `origin: agent`.
+const FIX_VERSION_CHANGE_FIELDS = Object.freeze(['fixVersions', 'Fix Version']);
+
+const versionErr = (status, message) => { const e = new Error(message); e.status = status; return e; };
+
+// Today's date as `YYYY-MM-DD` (UTC). `now` is a test seam.
+function todayIso(now) {
+  return new Date(typeof now === 'function' ? now() : Date.now()).toISOString().slice(0, 10);
+}
+
+// One version as the agent sees it. Jira reports `overdue` only on unreleased
+// versions with a past release date; when it is absent it is derived. Pure.
+function shapeVersion(raw, today) {
+  const v = raw && typeof raw === 'object' ? raw : {};
+  const released = v.released === true;
+  const releaseDate = v.releaseDate ? String(v.releaseDate) : null;
+  const overdue = released ? false
+    : typeof v.overdue === 'boolean' ? v.overdue
+      : !!(releaseDate && today && releaseDate < today);
+  return {
+    id: v.id != null ? String(v.id) : null,
+    name: v.name != null ? String(v.name) : null,
+    description: v.description ? String(v.description) : null,
+    startDate: v.startDate ? String(v.startDate) : null,
+    releaseDate,
+    released,
+    archived: v.archived === true,
+    overdue,
+  };
+}
+
+// Unreleased first, otherwise Jira's own (sequence) order. Pure.
+function sortVersions(versions) {
+  return [...versions.filter((v) => !v.released), ...versions.filter((v) => v.released)];
+}
+
+function findVersion(versions, name) {
+  const want = String(name == null ? '' : name).trim().toLowerCase();
+  return versions.find((v) => String(v.name || '').trim().toLowerCase() === want) || null;
+}
+
+function availableVersions(versions) {
+  return versions.map((v) => v.name).filter(Boolean).join(', ') || '(none)';
+}
+
+// A `YYYY-MM-DD` date argument, validated. Pure — throws a 400.
+function versionDate(value, label) {
+  if (value == null || String(value).trim() === '') return null;
+  const d = String(value).trim();
+  if (!isIsoDate(d)) throw versionErr(400, `"${d}" is not a valid ${label} — use YYYY-MM-DD, e.g. 2026-10-31`);
+  return d;
+}
+
+// Jira's refusal of a version write, readable. Pure.
+function versionWriteRefusal(err, projectKey, tail) {
+  if (err.status === 403) return `the Jira account may not manage versions in project ${projectKey} (403) — ${VERSION_PERMISSION_HINT}.${tail}`;
+  if (err.status === 404) return `${outOfScope('Project ', projectKey)}.${tail}`;
+  const body = safeJson(err.body || '');
+  const parts = [];
+  for (const [id, msg] of Object.entries(body && body.errors && typeof body.errors === 'object' ? body.errors : {})) parts.push(`${id}: ${msg}`);
+  for (const msg of Array.isArray(body && body.errorMessages) ? body.errorMessages : []) parts.push(String(msg));
+  if (!parts.length) return `${err.message}${tail}`;
+  return `Jira refused the version change in project ${projectKey}: ${parts.map((p) => String(p).replace(/[.\s]+$/, '')).join('; ')}.${tail}`;
+}
+
+// The project (scope check + canonical key + id) and its versions.
+async function readProjectVersions(base, auth, projectKey, tail, today) {
+  const key = String(projectKey == null ? '' : projectKey).trim().toUpperCase();
+  if (!key) throw versionErr(400, 'a --project key is required');
+  let project;
+  let raw;
+  try {
+    project = await requestJson({ base, path: `/rest/api/3/project/${encodeURIComponent(key)}`, authHeader: auth });
+    raw = await requestJson({ base, path: `/rest/api/3/project/${encodeURIComponent(key)}/versions`, authHeader: auth });
+  } catch (e) {
+    if (e.status === 404) throw versionErr(404, `${outOfScope('Project ', key)}.${tail}`);
+    throw e;
+  }
+  return {
+    projectKey: String((project && project.key) || key),
+    projectId: project && project.id != null ? String(project.id) : null,
+    raw: Array.isArray(raw) ? raw : [],
+    versions: (Array.isArray(raw) ? raw : []).map((v) => shapeVersion(v, today)),
+  };
+}
+
+async function listProjectVersions(cred, { projectKey, env, now } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const { projectKey: key, versions } = await readProjectVersions(base, auth, projectKey, '', todayIso(now));
+  return {
+    project: key,
+    count: versions.length,
+    unreleased: versions.filter((v) => !v.released).length,
+    versions: sortVersions(versions),
+  };
+}
+
+async function createProjectVersion(cred, { projectKey, name, description, startDate, releaseDate, env, now } = {}) {
+  const tail = ' Nothing was created.';
+  const versionName = String(name == null ? '' : name).trim();
+  if (!versionName) throw versionErr(400, 'a version --name is required (e.g. "1.5")');
+  if (/[\r\n]/.test(versionName)) throw versionErr(400, 'the version name must be a single line');
+  if (versionName.length > 255) throw versionErr(400, 'the version name is longer than Jira allows (255 characters)');
+  const start = versionDate(startDate, 'start date');
+  const release = versionDate(releaseDate, 'release date');
+  if (start && release && release < start) {
+    throw versionErr(400, `the release date ${release} is before the start date ${start}.${tail}`);
+  }
+
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const today = todayIso(now);
+  const { projectKey: key, projectId, versions } = await readProjectVersions(base, auth, projectKey, tail, today);
+  const dup = findVersion(versions, versionName);
+  const duplicate = () => versionErr(409,
+    `project ${key} already has a version "${dup ? dup.name : versionName}"${dup ? ` (${dup.released ? 'released' : 'unreleased'}${dup.archived ? ', archived' : ''})` : ''}.${tail}`);
+  if (dup) throw duplicate();
+
+  const body = { name: versionName };
+  if (projectId) body.projectId = Number(projectId);
+  else body.project = key;
+  const desc = description == null ? '' : String(description).trim();
+  if (desc) body.description = desc;
+  if (start) body.startDate = start;
+  if (release) body.releaseDate = release;
+  let created;
+  try {
+    // A write — NOT retried on a transport failure (F6).
+    created = await requestJson({ base, path: '/rest/api/3/version', method: 'POST', authHeader: auth, body });
+  } catch (e) {
+    // Another caller created the same name between the list and the create.
+    if (e.status === 400 && /already exists/i.test(String(e.body || ''))) throw duplicate();
+    throw versionErr(e.status, versionWriteRefusal(e, key, tail));
+  }
+  return { project: key, version: shapeVersion({ ...body, ...created }, today) };
+}
+
+// The keys of a version's unresolved issues (for the own-writes stamps when
+// they are moved). Best effort: an unreadable search stamps nothing.
+async function unresolvedVersionIssueKeys(base, auth, versionId) {
+  const keys = [];
+  try {
+    let nextPageToken;
+    for (let page = 0; page < MAX_PAGES; page += 1) {
+      const body = { jql: `fixVersion = ${Number(versionId)} AND resolution = EMPTY`, fields: ['summary'], maxResults: PAGE_SIZE };
+      if (nextPageToken) body.nextPageToken = nextPageToken;
+      const res = await requestJson({ base, path: '/rest/api/3/search/jql', method: 'POST', idempotent: true, authHeader: auth, body });
+      for (const raw of Array.isArray(res.issues) ? res.issues : []) if (raw && raw.key) keys.push(String(raw.key));
+      if (res.isLast !== false || !res.nextPageToken) break;
+      nextPageToken = res.nextPageToken;
+    }
+  } catch {
+    return keys;
+  }
+  return keys;
+}
+
+async function releaseProjectVersion(cred, { projectKey, name, releaseDate, moveTo, env, now, onMoved } = {}) {
+  const tail = ' Nothing was changed.';
+  const versionName = String(name == null ? '' : name).trim();
+  if (!versionName) throw versionErr(400, 'a version --name is required (e.g. "1.4")');
+  const date = versionDate(releaseDate, 'release date');
+  const moveName = moveTo == null ? '' : String(moveTo).trim();
+
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const today = todayIso(now);
+  const { projectKey: key, raw, versions } = await readProjectVersions(base, auth, projectKey, tail, today);
+  const version = findVersion(versions, versionName);
+  if (!version) throw versionErr(404, `project ${key} has no version "${versionName}". Available: ${availableVersions(versions)}.${tail}`);
+
+  if (version.released) {
+    return {
+      project: key,
+      version,
+      outcome: 'already-released',
+      message: `${version.name} was already released${version.releaseDate ? ` on ${version.releaseDate}` : ''} — nothing was changed${moveName ? ' and no issues were moved' : ''}.`,
+      unresolvedIssues: null,
+      movedTo: null,
+      moved: 0,
+    };
+  }
+
+  const effective = date || today;
+  if (version.startDate && effective < version.startDate) {
+    throw versionErr(400, `the release date ${effective} is before ${version.name}'s start date ${version.startDate}.${tail}`);
+  }
+  let target = null;
+  if (moveName) {
+    target = findVersion(versions, moveName);
+    if (!target) throw versionErr(404, `project ${key} has no version "${moveName}" to move the unresolved issues to. Available: ${availableVersions(versions)}.${tail}`);
+    if (target.id === version.id) throw versionErr(400, `cannot move ${version.name}'s unresolved issues to ${version.name} itself.${tail}`);
+    if (target.archived) throw versionErr(400, `version ${target.name} is archived — move the unresolved issues to an active version.${tail}`);
+  }
+
+  let unresolved = 0;
+  try {
+    const counts = await requestJson({ base, path: `/rest/api/3/version/${encodeURIComponent(version.id)}/unresolvedIssueCount`, authHeader: auth });
+    unresolved = Number(counts && counts.issuesUnresolvedCount) || 0;
+  } catch (e) {
+    if (e.status === 404) throw versionErr(404, `${outOfScope('Project ', key)}.${tail}`);
+    throw e;
+  }
+  const movedKeys = target && unresolved ? await unresolvedVersionIssueKeys(base, auth, version.id) : [];
+
+  const body = { released: true, releaseDate: effective };
+  if (target && unresolved) {
+    const targetRaw = raw.find((v) => v && String(v.id) === target.id);
+    body.moveUnfixedIssuesTo = (targetRaw && targetRaw.self) || `${base}/rest/api/3/version/${encodeURIComponent(target.id)}`;
+  }
+  let updated;
+  try {
+    // A write — NOT retried on a transport failure (F6).
+    updated = await requestJson({ base, path: `/rest/api/3/version/${encodeURIComponent(version.id)}`, method: 'PUT', authHeader: auth, body });
+  } catch (e) {
+    throw versionErr(e.status, versionWriteRefusal(e, key, tail));
+  }
+  const moved = target ? unresolved : 0;
+  if (moved && movedKeys.length && typeof onMoved === 'function') onMoved(movedKeys);
+  let message = `${version.name} released on ${effective}`;
+  if (!unresolved) message += '; it had no unresolved issues.';
+  else if (target) message += `; its ${unresolved} unresolved issue${unresolved === 1 ? ' was' : 's were'} moved to ${target.name}.`;
+  else message += `; ${unresolved} unresolved issue${unresolved === 1 ? ' stays' : 's stay'} assigned to ${version.name} (pass --move-to <version> to move them).`;
+  return {
+    project: key,
+    version: shapeVersion({ ...(raw.find((v) => v && String(v.id) === version.id) || {}), ...(updated && typeof updated === 'object' ? updated : {}), released: true, releaseDate: effective }, today),
+    outcome: 'released',
+    message,
+    unresolvedIssues: unresolved,
+    movedTo: target && unresolved ? target.name : null,
+    moved,
   };
 }
 
@@ -2375,18 +3641,27 @@ module.exports = {
   clampSearchLimit,
   pickAgentColumns,
   AGENT_ISSUE_COLUMNS,
+  STANDARD_READ_COLUMNS,
+  shapeStandardReadFields,
   SEARCH_DEFAULT_LIMIT,
   SEARCH_MAX_LIMIT,
   searchJql,
   fetchFullChangelog,
   getIssue,
   getComment,
+  listComments,
+  COMMENTS_DEFAULT_LIMIT,
+  COMMENTS_MAX_LIMIT,
   getIssueAttachments,
   downloadAttachmentContent,
   getAttachment,
   addAttachment,
   listProjects,
   listProjectStatuses,
+  // user lookup (#2898)
+  USER_SEARCH_LIMIT,
+  shapeUser,
+  searchUsers,
   ATTACHMENT_LIST_CAP,
   ATTACHMENT_MAX_BYTES,
   ATTACHMENT_UPLOAD_MAX_BYTES,
@@ -2408,9 +3683,36 @@ module.exports = {
   collectCustomFieldNames,
   createEpicWithStories,
   addStoriesToEpic,
+  addSubtasksToIssue,
   isEpicIssueType,
+  // standalone issue create (#2894)
+  classifyIssueType,
+  resolveStandaloneIssueType,
+  resolveProjectIssueType,
+  missingRequiredFields,
+  createRejectionMessage,
+  createStandaloneIssue,
+  // parent Epic of existing issues (#2895)
+  setParentEpic,
+  parentWriteRefusal,
+  PARENT_CHANGE_FIELDS,
+  EPIC_CHILD_FIELD,
   EPIC_ISSUE_TYPE,
   STORY_ISSUE_TYPE,
+  // standard fields of an existing issue (#2897)
+  EDIT_FIELDS,
+  isIsoDate,
+  normalizeIssueEdit,
+  editRefusalMessage,
+  editIssueFields,
+  // project versions (#2902)
+  FIX_VERSION_CHANGE_FIELDS,
+  shapeVersion,
+  sortVersions,
+  versionWriteRefusal,
+  listProjectVersions,
+  createProjectVersion,
+  releaseProjectVersion,
   // board & sprint management (#2450)
   MAX_BULK_SPRINTS,
   parseUtcDay,

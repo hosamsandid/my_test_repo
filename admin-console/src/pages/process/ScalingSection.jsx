@@ -1,9 +1,12 @@
 import React from 'react';
 import { AlertTriangle } from 'lucide-react';
 import {
+  POOL_WORKSPACE_OPTIONS,
   parseMaxInstancesInput,
   parseMinutesInput,
+  parseWorkSourceInput,
   scalingPrerequisite,
+  workSourceApplies,
 } from './scaling-view.js';
 import { poolCapView } from './pool-cap-view.js';
 
@@ -23,12 +26,11 @@ import { poolCapView } from './pool-cap-view.js';
 // shown inline rather than only ever blocking a button this component no
 // longer has.
 //
-// No workspace binding control here (#2294): every pooled role is created
-// implicitly as `git-clean-base` (`buildPoolPayload`'s default in
-// `scaling-view.js`) — the other two `pool.workspace` values (`input-copy`,
-// `none`) stay fully functional server-side but have no UI anywhere to
-// configure the `pool.workSource` they'd need, so offering them here would
-// be a selectable option that silently does nothing.
+// Workspace binding (#2813 AC15, reversing #2294's removal): the select
+// offers `git-clean-base` / `input-copy` / `none`, and for the latter two the
+// `pool.workSource` fields (work items, output directory, input directory)
+// that make them do something — so no option is selectable without its
+// configuration any more. `pool.baseBranch` stays UI-less (carried through).
 //
 // `disabled` (#2302): the agent-pools feature flag is off — render the current
 // draft but block every input, so the section stays visible ("Coming Soon",
@@ -45,6 +47,10 @@ export default function ScalingSection({ draft, onChange, parentWipLimit, error,
   const idle = parseMinutesInput(draft.idleText);
   const hard = parseMinutesInput(draft.hardText);
   const retain = parseMinutesInput(draft.retainText);
+  const showWorkSource = workSourceApplies(draft);
+  const workSource = showWorkSource
+    ? parseWorkSourceInput({ itemsText: draft.itemsText, outputDir: draft.outputDirText, inputDir: draft.inputDirText })
+    : { error: null };
   const prereq = scalingPrerequisite({ parentWipLimit });
 
   const set = (patch) => onChange({ ...draft, ...patch });
@@ -81,6 +87,34 @@ export default function ScalingSection({ draft, onChange, parentWipLimit, error,
           </Field>
           {maxInstances.error && <FieldError text={maxInstances.error} />}
           {live && <LiveInstances count={live.count} cap={live.cap} waiting={live.waiting} />}
+
+          <Field label="Workspace" hint="How each instance gets its working files.">
+            <select value={draft.workspace} disabled={disabled}
+              onChange={(e) => set({ workspace: e.target.value })}
+              style={{ ...fieldInput, width: '100%' }}>
+              {POOL_WORKSPACE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </Field>
+          {showWorkSource && (
+            <>
+              <Field label="Work items (one per line)" hint="Optional — a fixed list the pool works through, one instance per item. Leave all three blank for ticket-driven work.">
+                <textarea value={draft.itemsText || ''} disabled={disabled}
+                  onChange={(e) => set({ itemsText: e.target.value })}
+                  rows={3} style={{ ...fieldInput, width: '100%', resize: 'vertical', fontFamily: 'var(--eb-font-mono)' }} />
+              </Field>
+              <Field label="Output directory" hint="An item is done once its output appears here.">
+                <input type="text" value={draft.outputDirText || ''} disabled={disabled}
+                  onChange={(e) => set({ outputDirText: e.target.value })}
+                  style={{ ...fieldInput, width: '100%' }} />
+              </Field>
+              <Field label="Input directory (optional)">
+                <input type="text" value={draft.inputDirText || ''} disabled={disabled}
+                  onChange={(e) => set({ inputDirText: e.target.value })}
+                  style={{ ...fieldInput, width: '100%' }} />
+              </Field>
+              {workSource.error && <FieldError text={workSource.error} />}
+            </>
+          )}
 
           <div style={{ display: 'flex', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
             <Field label="Idle timeout (min)">

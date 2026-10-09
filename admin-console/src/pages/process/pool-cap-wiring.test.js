@@ -26,7 +26,8 @@ test('rail: "Instances (n)" label and marker use the role template\'s poolMaxIns
 });
 
 test('API: the roster ships poolMaxInstances on pooled role templates', () => {
-  const api = readFileSync(join(here, '../../../api/api.js'), 'utf8');
+  // Since #566 the roster row is shaped in the pure matrix-agent-roster.js.
+  const api = readFileSync(join(here, '../../../api/matrix-agent-roster.js'), 'utf8');
   assert.match(api, /!cfg\.poolInstance && cfg\.pool && typeof cfg\.pool === 'object' && cfg\.pool\.enabled === true \? \{\s*poolMaxInstances:/);
 });
 
@@ -54,8 +55,12 @@ test('rail: an instance row shows its waiting line from the pure poolWaitingLabe
 
 test('API: the roster ships primitive poolWaiting/poolWaitingPr on a pool instance, from its team\'s pool-waiting.json', () => {
   const api = readFileSync(join(here, '../../../api/api.js'), 'utf8');
-  assert.match(api, /readJsonFile\(controlOrAgentPath\(teamId, 'pool-waiting\.json'\), null\)/);
-  assert.match(api, /\.\.\.poolWaitingFields\(cfg\.parentTeamId \? poolWaitingOf\(cfg\.parentTeamId\) : null, id, cfg\.poolSpawnedAt\)/);
-  assert.match(api, /if \(\(rec\.spawnedAt \|\| null\) !== \(spawnedAt \|\| null\)\) return \{\};/, 'a record from an earlier spawn is ignored');
-  assert.match(api, /return \{ poolWaiting: true, poolWaitingPr: prs\.length \? Math\.min\(\.\.\.prs\) : null \};/);
+  assert.match(api, /readPoolWaiting: \(teamId\) => readJsonFile\(controlOrAgentPath\(teamId, 'pool-waiting\.json'\), null\)/);
+  // Since #566 the fields are derived in the pure matrix-agent-roster.js,
+  // once per team per build.
+  const roster = readFileSync(join(here, '../../../api/matrix-agent-roster.js'), 'utf8');
+  assert.match(roster, /poolWaiting = poolWaitingFields\(poolWaitingByTeam\.get\(cfg\.parentTeamId\), id, cfg\.poolSpawnedAt\);/);
+  assert.match(roster, /\.\.\.poolWaiting,/);
+  assert.match(roster, /if \(\(rec\.spawnedAt \|\| null\) !== \(spawnedAt \|\| null\)\) return \{\};/, 'a record from an earlier spawn is ignored');
+  assert.match(roster, /return \{ poolWaiting: true, poolWaitingPr: prs\.length \? Math\.min\(\.\.\.prs\) : null \};/);
 });

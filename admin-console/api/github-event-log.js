@@ -224,7 +224,9 @@ function queryAgentEntries({ agentId, since, until, limit, now = Date.now() } = 
 // for the "open the role's chat instead" fallback. `readConfig(agentId)` returns
 // the agent's config or null. An outcome without an instanceId (every
 // non-pooled row, and every row recorded before #2596) is returned unchanged.
-function projectPoolInstance(outcome, readConfig) {
+// #2944: for a reaped instance, `findArchiveKey(roleId, instanceId)` names its
+// still-readable archive (`instanceArchiveKey`), or null once it is gone.
+function projectPoolInstance(outcome, readConfig, findArchiveKey = null) {
   if (!outcome || typeof outcome.instanceId !== 'string' || !outcome.instanceId) return outcome;
   const instanceId = outcome.instanceId;
   const instanceCfg = readConfig(instanceId);
@@ -241,6 +243,9 @@ function projectPoolInstance(outcome, readConfig) {
     instanceExists: !!instanceCfg,
     instanceItem: item,
     poolRoleName,
+    ...(!instanceCfg && typeof findArchiveKey === 'function' && outcome.agentId
+      ? { instanceArchiveKey: findArchiveKey(outcome.agentId, instanceId) || null }
+      : {}),
   };
 }
 

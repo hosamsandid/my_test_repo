@@ -252,6 +252,25 @@ test('projectPoolInstance falls back to the ids when no config is readable', () 
   assert.equal(r.instanceExists, false);
 });
 
+test('#2944 AC5: a reaped instance names its readable archive; a live one is never looked up', () => {
+  const asked = [];
+  const find = (roleId, instanceId) => { asked.push([roleId, instanceId]); return 'team-developer-i7~1'; };
+  const reaped = eventLog.projectPoolInstance(
+    { agentId: 'team-developer', status: 'delivered', instanceId: 'team-developer-i7' }, () => null, find,
+  );
+  assert.equal(reaped.instanceArchiveKey, 'team-developer-i7~1');
+  assert.deepEqual(asked, [['team-developer', 'team-developer-i7']]);
+  const gone = eventLog.projectPoolInstance(
+    { agentId: 'team-developer', status: 'delivered', instanceId: 'team-developer-i7' }, () => null, () => null,
+  );
+  assert.equal(gone.instanceArchiveKey, null);
+  const live = eventLog.projectPoolInstance(
+    { agentId: 'team-developer', status: 'delivered', instanceId: 'team-developer-i7' }, () => ({}), find,
+  );
+  assert.equal('instanceArchiveKey' in live, false);
+  assert.equal(asked.length, 1);
+});
+
 test('projectPoolInstance leaves non-pooled and pre-#2596 outcomes untouched', () => {
   const o = { agentId: 'dev', status: 'delivered', agentName: 'dev' };
   let calls = 0;

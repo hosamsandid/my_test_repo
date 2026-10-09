@@ -196,6 +196,7 @@ const skillGrantValidate = require('./skill-grant-validate');
 const skillPoolTeam = require('./skill-pool-team');
 const skillFileBatch = require('./skill-file-batch');
 const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archives');
+const { createPoolArchiveReader, archiveKeyForEvent } = require('./pool-archive');
 const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix, stampLiveLabels, collectLabelTokens, teamForeignLabels, planSuffixChange, githubRenamesForPlan } = require('./label-suffix');
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
@@ -673,11 +674,21 @@ app.get('/api/github-events', (req, res) => {
     return configCache.get(agentId);
   };
   const agentName = (agentId) => readConfig(agentId)?.name || agentId;
+  // #2944: a reaped instance links its archive while it is readable.
+  const archivesOf = new Map();
+  const roleArchives = (roleId) => {
+    if (!archivesOf.has(roleId)) {
+      const role = poolArchiveRole(roleId);
+      archivesOf.set(roleId, role ? poolArchives.listForRole(role.teamId, roleId, role) : []);
+    }
+    return archivesOf.get(roleId);
+  };
   res.json(entries.map((e) => ({
     ...e,
     // #2596: a pooled delivery also names/links the instance that ran it.
     outcomes: (e.outcomes || []).map((o) => githubEventLog.projectPoolInstance(
       { ...o, agentName: agentName(o.agentId) }, readConfig,
+      (roleId, instanceId) => archiveKeyForEvent(roleArchives(roleId), instanceId, e.ts),
     )),
   })));
 });
@@ -20622,6 +20633,11 @@ function buildRoster() {
     readEnvironmentName: (envId) => loadEnvironment(envId)?.name || null,
     // #2789: each team's pool-waiting record (orchestrator `poolReapSweepTeam`).
     readPoolWaiting: (teamId) => readJsonFile(controlOrAgentPath(teamId, 'pool-waiting.json'), null),
+    // #2944: the role's still-readable removed instances (memoized scan).
+    countPoolArchives: (id) => {
+      const role = poolArchiveRole(id);
+      return role ? poolArchives.listForRole(role.teamId, id, role).length : 0;
+    },
     agentMetaForScope,
     onEntryError: (id, err) => {
       const key = `${id}\u0000${err && err.message}`;
@@ -21471,6 +21487,64 @@ app.post('/api/agents/:agentId/sessions/:sessionId/stop', apiLimiter, async (req
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Removed pool instances (#2944): a pooled role's reaped instances keep their
+// chat history + session log under the team's `pool-archive/` for the role's
+// `retainLogsMs` (default 30 days). `:agentId` is the pooled ROLE (the
+// instance itself is gone), so the work-plane gate applies the role's own
+// chat/log permission to its archives. Read-only: there is nothing to write.
+const poolArchives = createPoolArchiveReader({ teamsDir: path.join(WORKSPACE, 'teams') });
+
+// The role's team + retention, or null when `agentId` names no team member.
+function poolArchiveRole(agentId) {
+  if (!AGENT_ID_RE.test(agentId)) return null;
+  const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
+  if (!cfg || !cfg.parentTeamId || cfg.poolInstance) return null;
+  const raw = cfg.pool && cfg.pool.enabled === true && cfg.pool.teardown
+    ? cfg.pool.teardown.retainLogsMs : null;
+  return { teamId: cfg.parentTeamId, retainLogsMs: Number.isFinite(raw) && raw > 0 ? raw : null };
+}
+
+function resolvePoolArchive(req, res) {
+  const role = poolArchiveRole(req.params.agentId);
+  const archive = role && poolArchives.resolve(role.teamId, req.params.agentId, req.params.key, role);
+  if (!archive) {
+    res.status(404).json({ error: 'archive not found' });
+    return null;
+  }
+  return archive;
+}
+
+app.get('/api/agents/:agentId/pool-archive', apiLimiter, (req, res) => {
+  const role = poolArchiveRole(req.params.agentId);
+  if (!role) return res.json({ entries: [] });
+  res.json({ entries: poolArchives.listForRole(role.teamId, req.params.agentId, role) });
+});
+
+app.get('/api/agents/:agentId/pool-archive/:key', apiLimiter, (req, res) => {
+  const archive = resolvePoolArchive(req, res);
+  if (!archive) return;
+  res.json({ entry: archive.entry, rooms: poolArchives.rooms(archive) });
+});
+
+// The archived chat, paged like Matrix `/messages?dir=b` (newest first,
+// `end` = the next older page's `from`).
+app.get('/api/agents/:agentId/pool-archive/:key/messages', apiLimiter, (req, res) => {
+  const archive = resolvePoolArchive(req, res);
+  if (!archive) return;
+  res.json(poolArchives.chatPage(archive, { from: req.query.from, limit: req.query.limit }));
+});
+
+// One room's archived transcript, `limit` events per page counted from the
+// end (`page=0` is the newest window).
+app.get('/api/agents/:agentId/pool-archive/:key/session/:roomId', apiLimiter, (req, res) => {
+  const archive = resolvePoolArchive(req, res);
+  if (!archive) return;
+  if (!ROOM_ID_RE.test(req.params.roomId)) return res.status(400).json({ error: 'invalid roomId' });
+  res.json(poolArchives.sessionPage(archive, req.params.roomId, {
+    limit: req.query.limit, page: req.query.page, parse: parseJsonlLine,
+  }));
 });
 
 // List *finished* sessions for an agent within one room (#544). Sessions are

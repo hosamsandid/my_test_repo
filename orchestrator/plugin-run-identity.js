@@ -228,6 +228,11 @@ function chatSenderFromEvent(event, { roomId, agentMatrixId, now = Date.now(), m
 //                       This is what lets ONE refusal list BOTH a missing
 //                       personal token and a missing team site, instead of the
 //                       user peeling them off one broker call at a time.
+//   credentialReadFailed — reading a stored credential (personal or team) threw
+//                       something other than "no such file" — e.g. a transient
+//                       I/O error on the shared volume. The credential may well
+//                       exist, so this is a retryable refusal, never "add your
+//                       token" (#2954). Default false.
 //   pagePath          — where a person adds their token (for the message)
 //   teamSetupLocation — where a Team Admin sets the team connection (Jira: site)
 //   pluginName        — "Jira"
@@ -246,7 +251,7 @@ function buildSetupMessage(missing, pluginName) {
   return `${head}\n${lines.join('\n')}\nOnce that is done, ask me again. Nothing was sent to ${pluginName}.`;
 }
 
-function decideCredentialGrant({ active, senderUserId, senderResolved = false, personalValues, personalKeys, teamSiteConfigured, pagePath = '/plugin-tokens', teamSetupLocation = 'Agent Chat → Settings → Plugins', pluginName = 'this plugin' }) {
+function decideCredentialGrant({ active, senderUserId, senderResolved = false, personalValues, personalKeys, teamSiteConfigured, credentialReadFailed = false, pagePath = '/plugin-tokens', teamSetupLocation = 'Agent Chat → Settings → Plugins', pluginName = 'this plugin' }) {
   if (!active || !active.ok) {
     const reason = (active && active.reason) || 'no-active-run';
     return {
@@ -268,6 +273,14 @@ function decideCredentialGrant({ active, senderUserId, senderResolved = false, p
       message: senderResolved
         ? `Refused: the person who sent this chat message is not a member of this agent's team, so no ${pluginName} credential may be used for them.`
         : `Refused: the platform could not identify who sent this chat message (its account maps to no user record), so no ${pluginName} credential could be selected for them.`,
+    };
+  }
+  if (credentialReadFailed) {
+    return {
+      ok: false,
+      status: 503,
+      code: 'credential-read-failed',
+      message: `Refused: the platform could not read the stored ${pluginName} credential just now (a temporary storage error). Nothing was sent to ${pluginName} — try again in a moment. No credential needs to be re-entered.`,
     };
   }
   const values = personalValues && typeof personalValues === 'object' ? personalValues : {};

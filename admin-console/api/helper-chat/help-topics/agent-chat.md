@@ -496,6 +496,14 @@ on the workspace root or on a `/context` folder). Each file row also offers
 The **Git** mode next to *Tree* switches the same tab to the repository view —
 which files the agent has changed, and the diff for each.
 
+The tree also works with the **arrow keys** once you have clicked into it: **↓** /
+**↑** move to the next / previous entry, **→** opens a folder (pressed again, it
+steps into the folder's first entry) and **←** closes a folder or jumps to the
+folder above. Landing on a file opens it in the viewer just like a click, so you
+can flip through a folder of screenshots with **↓**; landing on a folder keeps the
+last file open. HTML files still open as source — the rendered preview still asks
+every time.
+
 An agent may additionally have one or more **context folders** — host folders an
 administrator mounted into its container. They appear in the same tree under
 their own root. Those folders live only inside the agent's container, so the

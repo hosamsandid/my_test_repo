@@ -7,6 +7,9 @@ import {
   parseWorkSourceInput,
   scalingPrerequisite,
   workSourceApplies,
+  RETAIN_LOGS_PLACEHOLDER,
+  RETAIN_LOGS_FIELD_HINT,
+  RETAIN_LOGS_HINT,
 } from './scaling-view.js';
 import { poolCapView } from './pool-cap-view.js';
 
@@ -127,10 +130,11 @@ export default function ScalingSection({ draft, onChange, parentWipLimit, error,
                 onChange={(e) => set({ hardText: e.target.value })}
                 placeholder="default" style={{ ...fieldInput, width: 90 }} />
             </Field>
-            <Field label="Retain logs (min)">
+            <Field label="Retain logs (min)" hint={RETAIN_LOGS_FIELD_HINT}>
               <input type="text" inputMode="numeric" value={draft.retainText} disabled={disabled}
                 onChange={(e) => set({ retainText: e.target.value })}
-                placeholder="default" style={{ ...fieldInput, width: 90 }} />
+                placeholder={RETAIN_LOGS_PLACEHOLDER} title={RETAIN_LOGS_HINT} aria-description={RETAIN_LOGS_HINT}
+                style={{ ...fieldInput, width: 90 }} />
             </Field>
           </div>
           {idle.error && <FieldError text={idle.error} />}

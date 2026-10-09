@@ -8,6 +8,7 @@ import {
   findFinishedSessionMatch,
   sessionLinkTarget,
   reapedInstanceNotice,
+  archiveChatPath,
 } from './github-event-session.js';
 
 test('buildTriggerCorrelationId: composes the deterministic trigger:<t>:gh:<e> key', () => {
@@ -106,4 +107,20 @@ test('sessionLinkTarget: held / digest / dropped outcomes are not linkable (AC6)
 test('#2693: a burst digest (delivered + digest:true) is not linkable to a session', () => {
   assert.equal(isSessionOutcome({ status: 'delivered', digest: true, triggerId: 't1' }), false);
   assert.equal(isSessionOutcome({ status: 'delivered', digest: false, triggerId: 't1' }), true);
+});
+
+test('#2944 AC5: a removed instance links its archive while it is readable', () => {
+  const o = {
+    status: 'delivered', triggerId: 't1', agentId: 'team-developer',
+    instanceId: 'team-developer-i2562', instanceExists: false,
+    instanceName: 'Developer · #2562', poolRoleName: 'Developer',
+    instanceArchiveKey: 'team-developer-i2562~1760000000000',
+  };
+  assert.deepEqual(sessionLinkTarget(o), {
+    kind: 'archived', instanceName: 'Developer · #2562', poolRoleId: 'team-developer',
+    archiveKey: 'team-developer-i2562~1760000000000',
+  });
+  // Once the archive is gone, today's fallback.
+  assert.equal(sessionLinkTarget({ ...o, instanceArchiveKey: null }).kind, 'reaped');
+  assert.equal(archiveChatPath('team-developer', 'team-developer-i2562~1'), '/chats/team-developer?archive=team-developer-i2562~1');
 });

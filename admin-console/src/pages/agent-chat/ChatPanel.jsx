@@ -43,6 +43,7 @@ import { RESUME_MESSAGE } from './resume-session';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
 import { AUTHOR_FIELD, authorStampFor, buildAuthorDirectory } from './message-author.js';
 import { STATUS_NOTE_FIELD, lastTurnMessage } from './status-note.js';
+import { chatMessagesFromEvents } from './chat-event-message.js';
 import { GIT_INFO_POLL_MS, gitInfoPollArmed } from './git-info-poll.js';
 import {
   resolveInitialFontSize, loadStoredFontSize, FONT_SIZE_CHANGED_EVENT,
@@ -392,23 +393,7 @@ export default function ChatPanel({
         // dir=b returns newest-first — reverse for chronological display.
         // Exclude redacted events (unsigned.redacted_because present) to avoid
         // empty bubbles after a Clear History operation.
-        const seed = chunk
-          .filter(ev => ev.type === 'm.room.message' && !ev.unsigned?.redacted_because)
-          .reverse()
-          .map(ev => ({
-            event_id: ev.event_id,
-            sender:   ev.sender,
-            ts:       ev.origin_server_ts,
-            body:     ev.content?.body || '',
-            msgtype:  ev.content?.msgtype || 'm.text',
-            'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
-            'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
-            'io.aee.triggerFailure':  ev.content?.['io.aee.triggerFailure'] || null,
-            [STATUS_NOTE_FIELD]:  ev.content?.[STATUS_NOTE_FIELD] || null,
-            [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
-            [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
-            [AUTHOR_FIELD]:        ev.content?.[AUTHOR_FIELD] || null,
-          }));
+        const seed = chatMessagesFromEvents(chunk);
         setMessages(seed);
         // `end` (in dir=b) is the older boundary — use it as `from=` for the
         // next chunk on scroll-up. If absent or chunk was empty, mark
@@ -448,23 +433,7 @@ export default function ChatPanel({
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
       const chunk = Array.isArray(data?.chunk) ? data.chunk : [];
-      const older = chunk
-        .filter(ev => ev.type === 'm.room.message' && !ev.unsigned?.redacted_because)
-        .reverse()
-        .map(ev => ({
-          event_id: ev.event_id,
-          sender:   ev.sender,
-          ts:       ev.origin_server_ts,
-          body:     ev.content?.body || '',
-          msgtype:  ev.content?.msgtype || 'm.text',
-          'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
-          'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
-          'io.aee.triggerFailure':  ev.content?.['io.aee.triggerFailure'] || null,
-          [STATUS_NOTE_FIELD]:  ev.content?.[STATUS_NOTE_FIELD] || null,
-          [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
-          [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
-          [AUTHOR_FIELD]:        ev.content?.[AUTHOR_FIELD] || null,
-        }));
+      const older = chatMessagesFromEvents(chunk);
 
       const nextFrom = typeof data?.end === 'string' ? data.end : null;
       if (!nextFrom || chunk.length === 0 || older.length === 0) {

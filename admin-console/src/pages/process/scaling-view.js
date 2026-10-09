@@ -13,6 +13,15 @@
 // `wipLimit` of its own, so `pool.enabled` piggybacks on the PARENT TEAM's —
 // the section can explain a refusal inline instead of a raw 400 (#2271 AC5).
 
+// "Retain logs" left empty keeps a removed pool instance's chat history and
+// session log readable for 30 days (#2944) — the orchestrator's
+// `TEARDOWN_DEFAULTS.retainLogsMs`, pinned equal by test.
+export const RETAIN_LOGS_DEFAULT_MINUTES = 30 * 24 * 60;
+export const RETAIN_LOGS_PLACEHOLDER = '30 days';
+export const RETAIN_LOGS_FIELD_HINT = 'Default: 30 days';
+export const RETAIN_LOGS_HINT =
+  `How long a removed instance's chat history and session log stay readable in Agent Chat. Empty = default: 30 days (${RETAIN_LOGS_DEFAULT_MINUTES} min).`;
+
 // The three workspace bindings `process-template.js`'s `normalizePool`
 // accepts (`POOL_WORKSPACES`), in the mockup's own order.
 export const POOL_WORKSPACE_OPTIONS = Object.freeze([

@@ -98,6 +98,38 @@ test('exactly one active run: none → refuse, two → ambiguous, end → back t
   assert.equal(r.active('a').reason, 'no-active-run');
 });
 
+test('a declaration whose end never arrived is dropped by the next declaration (#2952)', () => {
+  const r = registry();
+  const { key } = r.issueKey('a');
+  r.begin('a', key, { kind: 'chat', roomId: '!r', eventId: '$1', sender: '@alice:hs' }, { live: [] });
+  // the end of $1 is lost; the runner no longer lists it as in flight
+  r.begin('a', key, { kind: 'chat', roomId: '!r', eventId: '$2', sender: '@alice:hs' }, { live: [] });
+  const act = r.active('a');
+  assert.equal(act.ok, true);
+  assert.equal(act.run.eventId, '$2');
+});
+
+test('a run the runner still lists as in flight is kept, so two live runs stay ambiguous (#2952)', () => {
+  const r = registry();
+  const { key } = r.issueKey('a');
+  const one = r.begin('a', key, { kind: 'chat', roomId: '!r', eventId: '$1', sender: '@alice:hs' }, { live: [] });
+  r.begin('a', key, { kind: 'chat', roomId: '!r', eventId: '$2', sender: '@bob:hs' }, { live: [one.runId] });
+  assert.equal(r.active('a').reason, 'ambiguous-run');
+});
+
+test('a refused declaration drops nothing; without a `live` list nothing is dropped (#2952)', () => {
+  const r = registry();
+  const { key } = r.issueKey('a');
+  r.begin('a', key, { kind: 'chat', roomId: '!r', eventId: '$1', sender: '@alice:hs' });
+  assert.equal(r.begin('a', 'guess', { kind: 'autonomous' }, { live: [] }).reason, 'bad-run-key');
+  assert.equal(r.begin('a', key, { kind: 'service' }, { live: [] }).reason, 'bad-kind');
+  assert.equal(r.active('a').ok, true);
+  r.begin('a', key, { kind: 'autonomous' }); // an older runner sends no list
+  assert.equal(r.active('a').reason, 'ambiguous-run');
+  r.begin('a', key, { kind: 'autonomous' }, { live: 'not-a-list' });
+  assert.equal(r.active('a').reason, 'ambiguous-run');
+});
+
 test('a chat run carries the io.aee.author stamp through to the active run', () => {
   const r = registry();
   const { key } = r.issueKey('a');

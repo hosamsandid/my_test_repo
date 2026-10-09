@@ -33,12 +33,13 @@ const POOL_WORKSPACES = ['git-clean-base', 'input-copy', 'none'];
 // `null`), even though the Scaling section's own UI copy ("blank = default")
 // already promised a default existed. `idleTimeoutMs`/`maxRuntimeMs` mirror the
 // concept doc's own mockup values (`docs/parallel-workers-concept.md`'s Scaling
-// panel: "Idle timeout [ 30m ]  Hard timeout [ 2h ]"); `retainLogsMs` has no
-// mockup precedent — 7 days, a judgement call, flagged in the PR.
+// panel: "Idle timeout [ 30m ]  Hard timeout [ 2h ]"). `retainLogsMs` is how
+// long a removed instance's chat history + session log stay readable in Agent
+// Chat — 30 days (#2944; was 7).
 const TEARDOWN_DEFAULTS = Object.freeze({
   idleTimeoutMs: 30 * 60 * 1000,
   maxRuntimeMs: 2 * 60 * 60 * 1000,
-  retainLogsMs: 7 * 24 * 60 * 60 * 1000,
+  retainLogsMs: 30 * 24 * 60 * 60 * 1000,
 });
 
 /**
@@ -384,6 +385,72 @@ function isArchivableSessionPath(p) {
 }
 
 // ---------------------------------------------------------------------------
+// Removed-instance archive (#2944) — chat history + session log kept readable
+// ---------------------------------------------------------------------------
+//
+// Layout: `/workspace/teams/<team>/pool-archive/<key>/` holding `sessions/`
+// (the transcript copy), `chat.json` (the DM room's messages) and
+// `archived-at.json` (the stamp + the metadata below). `<key>` is
+// `<instanceId>~<epoch ms>`: an item processed twice re-uses its instance id
+// (`poolInstanceId`), so the id alone would let the second teardown overwrite
+// the first archive. `~` never occurs in an agent id, so the split is
+// unambiguous. Archives written before #2944 are named by the bare instance id.
+
+// Why an instance was removed — passed by every reap path on the internal
+// DELETE (`?reason=`). Anything else (a human's delete from the console, the
+// orphan cleanup) reads as `deleted`.
+const REAP_REASONS = Object.freeze(['done', 'idle-timeout', 'hard-timeout', 'pr-closed', 'deleted']);
+
+function normalizeReapReason(reason) {
+  return REAP_REASONS.includes(reason) ? reason : 'deleted';
+}
+
+function poolArchiveKey(instanceId, archivedAtMs) {
+  return `${instanceId}~${Math.floor(archivedAtMs)}`;
+}
+
+// The in-progress name of an archive: built here, renamed to its key only once
+// complete, so a teardown that fails half-way never leaves an entry that lists
+// but cannot be opened (#2944 AC11). The prune pass removes stale leftovers.
+const POOL_ARCHIVE_TMP_PREFIX = '.tmp-';
+const POOL_ARCHIVE_TMP_MAX_AGE_MS = 60 * 60 * 1000;
+
+function isPoolArchiveTmpName(name) {
+  return typeof name === 'string' && name.startsWith(POOL_ARCHIVE_TMP_PREFIX);
+}
+
+// Which pooled role an archive belongs to: the `roleId` stamped since #2944,
+// else (a pre-#2944 archive named by its instance id) the role whose
+// `<roleId>-i` prefix it carries — the longest one, should two roles' ids
+// prefix each other. `null` when no current role claims it (the role was
+// renamed, removed or is no longer pooled).
+function archiveRoleId(entryName, meta, roleIds) {
+  if (meta && typeof meta.roleId === 'string' && meta.roleId) {
+    return (roleIds || []).includes(meta.roleId) ? meta.roleId : null;
+  }
+  let best = null;
+  for (const id of roleIds || []) {
+    if (typeof entryName === 'string' && entryName.startsWith(`${id}-i`) && entryName.length > id.length + 2) {
+      if (!best || id.length > best.length) best = id;
+    }
+  }
+  return best;
+}
+
+// The retention an archive is judged by: its role's own `retainLogsMs` while
+// the role is still pooled, else the default (#2944 AC8) — an orphaned archive
+// is never kept forever. `archivedAt` falls back to the directory's mtime for
+// an archive with no readable stamp (pre-#2301), for the same reason.
+function archivePruneDecision({ archivedAt, mtimeMs, roleRetainLogsMs }, now = Date.now()) {
+  const retainLogsMs = Number.isFinite(roleRetainLogsMs) && roleRetainLogsMs > 0
+    ? roleRetainLogsMs
+    : TEARDOWN_DEFAULTS.retainLogsMs;
+  let at = typeof archivedAt === 'string' && Number.isFinite(Date.parse(archivedAt)) ? archivedAt : null;
+  if (!at && Number.isFinite(mtimeMs)) at = new Date(mtimeMs).toISOString();
+  return { retainLogsMs, expired: isArchiveExpired({ archivedAt: at, retainLogsMs }, now) };
+}
+
+// ---------------------------------------------------------------------------
 // Waiting instances (#2789) — kept alive while the item's PR is open
 // ---------------------------------------------------------------------------
 //
@@ -581,6 +648,14 @@ module.exports = {
   isInstanceIdle,
   isArchiveExpired,
   isArchivableSessionPath,
+  REAP_REASONS,
+  normalizeReapReason,
+  poolArchiveKey,
+  POOL_ARCHIVE_TMP_PREFIX,
+  POOL_ARCHIVE_TMP_MAX_AGE_MS,
+  isPoolArchiveTmpName,
+  archiveRoleId,
+  archivePruneDecision,
   prItemKey,
   linkedOpenPrs,
   normalizeWaitRecord,

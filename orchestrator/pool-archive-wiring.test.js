@@ -163,6 +163,7 @@ test('AC1: every reap path names its reason on the internal DELETE', () => {
   assert.match(sweep, /_internalSelfDelete\(id, "pr-closed"\)/);
   assert.match(sweep, /_internalSelfDelete\(id, "idle-timeout"\)/);
   assert.match(fn('_reapPooledInstancesForTicket'), /_internalSelfDelete\(instanceId, "done"\)/);
+  assert.match(fn('recurringPoolSweepTeam'), /_internalSelfDelete\(instanceId, "done"\)/);
   assert.match(fn('_internalSelfDelete'), /\?reason=\$\{encodeURIComponent\(reason\)\}/);
 });
 

@@ -19,6 +19,7 @@ import {
   isContextKey, isReadOnlyKey, workspaceUrl, withContextRoot, childKey,
   mountForKey, sameWritableSource, writeApiBase, apiRelOf,
 } from './workspace-source';
+import { visibleTreeRows, effectiveCursor, navigateTree, TREE_NAV_KEYS } from './workspace-tree-nav.js';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import PageHelpButton from '../../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
@@ -71,6 +72,13 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0, onRe
   const [dirCache, setDirCache] = useState(() => new Map());
   const [expanded, setExpanded] = useState(() => new Set(['']));
   const [selectedFile, setSelectedFile] = useState(null); // { path }
+  // Keyboard cursor (#2950): the tree key of the "current row" — a file OR a
+  // directory. Arrow keys move it; a click moves it too. What is shown is
+  // derived (`cursorKey` below) so a row that disappears falls back to its
+  // nearest visible ancestor without losing the stored position.
+  const [cursor, setCursor] = useState(null);
+  const [treeFocused, setTreeFocused] = useState(false);
+  const treeRef = useRef(null);
 
   // Workspace has two display modes: the file tree (default) and a git diff
   // view. The mode is persisted across reloads but reset on agent change so
@@ -138,6 +146,7 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0, onRe
     setDirCache(new Map());
     setExpanded(new Set(['']));
     setSelectedFile(null);
+    setCursor(null);
     setUploadOpen(false);
     setReposOpen(false);
     setUploadDir('');
@@ -445,6 +454,60 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0, onRe
     onDirDrop: (relPath, e) => { e.preventDefault(); e.stopPropagation(); performMove(relPath); },
   }), [dragItem, dragOverDir, canDropInto, performMove]);
 
+  /* ─── Keyboard navigation (#2950) ─────────────────────────────────── */
+
+  const treeRows = useMemo(
+    () => visibleTreeRows(dirCache, expanded, contextStatus),
+    [dirCache, expanded, contextStatus],
+  );
+  const cursorKey = effectiveCursor(treeRows, cursor);
+
+  // A click focuses the tree too (Safari does not focus a clicked <button>),
+  // so mouse and keyboard can be mixed straight away.
+  const focusTree = useCallback(() => {
+    const el = treeRef.current;
+    if (el && !el.contains(document.activeElement)) el.focus({ preventScroll: true });
+  }, []);
+
+  const handleSelectFile = useCallback((p) => {
+    setCursor(p);
+    setSelectedFile({ path: p });
+    focusTree();
+  }, [focusTree]);
+
+  const handleToggleDir = useCallback((p) => {
+    setCursor(p);
+    toggleDir(p);
+    focusTree();
+  }, [toggleDir, focusTree]);
+
+  // Only the tree container listens, so the composer, dialogs and the file
+  // viewer (all outside it) never see these keys handled.
+  const onTreeKeyDown = useCallback((e) => {
+    if (!TREE_NAV_KEYS.includes(e.key)) return;
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    e.preventDefault(); // no extra scrolling of the tree pane / page
+    const step = navigateTree(treeRows, cursorKey, e.key, expanded);
+    if (!step) return;
+    if (step.toggle != null) toggleDir(step.toggle);
+    setCursor(step.cursor);
+    if (step.cursor !== cursorKey) {
+      const row = treeRows.find(r => r.key === step.cursor);
+      // Landing on a file opens it exactly like a click; landing on a
+      // directory leaves the viewer on the last opened file.
+      if (row && row.type === 'file') setSelectedFile({ path: row.key });
+    }
+  }, [treeRows, cursorKey, expanded, toggleDir]);
+
+  // Keep the cursor row in view when it moves outside the tree pane.
+  useEffect(() => {
+    const el = treeRef.current;
+    if (!el || cursorKey == null) return;
+    const row = Array.from(el.querySelectorAll('[data-tree-key]'))
+      .find(n => n.getAttribute('data-tree-key') === cursorKey);
+    if (row && typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'nearest' });
+  }, [cursorKey]);
+
   /* ─── Render ─────────────────────────────────────────────────────── */
   if (!agentId) {
     return (
@@ -695,6 +758,12 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0, onRe
           or non-directory rows. */}
       {mode === 'tree' && (
         <div
+          ref={treeRef}
+          tabIndex={0}
+          aria-label="Workspace files — use the arrow keys to move through the tree"
+          onKeyDown={onTreeKeyDown}
+          onFocus={() => setTreeFocused(true)}
+          onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setTreeFocused(false); }}
           onDragOver={(e) => {
             if (!canDropInto('')) return;
             e.preventDefault();
@@ -722,9 +791,11 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0, onRe
             depth={0}
             dirCache={dirCache}
             expanded={expanded}
-            onToggleDir={toggleDir}
-            onSelectFile={(p) => setSelectedFile({ path: p })}
+            onToggleDir={handleToggleDir}
+            onSelectFile={handleSelectFile}
             selectedFilePath={selectedFile?.path || null}
+            cursorKey={cursorKey}
+            treeFocused={treeFocused}
             onUploadToDir={handleUploadToDir}
             onDownloadDir={downloadDir}
             downloadingDir={downloadingDir}
@@ -831,7 +902,7 @@ function ModeButton({ icon, label, active, onClick }) {
 
 /* ─── Tree node ───────────────────────────────────────────────────── */
 
-function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, gitBranch, onUploadToDir, onDownloadDir, downloadingDir, onRequestDelete, onReference, dnd, agentId, contextStatus, chip }) {
+function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, cursorKey, treeFocused, gitBranch, onUploadToDir, onDownloadDir, downloadingDir, onRequestDelete, onReference, dnd, agentId, contextStatus, chip }) {
   const isRoot = relPath === '';
   const isOpen = expanded.has(relPath);
   const cache  = dirCache.get(relPath);
@@ -847,18 +918,22 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
   const Caret = isOpen ? ChevronDown : ChevronRight;
   const FolderIcon = isOpen ? FolderOpen : Folder;
   const isDropTarget = dnd?.dragOverDir === relPath && dnd?.dragItemPath != null;
+  const isCursor = !isRoot && cursorKey === relPath;
 
   return (
     <div>
       {!isRoot && (
         <div
+          data-tree-key={relPath}
           style={{
             display: 'flex',
             alignItems: 'center',
             width: '100%',
-            background: isDropTarget ? 'var(--eb-accent-muted)' : 'transparent',
-            outline: isDropTarget ? '2px dashed var(--eb-accent-primary)' : 'none',
-            outlineOffset: '-2px',
+            background: isDropTarget ? 'var(--eb-accent-muted)' : (isCursor ? 'var(--eb-bg-active)' : 'transparent'),
+            outline: isDropTarget
+              ? '2px dashed var(--eb-accent-primary)'
+              : (isCursor && treeFocused ? CURSOR_OUTLINE : 'none'),
+            outlineOffset: isDropTarget ? '-2px' : '-1px',
           }}
           onMouseEnter={() => setHovered(true)}
           onMouseLeave={() => setHovered(false)}
@@ -1018,6 +1093,8 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
           onToggleDir={onToggleDir}
           onSelectFile={onSelectFile}
           selectedFilePath={selectedFilePath}
+          cursorKey={cursorKey}
+          treeFocused={treeFocused}
           onUploadToDir={onUploadToDir}
           onDownloadDir={onDownloadDir}
           downloadingDir={downloadingDir}
@@ -1032,7 +1109,7 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
   );
 }
 
-function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, onUploadToDir, onDownloadDir, downloadingDir, onRequestDelete, onReference, dnd, agentId, contextStatus }) {
+function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, cursorKey, treeFocused, onUploadToDir, onDownloadDir, downloadingDir, onRequestDelete, onReference, dnd, agentId, contextStatus }) {
   if (!cache) {
     return null; // not yet fetched (open root state pre-fetch)
   }
@@ -1106,6 +1183,8 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
               onToggleDir={onToggleDir}
               onSelectFile={onSelectFile}
               selectedFilePath={selectedFilePath}
+              cursorKey={cursorKey}
+              treeFocused={treeFocused}
               gitBranch={item.gitBranch || null}
               onUploadToDir={onUploadToDir}
               onDownloadDir={onDownloadDir}
@@ -1129,6 +1208,8 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
             secondary={formatBytes(item.size)}
             dim={item.hidden}
             active={selectedFilePath === childRel}
+            isCursor={cursorKey === childRel}
+            treeFocused={treeFocused}
             onClick={() => onSelectFile(childRel)}
             onDownload={agentId ? () => {
               const a = document.createElement('a');
@@ -1155,11 +1236,19 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
   );
 }
 
-function Row({ indent, icon, label, secondary, dim, active, onClick, gitBranch, onDownload, onDelete, onReference, relPath, dnd }) {
+function Row({ indent, icon, label, secondary, dim, active, isCursor = false, treeFocused = false, onClick, gitBranch, onDownload, onDelete, onReference, relPath, dnd }) {
   const [hovered, setHovered] = useState(false);
   return (
     <div
-      style={{ display: 'flex', alignItems: 'center', width: '100%' }}
+      data-tree-key={relPath}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        width: '100%',
+        background: isCursor && !active ? 'var(--eb-bg-active)' : 'transparent',
+        outline: isCursor && treeFocused ? CURSOR_OUTLINE : 'none',
+        outlineOffset: '-1px',
+      }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       // Files are not drop targets; swallow drag-over/drop so a drop landing on
@@ -1868,6 +1957,9 @@ function FileViewer({ agentId, path: relPath, onClose }) {
 }
 
 /* ─── Helpers ──────────────────────────────────────────────────────── */
+
+// Marks the keyboard cursor row while the tree has focus (#2950).
+const CURSOR_OUTLINE = '1px solid var(--eb-accent-primary)';
 
 const iconBtnStyle = {
   background: 'none',

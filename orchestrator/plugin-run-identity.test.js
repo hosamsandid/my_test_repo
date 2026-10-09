@@ -191,6 +191,25 @@ test('decision: a chat run NEVER yields the service account (AC4/AC5/AC6)', () =
   for (const x of [d]) assert.notEqual(x.mode, 'service');
 });
 
+test('decision: a failed credential read is a retryable refusal, never "add your token" (#2954)', () => {
+  // the read threw, so the adapter has no values and no site answer
+  const d = decideCredentialGrant({
+    active: chat, senderUserId: 'alice', personalValues: null, personalKeys: PERSONAL_KEYS,
+    teamSiteConfigured: false, credentialReadFailed: true, pluginName: 'Jira',
+  });
+  assert.equal(d.ok, false);
+  assert.equal(d.status, 503);
+  assert.equal(d.code, 'credential-read-failed');
+  assert.match(d.message, /try again in a moment/);
+  assert.match(d.message, /Nothing was sent to Jira/);
+  assert.doesNotMatch(d.message, /Plugin Tokens|add your/);
+  assert.equal(d.missing, undefined);
+  // an autonomous run never reads a personal credential — unaffected
+  assert.equal(decideCredentialGrant({ active: auto, credentialReadFailed: true }).mode, 'service');
+  // the sender check still comes first
+  assert.equal(decideCredentialGrant({ active: chat, senderUserId: null, credentialReadFailed: true }).code, 'untrusted-sender');
+});
+
 test('decision: a chat turn with token AND team site both present → personal grant', () => {
   const d = decideCredentialGrant({ active: chat, senderUserId: 'alice', personalValues: { email: 'a@b.c', 'api-token': 't' }, personalKeys: PERSONAL_KEYS, teamSiteConfigured: true });
   assert.equal(d.ok, true);

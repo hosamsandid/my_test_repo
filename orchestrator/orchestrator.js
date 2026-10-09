@@ -18127,6 +18127,14 @@ async function main() {
         let senderResolved = false;
         let personalValues = null;
         let teamSiteConfigured; // undefined = not checked (plugin declares no interactive connection)
+        // A missing file reads as null; anything the store THROWS is a failed read
+        // (e.g. a transient I/O error on the shared volume), not a missing
+        // credential — answered retryable instead of "add your token" (#2954).
+        let credentialReadFailed = false;
+        const noteReadFailure = (what, err) => {
+          credentialReadFailed = true;
+          console.warn(`[Orchestrator] plugin-credential-grant ${pluginId}/${scopeId} agent=${agentId}: ${what} credential read failed (${(err && (err.code || err.message)) || 'error'})`);
+        };
         if (active.ok && active.run.kind === 'chat') {
           // Fresh trust check on EVERY call — a sender removed from the team
           // mid-turn is refused on their next action.
@@ -18135,7 +18143,7 @@ async function main() {
           senderResolved = acting.resolved;
           if (senderUserId) {
             try { personalValues = (pluginCredentialStore.readPersonal(pluginId, senderUserId) || {}).values || null; }
-            catch { personalValues = null; }
+            catch (err) { personalValues = null; noteReadFailure('personal', err); }
             // A team credential key marked `requiredFor: ['interactive', …]` is a
             // connection an interactive turn needs too (Jira: `site-url`). We own
             // the same store the broker reads, so we can fold a missing site into
@@ -18146,7 +18154,7 @@ async function main() {
             if (teamConnKeys.length) {
               let teamValues = {};
               try { teamValues = (pluginCredentialStore.read(pluginId, scopeId) || {}).values || {}; }
-              catch { teamValues = {}; }
+              catch (err) { teamValues = {}; noteReadFailure('team', err); }
               teamSiteConfigured = teamConnKeys.every((k) => typeof teamValues[k] === 'string' && teamValues[k].trim());
             }
           }
@@ -18158,9 +18166,12 @@ async function main() {
           personalValues,
           personalKeys: (manifest && manifest.personalCredentials) || [],
           teamSiteConfigured,
+          credentialReadFailed,
           pluginName: (manifest && manifest.name) || pluginId,
         });
-        const who = d.ok ? (d.mode === 'personal' ? `person ${d.userId}` : 'service account') : `refused (${d.code})`;
+        const who = d.ok
+          ? (d.mode === 'personal' ? `person ${d.userId}` : 'service account')
+          : `refused (${d.code})${senderUserId ? ` user=${senderUserId}` : ''}`;
         console.log(`[Orchestrator] plugin-credential-grant ${pluginId}/${scopeId} agent=${agentId} → ${who}`);
         if (!d.ok) return sendJson(res, d.status, { ok: false, code: d.code, message: d.message, agentId, ...(d.missing ? { missing: d.missing } : {}) });
         return sendJson(res, 200, {

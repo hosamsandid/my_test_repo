@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { summarize } = require('./usage-summary');
+const { summarize, modelSplit } = require('./usage-summary');
 
 const fixture = JSON.parse(
   fs.readFileSync(path.join(__dirname, 'usage-summary.fixture.json'), 'utf8'),
@@ -221,6 +221,102 @@ test('secondaryGroupBy is ignored (output identical) when absent, unknown or equ
   assert.deepEqual(summarize(flat, { groupBy: 'agent', secondaryGroupBy: 'agent' }), single);
   assert.deepEqual(summarize(flat, { groupBy: 'agent', secondaryGroupBy: 'nonsense' }), single);
   assert.deepEqual(summarize(flat, { groupBy: 'agent', secondaryGroupBy: undefined }), single);
+});
+
+// ── #2972: model rows are per-turn and reconcile with the totals ─────────────
+// `modelUsage` is the SESSION's cumulative per-model usage (the CLI restores its
+// cost tracker on resume), while `tokens` is the turn's own. These records are a
+// resumed session: three turns of one sessionId with a growing `modelUsage`.
+
+const t4 = (input, output, cacheCreationInput, cacheReadInput) =>
+  ({ input, output, cacheCreationInput, cacheReadInput });
+const CLASSES = ['input', 'output', 'cacheCreationInput', 'cacheReadInput'];
+const RESUMED = [
+  { ts: '2026-10-13T09:00:00.000Z', agentId: 'dev', teamId: 't1', sessionId: 's1',
+    tokens: t4(10, 100, 1000, 5000),
+    modelUsage: { opus: t4(10, 100, 1000, 5000) } },
+  { ts: '2026-10-13T10:00:00.000Z', agentId: 'dev', teamId: 't1', sessionId: 's1',
+    tokens: t4(5, 50, 0, 6000),
+    modelUsage: { opus: t4(15, 150, 1000, 11000) } },
+  // A third turn that also drove a sub-agent on a second model.
+  { ts: '2026-10-13T11:00:00.000Z', agentId: 'dev', teamId: 't1', sessionId: 's1',
+    tokens: t4(4, 40, 200, 7000),
+    modelUsage: { opus: t4(18, 180, 1100, 17500), haiku: t4(3, 30, 100, 500) } },
+  // Another agent's turn with no per-model detail at all.
+  { ts: '2026-10-13T12:00:00.000Z', agentId: 'rev', teamId: 't1', sessionId: 's2',
+    tokens: t4(1, 2, 3, 4) },
+];
+
+const sumClass = (rows, k) => rows.reduce((s, r) => s + r.tokens[k], 0);
+
+test('#2972 AC1: a single-model record adds exactly its own tokens to its model row', () => {
+  for (const rec of RESUMED.slice(0, 2)) {
+    const res = summarize([rec], { groupBy: 'model' });
+    assert.deepEqual(res.groups.map((g) => g.key), ['opus']);
+    const total = CLASSES.reduce((sum, k) => sum + rec.tokens[k], 0);
+    assert.deepEqual(res.groups[0].tokens, { ...rec.tokens, total });
+  }
+  // The second turn's cumulative modelUsage (15/150/1000/11000) is NOT what counts.
+  const both = summarize(RESUMED.slice(0, 2), { groupBy: 'model' });
+  assert.deepEqual(both.groups[0].tokens, { ...t4(15, 150, 1000, 11000), total: 12165 });
+  assert.equal(both.groups[0].tokens.total, both.totals.total);
+});
+
+test('#2972 AC2: model rows add up to the stat tiles per class, gaps in an unknown row', () => {
+  const res = summarize(RESUMED, { groupBy: 'model' });
+  for (const k of [...CLASSES, 'total']) assert.equal(sumClass(res.groups, k), res.totals[k], k);
+  const unknown = res.groups.find((g) => g.key === 'unknown');
+  assert.deepEqual(unknown.tokens, { ...t4(1, 2, 3, 4), total: 10 });
+  assert.equal(unknown.invocations, 1);
+  // Also over a narrower range.
+  const late = summarize(RESUMED, { groupBy: 'model', since: '2026-10-13T10:30:00.000Z' });
+  for (const k of [...CLASSES, 'total']) assert.equal(sumClass(late.groups, k), late.totals[k], k);
+});
+
+test('#2972 AC3: a multi-model turn is split so its parts add up to its tokens, not more', () => {
+  const rec = RESUMED[2];
+  const parts = modelSplit(rec);
+  assert.deepEqual(parts.map((p) => p.key), ['opus', 'haiku']);
+  for (const k of CLASSES) {
+    assert.equal(parts.reduce((s, p) => s + p.tokens[k], 0), rec.tokens[k], k);
+    for (const p of parts) assert.ok(Number.isInteger(p.tokens[k]) && p.tokens[k] >= 0, `${p.key}.${k}`);
+  }
+  // Split by the per-class model mix: output 180:30 of 40 → 34 + 6.
+  assert.deepEqual(parts.map((p) => p.tokens.output), [34, 6]);
+  const res = summarize([rec], { groupBy: 'model' });
+  assert.equal(sumClass(res.groups, 'total'), rec.tokens.input + rec.tokens.output
+    + rec.tokens.cacheCreationInput + rec.tokens.cacheReadInput);
+});
+
+test('#2972 AC4: cross-tabs with model on either axis reconcile with their primary rows', () => {
+  for (const [primary, secondary] of [['agent', 'model'], ['model', 'agent'], ['team', 'model'], ['model', 'day']]) {
+    const res = summarize(RESUMED, { groupBy: primary, secondaryGroupBy: secondary });
+    const single = summarize(RESUMED, { groupBy: primary });
+    assert.deepEqual(res.groups.map((g) => [g.key, g.tokens]), single.groups.map((g) => [g.key, g.tokens]));
+    for (const g of res.groups) {
+      for (const k of [...CLASSES, 'total']) {
+        assert.equal(sumClass(g.subgroups, k), g.tokens[k], `${primary}×${secondary} ${g.key}.${k}`);
+      }
+    }
+  }
+});
+
+test('#2972: the split stays exact for very large cumulative figures', () => {
+  const rec = { ts: '2026-10-13T09:00:00.000Z', tokens: t4(0, 0, 0, 987654321),
+    modelUsage: { a: t4(0, 0, 0, 4e12 + 7), b: t4(0, 0, 0, 3e12 + 1), c: t4(0, 0, 0, 1) } };
+  const parts = modelSplit(rec);
+  assert.equal(parts.reduce((s, p) => s + p.tokens.cacheReadInput, 0), 987654321);
+  for (const p of parts) assert.ok(Number.isInteger(p.tokens.cacheReadInput));
+});
+
+test('#2972: a class without any per-model signal falls back to the record-wide model mix', () => {
+  // modelUsage reports no cache read for either model, but the turn had some.
+  const rec = { ts: '2026-10-13T09:00:00.000Z', tokens: t4(0, 0, 0, 100),
+    modelUsage: { a: t4(30, 0, 0, 0), b: t4(10, 0, 0, 0) } };
+  assert.deepEqual(modelSplit(rec).map((p) => p.tokens.cacheReadInput), [75, 25]);
+  assert.deepEqual(modelSplit({ tokens: t4(1, 0, 0, 0) }), []);
+  assert.deepEqual(modelSplit({ tokens: t4(3, 0, 0, 0), modelUsage: { a: t4(0, 0, 0, 0), b: t4(0, 0, 0, 0) } })
+    .map((p) => p.tokens.input), [2, 1]);
 });
 
 // The orchestrator carries a byte-identical mirror of this module (#679) so the

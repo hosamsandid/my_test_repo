@@ -172,7 +172,7 @@
       }
     },
     {
-      "name": "groupBy model, split across modelUsage, record without modelUsage contributes no model group",
+      "name": "groupBy model, tokens split across modelUsage, record without modelUsage lands in unknown (#2972: model rows add up to the totals)",
       "recordIndexes": [0, 1, 2],
       "query": { "since": null, "until": null, "groupBy": "model" },
       "expected": {
@@ -182,6 +182,7 @@
         "totals": { "input": 115, "output": 262, "cacheCreationInput": 9141, "cacheReadInput": 20218, "total": 29736, "invocations": 3 },
         "groups": [
           { "key": "claude-sonnet-4-6", "tokens": { "input": 13, "output": 60, "cacheCreationInput": 9141, "cacheReadInput": 19718, "total": 28932 }, "invocations": 2 },
+          { "key": "unknown", "tokens": { "input": 100, "output": 200, "cacheCreationInput": 0, "cacheReadInput": 500, "total": 800 }, "invocations": 1 },
           { "key": "claude-haiku-4-5", "tokens": { "input": 2, "output": 2, "cacheCreationInput": 0, "cacheReadInput": 0, "total": 4 }, "invocations": 1 }
         ]
       }

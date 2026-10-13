@@ -19,7 +19,7 @@
 //     dropping the unassigned tokens.
 
 const { buildWorkItems, TOKEN_CLASSES } = require('./work-items');
-const { summarize, GROUP_BY } = require('./usage-summary');
+const { summarize, modelSplit, GROUP_BY } = require('./usage-summary');
 
 const FORMATS = new Set(['csv', 'json']);
 
@@ -64,7 +64,8 @@ function toCsv(columns, rows) {
 
 // ── Statistics export: one row per invocation × model ────────────────────────
 // The finest honest grain of view 1. A record with per-model usage fans into
-// one row per model (each carrying that model's own class split); a record
+// one row per model, each carrying its share of the record's tokens (modelSplit,
+// #2972 — the rows of one record add up to exactly its tokens); a record
 // with no modelUsage contributes a single row with an empty model, carrying
 // its turn-wide tokens — so no invocation is dropped and totals reconcile.
 const SUMMARY_COLUMNS = [
@@ -122,10 +123,10 @@ function summaryRows(records, { since = null, until = null } = {}) {
       branch: git.branch || '',
       durationMs: num(rec.durationMs),
     };
-    const mu = rec.modelUsage && typeof rec.modelUsage === 'object' ? rec.modelUsage : {};
-    const models = Object.keys(mu);
-    if (models.length) {
-      for (const model of models.sort()) rows.push({ ...base, model, ...tokenCols(mu[model]) });
+    const split = modelSplit(rec);
+    if (split.length) {
+      const byModel = [...split].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+      for (const { key: model, tokens } of byModel) rows.push({ ...base, model, ...tokenCols(tokens) });
     } else {
       rows.push({ ...base, model: '', ...tokenCols(rec.tokens) });
     }
@@ -161,8 +162,8 @@ function summaryPivotRows(records, { since = null, until = null, groupBy, second
   for (const g of summary.groups) {
     if (secondary) {
       // A cross-tab leaf per (group × subgroup) cell — exactly the rows the
-      // expanded nested table shows. A `model` axis fans over its per-model
-      // split (as in the view), so those cells need not sum to the group total.
+      // expanded nested table shows. A `model` axis splits each run's tokens
+      // over its models (as in the view), so the cells add up to the group (#2972).
       for (const s of g.subgroups || []) {
         rows.push({ group: g.key, subgroup: s.key, ...tokenCols(s.tokens), invocations: s.invocations });
       }

@@ -285,7 +285,9 @@ export const WORK_ITEM_TILE_HELP = {
 // model. Keys mirror the tile ids: the two totals plus the four TOKEN_CLASSES.
 export const STAT_TILE_HELP = {
   total:
-    'Sum of all token classes (input, output, cache write and cache read) across every agent run in this period.',
+    'Sum of all token classes (input, output, cache write and cache read) across every agent run in this period. '
+    + 'Grouped by model, each run\'s tokens are split across the models it used, so the model rows add up to this total; '
+    + 'runs that recorded no model are listed as "unknown".',
   invocations:
     'Number of model calls (agent runs) that produced these tokens in this period.',
   input:

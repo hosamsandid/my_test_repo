@@ -173,9 +173,9 @@ const SRC = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url
 test('TokenUsage.jsx feeds the chart from chartSummaryUrl and switches on chartDimension', () => {
   assert.match(SRC, /chartSummaryUrl\(\{ since, until, team, groupBy, granularity: sourceGranularity\(bucket\) \}\)/);
   assert.match(SRC, /chartDimension\(chartSummary\)/);
-  assert.match(SRC, /chartDim === 'day' \? \(\s*<TimeSeries/);
+  assert.match(SRC, /chartDim === 'day' \? \(\s*chartType === 'donut' \? \(\s*<ClassShareChart[\s\S]{0,120}\) : \(\s*<TimeSeries/);
   assert.match(SRC, /<GroupTimeSeries/);
-  assert.match(SRC, /\{chartTitle\(chartDim, bucketUnit\(drawnBucket\)\)\}/);
+  assert.match(SRC, /chartTypeTitle\(chartType, chartDim, bucketUnit\(drawnBucket\)\)/);
   // The secondary dimension never reaches the chart request (AC11).
   assert.doesNotMatch(SRC, /chartSummaryUrl\([^)]*secondaryGroupBy/);
   // Refresh reloads the chart too.

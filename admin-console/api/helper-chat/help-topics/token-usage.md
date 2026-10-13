@@ -159,6 +159,20 @@ range get their own colour; any further values are combined into one grey
 table. With *Group by day* the chart keeps its breakdown by token class. The
 *then by* dimension changes only the table, not the chart.
 
+The **Chart** control switches how the chart is drawn: **Stacked bars over
+time**, **Lines over time** (one line per value, same figures as the bars),
+**Donut (share)** — each value's share of the range total, with percentages —
+or **Ranking**, the range totals as horizontal bars, largest first and *Other*
+last. Model, provider and provider tier start as a donut, agent, team and user
+as a ranking, and day as stacked bars; a type you pick is kept for the rest of
+the visit, through Refresh, range and *Group by* changes. With *Group by day*
+the donut splits the range by token class (matching the four class tiles) and
+Ranking is not offered. Every type uses the same colours, top-8 + *Other* and
+legend: hiding a series removes it everywhere, and the donut's percentages are
+recalculated over what is left. Hover over or tab to a slice or bar to read its
+label, exact number and share. The **Bucket** control applies only to the
+over-time types.
+
 Clicking a legend entry hides or shows that series, and the y-axis rescales to
 what is left — useful because cache reads, or one busy agent, routinely dwarf
 everything else. The toggles affect only the chart: the tiles, the table and the

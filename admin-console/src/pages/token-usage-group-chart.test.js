@@ -171,11 +171,11 @@ test('series colours reach 3:1 on the chart surface in every theme and are pairw
 const SRC = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'TokenUsage.jsx'), 'utf8');
 
 test('TokenUsage.jsx feeds the chart from chartSummaryUrl and switches on chartDimension', () => {
-  assert.match(SRC, /chartSummaryUrl\(\{ since, team, groupBy \}\)/);
+  assert.match(SRC, /chartSummaryUrl\(\{ since, until, team, groupBy, granularity: sourceGranularity\(bucket\) \}\)/);
   assert.match(SRC, /chartDimension\(chartSummary\)/);
   assert.match(SRC, /chartDim === 'day' \? \(\s*<TimeSeries/);
   assert.match(SRC, /<GroupTimeSeries/);
-  assert.match(SRC, /\{chartTitle\(chartDim\)\}/);
+  assert.match(SRC, /\{chartTitle\(chartDim, bucketUnit\(drawnBucket\)\)\}/);
   // The secondary dimension never reaches the chart request (AC11).
   assert.doesNotMatch(SRC, /chartSummaryUrl\([^)]*secondaryGroupBy/);
   // Refresh reloads the chart too.

@@ -56,7 +56,9 @@ test('the named controls use labels matching their purpose', () => {
     .filter((t) => t.tag.startsWith(`<select value={${value}}`))
     .map((t) => (t.tag.match(/aria-label="([^"]*)"/) || [])[1]);
   assert.deepEqual(labelOf(ev, 'rangeKey'), ['Time range']);
-  assert.deepEqual(labelOf(tu, 'rangeKey'), ['Time range', 'Time range', 'Time range']);
+  // #2974: one shared RangeControl renders the range select for all three tabs.
+  assert.deepEqual(labelOf(tu, 'rangeSelection'), ['Time range']);
+  assert.deepEqual(labelOf(tu, 'bucketChoice'), ['Bucket size']);
   assert.deepEqual(labelOf(tu, 'groupBy'), ['Group by']);
   assert.deepEqual(labelOf(tu, 'model'), ['Model']);
 });

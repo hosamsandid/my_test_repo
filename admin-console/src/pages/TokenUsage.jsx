@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useId } from 'react';
 import { RefreshCw, Download } from 'lucide-react';
 import { useNavigate } from 'react-router';
 import { useApi } from '../hooks/useApi';
@@ -9,7 +9,8 @@ import InfoTip from '../components/InfoTip';
 import PageHelpButton from '../components/PageHelpButton';
 import { TOKEN_USAGE_HELP_SECTIONS } from './token-usage-help-sections.js';
 import { toRows as agentModelRows, modelOptions, filterRowsByModel, isCurrentModel } from './agent-models-view.js';
-import { TOKEN_CLASSES, CLASS_COLOR, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, sanitizeHiddenClasses, loadHiddenClasses, saveHiddenClasses, userLabelIndex, agentTeamFilterOptions, userGroupCell, providerTierCell, secondaryGroupOptions, groupValueCell, chartSummaryUrl, chartDimension, chartTitle, buildGroupDaySeries, seriesLabel, groupStack, groupVisibleMax, hiddenSeriesFor, toggleHiddenSeries } from './token-usage-view.js';
+import { TOKEN_CLASSES, CLASS_COLOR, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, sanitizeHiddenClasses, loadHiddenClasses, saveHiddenClasses, userLabelIndex, agentTeamFilterOptions, userGroupCell, providerTierCell, secondaryGroupOptions, groupValueCell, chartSummaryUrl, chartDimension, chartGranularity, chartTitle, buildGroupDaySeries, seriesLabel, groupStack, groupVisibleMax, hiddenSeriesFor, toggleHiddenSeries } from './token-usage-view.js';
+import { RANGE_PRESETS, DEFAULT_RANGE, BUCKET_OPTIONS, rangeBounds, rangeQuery, rangeQueryString, customRangeError, dateInputValue, resolveBucket, hourBucketAllowed, bucketDisplay, autoBucket, sourceGranularity, earliestKeyStart, rebucketClassPoints, rebucketGroupPoints, bucketRangeText, axisLabels, barLayout, bucketUnit } from './token-usage-range.js';
 
 // Trigger a browser download of an export URL. The endpoints are behind the
 // auth-cookie gate, so a same-origin anchor navigation carries the session.
@@ -24,13 +25,13 @@ function downloadExport(url) {
 
 // CSV / JSON export buttons for a view (#656 phase 3). `team` narrows the
 // export to the page's selected team (#801) — undefined/'' means all teams.
-function ExportButtons({ kind, since, team, groupBy, secondaryGroupBy }) {
+function ExportButtons({ kind, since, until, team, groupBy, secondaryGroupBy }) {
   return (
     <span style={{ display: 'inline-flex', gap: 'var(--eb-space-1)' }}>
       {['csv', 'json'].map((format) => (
         <button
           key={format}
-          onClick={() => downloadExport(buildExportUrl(kind, { since, format, team, groupBy, secondaryGroupBy }))}
+          onClick={() => downloadExport(buildExportUrl(kind, { since, until, format, team, groupBy, secondaryGroupBy }))}
           title={`Download ${format.toUpperCase()} (tokens only — apply prices downstream)`}
           style={{ ...CONTROL_STYLE, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}
         >
@@ -41,13 +42,57 @@ function ExportButtons({ kind, since, team, groupBy, secondaryGroupBy }) {
   );
 }
 
-/* ── Time-range presets ────────────────────────────────────────────── */
-const RANGE_PRESETS = [
-  { key: '7d', label: 'Last 7 days', hours: 24 * 7 },
-  { key: '24h', label: 'Last 24 hours', hours: 24 },
-  { key: '30d', label: 'Last 30 days', hours: 24 * 30 },
-  { key: 'all', label: 'All time', hours: null },
-];
+/* ── Time range (#2974) ────────────────────────────────────────────── */
+// The range control shared by all three tabs: the presets (RANGE_PRESETS) plus
+// a custom from–to pair of dates, both inclusive. A preset applies at once; a
+// custom range applies on "Apply", which stays disabled — with the reason
+// next to it — while the end date is before the start date (AC3). Every
+// boundary is UTC, so the control says so.
+function RangeControl({ value, onChange }) {
+  const [rangeSelection, setRangeSelection] = useState(value.key);
+  const today = dateInputValue(Date.now());
+  const [from, setFrom] = useState(value.from || dateInputValue(Date.now() - 6 * 24 * 60 * 60 * 1000));
+  const [to, setTo] = useState(value.to || today);
+  const errorId = useId();
+  const invalid = customRangeError(from, to);
+  const select = (key) => {
+    setRangeSelection(key);
+    if (key !== 'custom') onChange({ key });
+  };
+  const apply = (e) => {
+    e.preventDefault();
+    if (!invalid) onChange({ key: 'custom', from, to });
+  };
+  const labelStyle = { display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' };
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+      <select value={rangeSelection} onChange={(e) => select(e.target.value)} style={CONTROL_STYLE} aria-label="Time range">
+        {RANGE_PRESETS.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
+      </select>
+      <span title="Range boundaries and chart bars use UTC" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>UTC</span>
+      {rangeSelection === 'custom' ? (
+        <form onSubmit={apply} style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+          <label style={labelStyle}>
+            From
+            <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} style={CONTROL_STYLE}
+              aria-invalid={!!invalid} aria-describedby={invalid ? errorId : undefined} />
+          </label>
+          <label style={labelStyle}>
+            To
+            <input type="date" value={to} onChange={(e) => setTo(e.target.value)} style={CONTROL_STYLE}
+              aria-invalid={!!invalid} aria-describedby={invalid ? errorId : undefined} />
+          </label>
+          <button type="submit" disabled={!!invalid} style={{ ...CONTROL_STYLE, cursor: invalid ? 'not-allowed' : 'pointer', opacity: invalid ? 0.6 : 1 }}>
+            Apply
+          </button>
+          {invalid ? (
+            <span id={errorId} role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{invalid}</span>
+          ) : null}
+        </form>
+      ) : null}
+    </span>
+  );
+}
 
 /* ── Summary card ──────────────────────────────────────────────────── */
 // `help`, when set, adds an InfoTip "?" affordance next to the label (#832):
@@ -77,7 +122,7 @@ function StatCard({ label, value, accent, help, title }) {
   );
 }
 
-/* ── Stacked time-series (by day) ──────────────────────────────────── */
+/* ── Stacked time-series (hour / day / week / month bars) ─────────── */
 // Chart geometry (#699). The y-axis gutter and x-axis label row are fixed so
 // the plot area has a definite height (bar `%` heights need it, #696) and the
 // date labels sit in their own row beneath the plot, never over the bars.
@@ -85,13 +130,16 @@ const PLOT_HEIGHT = 180;
 const Y_AXIS_WIDTH = 48;
 const X_LABEL_HEIGHT = 44;
 
-// The shared plot (#699 geometry): y-axis ticks, gridlines, one column per day
-// drawn by `renderBar`, and the date row beneath. Both the token-class chart and
-// the group-value chart (#2973) draw through it, so the two never drift apart.
-function DayStackPlot({ points, top, ticks, allHidden, renderBar }) {
-  // Thin the x labels so a wide range (e.g. 30 days) never crowds — show at
-  // most ~12, always including the first, each still centered under its bar.
-  const labelStride = Math.max(1, Math.ceil(points.length / 12));
+// The shared plot (#699 geometry): y-axis ticks, gridlines, one column per
+// bucket drawn by `renderBar`, and the date row beneath. Both the token-class
+// chart and the group-value chart (#2973) draw through it, so the two never
+// drift apart. `points` are rebucketed bars ({ key, start, end, … }, #2974).
+function DayStackPlot({ points, bucket, top, ticks, allHidden, renderBar }) {
+  // Thin the x labels so a wide range never crowds — at most ~12, always
+  // including the first, each still centered under its bar (axisLabels).
+  const labels = axisLabels(points, bucket);
+  // Many bars (up to ~170 hourly ones) get a narrower gap so they still fit.
+  const { gap, minWidth } = barLayout(points.length);
   return (
     <>
       <div style={{ display: 'flex', paddingTop: 8, position: 'relative' }}>
@@ -131,9 +179,9 @@ function DayStackPlot({ points, top, ticks, allHidden, renderBar }) {
               }}
             />
           ))}
-          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'flex-end', gap: 'var(--eb-space-2)', padding: '0 var(--eb-space-1)' }}>
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'flex-end', gap, padding: '0 var(--eb-space-1)' }}>
             {points.map((p) => (
-              <div key={p.day} style={{ flex: '1 1 0', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', alignItems: 'center', minWidth: 8, height: '100%' }}>
+              <div key={p.key} style={{ flex: '1 1 0', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', alignItems: 'center', minWidth, height: '100%' }}>
                 {renderBar(p)}
               </div>
             ))}
@@ -144,25 +192,29 @@ function DayStackPlot({ points, top, ticks, allHidden, renderBar }) {
           matching a bar cell (same left gutter + gap) so labels stay centered. */}
       <div style={{ display: 'flex', height: X_LABEL_HEIGHT }}>
         <div style={{ width: Y_AXIS_WIDTH, flex: '0 0 auto' }} />
-        <div style={{ display: 'flex', flex: '1 1 0', gap: 'var(--eb-space-2)', padding: '0 var(--eb-space-1)' }}>
+        <div style={{ display: 'flex', flex: '1 1 0', gap, padding: '0 var(--eb-space-1)' }}>
           {points.map((p, i) => (
-            <div key={p.day} style={{ flex: '1 1 0', minWidth: 8, display: 'flex', justifyContent: 'center' }}>
-              {i % labelStride === 0 ? (
+            <div key={p.key} style={{ flex: '1 1 0', minWidth, display: 'flex', justifyContent: 'center' }}>
+              {labels[i] != null ? (
                 <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 6, whiteSpace: 'nowrap', transform: 'rotate(-45deg)', transformOrigin: 'top right' }}>
-                  {p.day.slice(5)}
+                  {labels[i]}
                 </div>
               ) : null}
             </div>
           ))}
         </div>
       </div>
+      <div style={{ textAlign: 'right', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Time (UTC)</div>
     </>
   );
 }
 
-// Group by = Day: one bar per day stacked by token class (unchanged by #2973).
-function TimeSeries({ summary, hidden, onToggle }) {
-  const { points } = useMemo(() => buildDaySeries(summary), [summary]);
+// Group by = Day: one bar per bucket stacked by token class (unchanged by
+// #2973). `bucket` and the [start, end) window (#2974) shape the bars; every
+// bucket in the window is drawn, empty ones at zero height.
+function TimeSeries({ summary, bucket, start, end, hidden, onToggle }) {
+  const raw = useMemo(() => buildDaySeries(summary).points, [summary]);
+  const points = useMemo(() => rebucketClassPoints(raw, { bucket, start, end }), [raw, bucket, start, end]);
   // The axis + bar heights are driven by the currently-VISIBLE classes (#1707),
   // so hiding the dominant cache series rescales the whole plot (AC4/AC5).
   const maxTotal = useMemo(() => visibleMaxTotal(points, hidden), [points, hidden]);
@@ -171,7 +223,7 @@ function TimeSeries({ summary, hidden, onToggle }) {
   // empty-state rather than a broken axis (Open Q3 / AC edge). The legend below
   // stays interactive so the user can switch a series back on.
   const allHidden = visibleClassList(hidden).length === 0;
-  if (points.length === 0) {
+  if (raw.length === 0) {
     return (
       <div>
         <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>No usage in this range.</div>
@@ -188,7 +240,7 @@ function TimeSeries({ summary, hidden, onToggle }) {
     const colHeightPct = top > 0 ? (vTotal / top) * 100 : 0;
     return (
       <div
-        title={`${p.day}: ${formatInt(vTotal)} tokens, ${formatInt(p.invocations)} invocations`}
+        title={`${bucketRangeText(p, bucket, start, end)}: ${formatInt(vTotal)} tokens, ${formatInt(p.invocations)} invocations`}
         style={{ width: '100%', maxWidth: 48, height: `${colHeightPct}%`, minHeight: colHeightPct > 0 ? 2 : 0, display: 'flex', flexDirection: 'column-reverse', borderRadius: 'var(--eb-radius-sm)', overflow: 'hidden' }}
       >
         {segs.map((s) => (
@@ -199,7 +251,7 @@ function TimeSeries({ summary, hidden, onToggle }) {
   };
   return (
     <div>
-      <DayStackPlot points={points} top={top} ticks={ticks} allHidden={allHidden} renderBar={renderBar} />
+      <DayStackPlot points={points} bucket={bucket} top={top} ticks={ticks} allHidden={allHidden} renderBar={renderBar} />
       <Legend hidden={hidden} onToggle={onToggle} />
     </div>
   );
@@ -209,15 +261,16 @@ function TimeSeries({ summary, hidden, onToggle }) {
 // largest CHART_SERIES_LIMIT values plus one "Other". Segments are separated by
 // a 2px surface gap so adjacent colours stay distinguishable (AC10), and each
 // segment's tooltip names its value and token count.
-function GroupTimeSeries({ summary, dim, userNames, hidden, onToggle }) {
-  const { series, points } = useMemo(() => buildGroupDaySeries(summary), [summary]);
+function GroupTimeSeries({ summary, dim, bucket, start, end, userNames, hidden, onToggle }) {
+  const { series, points: raw } = useMemo(() => buildGroupDaySeries(summary), [summary]);
+  const points = useMemo(() => rebucketGroupPoints(raw, { bucket, start, end }), [raw, bucket, start, end]);
   const labels = useMemo(
     () => new Map(series.map((s) => [s.key, seriesLabel(dim, s, userNames)])),
     [series, dim, userNames],
   );
   const maxTotal = useMemo(() => groupVisibleMax(points, series, hidden), [points, series, hidden]);
   const { top, ticks } = useMemo(() => niceScale(maxTotal), [maxTotal]);
-  if (points.length === 0) {
+  if (raw.length === 0) {
     return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>No usage in this range.</div>;
   }
   const allHidden = series.every((s) => hidden.includes(s.key));
@@ -226,13 +279,13 @@ function GroupTimeSeries({ summary, dim, userNames, hidden, onToggle }) {
     const colHeightPct = top > 0 ? (total / top) * 100 : 0;
     return (
       <div
-        title={`${p.day}: ${formatInt(total)} tokens`}
+        title={`${bucketRangeText(p, bucket, start, end)}: ${formatInt(total)} tokens`}
         style={{ width: '100%', maxWidth: 48, height: `${colHeightPct}%`, minHeight: colHeightPct > 0 ? 2 : 0, display: 'flex', flexDirection: 'column-reverse', borderRadius: 'var(--eb-radius-sm)', overflow: 'hidden' }}
       >
         {segments.map((s, i) => (
           <div
             key={s.key}
-            title={`${p.day} · ${labels.get(s.key).label}: ${formatInt(s.value)} tokens`}
+            title={`${bucketRangeText(p, bucket, start, end)} · ${labels.get(s.key).label}: ${formatInt(s.value)} tokens`}
             style={{
               height: `${(s.value / (total || 1)) * 100}%`, background: s.color, boxSizing: 'border-box',
               borderTop: i < segments.length - 1 ? '2px solid var(--eb-bg-elevated)' : undefined,
@@ -244,7 +297,7 @@ function GroupTimeSeries({ summary, dim, userNames, hidden, onToggle }) {
   };
   return (
     <div>
-      <DayStackPlot points={points} top={top} ticks={ticks} allHidden={allHidden} renderBar={renderBar} />
+      <DayStackPlot points={points} bucket={bucket} top={top} ticks={ticks} allHidden={allHidden} renderBar={renderBar} />
       <SeriesLegend
         items={series.map((s) => ({ key: s.key, color: s.color, ...labels.get(s.key) }))}
         hidden={hidden}
@@ -336,13 +389,16 @@ function teamQuery(team) {
   return team ? `team=${encodeURIComponent(team)}&` : '';
 }
 
-// Derive the ISO `since` (and its `until`) query params for a range preset.
-function useRangeWindow(rangeKey) {
+// Derive the ISO `since` / `until` query params and the [start, end) window in
+// ms for a range (#2974). Fixed at selection time, like before: Refresh keeps
+// the window.
+function useRangeWindow(range) {
+  const { key, from, to } = range;
   return useMemo(() => {
-    const preset = RANGE_PRESETS.find((r) => r.key === rangeKey) || RANGE_PRESETS[0];
-    if (preset.hours == null) return { since: null };
-    return { since: new Date(Date.now() - preset.hours * 60 * 60 * 1000).toISOString() };
-  }, [rangeKey]);
+    const now = Date.now();
+    const r = { key, from, to };
+    return { ...rangeQuery(r, now), ...rangeBounds(r, now) };
+  }, [key, from, to]);
 }
 
 /* ── Nested (cross-tab) summary table (#2440) ──────────────────────── */
@@ -424,14 +480,16 @@ function NestedSummaryTable({ summary, groupBy, secondaryGroupBy, userNames }) {
 
 /* ── Statistics tab (view 1, #654) ─────────────────────────────────── */
 function StatisticsTab({ team }) {
-  const [rangeKey, setRangeKey] = useState('7d');
+  const [range, setRange] = useState(DEFAULT_RANGE);
+  // #2974: chart bar size — 'auto' or a fixed hour / day / week / month.
+  const [bucketChoice, setBucketChoice] = useState('auto');
   const [groupBy, setGroupBy] = useState('agent');
   // #2440: an optional second grouping level (cross-tab drill-down). '' = None,
   // which restores the exact single-dimension behaviour. A self-cross is never
   // offered (secondaryGroupOptions drops the primary); if the primary changes
   // onto the current secondary, the effect below clears it.
   const [secondaryGroupBy, setSecondaryGroupBy] = useState('');
-  const { since } = useRangeWindow(rangeKey);
+  const { since, until, start, end } = useRangeWindow(range);
   useEffect(() => {
     if (secondaryGroupBy === groupBy) setSecondaryGroupBy('');
   }, [groupBy, secondaryGroupBy]);
@@ -457,16 +515,32 @@ function StatisticsTab({ team }) {
   // are not persisted across reloads.
   const [hiddenGroups, setHiddenGroups] = useState({});
 
-  const sinceQ = since ? `since=${encodeURIComponent(since)}&` : '';
+  const rangeQ = rangeQueryString({ since, until });
   const teamQ = teamQuery(team);
   const secondaryQ = nested ? `secondaryGroupBy=${encodeURIComponent(secondaryGroupBy)}&` : '';
-  const summaryUrl = `/api/usage/summary?${sinceQ}${teamQ}${secondaryQ}groupBy=${encodeURIComponent(groupBy)}`;
-  // #2973: the chart follows the PRIMARY Group by (split by day); the secondary
-  // "then by" only changes the table.
-  const chartUrl = chartSummaryUrl({ since, team, groupBy });
-
+  const summaryUrl = `/api/usage/summary?${rangeQ}${teamQ}${secondaryQ}groupBy=${encodeURIComponent(groupBy)}`;
   const { data: summary, loading, error, refetch } = useApi(summaryUrl);
-  const { data: chartSummary, refetch: refetchChart } = useApi(chartUrl);
+
+  // #2974: the bar size follows the window's span. All time has no start, so
+  // its window starts at the earliest record in the chart data (the previous
+  // response is kept while a new one loads, so this never flickers to null).
+  // A response still at day granularity while hourly bars are on their way is
+  // drawn as days rather than squeezed into hour slots.
+  const [chartSummary, setChartSummary] = useState(null);
+  const chartPointsOf = (cs) => (chartDimension(cs) === 'day' ? buildDaySeries(cs).points : buildGroupDaySeries(cs).points);
+  const windowStart = start != null ? start : earliestKeyStart(chartPointsOf(chartSummary));
+  const span = windowStart != null ? end - windowStart : null;
+  const bucket = resolveBucket(bucketChoice, span);
+  // #2973: the chart follows the PRIMARY Group by (split by day / hour); the
+  // secondary "then by" only changes the table.
+  const chartUrl = chartSummaryUrl({ since, until, team, groupBy, granularity: sourceGranularity(bucket) });
+  const { data: chartData, refetch: refetchChart } = useApi(chartUrl);
+  useEffect(() => { setChartSummary(chartData); }, [chartData]);
+  const drawnBucket = bucket === 'hour' && chartGranularity(chartSummary) !== 'hour' ? 'day' : bucket;
+  // A manual Hour that the new range is too long for drops back to Auto.
+  useEffect(() => {
+    if (bucketChoice === 'hour' && span != null && !hourBucketAllowed(span)) setBucketChoice('auto');
+  }, [bucketChoice, span]);
 
   // #2137: a `groupBy=user` key is a stable account id, which is useless on
   // screen. Names are resolved at read time from the OPEN directory (display
@@ -537,9 +611,7 @@ function StatisticsTab({ team }) {
   return (
     <>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
-        <select value={rangeKey} onChange={(e) => setRangeKey(e.target.value)} style={CONTROL_STYLE} aria-label="Time range">
-          {RANGE_PRESETS.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
-        </select>
+        <RangeControl value={range} onChange={setRange} />
         <label style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Group by</label>
         <select value={groupBy} onChange={(e) => setGroupBy(e.target.value)} style={CONTROL_STYLE} aria-label="Group by">
           {GROUP_OPTIONS.map((g) => <option key={g.key} value={g.key}>{g.label}</option>)}
@@ -558,7 +630,7 @@ function StatisticsTab({ team }) {
         <button onClick={refresh} style={{ ...CONTROL_STYLE, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
           <RefreshCw size={14} /> Refresh
         </button>
-        <ExportButtons kind="summary" since={since} team={team} groupBy={groupBy} secondaryGroupBy={nested ? secondaryGroupBy : ''} />
+        <ExportButtons kind="summary" since={since} until={until} team={team} groupBy={groupBy} secondaryGroupBy={nested ? secondaryGroupBy : ''} />
         {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
       </div>
 
@@ -576,15 +648,32 @@ function StatisticsTab({ team }) {
         border: '1px solid var(--eb-border-default)',
         borderRadius: 'var(--eb-radius-lg)',
       }}>
-        <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-3)' }}>
-          {chartTitle(chartDim)}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--eb-space-3)', flexWrap: 'wrap', marginBottom: 'var(--eb-space-3)' }}>
+          <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+            {chartTitle(chartDim, bucketUnit(drawnBucket))}
+          </div>
+          {/* #2974: bar size. Auto names what it picked, e.g. "Auto (Week)";
+              Hour is offered only for spans of 7 days or less. */}
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+            Bucket
+            <select value={bucketChoice} onChange={(e) => setBucketChoice(e.target.value)} style={CONTROL_STYLE} aria-label="Bucket size">
+              {BUCKET_OPTIONS.map((o) => (
+                <option key={o.key} value={o.key} disabled={o.key === 'hour' && !hourBucketAllowed(span)}>
+                  {o.key === 'auto' ? bucketDisplay('auto', span == null ? 'day' : autoBucket(span)) : o.label}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
         {chartDim === 'day' ? (
-          <TimeSeries summary={chartSummary} hidden={hidden} onToggle={toggleSeries} />
+          <TimeSeries summary={chartSummary} bucket={drawnBucket} start={windowStart} end={end} hidden={hidden} onToggle={toggleSeries} />
         ) : (
           <GroupTimeSeries
             summary={chartSummary}
             dim={chartDim}
+            bucket={drawnBucket}
+            start={windowStart}
+            end={end}
             userNames={userNames}
             hidden={hiddenSeriesFor(hiddenGroups, chartDim)}
             onToggle={(key) => setHiddenGroups((cur) => toggleHiddenSeries(cur, chartDim, key))}
@@ -634,13 +723,13 @@ function tierSummary(tiers = {}) {
     .join(' ') || '—';
 }
 
-function WorkItemDetail({ item, since, team, navigate }) {
+function WorkItemDetail({ item, since, until, team, navigate }) {
   const [owner, repoName] = (item.repo || '/').split('/');
   const addr = item.prs[0] != null ? item.prs[0] : item.issues[0];
-  const sinceQ = since ? `since=${encodeURIComponent(since)}&` : '';
+  const rangeQ = rangeQueryString({ since, until });
   const teamQ = teamQuery(team);
   const url = owner && repoName && addr != null
-    ? `/api/usage/work-items/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/${addr}?${sinceQ}${teamQ}`
+    ? `/api/usage/work-items/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/${addr}?${rangeQ}${teamQ}`
     : null;
   const { data, loading } = useApi(url);
 
@@ -716,13 +805,13 @@ function WorkItemDetail({ item, since, team, navigate }) {
 
 function WorkItemsTab({ team }) {
   const navigate = useNavigate();
-  const [rangeKey, setRangeKey] = useState('7d');
+  const [range, setRange] = useState(DEFAULT_RANGE);
   const [selected, setSelected] = useState(null);
-  const { since } = useRangeWindow(rangeKey);
+  const { since, until } = useRangeWindow(range);
 
-  const sinceQ = since ? `since=${encodeURIComponent(since)}&` : '';
+  const rangeQ = rangeQueryString({ since, until });
   const teamQ = teamQuery(team);
-  const { data, loading, error, refetch } = useApi(`/api/usage/work-items?${sinceQ}${teamQ}`);
+  const { data, loading, error, refetch } = useApi(`/api/usage/work-items?${rangeQ}${teamQ}`);
 
   const cov = data?.coverage || { runs: { attributed: 0, unattributed: 0, total: 0 }, tokens: { attributed: 0, unattributed: 0, total: 0 }, attributedPct: 0 };
   const unatt = data?.unattributed || { total: 0, runs: 0 };
@@ -784,13 +873,11 @@ function WorkItemsTab({ team }) {
   return (
     <>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
-        <select value={rangeKey} onChange={(e) => setRangeKey(e.target.value)} style={CONTROL_STYLE} aria-label="Time range">
-          {RANGE_PRESETS.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
-        </select>
+        <RangeControl value={range} onChange={setRange} />
         <button onClick={refetch} style={{ ...CONTROL_STYLE, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
           <RefreshCw size={14} /> Refresh
         </button>
-        <ExportButtons kind="work-items" since={since} team={team} />
+        <ExportButtons kind="work-items" since={since} until={until} team={team} />
         {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
       </div>
 
@@ -822,7 +909,7 @@ function WorkItemsTab({ team }) {
       )}
 
       {selected && rows.find((r) => r.id === selected) && (
-        <WorkItemDetail item={rows.find((r) => r.id === selected)._raw} since={since} team={team} navigate={navigate} />
+        <WorkItemDetail item={rows.find((r) => r.id === selected)._raw} since={since} until={until} team={team} navigate={navigate} />
       )}
     </>
   );
@@ -856,13 +943,13 @@ function ModelChip({ model, current }) {
 }
 
 function AgentModelsTab({ team }) {
-  const [rangeKey, setRangeKey] = useState('7d');
+  const [range, setRange] = useState(DEFAULT_RANGE);
   const [model, setModel] = useState(''); // '' = all models
-  const { since } = useRangeWindow(rangeKey);
+  const { since, until } = useRangeWindow(range);
 
-  const sinceQ = since ? `since=${encodeURIComponent(since)}&` : '';
+  const rangeQ = rangeQueryString({ since, until });
   const teamQ = teamQuery(team);
-  const { data, loading, error, refetch } = useApi(`/api/usage/agent-models?${sinceQ}${teamQ}`);
+  const { data, loading, error, refetch } = useApi(`/api/usage/agent-models?${rangeQ}${teamQ}`);
 
   const allRows = useMemo(() => agentModelRows(data), [data]);
   const models = useMemo(() => modelOptions(data), [data]);
@@ -892,9 +979,7 @@ function AgentModelsTab({ team }) {
   return (
     <>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
-        <select value={rangeKey} onChange={(e) => setRangeKey(e.target.value)} style={CONTROL_STYLE} aria-label="Time range">
-          {RANGE_PRESETS.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
-        </select>
+        <RangeControl value={range} onChange={setRange} />
         <label style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Model</label>
         <select value={model} onChange={(e) => setModel(e.target.value)} style={CONTROL_STYLE} aria-label="Model">
           <option value="">All models</option>

@@ -44,6 +44,10 @@ export const GROUP_OPTIONS = [
 // The `unknown` key the aggregator uses for a record whose group value could not
 // be resolved. Written down once so the label rules below and the table cell
 // cannot disagree about which key means "no answer".
+// Time keys the summary endpoint also groups by that are NOT offered as a
+// table Group by: `hour` (#2974) exists only for the chart's hourly bars.
+export const CHART_ONLY_GROUPINGS = ['hour'];
+
 export const UNKNOWN_GROUP_KEY = 'unknown';
 
 // How each provider tier reads in the table (#2137 AC2), and what it means.
@@ -327,11 +331,13 @@ export const PAGE_DESCRIPTION =
 
 // Build the flat-export download URL (#656) for a view. `kind` is
 // 'summary' | 'work-items', `format` is 'csv' | 'json'. Carries the current
-// time window (`since`) so the export matches what's on screen; the server
-// applies the same team scope as the view endpoints.
-export function buildExportUrl(kind, { since, format, team, groupBy, secondaryGroupBy } = {}) {
+// time window (`since`, and `until` for a closed range, #2974) so the export
+// matches what's on screen; the server applies the same team scope as the view
+// endpoints.
+export function buildExportUrl(kind, { since, until, format, team, groupBy, secondaryGroupBy } = {}) {
   const params = new URLSearchParams();
   if (since) params.set('since', since);
+  if (until) params.set('until', until);
   // `team` narrows the export to a single team (#801); a blank/absent value
   // means "all teams" and is simply omitted so the export stays unfiltered.
   if (team) params.set('team', team);
@@ -504,25 +510,37 @@ export const SERIES_COLORS = [
 ];
 export const OTHER_SERIES_COLOR = 'var(--eb-chart-series-other)';
 
+const isTimeKey = (g) => g === 'day' || g === 'hour';
+
 // The dimension a chart summary was computed for: the primary `groupBy` when
-// the response is split by day, else 'day'. Read from the response rather than
-// the select so a still-loading request never draws one dimension's data under
-// another dimension's labels.
+// the response is split by day or hour, else 'day'. Read from the response
+// rather than the select so a still-loading request never draws one
+// dimension's data under another dimension's labels.
 export function chartDimension(summary) {
-  return summary && summary.secondaryGroupBy === 'day' && summary.groupBy && summary.groupBy !== 'day'
+  return summary && isTimeKey(summary.secondaryGroupBy) && summary.groupBy && !isTimeKey(summary.groupBy)
     ? summary.groupBy
     : 'day';
 }
 
+// The time key a chart summary's points carry — 'hour' or 'day' (#2974). Read
+// from the response for the same reason as chartDimension.
+export function chartGranularity(summary) {
+  return summary && (summary.groupBy === 'hour' || summary.secondaryGroupBy === 'hour') ? 'hour' : 'day';
+}
+
 // The chart request for the selected primary dimension. The secondary "then by"
 // is deliberately not an input (#2973 AC11): it changes only the table.
-export function chartSummaryUrl({ since, team, groupBy } = {}) {
+// `granularity` (#2974) is the server time key the bars are built from:
+// 'hour' for hourly bars, else 'day' (week / month are rolled up from days).
+export function chartSummaryUrl({ since, until, team, groupBy, granularity } = {}) {
   const params = new URLSearchParams();
   if (since) params.set('since', since);
+  if (until) params.set('until', until);
   if (team) params.set('team', team);
-  const dim = GROUP_OPTIONS.some((g) => g.key === groupBy) ? groupBy : 'day';
-  params.set('groupBy', dim);
-  if (dim !== 'day') params.set('secondaryGroupBy', 'day');
+  const time = granularity === 'hour' ? 'hour' : 'day';
+  const dim = GROUP_OPTIONS.some((g) => g.key === groupBy) && groupBy !== 'day' ? groupBy : null;
+  params.set('groupBy', dim || time);
+  if (dim) params.set('secondaryGroupBy', time);
   return `/api/usage/summary?${params.toString()}`;
 }
 
@@ -585,10 +603,11 @@ export function seriesLabel(dim, series, userNames) {
 }
 
 // Chart title for a dimension: "Tokens per day" for Day (unchanged), else
-// "Tokens per day by <Dimension>".
-export function chartTitle(dim) {
+// "Tokens per day by <Dimension>". `unit` (#2974) names the bar size —
+// hour / day / week / month.
+export function chartTitle(dim, unit = 'day') {
   const opt = dim === 'day' ? null : GROUP_OPTIONS.find((g) => g.key === dim);
-  return opt ? `Tokens per day by ${opt.label}` : 'Tokens per day';
+  return opt ? `Tokens per ${unit} by ${opt.label}` : `Tokens per ${unit}`;
 }
 
 // Legend visibility for group-value series. Unlike token classes, the keys are

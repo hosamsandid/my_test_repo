@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useId, useRef, useState, useCallback } from 'react';
 import { Link } from 'react-router';
 import { RefreshCw, Clock, CalendarClock, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch, Repeat, Puzzle } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
@@ -218,11 +218,14 @@ function CronBuilder({ value, onChange }) {
   }
 
   const { errors } = validateCronState(s);
+  // #2961: every control carries an accessible name (axe select-name / label).
+  const scheduleCaptionId = useId();
   const timeVal = inCronTime(s) ? `${String(Number(s.hour)).padStart(2, '0')}:${String(Number(s.minute)).padStart(2, '0')}` : '';
   // A cleared time input stays empty (and is flagged) instead of becoming 00:00.
   const setTime = v => { const [h = '', m = ''] = (v || '').split(':'); upd({ hour: h, minute: m }); };
   const timeInput = (
     <input type="time" value={timeVal} onChange={e => setTime(e.target.value)}
+      aria-label="Time"
       aria-invalid={!!errors.time}
       style={{ ...FIELD_STYLE, ...(errors.time ? ERROR_BORDER : {}) }} />
   );
@@ -236,12 +239,12 @@ function CronBuilder({ value, onChange }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)' }}>
+      <div id={scheduleCaptionId} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)' }}>
         Schedule
       </div>
 
       {/* Frequency */}
-      <select value={s.mode} onChange={e => changeMode(e.target.value)} style={{ ...FIELD_STYLE, width: '100%' }}>
+      <select aria-labelledby={scheduleCaptionId} value={s.mode} onChange={e => changeMode(e.target.value)} style={{ ...FIELD_STYLE, width: '100%' }}>
         <option value="minutely">Every N minutes</option>
         <option value="hourly">Hourly</option>
         <option value="daily">Daily</option>
@@ -255,6 +258,7 @@ function CronBuilder({ value, onChange }) {
         {s.mode === 'minutely' && (<>
           Every
           <input type="number" min={1} max={59} step={1} value={s.interval}
+            aria-label="Interval in minutes"
             onChange={e => upd({ interval: e.target.value })}
             aria-invalid={!!errors.interval}
             style={{ ...FIELD_STYLE, width: 60, textAlign: 'center', ...(errors.interval ? ERROR_BORDER : {}) }} />
@@ -264,6 +268,7 @@ function CronBuilder({ value, onChange }) {
         {s.mode === 'hourly' && (<>
           At minute
           <input type="number" min={0} max={59} step={1} value={s.minute}
+            aria-label="Minute of the hour"
             onChange={e => upd({ minute: e.target.value })}
             aria-invalid={!!errors.minute}
             style={{ ...FIELD_STYLE, width: 60, textAlign: 'center', ...(errors.minute ? ERROR_BORDER : {}) }} />
@@ -275,7 +280,7 @@ function CronBuilder({ value, onChange }) {
 
         {s.mode === 'weekly' && (<>
           Every
-          <select value={s.dow} onChange={e => upd({ dow: e.target.value })} style={FIELD_STYLE}>
+          <select aria-label="Day of week" value={s.dow} onChange={e => upd({ dow: e.target.value })} style={FIELD_STYLE}>
             {DOW_LABELS.map((d, i) => <option key={i} value={String(i)}>{d}</option>)}
           </select>
           at {timeInput}
@@ -284,6 +289,7 @@ function CronBuilder({ value, onChange }) {
         {s.mode === 'monthly' && (<>
           Day
           <input type="number" min={1} max={31} step={1} value={s.dom}
+            aria-label="Day of the month"
             onChange={e => upd({ dom: e.target.value })}
             aria-invalid={!!errors.dom}
             style={{ ...FIELD_STYLE, width: 60, textAlign: 'center', ...(errors.dom ? ERROR_BORDER : {}) }} />
@@ -292,6 +298,7 @@ function CronBuilder({ value, onChange }) {
 
         {s.mode === 'custom' && (
           <input type="text" value={s.raw} onChange={e => upd({ raw: e.target.value })}
+            aria-label="Custom cron expression"
             placeholder="* * * * *  (min  hour  day  month  weekday)"
             aria-invalid={!!errors.raw}
             style={{
@@ -346,13 +353,15 @@ function toDatetimeLocal(iso) {
 // it) but never silent: an inline hint says so (#2682).
 function DateTimePicker({ value, onChange }) {
   const pastHint = pastOnceHint(value);
+  const captionId = useId();
   return (
     <div>
-      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+      <div id={captionId} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
         Date &amp; Time <span style={{ fontWeight: 'normal' }}>(your time, {browserTimeZone()})</span>
       </div>
       <input
         type="datetime-local"
+        aria-labelledby={captionId}
         value={toDatetimeLocal(value)}
         // Convert the browser-local selection to UTC ISO before storing
         onChange={e => onChange(e.target.value ? new Date(e.target.value).toISOString() : '')}
@@ -785,6 +794,10 @@ function PushedByPicker({ roster, selected, onToggle }) {
 export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues, agentId, ops = liveOps, allowTypeChange = false, allowLoopType = true, lockType = null, submitLabel = null, showReadinessGate = false, agentName = null }) {
   const isEdit = !!initialValues;
   const typeLocked = isEdit && !allowTypeChange;
+  // #2961: captions are plain <div>s, so each control names itself via
+  // aria-labelledby={fieldId('<field>')} (axe select-name / label).
+  const fieldIdBase = useId();
+  const fieldId = field => `${fieldIdBase}-${field}`;
   // Loop-launch mode (#1020): the composer launcher reuses this form pinned to
   // a single type, hiding the type selector, the id field and the enabled
   // toggle — a launched loop is a run you start, not a stored, toggleable
@@ -1251,10 +1264,11 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
       {!lockedMode && (
         <div>
-          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-0-5)' }}>
+          <div id={fieldId('type')} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-0-5)' }}>
             Type
           </div>
           <select
+            aria-labelledby={fieldId('type')}
             value={form.type}
             onChange={e => changeType(e.target.value)}
             disabled={typeLocked}
@@ -1295,7 +1309,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
             own (e.g. <code style={{ fontFamily: 'var(--eb-font-mono)' }}>status_changed</code>).
           </div>
           <div>
-            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+            <div id={fieldId('plugin')} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
               Plugin
             </div>
             {pluginPick === null ? (
@@ -1311,6 +1325,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
                 <select
                   value={form.pluginId}
                   onChange={e => set('pluginId', e.target.value)}
+                  aria-labelledby={fieldId('plugin')}
                   style={{ ...FIELD_STYLE, width: '100%' }}
                 >
                   {pluginPick.options.map(o => (
@@ -1331,7 +1346,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               distinction spelled out and a "?" into the help chapter. */}
           <div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--eb-space-1)' }}>
-              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)' }}>
+              <div id={fieldId('event-filter')} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)' }}>
                 Which event
               </div>
               <PageHelpButton
@@ -1345,6 +1360,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               <select
                 value={form.eventFilter}
                 onChange={e => set('eventFilter', e.target.value)}
+                aria-labelledby={fieldId('event-filter')}
                 style={{ ...FIELD_STYLE, width: '100%' }}
               >
                 {eventRows.map(o => <option key={o.value || '__any'} value={o.value}>{o.label}</option>)}
@@ -1353,6 +1369,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               <input
                 value={form.eventFilter}
                 onChange={e => set('eventFilter', e.target.value)}
+                aria-labelledby={fieldId('event-filter')}
                 placeholder="the plugin's event name, e.g. status_changed — blank = any event"
                 style={{ ...FIELD_STYLE, width: '100%' }}
               />
@@ -1380,6 +1397,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
                       <select
                         value={c.key}
                         onChange={e => setCondition(i, { key: e.target.value })}
+                        aria-label="Condition field"
                         title={known && known.description ? known.description : undefined}
                         style={{ ...FIELD_STYLE, flex: '1 1 40%', minWidth: 0 }}
                       >
@@ -1393,6 +1411,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
                       <input
                         value={c.key}
                         onChange={e => setCondition(i, { key: e.target.value })}
+                        aria-label="Condition field"
                         placeholder="field, e.g. toStatus"
                         style={{ ...FIELD_STYLE, flex: '1 1 40%', minWidth: 0 }}
                       />
@@ -1401,6 +1420,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
                     <input
                       value={c.value}
                       onChange={e => setCondition(i, { value: e.target.value })}
+                      aria-label="Condition value"
                       placeholder={known && known.example ? `e.g. ${known.example}` : 'exact value'}
                       style={{ ...FIELD_STYLE, flex: '1 1 60%', minWidth: 0 }}
                     />
@@ -1473,10 +1493,11 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               cannot be silently emptied. Kept in the core set (out of scope for
               #1083) as it is already relatively accessible. */}
           <div>
-            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+            <div id={fieldId('verify-mode')} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
               Who checks the work? (optional{verifierCopy.enforced ? ', enforced for team agents' : ', recommended'})
             </div>
             <select
+              aria-labelledby={fieldId('verify-mode')}
               value={form.verifyMode}
               onChange={e => set('verifyMode', e.target.value)}
               style={{ ...FIELD_STYLE, width: '100%' }}
@@ -1490,6 +1511,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
             {form.verifyMode === 'command' && (
               <input
                 type="text"
+                aria-label="Verifier command"
                 value={form.verifyCommand}
                 onChange={e => set('verifyCommand', e.target.value)}
                 placeholder="e.g. npm run lint && npm test"
@@ -1500,6 +1522,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
             {form.verifyMode === 'agent' && (
               (loopRoster?.siblings?.length > 0) ? (
                 <select
+                  aria-label="Verifier agent"
                   value={form.verifyAgentId}
                   onChange={e => set('verifyAgentId', e.target.value)}
                   style={{ ...FIELD_STYLE, width: '100%', marginTop: 'var(--eb-space-2)' }}
@@ -1512,6 +1535,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               ) : (
                 <input
                   type="text"
+                  aria-label="Verifier agent"
                   value={form.verifyAgentId}
                   onChange={e => set('verifyAgentId', e.target.value)}
                   placeholder="verifier agent id (e.g. team-x-code-reviewer)"
@@ -1558,10 +1582,11 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
                 {/* Stop condition — plain "Done when…" with a custom escape hatch. */}
                 <div>
-                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                  <div id={fieldId('stop-condition')} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
                     Done when…
                   </div>
                   <select
+                    aria-labelledby={fieldId('stop-condition')}
                     value={form.stopCondition}
                     onChange={e => set('stopCondition', e.target.value)}
                     style={{ ...FIELD_STYLE, width: '100%' }}
@@ -1575,6 +1600,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
                     <>
                       <input
                         type="text"
+                        aria-label="Done-when command"
                         value={form.untilCommand}
                         onChange={e => set('untilCommand', e.target.value)}
                         placeholder="e.g. npm test && test ! -s fix_plan.md"
@@ -1589,10 +1615,11 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
                 {/* Token budget — labelled presets, raw number only under Custom. */}
                 <div>
-                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                  <div id={fieldId('token-budget')} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
                     How much work can it do? (budget)
                   </div>
                   <select
+                    aria-labelledby={fieldId('token-budget')}
                     value={form.tokenPreset}
                     onChange={e => set('tokenPreset', e.target.value)}
                     style={{ ...FIELD_STYLE, width: '100%' }}
@@ -1604,6 +1631,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
                   {form.tokenPreset === 'custom' && (
                     <input
                       type="number"
+                      aria-label="Exact token budget"
                       value={form.tokenRaw}
                       onChange={e => set('tokenRaw', e.target.value)}
                       placeholder="exact token budget, e.g. 2000000"
@@ -1614,10 +1642,11 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
                 {/* Min gap — human-readable dropdown, raw seconds only under Custom. */}
                 <div>
-                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                  <div id={fieldId('gap')} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
                     Wait between tries
                   </div>
                   <select
+                    aria-labelledby={fieldId('gap')}
                     value={form.gapPreset}
                     onChange={e => set('gapPreset', e.target.value)}
                     style={{ ...FIELD_STYLE, width: '100%' }}
@@ -1629,6 +1658,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
                   {form.gapPreset === 'custom' && (
                     <input
                       type="number"
+                      aria-label="Seconds between tries"
                       value={form.gapRaw}
                       onChange={e => set('gapRaw', e.target.value)}
                       placeholder="exact seconds, e.g. 120"
@@ -1668,7 +1698,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
             </div>
           ) : (
           <div>
-            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+            <div id={fieldId('data-flow-repo')} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
               Repository
             </div>
             {dataFlowRepos === null ? (
@@ -1677,7 +1707,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
                 Loading repositories…
               </div>
             ) : (
-              <select value={form.repo} onChange={e => set('repo', e.target.value)} style={{ ...FIELD_STYLE, width: '100%' }}>
+              <select aria-labelledby={fieldId('data-flow-repo')} value={form.repo} onChange={e => set('repo', e.target.value)} style={{ ...FIELD_STYLE, width: '100%' }}>
                 <option value="">— Select a repository —</option>
                 {dataFlowRepos.map(r => <option key={r.fullName} value={r.fullName}>{r.fullName}</option>)}
               </select>
@@ -1695,7 +1725,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
             </div>
           ) : (
           <div>
-            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+            <div id={fieldId('repo')} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
               Repository
             </div>
             {availableRepos === null ? (
@@ -1716,6 +1746,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               </div>
             ) : (
               <select
+                aria-labelledby={fieldId('repo')}
                 value={form.repo}
                 onChange={e => set('repo', e.target.value)}
                 style={{ ...FIELD_STYLE, width: '100%' }}
@@ -1731,10 +1762,11 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
           )}
 
           <div>
-            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+            <div id={fieldId('event')} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
               Event
             </div>
             <select
+              aria-labelledby={fieldId('event')}
               value={form.events[0] || ''}
               onChange={e => selectEvent(e.target.value)}
               style={{ ...FIELD_STYLE, width: '100%' }}
@@ -1770,11 +1802,12 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
           {showBranchFilter && (
             <div>
-              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              <div id={fieldId('branches')} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
                 Branches
               </div>
               <input
                 type="text"
+                aria-labelledby={fieldId('branches')}
                 value={form.branchFilter}
                 onChange={e => set('branchFilter', e.target.value)}
                 placeholder={BRANCH_FILTER_PLACEHOLDER}
@@ -1792,10 +1825,11 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
           {showCommentFilter && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
               <div>
-                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                <div id={fieldId('comment-target')} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
                   Comments on
                 </div>
                 <select
+                  aria-labelledby={fieldId('comment-target')}
                   value={form.commentTarget}
                   onChange={e => set('commentTarget', e.target.value)}
                   style={{ ...FIELD_STYLE, width: '100%' }}
@@ -1806,13 +1840,14 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
                 </select>
               </div>
               <div>
-                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                <div id={fieldId('require-label')} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
                   Required label on the item
                 </div>
                 <SuffixedLabelInput
                   type="text"
                   value={form.requireLabel}
                   onChange={v => set('requireLabel', v)}
+                  aria-labelledby={fieldId('require-label')}
                   placeholder={REQUIRE_LABEL_PLACEHOLDER}
                   style={{ ...FIELD_STYLE, width: '100%' }}
                 />
@@ -1832,13 +1867,14 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
           {showLabelFilter && (
             <div>
-              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              <div id={fieldId('label-filter')} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
                 Label name filter
               </div>
               <SuffixedLabelInput
                 type="text"
                 value={form.labelFilter}
                 onChange={v => set('labelFilter', v)}
+                aria-labelledby={fieldId('label-filter')}
                 placeholder="e.g. ready (leave empty to fire for any label)"
                 style={{ ...FIELD_STYLE, width: '100%' }}
               />

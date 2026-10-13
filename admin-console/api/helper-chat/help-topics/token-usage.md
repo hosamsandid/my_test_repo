@@ -17,6 +17,7 @@ askPrompts:
   - "What is the difference between cache write and cache read tokens?"
   - "Do the model rows add up to the total tile?"
   - "Which day does a run's usage land in?"
+  - "Which model used the most tokens on which day?"
 ---
 
 ## What the page shows
@@ -90,8 +91,9 @@ turn or one trigger run is one invocation, so a single task can report many
 invocations.
 
 *Group by* re-keys the breakdown table — by agent, team, user, model, provider,
-provider tier or day — against the same range and team filter. The summary tiles
-and the totals never change with it; only the rows underneath do.
+provider tier or day — against the same range and team filter, and the chart
+above it follows. The summary tiles and the totals never change with it; only
+the chart and the rows underneath do.
 
 An optional *then by* dropdown adds a **second** dimension, cross-tabulating the
 breakdown into a nested table: for example *Group by agent, then by model*
@@ -130,11 +132,23 @@ accounting:
   `unknown` bucket rather than being dropped. An `unknown` row is real
   consumption whose label is missing — never a rounding artefact.
 
-The **Tokens per day** chart legend toggles which token classes are drawn, and
-the y-axis rescales to what is left — useful because cache reads routinely dwarf
+The **Tokens per day** chart draws one bar per day and stacks it by the
+selected *Group by* dimension — for example *Tokens per day by Model* gives one
+segment per model, so you can see which model or agent used the most tokens on
+which day. Legend entries use the same labels as the table (user names,
+provider-tier labels, the **unknown** bucket). The eight largest values in the
+range get their own colour; any further values are combined into one grey
+**Other** series, so each day's bar still adds up to that day's share of the
+table. With *Group by day* the chart keeps its breakdown by token class. The
+*then by* dimension changes only the table, not the chart.
+
+Clicking a legend entry hides or shows that series, and the y-axis rescales to
+what is left — useful because cache reads, or one busy agent, routinely dwarf
 everything else. The toggles affect only the chart: the tiles, the table and the
-exports always cover all four classes. Your selection is remembered per user
-across reloads.
+exports always cover everything. The token-class selection is remembered per
+user across reloads; the selection for the other dimensions is kept per
+dimension for the rest of your visit, through Refresh and range or team
+changes.
 
 ## The Work items tab
 

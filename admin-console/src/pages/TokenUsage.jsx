@@ -9,7 +9,7 @@ import InfoTip from '../components/InfoTip';
 import PageHelpButton from '../components/PageHelpButton';
 import { TOKEN_USAGE_HELP_SECTIONS } from './token-usage-help-sections.js';
 import { toRows as agentModelRows, modelOptions, filterRowsByModel, isCurrentModel } from './agent-models-view.js';
-import { TOKEN_CLASSES, CLASS_COLOR, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, isClassVisible, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, loadHiddenClasses, saveHiddenClasses, userLabelIndex, agentTeamFilterOptions, userGroupCell, providerTierCell, secondaryGroupOptions, groupValueCell } from './token-usage-view.js';
+import { TOKEN_CLASSES, CLASS_COLOR, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, sanitizeHiddenClasses, loadHiddenClasses, saveHiddenClasses, userLabelIndex, agentTeamFilterOptions, userGroupCell, providerTierCell, secondaryGroupOptions, groupValueCell, chartSummaryUrl, chartDimension, chartTitle, buildGroupDaySeries, seriesLabel, groupStack, groupVisibleMax, hiddenSeriesFor, toggleHiddenSeries } from './token-usage-view.js';
 
 // Trigger a browser download of an export URL. The endpoints are behind the
 // auth-cookie gate, so a same-origin anchor navigation carries the session.
@@ -85,29 +85,15 @@ const PLOT_HEIGHT = 180;
 const Y_AXIS_WIDTH = 48;
 const X_LABEL_HEIGHT = 44;
 
-function TimeSeries({ summary, hidden, onToggle }) {
-  const { points } = useMemo(() => buildDaySeries(summary), [summary]);
-  // The axis + bar heights are driven by the currently-VISIBLE classes (#1707),
-  // so hiding the dominant cache series rescales the whole plot (AC4/AC5).
-  const maxTotal = useMemo(() => visibleMaxTotal(points, hidden), [points, hidden]);
-  const { top, ticks } = useMemo(() => niceScale(maxTotal), [maxTotal]);
-  // With every series toggled off the chart has nothing to draw — show a short
-  // empty-state rather than a broken axis (Open Q3 / AC edge). The legend below
-  // stays interactive so the user can switch a series back on.
-  const allHidden = visibleClassList(hidden).length === 0;
-  if (points.length === 0) {
-    return (
-      <div>
-        <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>No usage in this range.</div>
-        <Legend hidden={hidden} onToggle={onToggle} />
-      </div>
-    );
-  }
+// The shared plot (#699 geometry): y-axis ticks, gridlines, one column per day
+// drawn by `renderBar`, and the date row beneath. Both the token-class chart and
+// the group-value chart (#2973) draw through it, so the two never drift apart.
+function DayStackPlot({ points, top, ticks, allHidden, renderBar }) {
   // Thin the x labels so a wide range (e.g. 30 days) never crowds — show at
   // most ~12, always including the first, each still centered under its bar.
   const labelStride = Math.max(1, Math.ceil(points.length / 12));
   return (
-    <div>
+    <>
       <div style={{ display: 'flex', paddingTop: 8, position: 'relative' }}>
         {allHidden ? (
           <div style={{
@@ -146,26 +132,11 @@ function TimeSeries({ summary, hidden, onToggle }) {
             />
           ))}
           <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'flex-end', gap: 'var(--eb-space-2)', padding: '0 var(--eb-space-1)' }}>
-            {points.map((p) => {
-              const segs = stackSegments(p.tokens, top, hidden);
-              // Column height + segment shares are relative to the VISIBLE-class
-              // total for this day, not `tokens.total`, so a hidden class is
-              // removed from every stacked column (AC4).
-              const vTotal = visibleTotalTokens(p.tokens, hidden);
-              const colHeightPct = top > 0 ? (vTotal / top) * 100 : 0;
-              return (
-                <div key={p.day} style={{ flex: '1 1 0', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', alignItems: 'center', minWidth: 8, height: '100%' }}>
-                  <div
-                    title={`${p.day}: ${formatInt(vTotal)} tokens, ${formatInt(p.invocations)} invocations`}
-                    style={{ width: '100%', maxWidth: 48, height: `${colHeightPct}%`, minHeight: colHeightPct > 0 ? 2 : 0, display: 'flex', flexDirection: 'column-reverse', borderRadius: 'var(--eb-radius-sm)', overflow: 'hidden' }}
-                  >
-                    {segs.map((s) => (
-                      <div key={s.key} style={{ height: `${(s.value / (vTotal || 1)) * 100}%`, background: CLASS_COLOR[s.key] }} />
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
+            {points.map((p) => (
+              <div key={p.day} style={{ flex: '1 1 0', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', alignItems: 'center', minWidth: 8, height: '100%' }}>
+                {renderBar(p)}
+              </div>
+            ))}
           </div>
         </div>
       </div>
@@ -185,7 +156,100 @@ function TimeSeries({ summary, hidden, onToggle }) {
           ))}
         </div>
       </div>
+    </>
+  );
+}
+
+// Group by = Day: one bar per day stacked by token class (unchanged by #2973).
+function TimeSeries({ summary, hidden, onToggle }) {
+  const { points } = useMemo(() => buildDaySeries(summary), [summary]);
+  // The axis + bar heights are driven by the currently-VISIBLE classes (#1707),
+  // so hiding the dominant cache series rescales the whole plot (AC4/AC5).
+  const maxTotal = useMemo(() => visibleMaxTotal(points, hidden), [points, hidden]);
+  const { top, ticks } = useMemo(() => niceScale(maxTotal), [maxTotal]);
+  // With every series toggled off the chart has nothing to draw — show a short
+  // empty-state rather than a broken axis (Open Q3 / AC edge). The legend below
+  // stays interactive so the user can switch a series back on.
+  const allHidden = visibleClassList(hidden).length === 0;
+  if (points.length === 0) {
+    return (
+      <div>
+        <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>No usage in this range.</div>
+        <Legend hidden={hidden} onToggle={onToggle} />
+      </div>
+    );
+  }
+  const renderBar = (p) => {
+    const segs = stackSegments(p.tokens, top, hidden);
+    // Column height + segment shares are relative to the VISIBLE-class
+    // total for this day, not `tokens.total`, so a hidden class is
+    // removed from every stacked column (AC4).
+    const vTotal = visibleTotalTokens(p.tokens, hidden);
+    const colHeightPct = top > 0 ? (vTotal / top) * 100 : 0;
+    return (
+      <div
+        title={`${p.day}: ${formatInt(vTotal)} tokens, ${formatInt(p.invocations)} invocations`}
+        style={{ width: '100%', maxWidth: 48, height: `${colHeightPct}%`, minHeight: colHeightPct > 0 ? 2 : 0, display: 'flex', flexDirection: 'column-reverse', borderRadius: 'var(--eb-radius-sm)', overflow: 'hidden' }}
+      >
+        {segs.map((s) => (
+          <div key={s.key} style={{ height: `${(s.value / (vTotal || 1)) * 100}%`, background: CLASS_COLOR[s.key] }} />
+        ))}
+      </div>
+    );
+  };
+  return (
+    <div>
+      <DayStackPlot points={points} top={top} ticks={ticks} allHidden={allHidden} renderBar={renderBar} />
       <Legend hidden={hidden} onToggle={onToggle} />
+    </div>
+  );
+}
+
+// Any other Group by (#2973): one bar per day stacked by group value — the
+// largest CHART_SERIES_LIMIT values plus one "Other". Segments are separated by
+// a 2px surface gap so adjacent colours stay distinguishable (AC10), and each
+// segment's tooltip names its value and token count.
+function GroupTimeSeries({ summary, dim, userNames, hidden, onToggle }) {
+  const { series, points } = useMemo(() => buildGroupDaySeries(summary), [summary]);
+  const labels = useMemo(
+    () => new Map(series.map((s) => [s.key, seriesLabel(dim, s, userNames)])),
+    [series, dim, userNames],
+  );
+  const maxTotal = useMemo(() => groupVisibleMax(points, series, hidden), [points, series, hidden]);
+  const { top, ticks } = useMemo(() => niceScale(maxTotal), [maxTotal]);
+  if (points.length === 0) {
+    return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>No usage in this range.</div>;
+  }
+  const allHidden = series.every((s) => hidden.includes(s.key));
+  const renderBar = (p) => {
+    const { segments, total } = groupStack(p, series, hidden);
+    const colHeightPct = top > 0 ? (total / top) * 100 : 0;
+    return (
+      <div
+        title={`${p.day}: ${formatInt(total)} tokens`}
+        style={{ width: '100%', maxWidth: 48, height: `${colHeightPct}%`, minHeight: colHeightPct > 0 ? 2 : 0, display: 'flex', flexDirection: 'column-reverse', borderRadius: 'var(--eb-radius-sm)', overflow: 'hidden' }}
+      >
+        {segments.map((s, i) => (
+          <div
+            key={s.key}
+            title={`${p.day} · ${labels.get(s.key).label}: ${formatInt(s.value)} tokens`}
+            style={{
+              height: `${(s.value / (total || 1)) * 100}%`, background: s.color, boxSizing: 'border-box',
+              borderTop: i < segments.length - 1 ? '2px solid var(--eb-bg-elevated)' : undefined,
+            }}
+          />
+        ))}
+      </div>
+    );
+  };
+  return (
+    <div>
+      <DayStackPlot points={points} top={top} ticks={ticks} allHidden={allHidden} renderBar={renderBar} />
+      <SeriesLegend
+        items={series.map((s) => ({ key: s.key, color: s.color, ...labels.get(s.key) }))}
+        hidden={hidden}
+        onToggle={onToggle}
+      />
     </div>
   );
 }
@@ -193,19 +257,21 @@ function TimeSeries({ summary, hidden, onToggle }) {
 // Interactive legend (#1707): each entry is a real toggle button — click or
 // Enter/Space shows/hides its series, and `aria-pressed` exposes the on/off
 // state to assistive tech. A hidden series is dimmed with a hollow swatch and
-// struck-through label so the state is obvious at a glance (AC3/AC7).
-function Legend({ hidden, onToggle }) {
+// struck-through label so the state is obvious at a glance (AC3/AC7). The
+// group-value chart (#2973) uses the same legend; `hint` (e.g. a user's account
+// id, or what "Other" folds) is shown on hover.
+function SeriesLegend({ items, hidden, onToggle }) {
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)', marginTop: 'var(--eb-space-2)' }}>
-      {TOKEN_CLASSES.map((c) => {
-        const visible = isClassVisible(hidden, c.key);
+      {items.map((c) => {
+        const visible = !hidden.includes(c.key);
         return (
           <button
             key={c.key}
             type="button"
             onClick={() => onToggle(c.key)}
             aria-pressed={visible}
-            title={visible ? `Hide ${c.label}` : `Show ${c.label}`}
+            title={`${visible ? 'Hide' : 'Show'} ${c.label}${c.hint ? ` (${c.hint})` : ''}`}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 6,
               padding: '2px 4px', border: 'none', background: 'transparent',
@@ -218,8 +284,8 @@ function Legend({ hidden, onToggle }) {
             <span style={{
               width: 10, height: 10, borderRadius: 2, display: 'inline-block',
               // Hollow (outlined) swatch when hidden, filled when shown.
-              background: visible ? CLASS_COLOR[c.key] : 'transparent',
-              border: visible ? undefined : `1px solid ${CLASS_COLOR[c.key]}`,
+              background: visible ? c.color : 'transparent',
+              border: visible ? undefined : `1px solid ${c.color}`,
               boxSizing: 'border-box',
             }} />
             {c.label}
@@ -228,6 +294,12 @@ function Legend({ hidden, onToggle }) {
       })}
     </div>
   );
+}
+
+// The token-class legend (Group by = Day).
+function Legend({ hidden, onToggle }) {
+  const items = TOKEN_CLASSES.map((c) => ({ key: c.key, label: c.label, color: CLASS_COLOR[c.key] }));
+  return <SeriesLegend items={items} hidden={sanitizeHiddenClasses(hidden)} onToggle={onToggle} />;
 }
 
 const CONTROL_STYLE = {
@@ -379,15 +451,22 @@ function StatisticsTab({ team }) {
     saveHiddenClasses(username, next);
     return next;
   });
+  // #2973: legend visibility for group-value series, per dimension. Session
+  // state only (like the class set above it survives Refresh, range, team and
+  // Group-by changes within the visit); group values are open-ended, so they
+  // are not persisted across reloads.
+  const [hiddenGroups, setHiddenGroups] = useState({});
 
   const sinceQ = since ? `since=${encodeURIComponent(since)}&` : '';
   const teamQ = teamQuery(team);
   const secondaryQ = nested ? `secondaryGroupBy=${encodeURIComponent(secondaryGroupBy)}&` : '';
   const summaryUrl = `/api/usage/summary?${sinceQ}${teamQ}${secondaryQ}groupBy=${encodeURIComponent(groupBy)}`;
-  const dayUrl = `/api/usage/summary?${sinceQ}${teamQ}groupBy=day`;
+  // #2973: the chart follows the PRIMARY Group by (split by day); the secondary
+  // "then by" only changes the table.
+  const chartUrl = chartSummaryUrl({ since, team, groupBy });
 
   const { data: summary, loading, error, refetch } = useApi(summaryUrl);
-  const { data: daySummary, refetch: refetchDays } = useApi(dayUrl);
+  const { data: chartSummary, refetch: refetchChart } = useApi(chartUrl);
 
   // #2137: a `groupBy=user` key is a stable account id, which is useless on
   // screen. Names are resolved at read time from the OPEN directory (display
@@ -395,6 +474,7 @@ function StatisticsTab({ team }) {
   // the store is billing-adjacent telemetry with no retention — a name copied
   // in would outlive the person and go stale. Fetched whenever EITHER axis
   // groups by user (#2440).
+  const chartDim = chartDimension(chartSummary);
   const needsDirectory = groupBy === 'user' || secondaryGroupBy === 'user';
   const { data: directory } = useApi(needsDirectory ? '/api/users/directory' : null);
   const userNames = useMemo(() => userLabelIndex(directory), [directory]);
@@ -452,7 +532,7 @@ function StatisticsTab({ team }) {
     { key: 'invocations', label: 'Invocations', align: 'right', render: (v) => formatInt(v) },
   ];
 
-  const refresh = () => { refetch(); refetchDays(); };
+  const refresh = () => { refetch(); refetchChart(); };
 
   return (
     <>
@@ -497,9 +577,19 @@ function StatisticsTab({ team }) {
         borderRadius: 'var(--eb-radius-lg)',
       }}>
         <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-3)' }}>
-          Tokens per day
+          {chartTitle(chartDim)}
         </div>
-        <TimeSeries summary={daySummary} hidden={hidden} onToggle={toggleSeries} />
+        {chartDim === 'day' ? (
+          <TimeSeries summary={chartSummary} hidden={hidden} onToggle={toggleSeries} />
+        ) : (
+          <GroupTimeSeries
+            summary={chartSummary}
+            dim={chartDim}
+            userNames={userNames}
+            hidden={hiddenSeriesFor(hiddenGroups, chartDim)}
+            onToggle={(key) => setHiddenGroups((cur) => toggleHiddenSeries(cur, chartDim, key))}
+          />
+        )}
       </div>
 
       {loading ? (

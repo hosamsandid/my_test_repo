@@ -82,6 +82,21 @@
   --eb-status-warning-text: oklch(0.82 0.15 85);
   --eb-status-error-text:   oklch(0.75 0.16 25);
 
+  /* Categorical chart series (#2973): eight hues in a fixed order plus a
+     neutral "Other". Each clears 3:1 against the chart surface (WCAG 1.4.11)
+     and adjacent slots stay apart under colour-vision deficiency. Stepped per
+     theme; high-contrast inherits these. Not status colours — never reuse a
+     status token for a series. */
+  --eb-chart-series-1:     #3987e5;
+  --eb-chart-series-2:     #d95926;
+  --eb-chart-series-3:     #199e70;
+  --eb-chart-series-4:     #c98500;
+  --eb-chart-series-5:     #d55181;
+  --eb-chart-series-6:     #008300;
+  --eb-chart-series-7:     #9085e9;
+  --eb-chart-series-8:     #e66767;
+  --eb-chart-series-other: #8b8a94;
+
   /* ─── Typography ───────────────────────────────────────────────── */
   --eb-font-sans: 'Inter', 'Inter var', -apple-system, BlinkMacSystemFont,
                   'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
@@ -187,6 +202,17 @@
   --eb-status-success-text: oklch(0.48 0.13 155);
   --eb-status-warning-text: oklch(0.48 0.11 70);
   --eb-status-error-text:   oklch(0.50 0.20 25);
+
+  /* Chart series (#2973): darker steps of the same hues for the white surface. */
+  --eb-chart-series-1:     #2a78d6;
+  --eb-chart-series-2:     #c4501f;
+  --eb-chart-series-3:     #0a8770;
+  --eb-chart-series-4:     #a66f00;
+  --eb-chart-series-5:     #c43d73;
+  --eb-chart-series-6:     #008300;
+  --eb-chart-series-7:     #4a3aa7;
+  --eb-chart-series-8:     #c93a39;
+  --eb-chart-series-other: #6e6d76;
 }
 
 /* ─── High Contrast Theme ───────────────────────────────────────────── */

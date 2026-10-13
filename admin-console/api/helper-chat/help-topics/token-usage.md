@@ -75,7 +75,14 @@ problem.
 
 ### Choosing a time range
 
-All three tabs carry the same range selector. **All time** means as far back as the
+All three tabs carry the same range selector: **Last 24 hours**, **Today**,
+**Yesterday**, **Last 7 days**, **This week**, **Last 30 days**, **This month**,
+**Last month**, **Last 90 days**, **All time**, or **Custom range…** — a *From*
+and a *To* date, both included, applied with **Apply** (an end date before the
+start date cannot be applied, and the picker says why). Every boundary is in
+**UTC**: *Today* starts at 00:00 UTC, *This week* on Monday 00:00 UTC, *Last
+month* is the whole previous calendar month. The tiles, the table, the chart and
+the CSV/JSON export all cover exactly the selected range. **All time** means as far back as the
 usage log goes: there is no automatic retention on this store — token telemetry
 is billing-adjacent, so nothing is pruned silently — but a stack that was
 rebuilt from scratch starts empty. Which day a given record falls into is a
@@ -131,6 +138,16 @@ accounting:
 - **A record with no team, provider or model at all** lands in an explicit
   `unknown` bucket rather than being dropped. An `unknown` row is real
   consumption whose label is missing — never a rounding artefact.
+
+The chart's **Bucket** control sets the bar size: **Hour**, **Day**, **Week**
+(Monday to Sunday) or **Month**, all in UTC. **Auto** (the default) picks Hour
+for ranges of up to 2 days, Day up to 60 days, Week up to a year and Month
+beyond, and shows its choice, e.g. *Auto (Week)*; for *All time* it measures
+from the earliest record. Hour is offered only for ranges of 7 days or less.
+Every bucket in the range gets a bar — one without usage stays empty rather than
+being left out — and a bucket the range only partly covers (e.g. *This week* on a
+Wednesday) is one bar whose tooltip names the dates it covers. Together the bars
+add up to the *Total tokens* tile, apart from series hidden in the legend.
 
 The **Tokens per day** chart draws one bar per day and stacks it by the
 selected *Group by* dimension — for example *Tokens per day by Model* gives one

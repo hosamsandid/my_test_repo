@@ -4,6 +4,14 @@
 // Two concerns live here: cycling keyboard focus so Tab / Shift+Tab never escape
 // an open modal (a focus trap), and deciding when a backdrop press dismisses.
 
+// Natural Tab stops inside a dialog. A roving-tabindex widget (e.g.
+// SettingsModal's section rail) gives its non-selected buttons tabIndex=-1;
+// those match `button` but are NOT reachable by forward Tab, so counting them
+// would put the "last focusable" past the real final tab stop and let Tab
+// escape the dialog. Every arm therefore excludes [tabindex="-1"]. Shared by
+// Modal and SidePanel (#2960).
+export const FOCUSABLE_SELECTOR = 'a[href]:not([tabindex="-1"]), button:not([disabled]):not([tabindex="-1"]), textarea:not([disabled]):not([tabindex="-1"]), input:not([disabled]):not([tabindex="-1"]), select:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])';
+
 // Given the index of the currently-focused element within the modal's ordered
 // list of focusables (or -1 when focus is outside the list), decide where Tab /
 // Shift+Tab should send focus so it stays trapped inside the modal:

@@ -471,3 +471,156 @@ export function saveHiddenClasses(username, hidden, store) {
     /* ignore */
   }
 }
+
+// ── "Tokens per day" by the selected Group-by dimension (#2973) ──────
+// With Group by = Day the chart keeps its token-class stacks (above). For every
+// other dimension it stacks each day's bar by group value instead, fed by a
+// `groupBy=<dim>&secondaryGroupBy=day` summary: every group carries one
+// subgroup per day, and those cells are exactly the figures the table rows
+// add up from (#2972 splits a multi-model turn across its models), so a day's
+// stack sums to that day's share of the table.
+
+// At most this many group values get their own series; the rest fold into one
+// "Other" series so the legend and the palette stay readable (the issue's N≈8,
+// one per categorical colour slot).
+export const CHART_SERIES_LIMIT = 8;
+
+// Key of the folded remainder. Not a value any dimension can produce (keys are
+// agent/team/user ids, model/provider names, tiers or dates).
+export const OTHER_SERIES_KEY = '__other__';
+
+// One colour per series slot, in fixed order (#2973 AC10): theme tokens stepped
+// per theme in tokens.css so every slot clears 3:1 on the chart surface. "Other"
+// is a neutral grey so it never reads as one more group value.
+export const SERIES_COLORS = [
+  'var(--eb-chart-series-1)',
+  'var(--eb-chart-series-2)',
+  'var(--eb-chart-series-3)',
+  'var(--eb-chart-series-4)',
+  'var(--eb-chart-series-5)',
+  'var(--eb-chart-series-6)',
+  'var(--eb-chart-series-7)',
+  'var(--eb-chart-series-8)',
+];
+export const OTHER_SERIES_COLOR = 'var(--eb-chart-series-other)';
+
+// The dimension a chart summary was computed for: the primary `groupBy` when
+// the response is split by day, else 'day'. Read from the response rather than
+// the select so a still-loading request never draws one dimension's data under
+// another dimension's labels.
+export function chartDimension(summary) {
+  return summary && summary.secondaryGroupBy === 'day' && summary.groupBy && summary.groupBy !== 'day'
+    ? summary.groupBy
+    : 'day';
+}
+
+// The chart request for the selected primary dimension. The secondary "then by"
+// is deliberately not an input (#2973 AC11): it changes only the table.
+export function chartSummaryUrl({ since, team, groupBy } = {}) {
+  const params = new URLSearchParams();
+  if (since) params.set('since', since);
+  if (team) params.set('team', team);
+  const dim = GROUP_OPTIONS.some((g) => g.key === groupBy) ? groupBy : 'day';
+  params.set('groupBy', dim);
+  if (dim !== 'day') params.set('secondaryGroupBy', 'day');
+  return `/api/usage/summary?${params.toString()}`;
+}
+
+// Build the stacked-by-group series from a `secondaryGroupBy=day` summary.
+//   -> { series: [{ key, total, color, members }], points: [{ day, values, total }] }
+// `series` keeps the server's order (total desc, key asc): the largest `limit`
+// group values each get a slot colour, and only when there are MORE than
+// `limit` values the remainder is summed into one trailing "Other" series
+// (`members` lists the folded keys). Colours follow the series, not the day, so
+// a value that appears on only some days keeps one colour across the chart.
+// `points` are chronological; `values` maps series key → that day's tokens and
+// omits a series with nothing on that day.
+export function buildGroupDaySeries(summary, limit = CHART_SERIES_LIMIT) {
+  const groups = summary && Array.isArray(summary.groups) ? summary.groups : [];
+  const fold = groups.length > limit;
+  const named = fold ? groups.slice(0, limit) : groups;
+  const seriesOf = new Map();
+  const series = named.map((g, i) => {
+    const s = { key: g.key, total: 0, color: SERIES_COLORS[i % SERIES_COLORS.length], members: [g.key] };
+    seriesOf.set(g.key, s);
+    return s;
+  });
+  if (fold) {
+    const other = { key: OTHER_SERIES_KEY, total: 0, color: OTHER_SERIES_COLOR, members: [] };
+    for (const g of groups.slice(limit)) {
+      other.members.push(g.key);
+      seriesOf.set(g.key, other);
+    }
+    series.push(other);
+  }
+  const byDay = new Map();
+  for (const g of groups) {
+    const s = seriesOf.get(g.key);
+    for (const sub of Array.isArray(g.subgroups) ? g.subgroups : []) {
+      const value = (sub.tokens && sub.tokens.total) || 0;
+      if (!value) continue;
+      let p = byDay.get(sub.key);
+      if (!p) {
+        p = { day: sub.key, values: {}, total: 0 };
+        byDay.set(sub.key, p);
+      }
+      p.values[s.key] = (p.values[s.key] || 0) + value;
+      p.total += value;
+      s.total += value;
+    }
+  }
+  const points = [...byDay.values()].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+  return { series, points };
+}
+
+// How a series reads in the legend and tooltips: the table's own label for the
+// group value (user names, provider-tier labels, the unknown bucket named the
+// same way — groupValueCell), or "Other" for the folded remainder.
+export function seriesLabel(dim, series, userNames) {
+  if (series.key === OTHER_SERIES_KEY) {
+    const n = series.members.length;
+    return { label: 'Other', hint: `${n} more ${n === 1 ? 'value' : 'values'} combined` };
+  }
+  return groupValueCell(dim, series.key, userNames);
+}
+
+// Chart title for a dimension: "Tokens per day" for Day (unchanged), else
+// "Tokens per day by <Dimension>".
+export function chartTitle(dim) {
+  const opt = dim === 'day' ? null : GROUP_OPTIONS.find((g) => g.key === dim);
+  return opt ? `Tokens per day by ${opt.label}` : 'Tokens per day';
+}
+
+// Legend visibility for group-value series. Unlike token classes, the keys are
+// open-ended and belong to one dimension, so the hidden set is kept per
+// dimension ({ [dim]: [seriesKey] }) — hiding a model never hides an agent of
+// the same name, and each dimension's choice survives switching away and back,
+// Refresh, range and team changes within the visit (#1707 / #2973 AC7).
+export function hiddenSeriesFor(hiddenByDim, dim) {
+  const list = hiddenByDim && Array.isArray(hiddenByDim[dim]) ? hiddenByDim[dim] : [];
+  return list.filter((k) => typeof k === 'string');
+}
+
+export function toggleHiddenSeries(hiddenByDim, dim, key) {
+  const cur = hiddenSeriesFor(hiddenByDim, dim);
+  const next = cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key];
+  return { ...(hiddenByDim || {}), [dim]: next };
+}
+
+// Visible stack for one day: the drawn segments bottom-up in series order (so
+// a series sits at the same place in every bar), skipping hidden and empty
+// series, plus their sum — the bar height driver.
+export function groupStack(point, series, hidden) {
+  const off = new Set(hidden || []);
+  const segments = (series || [])
+    .filter((s) => !off.has(s.key))
+    .map((s) => ({ key: s.key, color: s.color, value: (point && point.values && point.values[s.key]) || 0 }))
+    .filter((s) => s.value > 0);
+  return { segments, total: segments.reduce((sum, s) => sum + s.value, 0) };
+}
+
+// Largest visible stack across all days — feeds niceScale, so hiding the
+// dominant series rescales the axis (#1707 AC5 / #2973 AC7).
+export function groupVisibleMax(points, series, hidden) {
+  return (points || []).reduce((m, p) => Math.max(m, groupStack(p, series, hidden).total), 0);
+}

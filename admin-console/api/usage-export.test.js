@@ -57,7 +57,7 @@ test('toCsv of no rows is a bare header with no trailing newline', () => {
 });
 
 // ── summary export: one row per invocation × model ──────────────────────────
-test('summaryRows fans a record into one row per model with its own class split', () => {
+test('summaryRows fans a record into one row per model with its share of the record tokens', () => {
   const rec = canonical[0]; // two models
   const rows = summaryRows([rec]);
   const models = Object.keys(rec.modelUsage).sort();
@@ -81,6 +81,44 @@ test('summaryRows emits a single empty-model row for a record without modelUsage
   assert.equal(rows.length, 1);
   assert.equal(rows[0].model, '');
   assert.equal(rows[0].total, 10);
+});
+
+// #2972: a resumed session's later turns carry the session's CUMULATIVE
+// modelUsage; the raw export must show each turn's own tokens, split by model.
+const RESUMED = [
+  { ts: '2026-10-13T09:00:00.000Z', agentId: 'dev', teamId: 't1', sessionId: 's1',
+    tokens: { input: 10, output: 100, cacheCreationInput: 1000, cacheReadInput: 5000 },
+    modelUsage: { opus: { input: 10, output: 100, cacheCreationInput: 1000, cacheReadInput: 5000 } } },
+  { ts: '2026-10-13T10:00:00.000Z', agentId: 'dev', teamId: 't1', sessionId: 's1',
+    tokens: { input: 4, output: 40, cacheCreationInput: 200, cacheReadInput: 7000 },
+    modelUsage: {
+      opus: { input: 18, output: 180, cacheCreationInput: 1100, cacheReadInput: 17500 },
+      haiku: { input: 3, output: 30, cacheCreationInput: 100, cacheReadInput: 500 },
+    } },
+  { ts: '2026-10-13T11:00:00.000Z', agentId: 'rev', teamId: 't1', sessionId: 's2',
+    tokens: { input: 1, output: 2, cacheCreationInput: 3, cacheReadInput: 4 } },
+];
+const CLASS_KEYS = ['input', 'output', 'cacheCreationInput', 'cacheReadInput', 'total'];
+
+test('#2972 AC5: the raw summary export splits each turn\'s own tokens, not the cumulative modelUsage', () => {
+  const rows = summaryRows(RESUMED);
+  for (const rec of RESUMED) {
+    const mine = rows.filter((r) => r.ts === rec.ts);
+    for (const k of CLASS_KEYS.slice(0, 4)) {
+      assert.equal(mine.reduce((s, r) => s + r[k], 0), rec.tokens[k], `${rec.ts} ${k}`);
+    }
+  }
+  const totals = summarize(RESUMED, {}).totals;
+  for (const k of CLASS_KEYS) assert.equal(rows.reduce((s, r) => s + r[k], 0), totals[k], k);
+});
+
+test('#2972 AC5: the model-grouped summary export reconciles with the totals, cross-tab included', () => {
+  const totals = summarize(RESUMED, {}).totals;
+  const one = summaryPivotRows(RESUMED, { groupBy: 'model' }).rows;
+  assert.deepEqual(one.map((r) => r.group), ['opus', 'haiku', 'unknown']);
+  for (const k of CLASS_KEYS) assert.equal(one.reduce((s, r) => s + r[k], 0), totals[k], k);
+  const two = summaryPivotRows(RESUMED, { groupBy: 'agent', secondaryGroupBy: 'model' }).rows;
+  for (const k of CLASS_KEYS) assert.equal(two.reduce((s, r) => s + r[k], 0), totals[k], k);
 });
 
 test('summaryRows honours the half-open [since, until) window', () => {

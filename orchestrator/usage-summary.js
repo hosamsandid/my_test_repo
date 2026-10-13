@@ -95,37 +95,89 @@ function keyFor(rec, groupBy, nonInstanceIds) {
   return agentKeyOf(rec, nonInstanceIds); // 'agent'
 }
 
+// Split `amount` into non-negative parts proportional to `weights` (at least
+// one positive) that add up to exactly `amount` (#2972). An integer amount is
+// apportioned by largest remainder — ties go to the earlier model — so every
+// part stays an integer token count; the correction loops also absorb a float
+// rounding slip on very large products.
+function apportion(amount, weights) {
+  const sum = weights.reduce((s, w) => s + w, 0);
+  const raw = weights.map((w) => (amount * w) / sum);
+  if (!Number.isInteger(amount)) return raw;
+  const parts = raw.map(Math.floor);
+  const order = weights
+    .map((w, i) => i)
+    .filter((i) => weights[i] > 0)
+    .sort((a, b) => (raw[b] - parts[b]) - (raw[a] - parts[a]) || a - b);
+  let left = amount - parts.reduce((s, p) => s + p, 0);
+  for (let j = 0; left > 0; j = (j + 1) % order.length, left -= 1) parts[order[j]] += 1;
+  for (let j = order.length - 1; left < 0; j = (j + order.length - 1) % order.length, left += 1) parts[order[j]] -= 1;
+  return parts;
+}
+
+// A record's turn-wide `tokens`, split across the models it used (#2972):
+// [{ key: model, tokens }] whose parts add up to exactly `rec.tokens` in every
+// class, or [] when the record carries no per-model detail.
+//
+// `modelUsage` is NOT a per-turn figure: the CLI's result event reports it from
+// the session's cost tracker, which a resumed session restores, so on the Nth
+// turn of a session it holds the session's cumulative usage while `tokens` holds
+// only this turn's. Summing it as-is counted every earlier turn again on each
+// later one. It is therefore read only as the record's model MIX — each class
+// is apportioned in proportion to the models' figures for that class (falling
+// back to their all-class figures, then an even split, when the class has no
+// per-model signal) — so a single-model record gives its model exactly its
+// `tokens`, and a multi-model one never adds up to more than the record.
+// Historical records need no rewrite: the split is computed at read time.
+function modelSplit(rec) {
+  const mu = rec && rec.modelUsage && typeof rec.modelUsage === 'object' ? rec.modelUsage : {};
+  const models = Object.keys(mu).filter((m) => mu[m] && typeof mu[m] === 'object');
+  if (!models.length) return [];
+  const weightOf = (m, k) => Math.max(0, num(mu[m][k]));
+  const allClass = models.map((m) => TOKEN_CLASSES.reduce((s, k) => s + weightOf(m, k), 0));
+  const hasSignal = (ws) => ws.some((w) => w > 0);
+  const out = models.map((key) => ({ key, tokens: zeroTokens() }));
+  for (const k of TOKEN_CLASSES) {
+    const amount = num(rec.tokens && rec.tokens[k]);
+    if (!amount) continue;
+    let weights = models.map((m) => weightOf(m, k));
+    if (!hasSignal(weights)) weights = hasSignal(allClass) ? allClass : models.map(() => 1);
+    apportion(amount, weights).forEach((part, i) => { out[i].tokens[k] = part; });
+  }
+  return out;
+}
+
 // Which group key(s) a record contributes to, paired with the tokens for each.
 // All groupings but `model` attribute the record's turn-wide tokens to one key;
-// `model` fans the record across its per-model split (a record with no
-// modelUsage contributes to no model group, but still counts in totals).
+// `model` splits them across the models the record used (modelSplit), and a
+// record with no per-model detail lands in the `unknown` model — so the model
+// rows always add up to the totals (#2972).
 function contributions(rec, groupBy, nonInstanceIds) {
-  if (groupBy === 'model') {
-    const mu = rec.modelUsage && typeof rec.modelUsage === 'object' ? rec.modelUsage : {};
-    return Object.keys(mu).map((model) => ({ key: model, tokens: mu[model] }));
-  }
+  if (groupBy === 'model') return modelContributions(rec);
   return [{ key: keyFor(rec, groupBy, nonInstanceIds), tokens: rec.tokens }];
+}
+
+function modelContributions(rec) {
+  const split = modelSplit(rec);
+  return split.length ? split : [{ key: UNKNOWN, tokens: rec.tokens }];
 }
 
 // Which (primary, secondary) cell(s) a record contributes to for a cross-tab
 // (#2440), paired with the tokens for each. Mirrors `contributions`: when
 // neither axis is `model` the record lands in ONE cell carrying its turn-wide
-// tokens; when either axis is `model` the record fans over its per-model split,
-// the model axis taking the model name and the other axis its single key (so a
-// record with no modelUsage contributes to no cell, exactly as the single-axis
-// `model` grouping drops it — the primary group still holds it via
-// `contributions`, so the primary column keeps reconciling with the one-level
-// view). `model` on both axes never reaches here — the caller rejects a
-// secondary equal to the primary.
+// tokens; when either axis is `model` the record's tokens are split over its
+// models exactly as the single-axis `model` grouping splits them, the model
+// axis taking the model name (or `unknown`) and the other axis its single key —
+// so every primary row's subgroups add up to that row (#2972). `model` on both
+// axes never reaches here — the caller rejects a secondary equal to the primary.
 function pairContributions(rec, primary, secondary, nonInstanceIds) {
   const primaryIsModel = primary === 'model';
   const secondaryIsModel = secondary === 'model';
   if (primaryIsModel || secondaryIsModel) {
-    const mu = rec.modelUsage && typeof rec.modelUsage === 'object' ? rec.modelUsage : {};
-    return Object.keys(mu).map((model) => ({
+    return modelContributions(rec).map(({ key: model, tokens }) => ({
       pKey: primaryIsModel ? model : keyFor(rec, primary, nonInstanceIds),
       sKey: secondaryIsModel ? model : keyFor(rec, secondary, nonInstanceIds),
-      tokens: mu[model],
+      tokens,
     }));
   }
   return [{
@@ -208,4 +260,4 @@ function summarize(records, query = {}) {
   return result;
 }
 
-module.exports = { summarize, agentKeyOf, GROUP_BY, TOKEN_CLASSES };
+module.exports = { summarize, agentKeyOf, modelSplit, GROUP_BY, TOKEN_CLASSES };

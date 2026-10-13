@@ -15,7 +15,7 @@ askPrompts:
   - "Why are some tokens unattributed?"
   - "How can I see what a globally-shared model provider is costing, and who is using it?"
   - "What is the difference between cache write and cache read tokens?"
-  - "Why does grouping by model show less than the total tile?"
+  - "Do the model rows add up to the total tile?"
   - "Which day does a run's usage land in?"
 ---
 
@@ -98,17 +98,18 @@ breakdown into a nested table: for example *Group by agent, then by model*
 answers which models each agent ran and how many tokens each burned. The second
 list excludes whatever the primary is, so a self-cross can't be chosen, and
 **None** restores the single-level table. Each primary group carries its own
-total row with the secondary values indented beneath; a **model** axis still
-fans a run over its per-model split on whichever side it sits, so those cells
-need not sum to the group total — exactly as *Group by model* does on its own.
+total row with the secondary values indented beneath; a **model** axis splits
+each run's tokens over the models it used on whichever side it sits, so those
+cells add up to the group total — exactly as *Group by model* does on its own.
 
 A few behaviours are worth knowing before you read a grouped table as a complete
 accounting:
 
-- **Group by model fans a run out** across its per-model split, because one run
-  may call more than one model. A run that recorded no per-model detail still
-  counts in the totals but contributes to no model row, so the model rows can
-  legitimately add up to less than the total tile.
+- **Group by model splits a run** across the models it used, because one run
+  may call more than one model (a sub-agent, for example). The run's own tokens
+  are shared out in proportion to each model's usage, so the model rows add up
+  to the total tile. A run that recorded no per-model detail is listed under
+  **unknown**.
 - **Group by agent folds auto-scaled instances** into the agent that has the
   pool configured: a Developer's per-ticket instances add up on its one row, on
   screen, as the other dimension and in the export. The per-ticket split is on

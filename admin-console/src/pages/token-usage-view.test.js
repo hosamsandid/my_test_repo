@@ -28,6 +28,7 @@ import {
   loadHiddenClasses,
   saveHiddenClasses,
   buildExportUrl,
+  CHART_ONLY_GROUPINGS,
   workItemAverages,
   WORK_ITEM_TILE_HELP,
   STAT_TILE_HELP,
@@ -56,7 +57,9 @@ test('GROUP_OPTIONS covers exactly the groupBy values the summary endpoint suppo
   assert.ok(m, 'could not read GROUP_BY out of api/usage-summary.js');
   const server = m[1].split(',').map((s) => s.trim().replace(/^'|'$/g, '')).filter(Boolean);
   assert.ok(server.length >= 5, `parsed only ${server.length} server groupings — the regex has drifted`);
-  assert.deepEqual(GROUP_OPTIONS.map((g) => g.key).sort(), [...server].sort());
+  // #2974: `hour` is a chart-only time key, never a table grouping.
+  assert.deepEqual([...GROUP_OPTIONS.map((g) => g.key), ...CHART_ONLY_GROUPINGS].sort(), [...server].sort());
+  for (const k of CHART_ONLY_GROUPINGS) assert.ok(!GROUP_OPTIONS.some((g) => g.key === k), k);
 });
 
 test('every GROUP_OPTIONS entry carries a human label', () => {

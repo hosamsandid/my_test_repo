@@ -12,7 +12,12 @@
 // usage-summary.fixture.json and covered by this module's own suite instead.
 // They exist because #2136's global providers broke the assumption that `team`
 // is always the accounting anchor: a global provider has no team.
-const GROUP_BY = new Set(['agent', 'team', 'user', 'model', 'provider', 'providerTier', 'day']);
+//
+// `hour` (#2974) is the UTC hour a record falls in (`YYYY-MM-DDTHH`, the first
+// 13 characters of the ISO `ts`), next to `day`'s first 10: the Token Usage
+// chart asks for it for hourly bars. Week and month bars are rolled up from
+// `day` on the client, so they need no key of their own.
+const GROUP_BY = new Set(['agent', 'team', 'user', 'model', 'provider', 'providerTier', 'day', 'hour']);
 const TOKEN_CLASSES = ['input', 'output', 'cacheCreationInput', 'cacheReadInput'];
 const UNKNOWN = 'unknown';
 
@@ -92,6 +97,7 @@ function keyFor(rec, groupBy, nonInstanceIds) {
   if (groupBy === 'provider') return rec.provider || UNKNOWN;
   if (groupBy === 'providerTier') return rec.providerTier || UNKNOWN;
   if (groupBy === 'day') return typeof rec.ts === 'string' ? rec.ts.slice(0, 10) : UNKNOWN;
+  if (groupBy === 'hour') return typeof rec.ts === 'string' ? rec.ts.slice(0, 13) : UNKNOWN;
   return agentKeyOf(rec, nonInstanceIds); // 'agent'
 }
 

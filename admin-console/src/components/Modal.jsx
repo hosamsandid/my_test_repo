@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
-import { focusTrapTarget, backdropDismisses } from './modal-view.js';
+import { focusTrapTarget, backdropDismisses, FOCUSABLE_SELECTOR } from './modal-view.js';
 
 /**
  * Modal — reusable, keyboard-accessible centred overlay dialog (#1802).
@@ -30,15 +30,10 @@ export default function Modal({ open, onClose, title, children, maxWidth = 560, 
   const focusables = () => {
     const card = cardRef.current;
     if (!card) return [];
-    // Only natural Tab stops count for the trap. A roving-tabindex widget (e.g.
-    // SettingsModal's section rail) gives its non-selected buttons tabIndex=-1;
-    // those match `button` but are NOT reachable by forward Tab, so counting
-    // them would put the "last focusable" past the real final tab stop and let
-    // Tab escape the modal (AC4). Exclude [tabindex="-1"] from every arm.
-    const sel = 'a[href]:not([tabindex="-1"]), button:not([disabled]):not([tabindex="-1"]), textarea:not([disabled]):not([tabindex="-1"]), input:not([disabled]):not([tabindex="-1"]), select:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])';
+    // Only natural Tab stops count for the trap (see FOCUSABLE_SELECTOR, AC4).
     // Skip elements that are not currently rendered/visible (offsetParent null),
     // but keep the active element so the trap can reason about where focus is.
-    return Array.from(card.querySelectorAll(sel))
+    return Array.from(card.querySelectorAll(FOCUSABLE_SELECTOR))
       .filter((el) => el.offsetParent !== null || el === document.activeElement);
   };
 

@@ -75,7 +75,14 @@ problem.
 
 ### Choosing a time range
 
-All three tabs carry the same range selector. **All time** means as far back as the
+All three tabs carry the same range selector: **Last 24 hours**, **Today**,
+**Yesterday**, **Last 7 days**, **This week**, **Last 30 days**, **This month**,
+**Last month**, **Last 90 days**, **All time**, or **Custom range…** — a *From*
+and a *To* date, both included, applied with **Apply** (an end date before the
+start date cannot be applied, and the picker says why). Every boundary is in
+**UTC**: *Today* starts at 00:00 UTC, *This week* on Monday 00:00 UTC, *Last
+month* is the whole previous calendar month. The tiles, the table, the chart and
+the CSV/JSON export all cover exactly the selected range. **All time** means as far back as the
 usage log goes: there is no automatic retention on this store — token telemetry
 is billing-adjacent, so nothing is pruned silently — but a stack that was
 rebuilt from scratch starts empty. Which day a given record falls into is a
@@ -132,6 +139,16 @@ accounting:
   `unknown` bucket rather than being dropped. An `unknown` row is real
   consumption whose label is missing — never a rounding artefact.
 
+The chart's **Bucket** control sets the bar size: **Hour**, **Day**, **Week**
+(Monday to Sunday) or **Month**, all in UTC. **Auto** (the default) picks Hour
+for ranges of up to 2 days, Day up to 60 days, Week up to a year and Month
+beyond, and shows its choice, e.g. *Auto (Week)*; for *All time* it measures
+from the earliest record. Hour is offered only for ranges of 7 days or less.
+Every bucket in the range gets a bar — one without usage stays empty rather than
+being left out — and a bucket the range only partly covers (e.g. *This week* on a
+Wednesday) is one bar whose tooltip names the dates it covers. Together the bars
+add up to the *Total tokens* tile, apart from series hidden in the legend.
+
 The **Tokens per day** chart draws one bar per day and stacks it by the
 selected *Group by* dimension — for example *Tokens per day by Model* gives one
 segment per model, so you can see which model or agent used the most tokens on
@@ -141,6 +158,20 @@ range get their own colour; any further values are combined into one grey
 **Other** series, so each day's bar still adds up to that day's share of the
 table. With *Group by day* the chart keeps its breakdown by token class. The
 *then by* dimension changes only the table, not the chart.
+
+The **Chart** control switches how the chart is drawn: **Stacked bars over
+time**, **Lines over time** (one line per value, same figures as the bars),
+**Donut (share)** — each value's share of the range total, with percentages —
+or **Ranking**, the range totals as horizontal bars, largest first and *Other*
+last. Model, provider and provider tier start as a donut, agent, team and user
+as a ranking, and day as stacked bars; a type you pick is kept for the rest of
+the visit, through Refresh, range and *Group by* changes. With *Group by day*
+the donut splits the range by token class (matching the four class tiles) and
+Ranking is not offered. Every type uses the same colours, top-8 + *Other* and
+legend: hiding a series removes it everywhere, and the donut's percentages are
+recalculated over what is left. Hover over or tab to a slice or bar to read its
+label, exact number and share. The **Bucket** control applies only to the
+over-time types.
 
 Clicking a legend entry hides or shows that series, and the y-axis rescales to
 what is left — useful because cache reads, or one busy agent, routinely dwarf

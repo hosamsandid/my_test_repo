@@ -218,6 +218,22 @@
       }
     },
     {
+      "name": "groupBy hour, UTC hourly time series (#2974)",
+      "recordIndexes": [0, 1, 2],
+      "query": { "since": null, "until": null, "groupBy": "hour" },
+      "expected": {
+        "since": null,
+        "until": null,
+        "groupBy": "hour",
+        "totals": { "input": 115, "output": 262, "cacheCreationInput": 9141, "cacheReadInput": 20218, "total": 29736, "invocations": 3 },
+        "groups": [
+          { "key": "2026-07-16T10", "tokens": { "input": 10, "output": 42, "cacheCreationInput": 8141, "cacheReadInput": 17718, "total": 25911 }, "invocations": 1 },
+          { "key": "2026-07-16T14", "tokens": { "input": 5, "output": 20, "cacheCreationInput": 1000, "cacheReadInput": 2000, "total": 3025 }, "invocations": 1 },
+          { "key": "2026-07-15T09", "tokens": { "input": 100, "output": 200, "cacheCreationInput": 0, "cacheReadInput": 500, "total": 800 }, "invocations": 1 }
+        ]
+      }
+    },
+    {
       "name": "date-filtered half-open [since, until), groupBy agent",
       "recordIndexes": [0, 1, 2],
       "query": { "since": "2026-07-16T00:00:00.000Z", "until": "2026-07-17T00:00:00.000Z", "groupBy": "agent" },

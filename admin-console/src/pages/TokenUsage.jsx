@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useId } from 'react';
 import { RefreshCw, Download } from 'lucide-react';
 import { useNavigate } from 'react-router';
 import { useApi } from '../hooks/useApi';
@@ -9,7 +9,9 @@ import InfoTip from '../components/InfoTip';
 import PageHelpButton from '../components/PageHelpButton';
 import { TOKEN_USAGE_HELP_SECTIONS } from './token-usage-help-sections.js';
 import { toRows as agentModelRows, modelOptions, filterRowsByModel, isCurrentModel } from './agent-models-view.js';
-import { TOKEN_CLASSES, CLASS_COLOR, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, sanitizeHiddenClasses, loadHiddenClasses, saveHiddenClasses, userLabelIndex, agentTeamFilterOptions, userGroupCell, providerTierCell, secondaryGroupOptions, groupValueCell, chartSummaryUrl, chartDimension, chartTitle, buildGroupDaySeries, seriesLabel, groupStack, groupVisibleMax, hiddenSeriesFor, toggleHiddenSeries } from './token-usage-view.js';
+import { TOKEN_CLASSES, CLASS_COLOR, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, sanitizeHiddenClasses, loadHiddenClasses, saveHiddenClasses, userLabelIndex, agentTeamFilterOptions, userGroupCell, providerTierCell, secondaryGroupOptions, groupValueCell, chartSummaryUrl, chartDimension, chartGranularity, buildGroupDaySeries, seriesLabel, groupStack, groupVisibleMax, hiddenSeriesFor, toggleHiddenSeries } from './token-usage-view.js';
+import { chartTypeOptions, resolveChartType, isOverTime, chartTypeTitle, classShareItems, shareSlices, rankingBars, shareText, donutAngles, arcPath, lineSeries, lineVisibleMax } from './token-usage-chart-type.js';
+import { RANGE_PRESETS, DEFAULT_RANGE, BUCKET_OPTIONS, rangeBounds, rangeQuery, rangeQueryString, customRangeError, dateInputValue, resolveBucket, hourBucketAllowed, bucketDisplay, autoBucket, sourceGranularity, earliestKeyStart, rebucketClassPoints, rebucketGroupPoints, bucketRangeText, axisLabels, barLayout, bucketUnit } from './token-usage-range.js';
 
 // Trigger a browser download of an export URL. The endpoints are behind the
 // auth-cookie gate, so a same-origin anchor navigation carries the session.
@@ -24,13 +26,13 @@ function downloadExport(url) {
 
 // CSV / JSON export buttons for a view (#656 phase 3). `team` narrows the
 // export to the page's selected team (#801) — undefined/'' means all teams.
-function ExportButtons({ kind, since, team, groupBy, secondaryGroupBy }) {
+function ExportButtons({ kind, since, until, team, groupBy, secondaryGroupBy }) {
   return (
     <span style={{ display: 'inline-flex', gap: 'var(--eb-space-1)' }}>
       {['csv', 'json'].map((format) => (
         <button
           key={format}
-          onClick={() => downloadExport(buildExportUrl(kind, { since, format, team, groupBy, secondaryGroupBy }))}
+          onClick={() => downloadExport(buildExportUrl(kind, { since, until, format, team, groupBy, secondaryGroupBy }))}
           title={`Download ${format.toUpperCase()} (tokens only — apply prices downstream)`}
           style={{ ...CONTROL_STYLE, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}
         >
@@ -41,13 +43,57 @@ function ExportButtons({ kind, since, team, groupBy, secondaryGroupBy }) {
   );
 }
 
-/* ── Time-range presets ────────────────────────────────────────────── */
-const RANGE_PRESETS = [
-  { key: '7d', label: 'Last 7 days', hours: 24 * 7 },
-  { key: '24h', label: 'Last 24 hours', hours: 24 },
-  { key: '30d', label: 'Last 30 days', hours: 24 * 30 },
-  { key: 'all', label: 'All time', hours: null },
-];
+/* ── Time range (#2974) ────────────────────────────────────────────── */
+// The range control shared by all three tabs: the presets (RANGE_PRESETS) plus
+// a custom from–to pair of dates, both inclusive. A preset applies at once; a
+// custom range applies on "Apply", which stays disabled — with the reason
+// next to it — while the end date is before the start date (AC3). Every
+// boundary is UTC, so the control says so.
+function RangeControl({ value, onChange }) {
+  const [rangeSelection, setRangeSelection] = useState(value.key);
+  const today = dateInputValue(Date.now());
+  const [from, setFrom] = useState(value.from || dateInputValue(Date.now() - 6 * 24 * 60 * 60 * 1000));
+  const [to, setTo] = useState(value.to || today);
+  const errorId = useId();
+  const invalid = customRangeError(from, to);
+  const select = (key) => {
+    setRangeSelection(key);
+    if (key !== 'custom') onChange({ key });
+  };
+  const apply = (e) => {
+    e.preventDefault();
+    if (!invalid) onChange({ key: 'custom', from, to });
+  };
+  const labelStyle = { display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' };
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+      <select value={rangeSelection} onChange={(e) => select(e.target.value)} style={CONTROL_STYLE} aria-label="Time range">
+        {RANGE_PRESETS.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
+      </select>
+      <span title="Range boundaries and chart bars use UTC" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>UTC</span>
+      {rangeSelection === 'custom' ? (
+        <form onSubmit={apply} style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+          <label style={labelStyle}>
+            From
+            <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} style={CONTROL_STYLE}
+              aria-invalid={!!invalid} aria-describedby={invalid ? errorId : undefined} />
+          </label>
+          <label style={labelStyle}>
+            To
+            <input type="date" value={to} onChange={(e) => setTo(e.target.value)} style={CONTROL_STYLE}
+              aria-invalid={!!invalid} aria-describedby={invalid ? errorId : undefined} />
+          </label>
+          <button type="submit" disabled={!!invalid} style={{ ...CONTROL_STYLE, cursor: invalid ? 'not-allowed' : 'pointer', opacity: invalid ? 0.6 : 1 }}>
+            Apply
+          </button>
+          {invalid ? (
+            <span id={errorId} role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{invalid}</span>
+          ) : null}
+        </form>
+      ) : null}
+    </span>
+  );
+}
 
 /* ── Summary card ──────────────────────────────────────────────────── */
 // `help`, when set, adds an InfoTip "?" affordance next to the label (#832):
@@ -77,7 +123,7 @@ function StatCard({ label, value, accent, help, title }) {
   );
 }
 
-/* ── Stacked time-series (by day) ──────────────────────────────────── */
+/* ── Stacked time-series (hour / day / week / month bars) ─────────── */
 // Chart geometry (#699). The y-axis gutter and x-axis label row are fixed so
 // the plot area has a definite height (bar `%` heights need it, #696) and the
 // date labels sit in their own row beneath the plot, never over the bars.
@@ -85,13 +131,21 @@ const PLOT_HEIGHT = 180;
 const Y_AXIS_WIDTH = 48;
 const X_LABEL_HEIGHT = 44;
 
-// The shared plot (#699 geometry): y-axis ticks, gridlines, one column per day
-// drawn by `renderBar`, and the date row beneath. Both the token-class chart and
-// the group-value chart (#2973) draw through it, so the two never drift apart.
-function DayStackPlot({ points, top, ticks, allHidden, renderBar }) {
-  // Thin the x labels so a wide range (e.g. 30 days) never crowds — show at
-  // most ~12, always including the first, each still centered under its bar.
-  const labelStride = Math.max(1, Math.ceil(points.length / 12));
+// The shared plot (#699 geometry): y-axis ticks, gridlines, one column per
+// bucket drawn by `renderBar`, and the date row beneath. Both the token-class
+// chart and the group-value chart (#2973) draw through it, so the two never
+// drift apart. `points` are rebucketed bars ({ key, start, end, … }, #2974).
+// `overlay` (#2975) is drawn over the columns — the line chart's polylines. It
+// needs the columns flush (no gap) so a column's centre is exactly
+// (i + 0.5) / n of the plot width, where lineSeries puts that bucket's point.
+function DayStackPlot({ points, bucket, top, ticks, allHidden, renderBar, overlay }) {
+  // Thin the x labels so a wide range never crowds — at most ~12, always
+  // including the first, each still centered under its bar (axisLabels).
+  const labels = axisLabels(points, bucket);
+  // Many bars (up to ~170 hourly ones) get a narrower gap so they still fit.
+  const layout = barLayout(points.length);
+  const gap = overlay ? 0 : layout.gap;
+  const { minWidth } = layout;
   return (
     <>
       <div style={{ display: 'flex', paddingTop: 8, position: 'relative' }}>
@@ -101,7 +155,7 @@ function DayStackPlot({ points, top, ticks, allHidden, renderBar }) {
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', pointerEvents: 'none',
           }}>
-            No series selected — click a legend item below to show it.
+            {NO_SERIES_HINT}
           </div>
         ) : null}
         {/* Y-axis: dynamically-scaled tick labels aligned to the gridlines. */}
@@ -131,50 +185,130 @@ function DayStackPlot({ points, top, ticks, allHidden, renderBar }) {
               }}
             />
           ))}
-          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'flex-end', gap: 'var(--eb-space-2)', padding: '0 var(--eb-space-1)' }}>
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'flex-end', gap, padding: '0 var(--eb-space-1)' }}>
             {points.map((p) => (
-              <div key={p.day} style={{ flex: '1 1 0', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', alignItems: 'center', minWidth: 8, height: '100%' }}>
+              <div key={p.key} style={{ flex: '1 1 0', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', alignItems: 'center', minWidth, height: '100%' }}>
                 {renderBar(p)}
               </div>
             ))}
           </div>
+          {overlay}
         </div>
       </div>
       {/* X-axis: date labels in a dedicated row beneath the plot, each cell
           matching a bar cell (same left gutter + gap) so labels stay centered. */}
       <div style={{ display: 'flex', height: X_LABEL_HEIGHT }}>
         <div style={{ width: Y_AXIS_WIDTH, flex: '0 0 auto' }} />
-        <div style={{ display: 'flex', flex: '1 1 0', gap: 'var(--eb-space-2)', padding: '0 var(--eb-space-1)' }}>
+        <div style={{ display: 'flex', flex: '1 1 0', gap, padding: '0 var(--eb-space-1)' }}>
           {points.map((p, i) => (
-            <div key={p.day} style={{ flex: '1 1 0', minWidth: 8, display: 'flex', justifyContent: 'center' }}>
-              {i % labelStride === 0 ? (
+            <div key={p.key} style={{ flex: '1 1 0', minWidth, display: 'flex', justifyContent: 'center' }}>
+              {labels[i] != null ? (
                 <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 6, whiteSpace: 'nowrap', transform: 'rotate(-45deg)', transformOrigin: 'top right' }}>
-                  {p.day.slice(5)}
+                  {labels[i]}
                 </div>
               ) : null}
             </div>
           ))}
         </div>
       </div>
+      <div style={{ textAlign: 'right', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Time (UTC)</div>
     </>
   );
 }
 
-// Group by = Day: one bar per day stacked by token class (unchanged by #2973).
-function TimeSeries({ summary, hidden, onToggle }) {
-  const { points } = useMemo(() => buildDaySeries(summary), [summary]);
+// "Nothing to draw" hint shared by every chart type: every series is hidden,
+// and the legend below stays interactive to switch one back on.
+const NO_SERIES_HINT = 'No series selected — click a legend item below to show it.';
+
+// Empty range — the same message for every chart type (#2975 AC11). `children`
+// is the legend, kept so the user can still change the hidden set.
+function ChartEmpty({ children }) {
+  return (
+    <div>
+      <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>No usage in this range.</div>
+      {children}
+    </div>
+  );
+}
+
+// Lines over time (#2975): one polyline per visible series across the plot,
+// drawn over flush columns. The SVG is stretched to the plot, so strokes keep
+// their width via non-scaling-stroke; the per-point dots and the hover text
+// live in the HTML columns (renderLinePoint), where they stay round.
+function LinesOverlay({ lines, label }) {
+  return (
+    <div style={{ position: 'absolute', inset: 0, padding: '0 var(--eb-space-1)', pointerEvents: 'none' }}>
+      <svg role="img" aria-label={label} viewBox="0 0 100 100" preserveAspectRatio="none" width="100%" height="100%" style={{ display: 'block', overflow: 'visible' }}>
+        {lines.map((l) => (
+          <polyline
+            key={l.key}
+            fill="none"
+            stroke={l.color}
+            strokeWidth={2}
+            strokeLinejoin="round"
+            vectorEffect="non-scaling-stroke"
+            points={l.coords.map(([x, y]) => `${x * 100},${100 - y * 100}`).join(' ')}
+          />
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+// One column of the line chart: a full-height hover target whose tooltip
+// lists every visible series' value for the bucket, and a dot per series.
+function renderLinePoint(title, dots) {
+  return (
+    <div title={title} style={{ position: 'relative', width: '100%', height: '100%' }}>
+      {dots.map((d) => (
+        <span
+          key={d.key}
+          aria-hidden="true"
+          style={{
+            position: 'absolute', left: '50%', bottom: `${d.y * 100}%`, width: 6, height: 6,
+            transform: 'translate(-50%, 50%)', borderRadius: '50%', background: d.color,
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+// The token classes as line series (#2975), coloured like the tiles.
+const CLASS_SERIES = TOKEN_CLASSES.map((c) => ({ key: c.key, label: c.label, color: CLASS_COLOR[c.key] }));
+
+// Group by = Day: one bar per bucket stacked by token class (unchanged by
+// #2973), or one line per class (#2975 `lines`). `bucket` and the [start, end)
+// window (#2974) shape the bars; every bucket in the window is drawn, empty
+// ones at zero height.
+function TimeSeries({ summary, bucket, start, end, hidden, onToggle, lines, label }) {
+  const raw = useMemo(() => buildDaySeries(summary).points, [summary]);
+  const points = useMemo(() => rebucketClassPoints(raw, { bucket, start, end }), [raw, bucket, start, end]);
+  const classValue = (p, k) => (p.tokens && p.tokens[k]) || 0;
+  const visibleHidden = sanitizeHiddenClasses(hidden);
   // The axis + bar heights are driven by the currently-VISIBLE classes (#1707),
   // so hiding the dominant cache series rescales the whole plot (AC4/AC5).
-  const maxTotal = useMemo(() => visibleMaxTotal(points, hidden), [points, hidden]);
+  // Lines are not stacked, so their axis follows the largest single value.
+  const maxTotal = lines ? lineVisibleMax(points, CLASS_SERIES, visibleHidden, classValue) : visibleMaxTotal(points, hidden);
   const { top, ticks } = useMemo(() => niceScale(maxTotal), [maxTotal]);
   // With every series toggled off the chart has nothing to draw — show a short
   // empty-state rather than a broken axis (Open Q3 / AC edge). The legend below
   // stays interactive so the user can switch a series back on.
   const allHidden = visibleClassList(hidden).length === 0;
-  if (points.length === 0) {
+  if (raw.length === 0) {
+    return <ChartEmpty><Legend hidden={hidden} onToggle={onToggle} /></ChartEmpty>;
+  }
+  if (lines) {
+    const drawn = lineSeries(points, CLASS_SERIES, visibleHidden, classValue, top);
+    const shown = CLASS_SERIES.filter((c) => !visibleHidden.includes(c.key));
+    const renderPoint = (p) => renderLinePoint(
+      [`${bucketRangeText(p, bucket, start, end)}:`, ...shown.map((c) => `${c.label}: ${formatInt(classValue(p, c.key))} tokens`)].join('\n'),
+      shown.map((c) => ({ key: c.key, color: c.color, y: top > 0 ? classValue(p, c.key) / top : 0 })),
+    );
     return (
       <div>
-        <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>No usage in this range.</div>
+        <DayStackPlot points={points} bucket={bucket} top={top} ticks={ticks} allHidden={allHidden} renderBar={renderPoint}
+          overlay={allHidden ? null : <LinesOverlay lines={drawn} label={label} />} />
         <Legend hidden={hidden} onToggle={onToggle} />
       </div>
     );
@@ -188,7 +322,7 @@ function TimeSeries({ summary, hidden, onToggle }) {
     const colHeightPct = top > 0 ? (vTotal / top) * 100 : 0;
     return (
       <div
-        title={`${p.day}: ${formatInt(vTotal)} tokens, ${formatInt(p.invocations)} invocations`}
+        title={`${bucketRangeText(p, bucket, start, end)}: ${formatInt(vTotal)} tokens, ${formatInt(p.invocations)} invocations`}
         style={{ width: '100%', maxWidth: 48, height: `${colHeightPct}%`, minHeight: colHeightPct > 0 ? 2 : 0, display: 'flex', flexDirection: 'column-reverse', borderRadius: 'var(--eb-radius-sm)', overflow: 'hidden' }}
       >
         {segs.map((s) => (
@@ -199,40 +333,69 @@ function TimeSeries({ summary, hidden, onToggle }) {
   };
   return (
     <div>
-      <DayStackPlot points={points} top={top} ticks={ticks} allHidden={allHidden} renderBar={renderBar} />
+      <DayStackPlot points={points} bucket={bucket} top={top} ticks={ticks} allHidden={allHidden} renderBar={renderBar} />
       <Legend hidden={hidden} onToggle={onToggle} />
     </div>
   );
 }
 
-// Any other Group by (#2973): one bar per day stacked by group value — the
-// largest CHART_SERIES_LIMIT values plus one "Other". Segments are separated by
-// a 2px surface gap so adjacent colours stay distinguishable (AC10), and each
-// segment's tooltip names its value and token count.
-function GroupTimeSeries({ summary, dim, userNames, hidden, onToggle }) {
+// The group-value series of a chart summary with their legend labels — shared
+// by every chart type so a value has one colour and one name throughout
+// (#2975 AC7).
+function useGroupSeries(summary, dim, userNames) {
   const { series, points } = useMemo(() => buildGroupDaySeries(summary), [summary]);
   const labels = useMemo(
     () => new Map(series.map((s) => [s.key, seriesLabel(dim, s, userNames)])),
     [series, dim, userNames],
   );
-  const maxTotal = useMemo(() => groupVisibleMax(points, series, hidden), [points, series, hidden]);
+  const items = useMemo(
+    () => series.map((s) => ({ key: s.key, color: s.color, value: s.total, ...labels.get(s.key) })),
+    [series, labels],
+  );
+  return { series, points, labels, items };
+}
+
+// Any other Group by (#2973): one bar per day stacked by group value — the
+// largest CHART_SERIES_LIMIT values plus one "Other" — or one line per value
+// (#2975 `lines`). Segments are separated by a 2px surface gap so adjacent
+// colours stay distinguishable (AC10), and each segment's tooltip names its
+// value and token count.
+function GroupTimeSeries({ summary, dim, bucket, start, end, userNames, hidden, onToggle, lines, label }) {
+  const { series, points: raw, labels, items } = useGroupSeries(summary, dim, userNames);
+  const points = useMemo(() => rebucketGroupPoints(raw, { bucket, start, end }), [raw, bucket, start, end]);
+  const groupValue = (p, k) => (p.values && p.values[k]) || 0;
+  const maxTotal = lines ? lineVisibleMax(points, series, hidden, groupValue) : groupVisibleMax(points, series, hidden);
   const { top, ticks } = useMemo(() => niceScale(maxTotal), [maxTotal]);
-  if (points.length === 0) {
-    return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>No usage in this range.</div>;
-  }
+  const legend = <SeriesLegend items={items} hidden={hidden} onToggle={onToggle} />;
+  if (raw.length === 0) return <ChartEmpty>{legend}</ChartEmpty>;
   const allHidden = series.every((s) => hidden.includes(s.key));
+  if (lines) {
+    const drawn = lineSeries(points, series, hidden, groupValue, top);
+    const shown = series.filter((s) => !hidden.includes(s.key));
+    const renderPoint = (p) => renderLinePoint(
+      [`${bucketRangeText(p, bucket, start, end)}:`, ...shown.map((s) => `${labels.get(s.key).label}: ${formatInt(groupValue(p, s.key))} tokens`)].join('\n'),
+      shown.map((s) => ({ key: s.key, color: s.color, y: top > 0 ? groupValue(p, s.key) / top : 0 })),
+    );
+    return (
+      <div>
+        <DayStackPlot points={points} bucket={bucket} top={top} ticks={ticks} allHidden={allHidden} renderBar={renderPoint}
+          overlay={allHidden ? null : <LinesOverlay lines={drawn} label={label} />} />
+        {legend}
+      </div>
+    );
+  }
   const renderBar = (p) => {
     const { segments, total } = groupStack(p, series, hidden);
     const colHeightPct = top > 0 ? (total / top) * 100 : 0;
     return (
       <div
-        title={`${p.day}: ${formatInt(total)} tokens`}
+        title={`${bucketRangeText(p, bucket, start, end)}: ${formatInt(total)} tokens`}
         style={{ width: '100%', maxWidth: 48, height: `${colHeightPct}%`, minHeight: colHeightPct > 0 ? 2 : 0, display: 'flex', flexDirection: 'column-reverse', borderRadius: 'var(--eb-radius-sm)', overflow: 'hidden' }}
       >
         {segments.map((s, i) => (
           <div
             key={s.key}
-            title={`${p.day} · ${labels.get(s.key).label}: ${formatInt(s.value)} tokens`}
+            title={`${bucketRangeText(p, bucket, start, end)} · ${labels.get(s.key).label}: ${formatInt(s.value)} tokens`}
             style={{
               height: `${(s.value / (total || 1)) * 100}%`, background: s.color, boxSizing: 'border-box',
               borderTop: i < segments.length - 1 ? '2px solid var(--eb-bg-elevated)' : undefined,
@@ -244,14 +407,166 @@ function GroupTimeSeries({ summary, dim, userNames, hidden, onToggle }) {
   };
   return (
     <div>
-      <DayStackPlot points={points} top={top} ticks={ticks} allHidden={allHidden} renderBar={renderBar} />
-      <SeriesLegend
-        items={series.map((s) => ({ key: s.key, color: s.color, ...labels.get(s.key) }))}
-        hidden={hidden}
-        onToggle={onToggle}
-      />
+      <DayStackPlot points={points} bucket={bucket} top={top} ticks={ticks} allHidden={allHidden} renderBar={renderBar} />
+      {legend}
     </div>
   );
+}
+
+// The chart's named region (#2975 AC10): every type sits in one group named by
+// the chart heading, so assistive tech announces what the chart shows.
+function ChartRegion({ title, children }) {
+  return <div role="group" aria-label={title}>{children}</div>;
+}
+
+// The readout under a donut or ranking: the hovered or focused slice / bar —
+// label, full number and share (#2975). Polite live region, so a keyboard user
+// hears it as focus moves; a hint when nothing is active.
+function ShareReadout({ item }) {
+  return (
+    <div aria-live="polite" style={{ minHeight: '1.5em', marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: item ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)' }}>
+      {item ? shareText(item) : 'Hover over or focus a slice or bar to see its value.'}
+    </div>
+  );
+}
+
+const DONUT_SIZE = 200;
+const DONUT_OUTER = 92;
+const DONUT_INNER = 58;
+
+// Donut (share) (#2975): each visible value's share of the range total. Slices
+// are focusable; percentages and values are listed beside the ring rather than
+// on it, so a tiny slice never gets an overlapping label (edge case).
+function DonutChart({ items, hidden, legend }) {
+  const [active, setActive] = useState(null);
+  const { slices, total } = shareSlices(items, hidden);
+  const arcs = donutAngles(slices);
+  if (!slices.length) {
+    return (
+      <div>
+        <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>{NO_SERIES_HINT}</div>
+        {legend}
+      </div>
+    );
+  }
+  const c = DONUT_SIZE / 2;
+  const activeItem = slices.find((s) => s.key === active) || null;
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-5)', flexWrap: 'wrap' }}>
+        <svg width={DONUT_SIZE} height={DONUT_SIZE} viewBox={`0 0 ${DONUT_SIZE} ${DONUT_SIZE}`} style={{ flex: '0 0 auto', overflow: 'visible' }}>
+          {slices.map((s, i) => (
+            <path
+              key={s.key}
+              d={arcPath(c, c, DONUT_OUTER, DONUT_INNER, arcs[i].start, arcs[i].end)}
+              fill={s.color}
+              stroke={active === s.key ? 'var(--eb-text-primary)' : 'var(--eb-bg-elevated)'}
+              strokeWidth={active === s.key ? 2 : 1}
+              tabIndex={0}
+              role="img"
+              aria-label={shareText(s)}
+              onMouseEnter={() => setActive(s.key)}
+              onMouseLeave={() => setActive(null)}
+              onFocus={() => setActive(s.key)}
+              onBlur={() => setActive(null)}
+              style={{ cursor: 'default', outline: 'none' }}
+            >
+              <title>{shareText(s)}</title>
+            </path>
+          ))}
+          <text x={c} y={c - 4} textAnchor="middle" aria-hidden="true" style={{ fill: 'var(--eb-text-primary)', fontSize: 18, fontWeight: 600, fontFamily: 'var(--eb-font-mono)' }}>
+            {formatCompact(total)}
+          </text>
+          <text x={c} y={c + 16} textAnchor="middle" aria-hidden="true" style={{ fill: 'var(--eb-text-secondary)', fontSize: 12 }}>
+            tokens
+          </text>
+        </svg>
+        <table style={{ borderCollapse: 'collapse', fontSize: 'var(--eb-text-sm)' }}>
+          <tbody>
+            {slices.map((s) => (
+              <tr key={s.key} style={{ fontWeight: active === s.key ? 'var(--eb-font-semibold)' : undefined }}>
+                <td style={{ padding: '2px 6px 2px 0' }}>
+                  <span aria-hidden="true" style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: s.color, marginRight: 6 }} />
+                  <span title={s.hint || undefined}>{s.label}</span>
+                </td>
+                <td style={{ padding: '2px 6px', textAlign: 'right', fontFamily: 'var(--eb-font-mono)' }}>{s.pct.toFixed(1)}%</td>
+                <td style={{ padding: '2px 0 2px 6px', textAlign: 'right', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-secondary)' }}>{formatInt(s.value)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <ShareReadout item={activeItem} />
+      {legend}
+    </div>
+  );
+}
+
+// Ranking (#2975): one horizontal bar per visible value, largest first and
+// "Other" last; each row is focusable and named by its readout.
+function RankingChart({ items, hidden, legend }) {
+  const [active, setActive] = useState(null);
+  const { bars } = rankingBars(items, hidden);
+  if (!bars.length) {
+    return (
+      <div>
+        <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>{NO_SERIES_HINT}</div>
+        {legend}
+      </div>
+    );
+  }
+  const activeItem = bars.find((b) => b.key === active) || null;
+  return (
+    <div>
+      <ol style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+        {bars.map((b) => (
+          <li
+            key={b.key}
+            tabIndex={0}
+            aria-label={shareText(b)}
+            title={shareText(b)}
+            onMouseEnter={() => setActive(b.key)}
+            onMouseLeave={() => setActive(null)}
+            onFocus={() => setActive(b.key)}
+            onBlur={() => setActive(null)}
+            style={{
+              display: 'grid', gridTemplateColumns: 'minmax(80px, 200px) 1fr auto', alignItems: 'center', gap: 'var(--eb-space-2)',
+              fontSize: 'var(--eb-text-sm)', borderRadius: 'var(--eb-radius-sm)', padding: '1px 2px',
+              background: active === b.key ? 'var(--eb-bg-hover, transparent)' : undefined,
+            }}
+          >
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--eb-text-secondary)' }}>{b.label}</span>
+            <span style={{ display: 'block', height: 14 }}>
+              <span style={{ display: 'block', height: '100%', width: `${b.widthPct}%`, minWidth: 2, background: b.color, borderRadius: 'var(--eb-radius-sm)' }} />
+            </span>
+            <span style={{ fontFamily: 'var(--eb-font-mono)', whiteSpace: 'nowrap' }}>{formatCompact(b.value)} · {b.pct.toFixed(1)}%</span>
+          </li>
+        ))}
+      </ol>
+      <ShareReadout item={activeItem} />
+      {legend}
+    </div>
+  );
+}
+
+// Donut or ranking over the selected Group by's range totals (#2975): the same
+// series, colours, top-N + Other fold and legend toggles as the time charts.
+function GroupShareChart({ type, summary, dim, userNames, hidden, onToggle }) {
+  const { points, items } = useGroupSeries(summary, dim, userNames);
+  const legend = <SeriesLegend items={items} hidden={hidden} onToggle={onToggle} />;
+  if (points.length === 0) return <ChartEmpty>{legend}</ChartEmpty>;
+  return type === 'ranking'
+    ? <RankingChart items={items} hidden={hidden} legend={legend} />
+    : <DonutChart items={items} hidden={hidden} legend={legend} />;
+}
+
+// Group by = Day donut (#2975 AC9): the range split by token class, matching
+// the four class tiles; the class legend toggles slices as it toggles bars.
+function ClassShareChart({ summary, hidden, onToggle }) {
+  const totals = (summary && summary.totals) || {};
+  const legend = <Legend hidden={hidden} onToggle={onToggle} />;
+  if (!(totals.total > 0)) return <ChartEmpty>{legend}</ChartEmpty>;
+  return <DonutChart items={classShareItems(totals)} hidden={sanitizeHiddenClasses(hidden)} legend={legend} />;
 }
 
 // Interactive legend (#1707): each entry is a real toggle button — click or
@@ -336,13 +651,16 @@ function teamQuery(team) {
   return team ? `team=${encodeURIComponent(team)}&` : '';
 }
 
-// Derive the ISO `since` (and its `until`) query params for a range preset.
-function useRangeWindow(rangeKey) {
+// Derive the ISO `since` / `until` query params and the [start, end) window in
+// ms for a range (#2974). Fixed at selection time, like before: Refresh keeps
+// the window.
+function useRangeWindow(range) {
+  const { key, from, to } = range;
   return useMemo(() => {
-    const preset = RANGE_PRESETS.find((r) => r.key === rangeKey) || RANGE_PRESETS[0];
-    if (preset.hours == null) return { since: null };
-    return { since: new Date(Date.now() - preset.hours * 60 * 60 * 1000).toISOString() };
-  }, [rangeKey]);
+    const now = Date.now();
+    const r = { key, from, to };
+    return { ...rangeQuery(r, now), ...rangeBounds(r, now) };
+  }, [key, from, to]);
 }
 
 /* ── Nested (cross-tab) summary table (#2440) ──────────────────────── */
@@ -424,14 +742,16 @@ function NestedSummaryTable({ summary, groupBy, secondaryGroupBy, userNames }) {
 
 /* ── Statistics tab (view 1, #654) ─────────────────────────────────── */
 function StatisticsTab({ team }) {
-  const [rangeKey, setRangeKey] = useState('7d');
+  const [range, setRange] = useState(DEFAULT_RANGE);
+  // #2974: chart bar size — 'auto' or a fixed hour / day / week / month.
+  const [bucketChoice, setBucketChoice] = useState('auto');
   const [groupBy, setGroupBy] = useState('agent');
   // #2440: an optional second grouping level (cross-tab drill-down). '' = None,
   // which restores the exact single-dimension behaviour. A self-cross is never
   // offered (secondaryGroupOptions drops the primary); if the primary changes
   // onto the current secondary, the effect below clears it.
   const [secondaryGroupBy, setSecondaryGroupBy] = useState('');
-  const { since } = useRangeWindow(rangeKey);
+  const { since, until, start, end } = useRangeWindow(range);
   useEffect(() => {
     if (secondaryGroupBy === groupBy) setSecondaryGroupBy('');
   }, [groupBy, secondaryGroupBy]);
@@ -456,17 +776,38 @@ function StatisticsTab({ team }) {
   // Group-by changes within the visit); group values are open-ended, so they
   // are not persisted across reloads.
   const [hiddenGroups, setHiddenGroups] = useState({});
+  // #2975: the chart type the user picked in this visit — null until they pick
+  // one, so each grouping shows its own default. Like the legend state it is
+  // plain component state: it survives Refresh, range and Group-by changes and
+  // is never written back when a grouping does not offer it (Ranking on Day).
+  const [chartTypeChoice, setChartTypeChoice] = useState(null);
 
-  const sinceQ = since ? `since=${encodeURIComponent(since)}&` : '';
+  const rangeQ = rangeQueryString({ since, until });
   const teamQ = teamQuery(team);
   const secondaryQ = nested ? `secondaryGroupBy=${encodeURIComponent(secondaryGroupBy)}&` : '';
-  const summaryUrl = `/api/usage/summary?${sinceQ}${teamQ}${secondaryQ}groupBy=${encodeURIComponent(groupBy)}`;
-  // #2973: the chart follows the PRIMARY Group by (split by day); the secondary
-  // "then by" only changes the table.
-  const chartUrl = chartSummaryUrl({ since, team, groupBy });
-
+  const summaryUrl = `/api/usage/summary?${rangeQ}${teamQ}${secondaryQ}groupBy=${encodeURIComponent(groupBy)}`;
   const { data: summary, loading, error, refetch } = useApi(summaryUrl);
-  const { data: chartSummary, refetch: refetchChart } = useApi(chartUrl);
+
+  // #2974: the bar size follows the window's span. All time has no start, so
+  // its window starts at the earliest record in the chart data (the previous
+  // response is kept while a new one loads, so this never flickers to null).
+  // A response still at day granularity while hourly bars are on their way is
+  // drawn as days rather than squeezed into hour slots.
+  const [chartSummary, setChartSummary] = useState(null);
+  const chartPointsOf = (cs) => (chartDimension(cs) === 'day' ? buildDaySeries(cs).points : buildGroupDaySeries(cs).points);
+  const windowStart = start != null ? start : earliestKeyStart(chartPointsOf(chartSummary));
+  const span = windowStart != null ? end - windowStart : null;
+  const bucket = resolveBucket(bucketChoice, span);
+  // #2973: the chart follows the PRIMARY Group by (split by day / hour); the
+  // secondary "then by" only changes the table.
+  const chartUrl = chartSummaryUrl({ since, until, team, groupBy, granularity: sourceGranularity(bucket) });
+  const { data: chartData, refetch: refetchChart } = useApi(chartUrl);
+  useEffect(() => { setChartSummary(chartData); }, [chartData]);
+  const drawnBucket = bucket === 'hour' && chartGranularity(chartSummary) !== 'hour' ? 'day' : bucket;
+  // A manual Hour that the new range is too long for drops back to Auto.
+  useEffect(() => {
+    if (bucketChoice === 'hour' && span != null && !hourBucketAllowed(span)) setBucketChoice('auto');
+  }, [bucketChoice, span]);
 
   // #2137: a `groupBy=user` key is a stable account id, which is useless on
   // screen. Names are resolved at read time from the OPEN directory (display
@@ -475,6 +816,9 @@ function StatisticsTab({ team }) {
   // in would outlive the person and go stale. Fetched whenever EITHER axis
   // groups by user (#2440).
   const chartDim = chartDimension(chartSummary);
+  const chartType = resolveChartType(chartTypeChoice, chartDim);
+  const overTime = isOverTime(chartType);
+  const chartHeading = chartTypeTitle(chartType, chartDim, bucketUnit(drawnBucket));
   const needsDirectory = groupBy === 'user' || secondaryGroupBy === 'user';
   const { data: directory } = useApi(needsDirectory ? '/api/users/directory' : null);
   const userNames = useMemo(() => userLabelIndex(directory), [directory]);
@@ -537,9 +881,7 @@ function StatisticsTab({ team }) {
   return (
     <>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
-        <select value={rangeKey} onChange={(e) => setRangeKey(e.target.value)} style={CONTROL_STYLE} aria-label="Time range">
-          {RANGE_PRESETS.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
-        </select>
+        <RangeControl value={range} onChange={setRange} />
         <label style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Group by</label>
         <select value={groupBy} onChange={(e) => setGroupBy(e.target.value)} style={CONTROL_STYLE} aria-label="Group by">
           {GROUP_OPTIONS.map((g) => <option key={g.key} value={g.key}>{g.label}</option>)}
@@ -558,7 +900,7 @@ function StatisticsTab({ team }) {
         <button onClick={refresh} style={{ ...CONTROL_STYLE, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
           <RefreshCw size={14} /> Refresh
         </button>
-        <ExportButtons kind="summary" since={since} team={team} groupBy={groupBy} secondaryGroupBy={nested ? secondaryGroupBy : ''} />
+        <ExportButtons kind="summary" since={since} until={until} team={team} groupBy={groupBy} secondaryGroupBy={nested ? secondaryGroupBy : ''} />
         {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
       </div>
 
@@ -576,20 +918,68 @@ function StatisticsTab({ team }) {
         border: '1px solid var(--eb-border-default)',
         borderRadius: 'var(--eb-radius-lg)',
       }}>
-        <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-3)' }}>
-          {chartTitle(chartDim)}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--eb-space-3)', flexWrap: 'wrap', marginBottom: 'var(--eb-space-3)' }}>
+          <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+            {chartHeading}
+          </div>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
+            {/* #2975: chart type. Offers what the grouping supports (no Ranking
+                for Day); the choice is kept for the visit. */}
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+              Chart
+              <select value={chartType} onChange={(e) => setChartTypeChoice(e.target.value)} style={CONTROL_STYLE} aria-label="Chart type">
+                {chartTypeOptions(chartDim).map((ct) => <option key={ct.key} value={ct.key}>{ct.label}</option>)}
+              </select>
+            </label>
+            {/* #2974: bar size. Auto names what it picked, e.g. "Auto (Week)";
+                Hour is offered only for spans of 7 days or less. Only the
+                over-time types have buckets. */}
+            {overTime ? (
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+                Bucket
+                <select value={bucketChoice} onChange={(e) => setBucketChoice(e.target.value)} style={CONTROL_STYLE} aria-label="Bucket size">
+                  {BUCKET_OPTIONS.map((o) => (
+                    <option key={o.key} value={o.key} disabled={o.key === 'hour' && !hourBucketAllowed(span)}>
+                      {o.key === 'auto' ? bucketDisplay('auto', span == null ? 'day' : autoBucket(span)) : o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+          </span>
         </div>
-        {chartDim === 'day' ? (
-          <TimeSeries summary={chartSummary} hidden={hidden} onToggle={toggleSeries} />
-        ) : (
-          <GroupTimeSeries
-            summary={chartSummary}
-            dim={chartDim}
-            userNames={userNames}
-            hidden={hiddenSeriesFor(hiddenGroups, chartDim)}
-            onToggle={(key) => setHiddenGroups((cur) => toggleHiddenSeries(cur, chartDim, key))}
-          />
-        )}
+        <ChartRegion title={chartHeading}>
+          {chartDim === 'day' ? (
+            chartType === 'donut' ? (
+              <ClassShareChart summary={chartSummary} hidden={hidden} onToggle={toggleSeries} />
+            ) : (
+              <TimeSeries summary={chartSummary} bucket={drawnBucket} start={windowStart} end={end} hidden={hidden} onToggle={toggleSeries}
+                lines={chartType === 'lines'} label={chartHeading} />
+            )
+          ) : overTime ? (
+            <GroupTimeSeries
+              summary={chartSummary}
+              dim={chartDim}
+              bucket={drawnBucket}
+              start={windowStart}
+              end={end}
+              userNames={userNames}
+              hidden={hiddenSeriesFor(hiddenGroups, chartDim)}
+              onToggle={(key) => setHiddenGroups((cur) => toggleHiddenSeries(cur, chartDim, key))}
+              lines={chartType === 'lines'}
+              label={chartHeading}
+            />
+          ) : (
+            <GroupShareChart
+              type={chartType}
+              summary={chartSummary}
+              dim={chartDim}
+              userNames={userNames}
+              hidden={hiddenSeriesFor(hiddenGroups, chartDim)}
+              onToggle={(key) => setHiddenGroups((cur) => toggleHiddenSeries(cur, chartDim, key))}
+            />
+          )}
+        </ChartRegion>
       </div>
 
       {loading ? (
@@ -634,13 +1024,13 @@ function tierSummary(tiers = {}) {
     .join(' ') || '—';
 }
 
-function WorkItemDetail({ item, since, team, navigate }) {
+function WorkItemDetail({ item, since, until, team, navigate }) {
   const [owner, repoName] = (item.repo || '/').split('/');
   const addr = item.prs[0] != null ? item.prs[0] : item.issues[0];
-  const sinceQ = since ? `since=${encodeURIComponent(since)}&` : '';
+  const rangeQ = rangeQueryString({ since, until });
   const teamQ = teamQuery(team);
   const url = owner && repoName && addr != null
-    ? `/api/usage/work-items/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/${addr}?${sinceQ}${teamQ}`
+    ? `/api/usage/work-items/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/${addr}?${rangeQ}${teamQ}`
     : null;
   const { data, loading } = useApi(url);
 
@@ -716,13 +1106,13 @@ function WorkItemDetail({ item, since, team, navigate }) {
 
 function WorkItemsTab({ team }) {
   const navigate = useNavigate();
-  const [rangeKey, setRangeKey] = useState('7d');
+  const [range, setRange] = useState(DEFAULT_RANGE);
   const [selected, setSelected] = useState(null);
-  const { since } = useRangeWindow(rangeKey);
+  const { since, until } = useRangeWindow(range);
 
-  const sinceQ = since ? `since=${encodeURIComponent(since)}&` : '';
+  const rangeQ = rangeQueryString({ since, until });
   const teamQ = teamQuery(team);
-  const { data, loading, error, refetch } = useApi(`/api/usage/work-items?${sinceQ}${teamQ}`);
+  const { data, loading, error, refetch } = useApi(`/api/usage/work-items?${rangeQ}${teamQ}`);
 
   const cov = data?.coverage || { runs: { attributed: 0, unattributed: 0, total: 0 }, tokens: { attributed: 0, unattributed: 0, total: 0 }, attributedPct: 0 };
   const unatt = data?.unattributed || { total: 0, runs: 0 };
@@ -784,13 +1174,11 @@ function WorkItemsTab({ team }) {
   return (
     <>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
-        <select value={rangeKey} onChange={(e) => setRangeKey(e.target.value)} style={CONTROL_STYLE} aria-label="Time range">
-          {RANGE_PRESETS.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
-        </select>
+        <RangeControl value={range} onChange={setRange} />
         <button onClick={refetch} style={{ ...CONTROL_STYLE, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
           <RefreshCw size={14} /> Refresh
         </button>
-        <ExportButtons kind="work-items" since={since} team={team} />
+        <ExportButtons kind="work-items" since={since} until={until} team={team} />
         {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
       </div>
 
@@ -822,7 +1210,7 @@ function WorkItemsTab({ team }) {
       )}
 
       {selected && rows.find((r) => r.id === selected) && (
-        <WorkItemDetail item={rows.find((r) => r.id === selected)._raw} since={since} team={team} navigate={navigate} />
+        <WorkItemDetail item={rows.find((r) => r.id === selected)._raw} since={since} until={until} team={team} navigate={navigate} />
       )}
     </>
   );
@@ -856,13 +1244,13 @@ function ModelChip({ model, current }) {
 }
 
 function AgentModelsTab({ team }) {
-  const [rangeKey, setRangeKey] = useState('7d');
+  const [range, setRange] = useState(DEFAULT_RANGE);
   const [model, setModel] = useState(''); // '' = all models
-  const { since } = useRangeWindow(rangeKey);
+  const { since, until } = useRangeWindow(range);
 
-  const sinceQ = since ? `since=${encodeURIComponent(since)}&` : '';
+  const rangeQ = rangeQueryString({ since, until });
   const teamQ = teamQuery(team);
-  const { data, loading, error, refetch } = useApi(`/api/usage/agent-models?${sinceQ}${teamQ}`);
+  const { data, loading, error, refetch } = useApi(`/api/usage/agent-models?${rangeQ}${teamQ}`);
 
   const allRows = useMemo(() => agentModelRows(data), [data]);
   const models = useMemo(() => modelOptions(data), [data]);
@@ -892,9 +1280,7 @@ function AgentModelsTab({ team }) {
   return (
     <>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
-        <select value={rangeKey} onChange={(e) => setRangeKey(e.target.value)} style={CONTROL_STYLE} aria-label="Time range">
-          {RANGE_PRESETS.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
-        </select>
+        <RangeControl value={range} onChange={setRange} />
         <label style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Model</label>
         <select value={model} onChange={(e) => setModel(e.target.value)} style={CONTROL_STYLE} aria-label="Model">
           <option value="">All models</option>

@@ -186,6 +186,7 @@ const promptHistory = require('./prompt-history');
 const { resolveAgentStateDir } = require('./agent-state-dir');
 const skillDrift = require('./skill-drift');
 const skillLineage = require('./skill-lineage');
+const { skillSourceTeamIdOf, seededCopyOrigin } = require('./skill-copy-origin');
 const skillTransfer = require('./skill-transfer');
 const skillVersionDiff = require('./skill-version-diff');
 const skillInjectionScan = require('./skill-injection-scan');
@@ -8032,12 +8033,10 @@ function augmentSkillActivation(graph, parsed, fleet = null) {
         // Drift (#629 AC2) is meaningful only for a copy that was actually
         // seeded into this member's workspace — the seeded entry is the anchor.
         if (seeded) {
-          const origin = seededEntry.tier
-            // #750: a team-tier copy's source lives in the AGENT team's pool
-            // (parentTeamId — the same key the overlay's sourceMissing check and
-            // the orchestrator seed/sync use), not the member's human tenant teamId.
-            ? { tier: seededEntry.tier, teamId: seededEntry.tier === 'team' ? (m.parentTeamId || m.teamId) : undefined, sourceHash: seededEntry.contentHash }
-            : null;
+          // #750: a team-tier copy's source lives in the AGENT team's pool
+          // (parentTeamId — the same key the overlay's sourceMissing check and
+          // the orchestrator seed/sync use), not the member's human tenant teamId.
+          const origin = seededCopyOrigin(m, seededEntry);
           const copyDir = path.join(AGENTS_DIR, m.id, 'skills', name);
           let sourceDir = origin ? resolveSkillSourceDir(name, origin.tier, origin.teamId) : null;
           // #750 follow-up: a skill promoted/moved from the team tier into the
@@ -8991,9 +8990,7 @@ app.get('/api/agents/:id/private-skills', (req, res) => {
       const prov = readSkillProvenance(dir);
       if (granted.has(name)) {
         const seeded = seededManifest[name];
-        const origin = seeded && seeded.tier
-          ? { tier: seeded.tier, teamId: seeded.tier === 'team' ? cfg.teamId : undefined, sourceHash: seeded.contentHash }
-          : null;
+        const origin = seededCopyOrigin(cfg, seeded);
         const d = skillDriftSummary(dir, origin);
         if (d.drift !== 'diverged' && d.drift !== 'conflict') continue;
         skills.push({ name, provenance: prov || null, granted: true, drift: d.drift });
@@ -12302,9 +12299,7 @@ function gatherSkillCopies(name, scope) {
     lazyStampAgentSkill(dir, agentId);
     const seededManifest = readJsonFile(path.join(resolveAgentStateDir(path.join(AGENTS_DIR, agentId)), 'seeded-skills.json'), {}) || {};
     const seeded = seededManifest[name];
-    const origin = seeded && seeded.tier
-      ? { tier: seeded.tier, teamId: seeded.tier === 'team' ? cfg.teamId : undefined, sourceHash: seeded.contentHash }
-      : null;
+    const origin = seededCopyOrigin(cfg, seeded);
     const d = skillDriftSummary(dir, origin);
     copies.push({ tier: 'agent', agentId, teamId: cfg.teamId, ...skillManifestSummary(dir), drift: d.drift, resyncable: d.resyncable, sourceVersion: d.sourceVersion });
   }
@@ -12381,12 +12376,13 @@ app.get('/api/skills', (req, res) => {
             const dir = path.join(agentSkillsDir, name);
             lazyStampAgentSkill(dir, agentId);
             const seeded = seededManifest[name];
-            const origin = seeded && seeded.tier
-              ? { tier: seeded.tier, teamId: seeded.tier === 'team' ? cfg.teamId : undefined, sourceHash: seeded.contentHash }
-              : null;
+            // #2971: a member's team-tier source lives in its AGENT team's pool.
+            const origin = seededCopyOrigin(cfg, seeded);
             const driftSummary = skillDriftSummary(dir, origin);
             if (!agentDriftByNameTeam.has(name)) agentDriftByNameTeam.set(name, new Map());
-            pushDrift(agentDriftByNameTeam.get(name), cfg.teamId, driftSummary.drift);
+            // Bucketed under the same key a team row's `teamId` carries (the
+            // agent team), so the read below finds its member copies (#2971 AC3).
+            pushDrift(agentDriftByNameTeam.get(name), skillSourceTeamIdOf(cfg), driftSummary.drift);
             // Carry the owning team so the UI can deep-link the "share it" path
             // into the (team-scoped) Knowledge page for this agent (#1144).
             // `knowledgeTeamId` (#2180) is the actual skill-POOL key (the squad

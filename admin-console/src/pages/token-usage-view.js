@@ -41,6 +41,43 @@ export const GROUP_OPTIONS = [
   { key: 'day', label: 'Day' },
 ];
 
+// What the Statistics chart measures (#2976): total tokens (the default), one
+// token class, or the number of invocations. Each metric is one column of the
+// summary table, so a chart value can always be checked against that column.
+// `noun` heads the chart title ("Input tokens per day"), `unit` follows a
+// number ("1,234 tokens").
+export const METRICS = [
+  { key: 'total', label: 'Total tokens', noun: 'Tokens', unit: 'tokens' },
+  ...TOKEN_CLASSES.map((c) => ({ key: c.key, label: c.label, noun: `${c.label} tokens`, unit: 'tokens' })),
+  { key: 'invocations', label: 'Invocations', noun: 'Invocations', unit: 'invocations' },
+];
+
+export const DEFAULT_METRIC = 'total';
+
+// A known metric key, or the default.
+export function resolveMetric(key) {
+  return METRICS.some((m) => m.key === key) ? key : DEFAULT_METRIC;
+}
+
+export function metricInfo(key) {
+  return METRICS.find((m) => m.key === resolveMetric(key));
+}
+
+// The metric's figure on a summary row (a group, subgroup or `totals`): the
+// matching table column — `tokens[metric]`, or `invocations`.
+export function metricValue(row, metric = DEFAULT_METRIC) {
+  if (!row) return 0;
+  const m = resolveMetric(metric);
+  const v = m === 'invocations' ? row.invocations : row.tokens && row.tokens[m];
+  return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+}
+
+// A full number with the metric's unit: "1,234 tokens", "1 invocation".
+export function formatMetric(n, metric = DEFAULT_METRIC) {
+  const { unit } = metricInfo(metric);
+  return `${formatInt(n)} ${n === 1 ? unit.replace(/s$/, '') : unit}`;
+}
+
 // The `unknown` key the aggregator uses for a record whose group value could not
 // be resolved. Written down once so the label rules below and the table cell
 // cannot disagree about which key means "no answer".
@@ -532,11 +569,19 @@ export function chartGranularity(summary) {
 // is deliberately not an input (#2973 AC11): it changes only the table.
 // `granularity` (#2974) is the server time key the bars are built from:
 // 'hour' for hourly bars, else 'day' (week / month are rolled up from days).
-export function chartSummaryUrl({ since, until, team, groupBy, granularity } = {}) {
+//
+// `filterBy` + `filterKey` (#2976) narrow the chart to one value of a dimension
+// — the drill-down: `groupBy` is then the "then by" dimension the value is
+// split by.
+export function chartSummaryUrl({ since, until, team, groupBy, granularity, filterBy, filterKey } = {}) {
   const params = new URLSearchParams();
   if (since) params.set('since', since);
   if (until) params.set('until', until);
   if (team) params.set('team', team);
+  if (filterBy && filterKey) {
+    params.set('filterBy', filterBy);
+    params.set('filterKey', filterKey);
+  }
   const time = granularity === 'hour' ? 'hour' : 'day';
   const dim = GROUP_OPTIONS.some((g) => g.key === groupBy) && groupBy !== 'day' ? groupBy : null;
   params.set('groupBy', dim || time);
@@ -553,8 +598,15 @@ export function chartSummaryUrl({ since, until, team, groupBy, granularity } = {
 // a value that appears on only some days keeps one colour across the chart.
 // `points` are chronological; `values` maps series key → that day's tokens and
 // omits a series with nothing on that day.
-export function buildGroupDaySeries(summary, limit = CHART_SERIES_LIMIT) {
-  const groups = summary && Array.isArray(summary.groups) ? summary.groups : [];
+//
+// `metric` (#2976) picks the figure each cell contributes (metricValue). For any
+// metric but the default the groups are re-ranked by that figure first, so the
+// values that get their own slot are the largest by what is being measured.
+export function buildGroupDaySeries(summary, limit = CHART_SERIES_LIMIT, metric = DEFAULT_METRIC) {
+  const all = summary && Array.isArray(summary.groups) ? summary.groups : [];
+  const groups = resolveMetric(metric) === DEFAULT_METRIC
+    ? all
+    : [...all].sort((a, b) => metricValue(b, metric) - metricValue(a, metric) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   const fold = groups.length > limit;
   const named = fold ? groups.slice(0, limit) : groups;
   const seriesOf = new Map();
@@ -575,7 +627,7 @@ export function buildGroupDaySeries(summary, limit = CHART_SERIES_LIMIT) {
   for (const g of groups) {
     const s = seriesOf.get(g.key);
     for (const sub of Array.isArray(g.subgroups) ? g.subgroups : []) {
-      const value = (sub.tokens && sub.tokens.total) || 0;
+      const value = metricValue(sub, metric);
       if (!value) continue;
       let p = byDay.get(sub.key);
       if (!p) {
@@ -604,10 +656,12 @@ export function seriesLabel(dim, series, userNames) {
 
 // Chart title for a dimension: "Tokens per day" for Day (unchanged), else
 // "Tokens per day by <Dimension>". `unit` (#2974) names the bar size —
-// hour / day / week / month.
-export function chartTitle(dim, unit = 'day') {
+// hour / day / week / month; `metric` (#2976) what is measured
+// ("Input tokens per day", "Invocations per week by Agent").
+export function chartTitle(dim, unit = 'day', metric = DEFAULT_METRIC) {
   const opt = dim === 'day' ? null : GROUP_OPTIONS.find((g) => g.key === dim);
-  return opt ? `Tokens per ${unit} by ${opt.label}` : `Tokens per ${unit}`;
+  const noun = metricInfo(metric).noun;
+  return opt ? `${noun} per ${unit} by ${opt.label}` : `${noun} per ${unit}`;
 }
 
 // Legend visibility for group-value series. Unlike token classes, the keys are

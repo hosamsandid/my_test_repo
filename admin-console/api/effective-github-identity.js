@@ -97,7 +97,7 @@ function presentSigning(described, { callerUserId = null, userLabel, credentialN
   const ident = d.identity && typeof d.identity === 'object' && d.identity.email
     ? { name: String(d.identity.name || ''), email: String(d.identity.email) }
     : null;
-  return {
+  const out = {
     kind: 'signing',
     kindLabel: 'Signing key',
     source,
@@ -105,6 +105,14 @@ function presentSigning(described, { callerUserId = null, userLabel, credentialN
     credential: shown && source !== 'global' ? { id, name: nameOf(id) || d.name || null } : null,
     identity: shown ? ident : null,
   };
+  // #2959: what signs once the personal key no longer applies — a team key
+  // keeps its id/name (as above), a global one is a tier only.
+  if (source === 'personal' && d.fallback && typeof d.fallback === 'object') {
+    const fb = ['team', 'global'].includes(d.fallback.source) && d.fallback.keyId ? d.fallback.source : 'none';
+    const fbId = fb === 'team' ? String(d.fallback.keyId) : null;
+    out.fallback = { source: fb, credential: fbId ? { id: fbId, name: nameOf(fbId) || d.fallback.name || null } : null };
+  }
+  return out;
 }
 
 /**

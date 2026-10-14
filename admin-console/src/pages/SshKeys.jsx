@@ -25,12 +25,11 @@ import {
 import { environmentsUsingSshKey, usageCountLabel, usageTooltip } from './credential-usage';
 import { CREDENTIALS_HELP_SECTIONS } from './credentials-help-sections.js';
 import { usePageActions } from '../context/PageActionsContext';
-import {
-  loadPersonalCredentialChangeNotice, personalUsageCell, personalCreateRestartNote, replaceRestartNote,
-} from './effective-identity-view.js';
+import { personalCreateRestartNote, replaceRestartNote } from './effective-identity-view.js';
 import {
   signingFormValue, signingFormError, signingPayload, signingCell, signingRecommendation,
   SIGNING_UPLOAD_HINT, GITHUB_SIGNING_DOCS_HREF,
+  personalSshUsageCell, signingUsageLine, signingDeleteImpact, personalSigningTeams, loadPersonalSshChangeNotice,
 } from './commit-signing-view.js';
 
 const inputStyle = {
@@ -211,6 +210,16 @@ function SigningUploadNote() {
     <div role="note" style={{ padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
       <strong>Commit signing:</strong> {SIGNING_UPLOAD_HINT}
     </div>
+  );
+}
+
+// #2959: the "signs commits" line under a key's Used-by cell.
+function SigningUsageLine({ line }) {
+  if (!line) return null;
+  return (
+    <span title={line.title} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: line.active ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)' }}>
+      <PenLine size={11} aria-hidden="true" /> {line.label}
+    </span>
   );
 }
 
@@ -527,6 +536,10 @@ export default function SshKeys() {
   const { data: keys, loading, error, refetch } = useApi('/api/ssh-keys');
   const { data: teamsData } = useApi('/api/admin/teams');
   const { data: envsData } = useApi('/api/environments');
+  // #2959: the caller's teams with their effective signing key — names the
+  // teams a personal key signs for, and what they fall back to on delete.
+  const { data: baselineData, refetch: refetchBaseline } = useApi('/api/me/baseline-teams');
+  const baselineTeams = Array.isArray(baselineData?.teams) ? baselineData.teams : [];
   const { user } = useAuth();
   const [creating, setCreating] = useState(false);
   const [editTarget, setEditTarget] = useState(null);
@@ -540,11 +553,16 @@ export default function SshKeys() {
   // (or deleted) now moves — the Team Admin's personal credential overrides the
   // team's own for automatic work and in-container GitHub actions.
   const [baselineNotice, setBaselineNotice] = useState(null);
+  // #2959: the notice words the signing outcome separately from transport.
   const announceBaselineChange = (entry, action) => {
     if (entry?.scope !== 'personal') return;
-    loadPersonalCredentialChangeNotice(url => apiCall('GET', url), {
-      kind: 'ssh', action, credentialId: entry.id, restarted: entry.ownerAgentsRestarted === true,
+    loadPersonalSshChangeNotice(url => apiCall('GET', url), {
+      action, credentialId: entry.id, restarted: entry.ownerAgentsRestarted === true,
+      signing: entry.signing || null,
+      signedTeamsBefore: action === 'deleted' ? personalSigningTeams(baselineTeams, entry.id) : [],
+      wasTransport: entry.activePersonal !== false,
     }).then(setBaselineNotice);
+    refetchBaseline();
   };
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
@@ -584,6 +602,8 @@ export default function SshKeys() {
   const envsLoaded = Array.isArray(envsData);
   const envs = envsLoaded ? envsData : [];
   const deleteUsage = deleteTarget && envsLoaded ? environmentsUsingSshKey(envs, deleteTarget.id) : [];
+  const signingCtx = { rows, teams: baselineTeams };
+  const deleteSigning = deleteTarget ? signingDeleteImpact(deleteTarget, signingCtx) : null;
 
   const COLUMNS = [
     { key: 'id', label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
@@ -643,24 +663,37 @@ export default function SshKeys() {
       render: (_, row) => {
         // #2655: a personal credential is never referenced by an environment —
         // say whether the runtime uses it instead of a meaningless "None".
-        const personal = personalUsageCell(row, 'ssh');
+        // #2959: plus, on a second line, whether the key SIGNS commits.
+        const personal = personalSshUsageCell(row, signingCtx);
         if (personal) {
           return (
-            <span title={personal.title} style={{ fontSize: 'var(--eb-text-xs)', color: personal.active ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)', fontWeight: personal.active ? 'var(--eb-font-medium)' : undefined }}>
-              {personal.label}
+            <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2 }}>
+              <span title={personal.title} style={{ fontSize: 'var(--eb-text-xs)', color: personal.active ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)', fontWeight: personal.active ? 'var(--eb-font-medium)' : undefined }}>
+                {personal.label}
+              </span>
+              <SigningUsageLine line={personal.signing} />
             </span>
           );
         }
+        const signingLine = signingUsageLine(row, signingCtx);
         if (!envsLoaded) {
-          return <span title="Environment usage is loading or unavailable" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>—</span>;
+          return (
+            <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2 }}>
+              <span title="Environment usage is loading or unavailable" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>—</span>
+              <SigningUsageLine line={signingLine} />
+            </span>
+          );
         }
         const using = environmentsUsingSshKey(envs, row.id);
         return (
-          <span
-            title={usageTooltip(using)}
-            style={{ fontSize: 'var(--eb-text-xs)', color: using.length > 0 ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)' }}
-          >
-            {usageCountLabel(using)}
+          <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2 }}>
+            <span
+              title={usageTooltip(using)}
+              style={{ fontSize: 'var(--eb-text-xs)', color: using.length > 0 ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)' }}
+            >
+              {usageCountLabel(using)}
+            </span>
+            <SigningUsageLine line={signingLine} />
           </span>
         );
       },
@@ -987,6 +1020,16 @@ export default function SshKeys() {
             <p style={{ margin: 0 }}>
               Really delete "<strong>{deleteTarget?.name || deleteTarget?.id}</strong>"?
             </p>
+            {deleteSigning && (
+              <div role="note" style={{ marginTop: 'var(--eb-space-3)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>
+                <p style={{ margin: 0 }}>{deleteSigning.intro}</p>
+                {deleteSigning.items.length > 0 && (
+                  <ul style={{ margin: 'var(--eb-space-1) 0 0', paddingLeft: '1.25rem' }}>
+                    {deleteSigning.items.map(item => <li key={item}>{item}</li>)}
+                  </ul>
+                )}
+              </div>
+            )}
             {!envsLoaded ? (
               <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
                 Any environment still referencing this key must detach it first.
@@ -1002,7 +1045,7 @@ export default function SshKeys() {
                   {deleteUsage.map(e => <li key={e.id}>{e.name || e.id}</li>)}
                 </ul>
               </div>
-            ) : (
+            ) : deleteSigning ? null : (
               <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
                 Not in use by any environment.
               </p>

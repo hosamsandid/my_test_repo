@@ -7477,7 +7477,9 @@ function describeAgentBaselineCredentials(cfg) {
     environmentId: env?.id || null,
     github: describeBaselineGithubToken(cfg, env),
     ssh: describeBaselineSshKey(cfg, baselineSharedSshKeyId(env)),
-    signing: describeSigning(resolveAgentSigning(cfg, env, null)),
+    // #2959: plus what signs once no personal signing key applies — the
+    // SSH Keys page names it when the owner deletes their signing key.
+    signing: describeSigning(resolveAgentSigning(cfg, env, null), resolveTeamSigning(env)),
   };
 }
 
@@ -7507,10 +7509,18 @@ function resolveTeamSigning(env) {
 }
 
 // Display-safe summary of a resolution (no secrets): what the console shows.
-function describeSigning(signing) {
+// `fallback` (optional, a `resolveTeamSigning` result) is kept for a personal
+// resolution only: what would sign without the owner's personal key (#2959).
+function describeSigning(signing, fallback = null) {
   if (!signing || signing.source === "none" || !signing.keyId) return { source: "none", keyId: null, identity: null };
-  const entry = loadSshKeyIndex().find((k) => k && String(k.id) === String(signing.keyId)) || {};
-  return { source: signing.source, keyId: signing.keyId, ownerId: signing.ownerId || null, name: entry.name || null, identity: signing.identity };
+  const index = loadSshKeyIndex();
+  const nameOf = (id) => (index.find((k) => k && String(k.id) === String(id)) || {}).name || null;
+  const out = { source: signing.source, keyId: signing.keyId, ownerId: signing.ownerId || null, name: nameOf(signing.keyId), identity: signing.identity };
+  if (signing.source === "personal" && fallback) {
+    const fb = fallback.source === "team" || fallback.source === "global" ? fallback.source : "none";
+    out.fallback = { source: fb, keyId: fb === "none" ? null : fallback.keyId, name: fb === "none" ? null : nameOf(fallback.keyId) };
+  }
+  return out;
 }
 
 // "team key 'deploy'" — names the credential in a signing failure (AC9).

@@ -6,7 +6,7 @@
 // order, the donut and line geometry — lives here so it is covered by
 // `node --test`; TokenUsage.jsx only draws the result.
 
-import { TOKEN_CLASSES, CLASS_COLOR, GROUP_OPTIONS, OTHER_SERIES_KEY, chartTitle, formatInt } from './token-usage-view.js';
+import { TOKEN_CLASSES, CLASS_COLOR, GROUP_OPTIONS, OTHER_SERIES_KEY, DEFAULT_METRIC, chartTitle, formatMetric, metricInfo, resolveMetric } from './token-usage-view.js';
 
 // The four chart types, in the order the switch offers them (AC1).
 export const CHART_TYPES = [
@@ -38,16 +38,18 @@ export function defaultChartType(dim) {
 
 // The types a grouping offers. With Group by = Day every "value" is a time
 // bucket, so a ranking of days is not offered; its donut splits the range by
-// token class instead (AC9).
-export function chartTypeOptions(dim) {
-  return dim === 'day' ? CHART_TYPES.filter((t) => t.key !== 'ranking') : CHART_TYPES;
+// token class instead (AC9) — which only means something while the metric is
+// total tokens (#2976): one class, or the invocation count, has no class split.
+export function chartTypeOptions(dim, metric = DEFAULT_METRIC) {
+  if (dim !== 'day') return CHART_TYPES;
+  return CHART_TYPES.filter((t) => t.key !== 'ranking' && (t.key !== 'donut' || resolveMetric(metric) === DEFAULT_METRIC));
 }
 
 // The type to draw: the user's choice for this visit (null = none yet) when the
 // grouping offers it, else that grouping's default (AC2/AC3). The choice itself
 // is never overwritten, so switching Day → Agent brings a chosen Ranking back.
-export function resolveChartType(choice, dim) {
-  if (choice && chartTypeOptions(dim).some((t) => t.key === choice)) return choice;
+export function resolveChartType(choice, dim, metric = DEFAULT_METRIC) {
+  if (choice && chartTypeOptions(dim, metric).some((t) => t.key === choice)) return choice;
   return defaultChartType(dim);
 }
 
@@ -56,12 +58,14 @@ export function isOverTime(type) {
 }
 
 // The chart heading. Over-time types keep the existing "Tokens per <bucket>
-// [by <Dimension>]" title; the range-total types name what they show.
-export function chartTypeTitle(type, dim, unit = 'day') {
-  if (isOverTime(type)) return chartTitle(dim, unit);
+// [by <Dimension>]" title; the range-total types name what they show. `metric`
+// (#2976) replaces "tokens" with what is measured.
+export function chartTypeTitle(type, dim, unit = 'day', metric = DEFAULT_METRIC) {
+  if (isOverTime(type)) return chartTitle(dim, unit, metric);
   const opt = GROUP_OPTIONS.find((g) => g.key === dim);
-  if (type === 'donut') return dim === 'day' || !opt ? 'Share of tokens by token class' : `Share of tokens by ${opt.label}`;
-  return `Tokens by ${opt ? opt.label : 'group'}, ranked`;
+  const noun = metricInfo(metric).noun;
+  if (type === 'donut') return dim === 'day' || !opt ? `Share of ${noun.toLowerCase()} by token class` : `Share of ${noun.toLowerCase()} by ${opt.label}`;
+  return `${noun} by ${opt ? opt.label : 'group'}, ranked`;
 }
 
 // The Day donut's items: the range total per token class, coloured like the
@@ -117,9 +121,9 @@ export function rankingBars(items, hidden) {
 }
 
 // One-line readout for a slice or bar (hover, focus and accessible name):
-// label, the full number and the share.
-export function shareText(item) {
-  return `${item.label}: ${formatInt(item.value)} tokens (${item.pct.toFixed(1)}%)`;
+// label, the full number in the metric's unit (#2976) and the share.
+export function shareText(item, metric = DEFAULT_METRIC) {
+  return `${item.label}: ${formatMetric(item.value, metric)} (${item.pct.toFixed(1)}%)`;
 }
 
 // ── Donut geometry ─────────────────────────────────────────────────────────

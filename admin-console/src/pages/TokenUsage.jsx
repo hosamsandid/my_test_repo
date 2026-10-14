@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useId } from 'react';
+import React, { useState, useMemo, useEffect, useId, useRef } from 'react';
 import { RefreshCw, Download } from 'lucide-react';
 import { useNavigate } from 'react-router';
 import { useApi } from '../hooks/useApi';
@@ -9,7 +9,9 @@ import InfoTip from '../components/InfoTip';
 import PageHelpButton from '../components/PageHelpButton';
 import { TOKEN_USAGE_HELP_SECTIONS } from './token-usage-help-sections.js';
 import { toRows as agentModelRows, modelOptions, filterRowsByModel, isCurrentModel } from './agent-models-view.js';
-import { TOKEN_CLASSES, CLASS_COLOR, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, sanitizeHiddenClasses, loadHiddenClasses, saveHiddenClasses, userLabelIndex, agentTeamFilterOptions, userGroupCell, providerTierCell, secondaryGroupOptions, groupValueCell, chartSummaryUrl, chartDimension, chartGranularity, buildGroupDaySeries, seriesLabel, groupStack, groupVisibleMax, hiddenSeriesFor, toggleHiddenSeries } from './token-usage-view.js';
+import { TOKEN_CLASSES, CLASS_COLOR, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, toggleHiddenClass, sanitizeHiddenClasses, loadHiddenClasses, saveHiddenClasses, userLabelIndex, agentTeamFilterOptions, userGroupCell, providerTierCell, secondaryGroupOptions, groupValueCell, chartSummaryUrl, chartDimension, chartGranularity, buildGroupDaySeries, seriesLabel, groupStack, groupVisibleMax, hiddenSeriesFor, toggleHiddenSeries, METRICS, DEFAULT_METRIC, resolveMetric, metricInfo, formatMetric, CHART_SERIES_LIMIT } from './token-usage-view.js';
+import { classSeriesFor, classPointValues, rankingSplit, visibleSegments, drillAvailable, isDrillable, allValuesLabel, drilledTableSummary, drillValueGone, isActivationKey } from './token-usage-drill.js';
+import { previousWindow, previousSummaryUrl, tileComparison, isPreviousSummaryFor } from './token-usage-compare.js';
 import { chartTypeOptions, resolveChartType, isOverTime, chartTypeTitle, classShareItems, shareSlices, rankingBars, shareText, donutAngles, arcPath, lineSeries, lineVisibleMax } from './token-usage-chart-type.js';
 import { RANGE_PRESETS, DEFAULT_RANGE, BUCKET_OPTIONS, rangeBounds, rangeQuery, rangeQueryString, customRangeError, dateInputValue, resolveBucket, hourBucketAllowed, bucketDisplay, autoBucket, sourceGranularity, earliestKeyStart, rebucketClassPoints, rebucketGroupPoints, bucketRangeText, axisLabels, barLayout, bucketUnit } from './token-usage-range.js';
 
@@ -100,7 +102,10 @@ function RangeControl({ value, onChange }) {
 // a visible indicator that reveals a plain-language explanation on hover,
 // keyboard focus and tap. Purely additive — cards without `help` render
 // exactly as before (value, order and layout unchanged).
-function StatCard({ label, value, accent, help, title }) {
+//
+// `delta` (#2976) adds the comparison with the previous period under the value
+// — arrow, signed percentage and period ("▲ +12% vs previous 7 days").
+function StatCard({ label, value, accent, help, title, delta }) {
   return (
     <div style={{
       flex: '1 1 120px',
@@ -119,6 +124,11 @@ function StatCard({ label, value, accent, help, title }) {
       <div title={title} style={{ fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)', fontFamily: 'var(--eb-font-mono)' }}>
         {value}
       </div>
+      {delta ? (
+        <div title={delta.title} style={{ marginTop: 2, fontSize: 'var(--eb-text-xs)', color: delta.color, whiteSpace: 'nowrap' }}>
+          {delta.text}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -257,76 +267,101 @@ function LinesOverlay({ lines, label }) {
 
 // One column of the line chart: a full-height hover target whose tooltip
 // lists every visible series' value for the bucket, and a dot per series.
-function renderLinePoint(title, dots) {
+// With `drill` (#2976) a drillable series' dot is a larger, focusable button
+// named by its value; the others stay decorative.
+function renderLinePoint(title, dots, drill) {
   return (
     <div title={title} style={{ position: 'relative', width: '100%', height: '100%' }}>
-      {dots.map((d) => (
-        <span
-          key={d.key}
-          aria-hidden="true"
-          style={{
-            position: 'absolute', left: '50%', bottom: `${d.y * 100}%`, width: 6, height: 6,
-            transform: 'translate(-50%, 50%)', borderRadius: '50%', background: d.color,
-          }}
-        />
-      ))}
+      {dots.map((d) => {
+        const target = drill && isDrillable(d.key) ? drillProps(drill, d.key, d.text) : null;
+        const size = target ? 10 : 6;
+        return (
+          <span
+            key={d.key}
+            aria-hidden={target ? undefined : 'true'}
+            {...target}
+            style={{
+              position: 'absolute', left: '50%', bottom: `${d.y * 100}%`, width: size, height: size,
+              transform: 'translate(-50%, 50%)', borderRadius: '50%', background: d.color,
+              cursor: target ? 'pointer' : undefined,
+            }}
+          />
+        );
+      })}
     </div>
   );
 }
 
-// The token classes as line series (#2975), coloured like the tiles.
-const CLASS_SERIES = TOKEN_CLASSES.map((c) => ({ key: c.key, label: c.label, color: CLASS_COLOR[c.key] }));
+// Drill-down target props (#2976): a segment, line point or slice that opens
+// `key` split by the "then by" dimension, by mouse or by Enter / Space on
+// focus. `drill` is { onDrill, labelOf, byLabel }; `text` names what the
+// target shows, and the accessible name adds what activating it does.
+function drillProps(drill, key, text) {
+  const go = () => drill.onDrill(key);
+  return {
+    role: 'button',
+    tabIndex: 0,
+    'aria-label': `${text} — show ${drill.labelOf(key)} by ${drill.byLabel}`,
+    onClick: go,
+    onKeyDown: (e) => {
+      if (isActivationKey(e.key)) {
+        e.preventDefault();
+        go();
+      }
+    },
+  };
+}
 
 // Group by = Day: one bar per bucket stacked by token class (unchanged by
 // #2973), or one line per class (#2975 `lines`). `bucket` and the [start, end)
 // window (#2974) shape the bars; every bucket in the window is drawn, empty
-// ones at zero height.
-function TimeSeries({ summary, bucket, start, end, hidden, onToggle, lines, label }) {
+// ones at zero height. `metric` (#2976) picks the series: all four classes for
+// total tokens, one class, or the invocation count (classSeriesFor); `hidden`
+// is the hidden set of those series.
+function TimeSeries({ summary, metric, bucket, start, end, hidden, onToggle, lines, label }) {
   const raw = useMemo(() => buildDaySeries(summary).points, [summary]);
-  const points = useMemo(() => rebucketClassPoints(raw, { bucket, start, end }), [raw, bucket, start, end]);
-  const classValue = (p, k) => (p.tokens && p.tokens[k]) || 0;
-  const visibleHidden = sanitizeHiddenClasses(hidden);
-  // The axis + bar heights are driven by the currently-VISIBLE classes (#1707),
+  const points = useMemo(() => rebucketClassPoints(raw, { bucket, start, end }).map(classPointValues), [raw, bucket, start, end]);
+  const series = useMemo(() => classSeriesFor(metric), [metric]);
+  const seriesValue = (p, k) => (p.values && p.values[k]) || 0;
+  // The axis + bar heights are driven by the currently-VISIBLE series (#1707),
   // so hiding the dominant cache series rescales the whole plot (AC4/AC5).
   // Lines are not stacked, so their axis follows the largest single value.
-  const maxTotal = lines ? lineVisibleMax(points, CLASS_SERIES, visibleHidden, classValue) : visibleMaxTotal(points, hidden);
+  const maxTotal = lines ? lineVisibleMax(points, series, hidden, seriesValue) : groupVisibleMax(points, series, hidden);
   const { top, ticks } = useMemo(() => niceScale(maxTotal), [maxTotal]);
   // With every series toggled off the chart has nothing to draw — show a short
   // empty-state rather than a broken axis (Open Q3 / AC edge). The legend below
   // stays interactive so the user can switch a series back on.
-  const allHidden = visibleClassList(hidden).length === 0;
-  if (raw.length === 0) {
-    return <ChartEmpty><Legend hidden={hidden} onToggle={onToggle} /></ChartEmpty>;
-  }
+  const allHidden = series.every((c) => hidden.includes(c.key));
+  const legend = <SeriesLegend items={series} hidden={hidden} onToggle={onToggle} />;
+  if (raw.length === 0) return <ChartEmpty>{legend}</ChartEmpty>;
   if (lines) {
-    const drawn = lineSeries(points, CLASS_SERIES, visibleHidden, classValue, top);
-    const shown = CLASS_SERIES.filter((c) => !visibleHidden.includes(c.key));
+    const drawn = lineSeries(points, series, hidden, seriesValue, top);
+    const shown = series.filter((c) => !hidden.includes(c.key));
     const renderPoint = (p) => renderLinePoint(
-      [`${bucketRangeText(p, bucket, start, end)}:`, ...shown.map((c) => `${c.label}: ${formatInt(classValue(p, c.key))} tokens`)].join('\n'),
-      shown.map((c) => ({ key: c.key, color: c.color, y: top > 0 ? classValue(p, c.key) / top : 0 })),
+      [`${bucketRangeText(p, bucket, start, end)}:`, ...shown.map((c) => `${c.label}: ${formatMetric(seriesValue(p, c.key), metric)}`)].join('\n'),
+      shown.map((c) => ({ key: c.key, color: c.color, y: top > 0 ? seriesValue(p, c.key) / top : 0 })),
     );
     return (
       <div>
         <DayStackPlot points={points} bucket={bucket} top={top} ticks={ticks} allHidden={allHidden} renderBar={renderPoint}
           overlay={allHidden ? null : <LinesOverlay lines={drawn} label={label} />} />
-        <Legend hidden={hidden} onToggle={onToggle} />
+        {legend}
       </div>
     );
   }
   const renderBar = (p) => {
-    const segs = stackSegments(p.tokens, top, hidden);
-    // Column height + segment shares are relative to the VISIBLE-class
-    // total for this day, not `tokens.total`, so a hidden class is
-    // removed from every stacked column (AC4).
-    const vTotal = visibleTotalTokens(p.tokens, hidden);
-    const colHeightPct = top > 0 ? (vTotal / top) * 100 : 0;
+    // Column height + segment shares are relative to the VISIBLE-series total
+    // for this bucket, so a hidden class is removed from every column (AC4).
+    const { segments, total } = groupStack(p, series, hidden);
+    const colHeightPct = top > 0 ? (total / top) * 100 : 0;
+    const invocations = resolveMetric(metric) === 'invocations' ? '' : `, ${formatMetric(p.invocations, 'invocations')}`;
     return (
       <div
-        title={`${bucketRangeText(p, bucket, start, end)}: ${formatInt(vTotal)} tokens, ${formatInt(p.invocations)} invocations`}
+        title={`${bucketRangeText(p, bucket, start, end)}: ${formatMetric(total, metric)}${invocations}`}
         style={{ width: '100%', maxWidth: 48, height: `${colHeightPct}%`, minHeight: colHeightPct > 0 ? 2 : 0, display: 'flex', flexDirection: 'column-reverse', borderRadius: 'var(--eb-radius-sm)', overflow: 'hidden' }}
       >
-        {segs.map((s) => (
-          <div key={s.key} style={{ height: `${(s.value / (vTotal || 1)) * 100}%`, background: CLASS_COLOR[s.key] }} />
+        {segments.map((seg) => (
+          <div key={seg.key} style={{ height: `${(seg.value / (total || 1)) * 100}%`, background: seg.color }} />
         ))}
       </div>
     );
@@ -334,7 +369,7 @@ function TimeSeries({ summary, bucket, start, end, hidden, onToggle, lines, labe
   return (
     <div>
       <DayStackPlot points={points} bucket={bucket} top={top} ticks={ticks} allHidden={allHidden} renderBar={renderBar} />
-      <Legend hidden={hidden} onToggle={onToggle} />
+      {legend}
     </div>
   );
 }
@@ -342,8 +377,8 @@ function TimeSeries({ summary, bucket, start, end, hidden, onToggle, lines, labe
 // The group-value series of a chart summary with their legend labels — shared
 // by every chart type so a value has one colour and one name throughout
 // (#2975 AC7).
-function useGroupSeries(summary, dim, userNames) {
-  const { series, points } = useMemo(() => buildGroupDaySeries(summary), [summary]);
+function useGroupSeries(summary, dim, userNames, metric) {
+  const { series, points } = useMemo(() => buildGroupDaySeries(summary, CHART_SERIES_LIMIT, metric), [summary, metric]);
   const labels = useMemo(
     () => new Map(series.map((s) => [s.key, seriesLabel(dim, s, userNames)])),
     [series, dim, userNames],
@@ -359,9 +394,10 @@ function useGroupSeries(summary, dim, userNames) {
 // largest CHART_SERIES_LIMIT values plus one "Other" — or one line per value
 // (#2975 `lines`). Segments are separated by a 2px surface gap so adjacent
 // colours stay distinguishable (AC10), and each segment's tooltip names its
-// value and token count.
-function GroupTimeSeries({ summary, dim, bucket, start, end, userNames, hidden, onToggle, lines, label }) {
-  const { series, points: raw, labels, items } = useGroupSeries(summary, dim, userNames);
+// value and figure. `metric` (#2976) is what the values measure; `drill`, when
+// set, makes every segment / line point of a named value a drill-down target.
+function GroupTimeSeries({ summary, dim, metric, bucket, start, end, userNames, hidden, onToggle, lines, label, drill }) {
+  const { series, points: raw, labels, items } = useGroupSeries(summary, dim, userNames, metric);
   const points = useMemo(() => rebucketGroupPoints(raw, { bucket, start, end }), [raw, bucket, start, end]);
   const groupValue = (p, k) => (p.values && p.values[k]) || 0;
   const maxTotal = lines ? lineVisibleMax(points, series, hidden, groupValue) : groupVisibleMax(points, series, hidden);
@@ -373,8 +409,12 @@ function GroupTimeSeries({ summary, dim, bucket, start, end, userNames, hidden, 
     const drawn = lineSeries(points, series, hidden, groupValue, top);
     const shown = series.filter((s) => !hidden.includes(s.key));
     const renderPoint = (p) => renderLinePoint(
-      [`${bucketRangeText(p, bucket, start, end)}:`, ...shown.map((s) => `${labels.get(s.key).label}: ${formatInt(groupValue(p, s.key))} tokens`)].join('\n'),
-      shown.map((s) => ({ key: s.key, color: s.color, y: top > 0 ? groupValue(p, s.key) / top : 0 })),
+      [`${bucketRangeText(p, bucket, start, end)}:`, ...shown.map((s) => `${labels.get(s.key).label}: ${formatMetric(groupValue(p, s.key), metric)}`)].join('\n'),
+      shown.map((s) => ({
+        key: s.key, color: s.color, y: top > 0 ? groupValue(p, s.key) / top : 0,
+        text: `${bucketRangeText(p, bucket, start, end)} · ${labels.get(s.key).label}: ${formatMetric(groupValue(p, s.key), metric)}`,
+      })),
+      drill,
     );
     return (
       <div>
@@ -389,19 +429,25 @@ function GroupTimeSeries({ summary, dim, bucket, start, end, userNames, hidden, 
     const colHeightPct = top > 0 ? (total / top) * 100 : 0;
     return (
       <div
-        title={`${bucketRangeText(p, bucket, start, end)}: ${formatInt(total)} tokens`}
+        title={`${bucketRangeText(p, bucket, start, end)}: ${formatMetric(total, metric)}`}
         style={{ width: '100%', maxWidth: 48, height: `${colHeightPct}%`, minHeight: colHeightPct > 0 ? 2 : 0, display: 'flex', flexDirection: 'column-reverse', borderRadius: 'var(--eb-radius-sm)', overflow: 'hidden' }}
       >
-        {segments.map((s, i) => (
-          <div
-            key={s.key}
-            title={`${bucketRangeText(p, bucket, start, end)} · ${labels.get(s.key).label}: ${formatInt(s.value)} tokens`}
-            style={{
-              height: `${(s.value / (total || 1)) * 100}%`, background: s.color, boxSizing: 'border-box',
-              borderTop: i < segments.length - 1 ? '2px solid var(--eb-bg-elevated)' : undefined,
-            }}
-          />
-        ))}
+        {segments.map((s, i) => {
+          const text = `${bucketRangeText(p, bucket, start, end)} · ${labels.get(s.key).label}: ${formatMetric(s.value, metric)}`;
+          const target = drill && isDrillable(s.key) ? drillProps(drill, s.key, text) : null;
+          return (
+            <div
+              key={s.key}
+              title={text}
+              {...target}
+              style={{
+                height: `${(s.value / (total || 1)) * 100}%`, background: s.color, boxSizing: 'border-box',
+                borderTop: i < segments.length - 1 ? '2px solid var(--eb-bg-elevated)' : undefined,
+                cursor: target ? 'pointer' : undefined, outlineOffset: target ? -2 : undefined,
+              }}
+            />
+          );
+        })}
       </div>
     );
   };
@@ -415,17 +461,18 @@ function GroupTimeSeries({ summary, dim, bucket, start, end, userNames, hidden, 
 
 // The chart's named region (#2975 AC10): every type sits in one group named by
 // the chart heading, so assistive tech announces what the chart shows.
-function ChartRegion({ title, children }) {
-  return <div role="group" aria-label={title}>{children}</div>;
+// `regionRef` (#2976) lets the page return focus here when a drill-down ends.
+function ChartRegion({ title, children, regionRef }) {
+  return <div role="group" aria-label={title} ref={regionRef} tabIndex={-1} style={{ outline: 'none' }}>{children}</div>;
 }
 
 // The readout under a donut or ranking: the hovered or focused slice / bar —
 // label, full number and share (#2975). Polite live region, so a keyboard user
 // hears it as focus moves; a hint when nothing is active.
-function ShareReadout({ item }) {
+function ShareReadout({ item, metric }) {
   return (
     <div aria-live="polite" style={{ minHeight: '1.5em', marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: item ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)' }}>
-      {item ? shareText(item) : 'Hover over or focus a slice or bar to see its value.'}
+      {item ? shareText(item, metric) : 'Hover over or focus a slice or bar to see its value.'}
     </div>
   );
 }
@@ -436,8 +483,9 @@ const DONUT_INNER = 58;
 
 // Donut (share) (#2975): each visible value's share of the range total. Slices
 // are focusable; percentages and values are listed beside the ring rather than
-// on it, so a tiny slice never gets an overlapping label (edge case).
-function DonutChart({ items, hidden, legend }) {
+// on it, so a tiny slice never gets an overlapping label (edge case). With
+// `drill` (#2976) a named value's slice opens it on click / Enter / Space.
+function DonutChart({ items, hidden, legend, metric, drill }) {
   const [active, setActive] = useState(null);
   const { slices, total } = shareSlices(items, hidden);
   const arcs = donutAngles(slices);
@@ -455,30 +503,34 @@ function DonutChart({ items, hidden, legend }) {
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-5)', flexWrap: 'wrap' }}>
         <svg width={DONUT_SIZE} height={DONUT_SIZE} viewBox={`0 0 ${DONUT_SIZE} ${DONUT_SIZE}`} style={{ flex: '0 0 auto', overflow: 'visible' }}>
-          {slices.map((s, i) => (
-            <path
-              key={s.key}
-              d={arcPath(c, c, DONUT_OUTER, DONUT_INNER, arcs[i].start, arcs[i].end)}
-              fill={s.color}
-              stroke={active === s.key ? 'var(--eb-text-primary)' : 'var(--eb-bg-elevated)'}
-              strokeWidth={active === s.key ? 2 : 1}
-              tabIndex={0}
-              role="img"
-              aria-label={shareText(s)}
-              onMouseEnter={() => setActive(s.key)}
-              onMouseLeave={() => setActive(null)}
-              onFocus={() => setActive(s.key)}
-              onBlur={() => setActive(null)}
-              style={{ cursor: 'default', outline: 'none' }}
-            >
-              <title>{shareText(s)}</title>
-            </path>
-          ))}
+          {slices.map((s, i) => {
+            const target = drill && isDrillable(s.key) ? drillProps(drill, s.key, shareText(s, metric)) : null;
+            return (
+              <path
+                key={s.key}
+                d={arcPath(c, c, DONUT_OUTER, DONUT_INNER, arcs[i].start, arcs[i].end)}
+                fill={s.color}
+                stroke={active === s.key ? 'var(--eb-text-primary)' : 'var(--eb-bg-elevated)'}
+                strokeWidth={active === s.key ? 2 : 1}
+                tabIndex={0}
+                role="img"
+                aria-label={shareText(s, metric)}
+                {...target}
+                onMouseEnter={() => setActive(s.key)}
+                onMouseLeave={() => setActive(null)}
+                onFocus={() => setActive(s.key)}
+                onBlur={() => setActive(null)}
+                style={{ cursor: target ? 'pointer' : 'default', outline: 'none' }}
+              >
+                <title>{shareText(s, metric)}</title>
+              </path>
+            );
+          })}
           <text x={c} y={c - 4} textAnchor="middle" aria-hidden="true" style={{ fill: 'var(--eb-text-primary)', fontSize: 18, fontWeight: 600, fontFamily: 'var(--eb-font-mono)' }}>
             {formatCompact(total)}
           </text>
           <text x={c} y={c + 16} textAnchor="middle" aria-hidden="true" style={{ fill: 'var(--eb-text-secondary)', fontSize: 12 }}>
-            tokens
+            {metricInfo(metric).unit}
           </text>
         </svg>
         <table style={{ borderCollapse: 'collapse', fontSize: 'var(--eb-text-sm)' }}>
@@ -496,17 +548,21 @@ function DonutChart({ items, hidden, legend }) {
           </tbody>
         </table>
       </div>
-      <ShareReadout item={activeItem} />
+      <ShareReadout item={activeItem} metric={metric} />
       {legend}
     </div>
   );
 }
 
 // Ranking (#2975): one horizontal bar per visible value, largest first and
-// "Other" last; each row is focusable and named by its readout.
-function RankingChart({ items, hidden, legend }) {
+// "Other" last; each row is focusable and named by its readout. With `split`
+// (#2976, a "then by" is set) each bar is stacked by its secondary values —
+// the nested table's rows — and its length is the sum of the visible ones.
+function RankingChart({ items, hidden, legend, metric, split }) {
   const [active, setActive] = useState(null);
-  const { bars } = rankingBars(items, hidden);
+  const segOf = (key) => visibleSegments(split ? split.segmentsOf.get(key) : [], split ? split.hidden : []);
+  const sized = split ? items.map((it) => ({ ...it, value: segOf(it.key).total })) : items;
+  const { bars } = rankingBars(sized, hidden);
   if (!bars.length) {
     return (
       <div>
@@ -523,8 +579,8 @@ function RankingChart({ items, hidden, legend }) {
           <li
             key={b.key}
             tabIndex={0}
-            aria-label={shareText(b)}
-            title={shareText(b)}
+            aria-label={shareText(b, metric)}
+            title={shareText(b, metric)}
             onMouseEnter={() => setActive(b.key)}
             onMouseLeave={() => setActive(null)}
             onFocus={() => setActive(b.key)}
@@ -537,27 +593,85 @@ function RankingChart({ items, hidden, legend }) {
           >
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--eb-text-secondary)' }}>{b.label}</span>
             <span style={{ display: 'block', height: 14 }}>
-              <span style={{ display: 'block', height: '100%', width: `${b.widthPct}%`, minWidth: 2, background: b.color, borderRadius: 'var(--eb-radius-sm)' }} />
+              {split ? (
+                <span style={{ display: 'flex', height: '100%', width: `${b.widthPct}%`, minWidth: 2, borderRadius: 'var(--eb-radius-sm)', overflow: 'hidden' }}>
+                  {segOf(b.key).segments.map((seg, i, all) => (
+                    <span
+                      key={seg.key}
+                      title={`${b.label} › ${split.labelOf(seg.key)}: ${formatMetric(seg.value, metric)}`}
+                      style={{
+                        flex: `${seg.value} 0 0`, background: seg.color, boxSizing: 'border-box',
+                        borderRight: i < all.length - 1 ? '2px solid var(--eb-bg-elevated)' : undefined,
+                      }}
+                    />
+                  ))}
+                </span>
+              ) : (
+                <span style={{ display: 'block', height: '100%', width: `${b.widthPct}%`, minWidth: 2, background: b.color, borderRadius: 'var(--eb-radius-sm)' }} />
+              )}
             </span>
             <span style={{ fontFamily: 'var(--eb-font-mono)', whiteSpace: 'nowrap' }}>{formatCompact(b.value)} · {b.pct.toFixed(1)}%</span>
           </li>
         ))}
       </ol>
-      <ShareReadout item={activeItem} />
+      <ShareReadout item={activeItem} metric={metric} />
       {legend}
+      {split ? (
+        <div style={{ marginTop: 'var(--eb-space-2)' }}>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Bars split by {split.byLabel}:</div>
+          {split.legend}
+        </div>
+      ) : null}
     </div>
   );
 }
 
 // Donut or ranking over the selected Group by's range totals (#2975): the same
 // series, colours, top-N + Other fold and legend toggles as the time charts.
-function GroupShareChart({ type, summary, dim, userNames, hidden, onToggle }) {
-  const { points, items } = useGroupSeries(summary, dim, userNames);
+// `nested` (#2976) is the "then by" table summary that splits a Ranking's bars
+// ({ summary, dim, hidden, onToggle }); `drill` makes Donut slices drillable.
+function GroupShareChart({ type, summary, dim, metric, userNames, hidden, onToggle, nested, drill }) {
+  const { series, points, items } = useGroupSeries(summary, dim, userNames, metric);
+  const splitData = useMemo(
+    () => (type === 'ranking' && nested ? rankingSplit(series, nested.summary, metric) : null),
+    [type, nested, series, metric],
+  );
   const legend = <SeriesLegend items={items} hidden={hidden} onToggle={onToggle} />;
   if (points.length === 0) return <ChartEmpty>{legend}</ChartEmpty>;
-  return type === 'ranking'
-    ? <RankingChart items={items} hidden={hidden} legend={legend} />
-    : <DonutChart items={items} hidden={hidden} legend={legend} />;
+  if (type !== 'ranking') return <DonutChart items={items} hidden={hidden} legend={legend} metric={metric} drill={drill} />;
+  let split = null;
+  if (splitData) {
+    const labelOf = (key) => seriesLabel(nested.dim, splitData.series.find((s) => s.key === key) || { key, members: [] }, userNames).label;
+    const splitItems = splitData.series.map((s) => ({ key: s.key, color: s.color, value: s.total, ...seriesLabel(nested.dim, s, userNames) }));
+    split = {
+      segmentsOf: splitData.segmentsOf,
+      hidden: nested.hidden,
+      labelOf,
+      byLabel: nested.label,
+      legend: <SeriesLegend items={splitItems} hidden={nested.hidden} onToggle={nested.onToggle} />,
+    };
+  }
+  return <RankingChart items={items} hidden={hidden} legend={legend} metric={metric} split={split} />;
+}
+
+// Where the chart is while drilled down (#2976): "All models › claude-opus-5-5".
+// The first crumb is a button back to the top level; the second names the
+// drilled value as the current location.
+function DrillBreadcrumb({ trail, onBack, backRef }) {
+  return (
+    <nav aria-label="Chart drill-down" style={{ marginBottom: 'var(--eb-space-2)' }}>
+      <ol style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', fontSize: 'var(--eb-text-sm)' }}>
+        <li>
+          <button ref={backRef} type="button" onClick={onBack}
+            style={{ padding: 0, border: 'none', background: 'transparent', color: 'var(--eb-text-primary)', textDecoration: 'underline', cursor: 'pointer', font: 'inherit' }}>
+            {trail[0]}
+          </button>
+        </li>
+        <li aria-hidden="true" style={{ color: 'var(--eb-text-muted)' }}>›</li>
+        <li aria-current="location" style={{ fontWeight: 'var(--eb-font-medium)' }}>{trail[1]}</li>
+      </ol>
+    </nav>
+  );
 }
 
 // Group by = Day donut (#2975 AC9): the range split by token class, matching
@@ -781,6 +895,17 @@ function StatisticsTab({ team }) {
   // plain component state: it survives Refresh, range and Group-by changes and
   // is never written back when a grouping does not offer it (Ranking on Day).
   const [chartTypeChoice, setChartTypeChoice] = useState(null);
+  // #2976: what the chart measures (Total tokens by default). Session state
+  // like the chart type; a drill-down keeps it.
+  const [metric, setMetric] = useState(DEFAULT_METRIC);
+  // #2976: the primary value the chart is drilled into (null = top level). One
+  // level only; it needs a "then by" to split the value by. Changing Group by,
+  // then by, team or range returns to the top level (AC7).
+  const [drill, setDrill] = useState(null);
+  useEffect(() => { setDrill(null); }, [groupBy, secondaryGroupBy, team, range]);
+  const drilled = !!drill && nested;
+  const drillBackRef = useRef(null);
+  const chartRegionRef = useRef(null);
 
   const rangeQ = rangeQueryString({ since, until });
   const teamQ = teamQuery(team);
@@ -798,9 +923,14 @@ function StatisticsTab({ team }) {
   const windowStart = start != null ? start : earliestKeyStart(chartPointsOf(chartSummary));
   const span = windowStart != null ? end - windowStart : null;
   const bucket = resolveBucket(bucketChoice, span);
-  // #2973: the chart follows the PRIMARY Group by (split by day / hour); the
-  // secondary "then by" only changes the table.
-  const chartUrl = chartSummaryUrl({ since, until, team, groupBy, granularity: sourceGranularity(bucket) });
+  // #2973: the chart follows the PRIMARY Group by (split by day / hour). While
+  // drilled down (#2976) it shows the drilled value only, split by the "then
+  // by" dimension instead.
+  const chartGroupBy = drilled ? secondaryGroupBy : groupBy;
+  const chartUrl = chartSummaryUrl({
+    since, until, team, groupBy: chartGroupBy, granularity: sourceGranularity(bucket),
+    filterBy: drilled ? groupBy : null, filterKey: drilled ? drill : null,
+  });
   const { data: chartData, refetch: refetchChart } = useApi(chartUrl);
   useEffect(() => { setChartSummary(chartData); }, [chartData]);
   const drawnBucket = bucket === 'hour' && chartGranularity(chartSummary) !== 'hour' ? 'day' : bucket;
@@ -816,15 +946,67 @@ function StatisticsTab({ team }) {
   // in would outlive the person and go stale. Fetched whenever EITHER axis
   // groups by user (#2440).
   const chartDim = chartDimension(chartSummary);
-  const chartType = resolveChartType(chartTypeChoice, chartDim);
+  const chartType = resolveChartType(chartTypeChoice, chartDim, metric);
   const overTime = isOverTime(chartType);
-  const chartHeading = chartTypeTitle(chartType, chartDim, bucketUnit(drawnBucket));
+  const chartHeading = chartTypeTitle(chartType, chartDim, bucketUnit(drawnBucket), metric);
   const needsDirectory = groupBy === 'user' || secondaryGroupBy === 'user';
   const { data: directory } = useApi(needsDirectory ? '/api/users/directory' : null);
   const userNames = useMemo(() => userLabelIndex(directory), [directory]);
 
   const totals = summary?.totals || { input: 0, output: 0, cacheCreationInput: 0, cacheReadInput: 0, total: 0, invocations: 0 };
   const groupLabel = (GROUP_OPTIONS.find((g) => g.key === groupBy) || { label: 'Group' }).label;
+  const secondaryLabel = (GROUP_OPTIONS.find((g) => g.key === secondaryGroupBy) || { label: 'Group' }).label;
+
+  // #2976: each tile compares with the same-length window directly before this
+  // one (none for All time). The response is matched to the window, so a stale
+  // one from the previous range is never compared.
+  const prevWindow = useMemo(() => previousWindow({ start, end }), [start, end]);
+  const { data: prevSummary, refetch: refetchPrev } = useApi(previousSummaryUrl(prevWindow, team));
+  const prevTotals = isPreviousSummaryFor(prevSummary, prevWindow) && summary ? prevSummary.totals : null;
+  const deltaFor = (key) => (prevTotals ? tileComparison(totals[key] || 0, prevTotals[key] || 0, end - start, formatInt) : null);
+
+  // #2976 drill-down. Offered on the top-level chart of a primary dimension
+  // when a "then by" is set; the drilled value leaves by itself once the table
+  // no longer has it (e.g. after Refresh).
+  useEffect(() => {
+    if (drillValueGone(summary, drill, groupBy)) setDrill(null);
+  }, [summary, drill, groupBy]);
+  const canDrill = drillAvailable({ groupBy, secondaryGroupBy: nested ? secondaryGroupBy : '', chartDim, drilled })
+    && !(chartSummary && chartSummary.filterBy);
+  const enterDrill = (key) => {
+    // Pin the type on screen, so the drilled view and the way back keep it.
+    if (chartTypeChoice == null) setChartTypeChoice(chartType);
+    setDrill(key);
+  };
+  const leaveDrill = () => {
+    setDrill(null);
+    if (chartRegionRef.current) chartRegionRef.current.focus();
+  };
+  // Focus follows the drill-down: the activated segment is gone, so the way back is focused.
+  useEffect(() => {
+    if (drilled && drillBackRef.current) drillBackRef.current.focus();
+  }, [drilled]);
+  const drillCtl = canDrill
+    ? { onDrill: enterDrill, byLabel: secondaryLabel, labelOf: (key) => groupValueCell(groupBy, key, userNames).label }
+    : null;
+  // The Ranking's "then by" split (#2976 AC3) reads the nested table summary —
+  // only once it is for the grouping on screen.
+  const rankingNested = !drilled && nested && chartDim === groupBy
+    && summary && summary.groupBy === groupBy && summary.secondaryGroupBy === secondaryGroupBy
+    ? {
+      summary,
+      dim: secondaryGroupBy,
+      label: secondaryLabel,
+      hidden: hiddenSeriesFor(hiddenGroups, secondaryGroupBy),
+      onToggle: (key) => setHiddenGroups((cur) => toggleHiddenSeries(cur, secondaryGroupBy, key)),
+    }
+    : null;
+  // Group by = Day series per metric: the token classes keep the persisted
+  // class set; the invocation count has its own session-only set.
+  const dayHidden = resolveMetric(metric) === 'invocations' ? hiddenSeriesFor(hiddenGroups, 'day') : sanitizeHiddenClasses(hidden);
+  const dayToggle = resolveMetric(metric) === 'invocations'
+    ? (key) => setHiddenGroups((cur) => toggleHiddenSeries(cur, 'day', key))
+    : toggleSeries;
 
   const rows = useMemo(() => (summary?.groups || []).map((g) => ({
     key: g.key,
@@ -876,7 +1058,7 @@ function StatisticsTab({ team }) {
     { key: 'invocations', label: 'Invocations', align: 'right', render: (v) => formatInt(v) },
   ];
 
-  const refresh = () => { refetch(); refetchChart(); };
+  const refresh = () => { refetch(); refetchChart(); refetchPrev(); };
 
   return (
     <>
@@ -905,10 +1087,10 @@ function StatisticsTab({ team }) {
       </div>
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)' }}>
-        <StatCard label="Total tokens" value={formatTileCount(totals.total)} title={formatInt(totals.total)} help={STAT_TILE_HELP.total} />
-        <StatCard label="Invocations" value={formatTileCount(totals.invocations)} title={formatInt(totals.invocations)} help={STAT_TILE_HELP.invocations} />
+        <StatCard label="Total tokens" value={formatTileCount(totals.total)} title={formatInt(totals.total)} help={STAT_TILE_HELP.total} delta={deltaFor('total')} />
+        <StatCard label="Invocations" value={formatTileCount(totals.invocations)} title={formatInt(totals.invocations)} help={STAT_TILE_HELP.invocations} delta={deltaFor('invocations')} />
         {TOKEN_CLASSES.map((c) => (
-          <StatCard key={c.key} label={c.label} value={formatTileCount(totals[c.key])} title={formatInt(totals[c.key])} accent={CLASS_COLOR[c.key]} help={STAT_TILE_HELP[c.key]} />
+          <StatCard key={c.key} label={c.label} value={formatTileCount(totals[c.key])} title={formatInt(totals[c.key])} accent={CLASS_COLOR[c.key]} help={STAT_TILE_HELP[c.key]} delta={deltaFor(c.key)} />
         ))}
       </div>
 
@@ -920,15 +1102,23 @@ function StatisticsTab({ team }) {
       }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--eb-space-3)', flexWrap: 'wrap', marginBottom: 'var(--eb-space-3)' }}>
           <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
-            {chartHeading}
+            {chartHeading}{rankingNested && chartType === 'ranking' ? `, split by ${secondaryLabel}` : ''}
           </div>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
+            {/* #2976: what the chart measures — every chart type, axis,
+                tooltip and Donut share follows it. */}
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+              Measure
+              <select value={metric} onChange={(e) => setMetric(resolveMetric(e.target.value))} style={CONTROL_STYLE} aria-label="Chart metric">
+                {METRICS.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
+              </select>
+            </label>
             {/* #2975: chart type. Offers what the grouping supports (no Ranking
                 for Day); the choice is kept for the visit. */}
             <label style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
               Chart
               <select value={chartType} onChange={(e) => setChartTypeChoice(e.target.value)} style={CONTROL_STYLE} aria-label="Chart type">
-                {chartTypeOptions(chartDim).map((ct) => <option key={ct.key} value={ct.key}>{ct.label}</option>)}
+                {chartTypeOptions(chartDim, metric).map((ct) => <option key={ct.key} value={ct.key}>{ct.label}</option>)}
               </select>
             </label>
             {/* #2974: bar size. Auto names what it picked, e.g. "Auto (Week)";
@@ -948,18 +1138,27 @@ function StatisticsTab({ team }) {
             ) : null}
           </span>
         </div>
-        <ChartRegion title={chartHeading}>
+        {drilled ? (
+          <DrillBreadcrumb trail={[allValuesLabel(groupBy), groupValueCell(groupBy, drill, userNames).label]} onBack={leaveDrill} backRef={drillBackRef} />
+        ) : canDrill && chartType !== 'ranking' ? (
+          <div style={{ marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            Click a {chartType === 'donut' ? 'slice' : chartType === 'lines' ? 'point' : 'segment'} (or focus it and press Enter) to see it by {secondaryLabel}.
+          </div>
+        ) : null}
+        <ChartRegion title={chartHeading} regionRef={chartRegionRef}>
           {chartDim === 'day' ? (
             chartType === 'donut' ? (
               <ClassShareChart summary={chartSummary} hidden={hidden} onToggle={toggleSeries} />
             ) : (
-              <TimeSeries summary={chartSummary} bucket={drawnBucket} start={windowStart} end={end} hidden={hidden} onToggle={toggleSeries}
+              <TimeSeries summary={chartSummary} metric={metric} bucket={drawnBucket} start={windowStart} end={end} hidden={dayHidden} onToggle={dayToggle}
                 lines={chartType === 'lines'} label={chartHeading} />
             )
           ) : overTime ? (
             <GroupTimeSeries
               summary={chartSummary}
               dim={chartDim}
+              metric={metric}
+              drill={drillCtl}
               bucket={drawnBucket}
               start={windowStart}
               end={end}
@@ -974,6 +1173,9 @@ function StatisticsTab({ team }) {
               type={chartType}
               summary={chartSummary}
               dim={chartDim}
+              metric={metric}
+              nested={rankingNested}
+              drill={drillCtl}
               userNames={userNames}
               hidden={hiddenSeriesFor(hiddenGroups, chartDim)}
               onToggle={(key) => setHiddenGroups((cur) => toggleHiddenSeries(cur, chartDim, key))}
@@ -985,7 +1187,7 @@ function StatisticsTab({ team }) {
       {loading ? (
         <div style={{ height: 160, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />
       ) : nested ? (
-        <NestedSummaryTable summary={summary} groupBy={groupBy} secondaryGroupBy={secondaryGroupBy} userNames={userNames} />
+        <NestedSummaryTable summary={drilled ? drilledTableSummary(summary, drill) : summary} groupBy={groupBy} secondaryGroupBy={secondaryGroupBy} userNames={userNames} />
       ) : (
         <DataTable
           columns={COLS}

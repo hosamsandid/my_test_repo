@@ -171,15 +171,19 @@ test('series colours reach 3:1 on the chart surface in every theme and are pairw
 const SRC = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'TokenUsage.jsx'), 'utf8');
 
 test('TokenUsage.jsx feeds the chart from chartSummaryUrl and switches on chartDimension', () => {
-  assert.match(SRC, /chartSummaryUrl\(\{ since, until, team, groupBy, granularity: sourceGranularity\(bucket\) \}\)/);
+  // The chart follows the primary Group by; only a drill-down (#2976) swaps in
+  // the "then by" dimension, narrowed to the drilled primary value.
+  assert.match(SRC, /const chartGroupBy = drilled \? secondaryGroupBy : groupBy;/);
+  assert.match(SRC, /chartSummaryUrl\(\{\s*since, until, team, groupBy: chartGroupBy, granularity: sourceGranularity\(bucket\),\s*filterBy: drilled \? groupBy : null, filterKey: drilled \? drill : null,\s*\}\)/);
   assert.match(SRC, /chartDimension\(chartSummary\)/);
   assert.match(SRC, /chartDim === 'day' \? \(\s*chartType === 'donut' \? \(\s*<ClassShareChart[\s\S]{0,120}\) : \(\s*<TimeSeries/);
   assert.match(SRC, /<GroupTimeSeries/);
-  assert.match(SRC, /chartTypeTitle\(chartType, chartDim, bucketUnit\(drawnBucket\)\)/);
-  // The secondary dimension never reaches the chart request (AC11).
-  assert.doesNotMatch(SRC, /chartSummaryUrl\([^)]*secondaryGroupBy/);
+  assert.match(SRC, /chartTypeTitle\(chartType, chartDim, bucketUnit\(drawnBucket\), metric\)/);
+  // Outside a drill-down the secondary dimension never reaches the chart
+  // request (#2973 AC11): `drilled` needs both a drill value and a "then by".
+  assert.match(SRC, /const drilled = !!drill && nested;/);
   // Refresh reloads the chart too.
-  assert.match(SRC, /const refresh = \(\) => \{ refetch\(\); refetchChart\(\); \};/);
+  assert.match(SRC, /const refresh = \(\) => \{ refetch\(\); refetchChart\(\); refetchPrev\(\); \};/);
 });
 
 test('one series colour per slot, so a named series never shares a colour', () => {

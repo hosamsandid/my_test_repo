@@ -406,3 +406,72 @@ test('two-sided guard: admin-console canonical is byte-identical to orchestrator
   const there = fs.readFileSync(path.join(__dirname, '..', '..', 'orchestrator', 'usage-summary.js'));
   assert.ok(here.equals(there), 'admin-console/api/usage-summary.js and orchestrator/usage-summary.js must be identical');
 });
+
+// ── #2976: filterBy / filterKey — the chart drill-down's data ─────────────
+// A drilled chart shows one primary value split by the secondary dimension and
+// by day; its figures must equal the nested table row it was opened from.
+const DRILL_RECORDS = [
+  { ts: '2026-10-01T10:00:00Z', agentId: 'a', teamId: 't', tokens: t4(30, 6, 0, 0),
+    modelUsage: { 'model-x': t4(20, 4, 0, 0), 'model-y': t4(10, 2, 0, 0) } },
+  { ts: '2026-10-02T10:00:00Z', agentId: 'a', teamId: 't', tokens: t4(5, 1, 0, 0),
+    modelUsage: { 'model-x': t4(5, 1, 0, 0) } },
+  { ts: '2026-10-02T11:00:00Z', agentId: 'b', teamId: 't', tokens: t4(7, 0, 3, 0),
+    modelUsage: { 'model-y': t4(7, 0, 3, 0) } },
+  { ts: '2026-10-03T11:00:00Z', agentId: 'b', teamId: 't', tokens: t4(9, 0, 0, 0) },
+];
+
+test('#2976: without both filter halves the output is unchanged', () => {
+  const plain = summarize(DRILL_RECORDS, { groupBy: 'model', secondaryGroupBy: 'day' });
+  for (const q of [{ filterBy: 'agent' }, { filterKey: 'a' }, { filterBy: 'nonsense', filterKey: 'a' }, { filterBy: 'agent', filterKey: '' }]) {
+    assert.deepEqual(summarize(DRILL_RECORDS, { groupBy: 'model', secondaryGroupBy: 'day', ...q }), plain, JSON.stringify(q));
+  }
+});
+
+test('#2976: drilling into an agent equals that agent\'s nested model rows', () => {
+  const nested = summarize(DRILL_RECORDS, { groupBy: 'agent', secondaryGroupBy: 'model' });
+  const drilled = summarize(DRILL_RECORDS, { groupBy: 'model', secondaryGroupBy: 'day', filterBy: 'agent', filterKey: 'a' });
+  assert.equal(drilled.filterBy, 'agent');
+  assert.equal(drilled.filterKey, 'a');
+  const row = rowOf(nested, 'a');
+  assert.deepEqual(drilled.totals, { ...row.tokens, invocations: row.invocations });
+  assert.deepEqual(
+    drilled.groups.map((g) => [g.key, g.tokens, g.invocations]),
+    row.subgroups.map((s) => [s.key, s.tokens, s.invocations]),
+  );
+  // the per-day cells add up to each model's row
+  for (const g of drilled.groups) {
+    assert.equal(g.subgroups.reduce((s, d) => s + d.tokens.total, 0), g.tokens.total);
+    assert.equal(g.subgroups.reduce((s, d) => s + d.invocations, 0), g.invocations);
+  }
+});
+
+test('#2976: drilling into a model keeps only that model\'s share of each record', () => {
+  const nested = summarize(DRILL_RECORDS, { groupBy: 'model', secondaryGroupBy: 'agent' });
+  const drilled = summarize(DRILL_RECORDS, { groupBy: 'agent', secondaryGroupBy: 'day', filterBy: 'model', filterKey: 'model-y' });
+  const row = rowOf(nested, 'model-y');
+  assert.deepEqual(drilled.totals, { ...row.tokens, invocations: row.invocations });
+  assert.deepEqual(
+    drilled.groups.map((g) => [g.key, g.tokens.total, g.invocations]),
+    row.subgroups.map((s) => [s.key, s.tokens.total, s.invocations]),
+  );
+  // a record with no model detail is reachable through the `unknown` model
+  const unknown = summarize(DRILL_RECORDS, { groupBy: 'agent', filterBy: 'model', filterKey: 'unknown' });
+  assert.deepEqual(unknown.groups.map((g) => [g.key, g.tokens.total]), [['b', 9]]);
+  // a model the drilled records' split would otherwise produce never leaks in
+  const byModel = summarize(DRILL_RECORDS, { groupBy: 'model', filterBy: 'model', filterKey: 'model-y' });
+  assert.deepEqual(byModel.groups.map((g) => g.key), ['model-y']);
+});
+
+test('#2976: a key with no records yields an empty, zeroed summary', () => {
+  const res = summarize(DRILL_RECORDS, { groupBy: 'model', filterBy: 'agent', filterKey: 'gone' });
+  assert.deepEqual(res.groups, []);
+  assert.equal(res.totals.total, 0);
+  assert.equal(res.totals.invocations, 0);
+});
+
+test('#2976: the summary route passes filterBy / filterKey through after team scoping', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'api.js'), 'utf8');
+  const route = src.slice(src.indexOf("app.get('/api/usage/summary',"), src.indexOf("app.get('/api/usage/summary/export',"));
+  assert.match(route, /const \{ filterBy, filterKey \} = req\.query;/);
+  assert.match(route, /narrowUsageRecords\(records, scope, usageTeamParam\(req\)\);\s*res\.json\(summarize\(records, \{[^}]*filterBy, filterKey/);
+});

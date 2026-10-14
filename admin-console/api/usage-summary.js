@@ -207,6 +207,14 @@ function pairContributions(rec, primary, secondary, nonInstanceIds) {
 // An optional `nonInstanceAgentIds` (array or Set, #2585) names registered agents
 // that are NOT pool instances, so the `agent` dimension never folds them (see
 // agentKeyOf). Totals never depend on it — only which row a record lands in.
+//
+// An optional `filterBy` + `filterKey` pair (#2976, the chart drill-down) keeps
+// only what one value of one dimension contributed: a record counts with the
+// share it gives that key — its turn-wide tokens, or for `model` its share of
+// the split — and is dropped when it gives none. Totals, groups and subgroups
+// are then computed over those shares, so a drilled chart adds up to the
+// nested table row it was opened from. Ignored (output unchanged) when either
+// half is missing or the dimension is unknown; echoed back when applied.
 function summarize(records, query = {}) {
   const since = query.since || null;
   const until = query.until || null;
@@ -215,13 +223,19 @@ function summarize(records, query = {}) {
     ? query.secondaryGroupBy
     : null;
   const nonInstanceIds = toIdSet(query.nonInstanceAgentIds);
+  const filterBy = GROUP_BY.has(query.filterBy) && typeof query.filterKey === 'string' && query.filterKey
+    ? query.filterBy
+    : null;
+  const filterKey = filterBy ? query.filterKey : null;
 
   const totals = zeroTokens();
   let invocations = 0;
   const groups = new Map(); // key -> { tokens, invocations, sub? }
 
-  for (const rec of Array.isArray(records) ? records : []) {
-    if (!rec || !inRange(rec.ts, since, until)) continue;
+  for (const raw of Array.isArray(records) ? records : []) {
+    if (!raw || !inRange(raw.ts, since, until)) continue;
+    const rec = filterBy ? filteredShare(raw, filterBy, filterKey, nonInstanceIds) : raw;
+    if (!rec) continue;
     addTokens(totals, rec.tokens);
     invocations += 1;
     for (const { key, tokens } of contributions(rec, groupBy, nonInstanceIds)) {
@@ -263,7 +277,26 @@ function summarize(records, query = {}) {
 
   const result = { since, until, groupBy, totals: totalsOut, groups: groupsOut };
   if (secondaryGroupBy) result.secondaryGroupBy = secondaryGroupBy;
+  if (filterBy) {
+    result.filterBy = filterBy;
+    result.filterKey = filterKey;
+  }
   return result;
+}
+
+// The part of a record that `key` of dimension `dim` accounts for (#2976), or
+// null when it accounts for none. For `model` the record keeps only that
+// model's share of its tokens and of its model mix, so a later `model` split of
+// the result cannot hand tokens to another model.
+function filteredShare(rec, dim, key, nonInstanceIds) {
+  const hit = contributions(rec, dim, nonInstanceIds).find((c) => c.key === key);
+  if (!hit) return null;
+  const out = { ...rec, tokens: hit.tokens };
+  if (dim === 'model') {
+    const mu = rec.modelUsage && typeof rec.modelUsage === 'object' ? rec.modelUsage : {};
+    out.modelUsage = mu[key] && typeof mu[key] === 'object' ? { [key]: mu[key] } : {};
+  }
+  return out;
 }
 
 module.exports = { summarize, agentKeyOf, modelSplit, GROUP_BY, TOKEN_CLASSES };

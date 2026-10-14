@@ -962,10 +962,13 @@ app.get('/api/usage/summary', (req, res) => {
   // aggregator ignores it when absent, unknown, or equal to the primary, so a
   // request without it is unchanged.
   const secondaryGroupBy = req.query.secondaryGroupBy;
+  // #2976: the chart drill-down narrows to one value of one dimension (e.g. a
+  // single agent). Applied after team scoping, so it can only narrow further.
+  const { filterBy, filterKey } = req.query;
   let records = usageLog.readRecords({ since });
   records = narrowUsageRecords(records, scope, usageTeamParam(req));
   res.json(summarize(records, {
-    since, until, groupBy, secondaryGroupBy, nonInstanceAgentIds: usageNonInstanceAgentIds(),
+    since, until, groupBy, secondaryGroupBy, filterBy, filterKey, nonInstanceAgentIds: usageNonInstanceAgentIds(),
   }));
 });
 

@@ -156,8 +156,7 @@ which day. Legend entries use the same labels as the table (user names,
 provider-tier labels, the **unknown** bucket). The eight largest values in the
 range get their own colour; any further values are combined into one grey
 **Other** series, so each day's bar still adds up to that day's share of the
-table. With *Group by day* the chart keeps its breakdown by token class. The
-*then by* dimension changes only the table, not the chart.
+table. With *Group by day* the chart keeps its breakdown by token class.
 
 The **Chart** control switches how the chart is drawn: **Stacked bars over
 time**, **Lines over time** (one line per value, same figures as the bars),
@@ -172,6 +171,30 @@ legend: hiding a series removes it everywhere, and the donut's percentages are
 recalculated over what is left. Hover over or tab to a slice or bar to read its
 label, exact number and share. The **Bucket** control applies only to the
 over-time types.
+
+The **Measure** control sets what the chart counts: **Total tokens** (the
+default), one token class (**Input**, **Output**, **Cache write**, **Cache
+read**) or **Invocations**. Every chart type, the axis, the tooltips and the
+donut's percentages follow it, and each value matches the table column of the
+same name. With *Group by day* and a single class or Invocations, the donut is
+not offered — there is no token-class split to show.
+
+With a *then by* set, the chart uses it too. In a **Ranking** each bar is split
+into its secondary values — the nested table rows beneath that group — with the
+eight largest secondary values in their own colour and the rest as *Other*. In
+**Stacked bars**, **Lines** and **Donut** you can **drill down**: click a
+segment, point or slice (or tab to it and press Enter or Space) to see only that
+value, split by the *then by* dimension. A breadcrumb such as *All agents ›
+agent-a* shows where you are; its first entry leads back with the same chart
+type, measure, range and legend choices. While drilled down the table shows only
+that value; the export still covers the full view. *Other* is not drillable,
+and changing *Group by*, *then by*, team or range returns to the top level.
+
+Each tile compares its figure with the **previous period** — the window of the
+same length directly before the current one — e.g. *▲ +12% vs previous 7 days*.
+If the previous period had none, it reads *new*. The arrow and the sign show the
+direction, so it never depends on colour; hover for the previous figure. *All
+time* has no previous period, so no comparison is shown.
 
 Clicking a legend entry hides or shows that series, and the y-axis rescales to
 what is left — useful because cache reads, or one busy agent, routinely dwarf

@@ -67,9 +67,9 @@ test('a chosen type is kept across groupings, except where it is not offered (AC
 
 test('the page keeps the choice in component state, not per grouping or request (AC3)', () => {
   assert.match(PAGE, /const \[chartTypeChoice, setChartTypeChoice\] = useState\(null\);/);
-  assert.match(PAGE, /resolveChartType\(chartTypeChoice, chartDim\)/);
+  assert.match(PAGE, /resolveChartType\(chartTypeChoice, chartDim, metric\)/);
   assert.match(PAGE, /<select value=\{chartType\} onChange=\{\(e\) => setChartTypeChoice\(e\.target\.value\)\} style=\{CONTROL_STYLE\} aria-label="Chart type">/);
-  assert.match(PAGE, /chartTypeOptions\(chartDim\)\.map/);
+  assert.match(PAGE, /chartTypeOptions\(chartDim, metric\)\.map/);
 });
 
 test('chart titles name what each type shows', () => {
@@ -233,8 +233,8 @@ test('every chart type has an accessible name and keeps the empty state (AC10/AC
   // One named region for every type…
   assert.match(PAGE, /role="group" aria-label=\{title\}/);
   // …focusable slices and bars named by their readout…
-  assert.match(PAGE, /<path[\s\S]{0,400}tabIndex=\{0\}[\s\S]{0,200}aria-label=\{shareText\(s\)\}/);
-  assert.match(PAGE, /<li[\s\S]{0,200}tabIndex=\{0\}[\s\S]{0,200}aria-label=\{shareText\(b\)\}/);
+  assert.match(PAGE, /<path[\s\S]{0,400}tabIndex=\{0\}[\s\S]{0,200}aria-label=\{shareText\(s, metric\)\}/);
+  assert.match(PAGE, /<li[\s\S]{0,200}tabIndex=\{0\}[\s\S]{0,200}aria-label=\{shareText\(b, metric\)\}/);
   // …and the over-time lines are a named image (the table is the text equivalent).
   assert.match(PAGE, /<svg role="img" aria-label=/);
   // The empty state and the "nothing to draw" hint are shared by every type.

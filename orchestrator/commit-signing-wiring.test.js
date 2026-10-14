@@ -83,5 +83,13 @@ test('the signing routes are served and allowlisted with own scope', () => {
 
 test('the effective-credentials description includes the signing key', () => {
   const body = region('function describeAgentBaselineCredentials(');
-  assert.match(body, /signing: describeSigning\(resolveAgentSigning\(cfg, env, null\)\)/);
+  // #2959: plus the no-personal fallback (asserted below).
+  assert.match(body, /signing: describeSigning\(resolveAgentSigning\(cfg, env, null\)[,)]/);
+});
+
+test('#2959: the baseline signing description carries the no-personal fallback', () => {
+  const body = region('function describeAgentBaselineCredentials(');
+  assert.match(body, /signing: describeSigning\(resolveAgentSigning\(cfg, env, null\), resolveTeamSigning\(env\)\)/);
+  const describe = region('function describeSigning(');
+  assert.match(describe, /signing\.source === "personal" && fallback/);
 });

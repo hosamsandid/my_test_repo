@@ -119,3 +119,17 @@ test('#2938 signing: team key keeps id and identity; global is a tier; none / ma
   assert.equal(presentSigning(null).source, 'none');
   assert.equal(presentEffectiveIdentity({}).signing.source, 'none');
 });
+
+test('#2959 signing: a personal resolution carries what signs without it (team key named, global a tier)', () => {
+  const base = { source: 'personal', keyId: 'alice-sign', ownerId: 'alice', identity: { name: 'Alice', email: 'alice@corp.com' } };
+  const nameOf = (id) => (id === 'bot-sign' ? 'Bot signing' : null);
+  const team = presentSigning({ ...base, fallback: { source: 'team', keyId: 'bot-sign' } }, { callerUserId: 'alice', credentialName: nameOf });
+  assert.deepEqual(team.fallback, { source: 'team', credential: { id: 'bot-sign', name: 'Bot signing' } });
+  const global = presentSigning({ ...base, fallback: { source: 'global', keyId: 'sys' } }, { callerUserId: 'alice' });
+  assert.deepEqual(global.fallback, { source: 'global', credential: null });
+  const none = presentSigning({ ...base, fallback: { source: 'none', keyId: null } }, { callerUserId: 'alice' });
+  assert.deepEqual(none.fallback, { source: 'none', credential: null });
+  // Older orchestrator (no fallback) and non-personal sources carry none.
+  assert.equal('fallback' in presentSigning(base, { callerUserId: 'alice' }), false);
+  assert.equal('fallback' in presentSigning({ source: 'team', keyId: 'bot-sign', fallback: { source: 'global', keyId: 'x' } }), false);
+});

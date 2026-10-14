@@ -53,6 +53,17 @@ The **SSH Keys** and **GitHub Tokens** pages, and the team's **Effective GitHub
 identity** box (Agent Chat → Settings), show a non-blocking hint while no signing
 key is set up, and the box shows which key signs the team's commits.
 
+Which key signs is chosen **separately from git access**: the personal tier is
+the person's *first personal key that has a signing identity*, even when git
+access uses another (older) personal key. The SSH Keys page shows this in the
+**Used by** column: *Signs commits (personal) — <teams>* on the key that signs,
+*Signing identity set — not used: <key> signs first* on a further one, and
+*Signs commits — <environments>* on a team or global key. Its delete dialog
+lists the teams or environments whose signing identity changes and what they
+fall back to (the next personal signing key, the team key, the global key, or
+unsigned), and the notice after adding a key names the signing outcome apart
+from git access.
+
 ## When something goes wrong
 
 - **Signing fails** (key deleted, unreadable, orchestrator unreachable): the

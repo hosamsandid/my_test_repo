@@ -61,6 +61,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, isTeamAdminOfAny
 const { resolveAgentTeam } = require('./agent-team');
 const { lifecycleIdConflict } = require('./lifecycle-id-conflict');
 const { ownerRespawnNeeded, markActivePersonal } = require('./personal-credential-active');
+const { markSigningUsage } = require('./ssh-signing-usage');
 const { createAgentManageGate } = require('./team-member-boundary');
 // Layered resource ownership (#2083, P5) — the shared tier shape for
 // environments and MCP servers. Byte-mirrored in orchestrator/resource-tier.js.
@@ -19817,7 +19818,12 @@ app.get('/api/ssh-keys', (req, res) => {
   const scope = getScope(req);
   const keys = listSshKeys();
   // #2655: mark which personal key the runtime resolves (the owner's first one).
-  res.json(markActivePersonal(keys.map(normalizeCredential).filter(k => visibleCredential(scope, k)), keys).map(withSigningPublicKey));
+  // #2959: and which key SIGNS commits — resolved independently of transport,
+  // per environment for a team/system key (only environments the caller sees).
+  const envs = listEnvironmentIds().map(loadEnvironment).filter(Boolean)
+    .filter(e => !isTemplateEnvironment(e) && (visibleEnvironment(scope, e) || isGlobalEnvironment(e)));
+  const visible = markActivePersonal(keys.map(normalizeCredential).filter(k => visibleCredential(scope, k)), keys);
+  res.json(markSigningUsage(visible, keys, envs).map(withSigningPublicKey));
 });
 
 app.post('/api/ssh-keys', apiLimiter, (req, res) => {

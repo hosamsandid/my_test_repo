@@ -20,6 +20,7 @@ import {
   mountForKey, sameWritableSource, writeApiBase, apiRelOf,
 } from './workspace-source';
 import { visibleTreeRows, effectiveCursor, navigateTree, TREE_NAV_KEYS } from './workspace-tree-nav.js';
+import { splitHeaderPath, headerNameStyle, headerDirStyle, headerFileStyle, headerFixedStyle } from './file-viewer-header.js';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import PageHelpButton from '../../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
@@ -1405,9 +1406,7 @@ function toggleLabel(viewMode, isHtml) {
 }
 
 function FileViewerHeader({ relPath, data, isMarkdown, isHtml = false, viewMode, onToggleViewMode, expanded, onToggleExpand, onClose }) {
-  const idx = relPath.lastIndexOf('/');
-  const dir = idx >= 0 ? relPath.slice(0, idx + 1) : '';
-  const file = idx >= 0 ? relPath.slice(idx + 1) : relPath;
+  const { dir, file } = splitHeaderPath(relPath);
 
   return (
     <div style={{
@@ -1418,45 +1417,16 @@ function FileViewerHeader({ relPath, data, isMarkdown, isHtml = false, viewMode,
       borderBottom: '1px solid var(--eb-border-default)',
       flexShrink: 0,
     }}>
-      <span style={{ display: 'inline-flex', flexShrink: 0 }}>
-        {fileIconFor(relPath.split('/').pop())}
+      <span style={{ display: 'inline-flex', ...headerFixedStyle }}>
+        {fileIconFor(file)}
       </span>
-      <div
-        title={relPath}
-        style={{
-          flex: 1,
-          minWidth: 0,
-          display: 'flex',
-          alignItems: 'baseline',
-          gap: 0,
-          fontSize: 'var(--eb-text-xs)',
-          fontFamily: 'var(--eb-font-mono)',
-        }}
-      >
-        {dir && (
-          <span style={{
-            color: 'var(--eb-text-muted)',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            flexShrink: 1,
-            minWidth: 0,
-          }}>
-            {dir}
-          </span>
-        )}
-        <span style={{
-          color: 'var(--eb-text-primary)',
-          fontWeight: 'var(--eb-font-medium)',
-          whiteSpace: 'nowrap',
-          flexShrink: 0,
-        }}>
-          {file}
-        </span>
+      <div title={relPath} style={headerNameStyle}>
+        {dir && <span style={headerDirStyle}>{dir}</span>}
+        <span style={headerFileStyle}>{file}</span>
       </div>
       {data?.truncated && (
         <span title={`Truncated at ${formatBytes(data.size)}; showing first 512 KB`}
-          style={{ display: 'inline-flex', alignItems: 'center', color: 'var(--eb-status-warning)' }}>
+          style={{ display: 'inline-flex', alignItems: 'center', color: 'var(--eb-status-warning)', ...headerFixedStyle }}>
           <FileWarning size={12} />
         </span>
       )}

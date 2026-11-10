@@ -1,0 +1,4334 @@
+{
+  "fileEdges": [
+    {
+      "count": 4,
+      "crossComponent": false,
+      "firstFromLine": 2,
+      "from": "src/billing/invoice.py",
+      "fromComponent": "billing",
+      "kinds": [
+        "call",
+        "import"
+      ],
+      "to": "src/billing/db.py",
+      "toComponent": "billing"
+    }
+  ],
+  "resolved": [
+    {
+      "crossComponent": false,
+      "from": "src/billing/invoice.py",
+      "fromLine": 2,
+      "kind": "function",
+      "symbol": "connect",
+      "to": "src/billing/db.py",
+      "toLine": 6,
+      "usage": "import"
+    },
+    {
+      "crossComponent": false,
+      "from": "src/billing/invoice.py",
+      "fromLine": 2,
+      "kind": "function",
+      "symbol": "fetch_order",
+      "to": "src/billing/db.py",
+      "toLine": 9,
+      "usage": "import"
+    },
+    {
+      "crossComponent": false,
+      "from": "src/billing/invoice.py",
+      "fromLine": 10,
+      "kind": "function",
+      "symbol": "connect",
+      "to": "src/billing/db.py",
+      "toLine": 6,
+      "usage": "call"
+    },
+    {
+      "crossComponent": false,
+      "from": "src/billing/invoice.py",
+      "fromLine": 10,
+      "kind": "function",
+      "symbol": "fetch_order",
+      "to": "src/billing/db.py",
+      "toLine": 9,
+      "usage": "call"
+    }
+  ],
+  "ambiguous": [],
+  "unresolved": [],
+  "summary": {
+    "ambiguous": 0,
+    "crossComponentEdges": 0,
+    "externalImports": 3,
+    "fileEdges": 1,
+    "files": 4,
+    "resolved": 4,
+    "unresolved": 0,
+    "seams": 284
+  },
+  "warnings": [],
+  "crossComponentSeams": [
+    {
+      "kind": "env-var",
+      "literal": "GIT_COMMIT",
+      "a": {
+        "component": ".github",
+        "file": ".github/workflows/deploy-gke.yml",
+        "line": 153
+      },
+      "b": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.yml",
+        "line": 151
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "PODMAN_HOST_SOCKET",
+      "a": {
+        "component": ".github",
+        "file": ".github/workflows/e2e.yml",
+        "line": 55
+      },
+      "b": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 165
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GIT_COMMIT",
+      "a": {
+        "component": ".github",
+        "file": ".github/workflows/deploy-gke.yml",
+        "line": 153
+      },
+      "b": {
+        "component": "admin-console",
+        "file": "admin-console/Dockerfile",
+        "line": 9
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "CLUSTER",
+      "a": {
+        "component": ".github",
+        "file": ".github/workflows/deploy-gke.yml",
+        "line": 226
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 82
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GIT_COMMIT",
+      "a": {
+        "component": ".github",
+        "file": ".github/workflows/deploy-gke.yml",
+        "line": 153
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/k8s/kind-up.sh",
+        "line": 115
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "PROJECT",
+      "a": {
+        "component": ".github",
+        "file": ".github/workflows/deploy-gke.yml",
+        "line": 226
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/gcp/deploy.sh",
+        "line": 12
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "SOCK",
+      "a": {
+        "component": ".github",
+        "file": ".github/workflows/e2e.yml",
+        "line": 47
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/gcp/vm-stack-setup.sh",
+        "line": 23
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "TAG",
+      "a": {
+        "component": ".github",
+        "file": ".github/workflows/deploy-gke.yml",
+        "line": 102
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/gcp/provision.sh",
+        "line": 30
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "XDG_RUNTIME_DIR",
+      "a": {
+        "component": ".github",
+        "file": ".github/workflows/e2e.yml",
+        "line": 43
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/gcp/vm-stack-setup.sh",
+        "line": 20
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ZONE",
+      "a": {
+        "component": ".github",
+        "file": ".github/workflows/deploy-gke.yml",
+        "line": 226
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/gcp/deploy.sh",
+        "line": 13
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "PODMAN_HOST_SOCKET",
+      "a": {
+        "component": ".github",
+        "file": ".github/workflows/e2e.yml",
+        "line": 55
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 84
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "PROJECT",
+      "a": {
+        "component": ".github",
+        "file": ".github/workflows/deploy-gke.yml",
+        "line": 226
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/stack-down.sh",
+        "line": 13
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "SOCK",
+      "a": {
+        "component": ".github",
+        "file": ".github/workflows/e2e.yml",
+        "line": 47
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 29
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "PODMAN_HOST_SOCKET",
+      "a": {
+        "component": ".github",
+        "file": ".github/workflows/e2e.yml",
+        "line": 55
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/plugin-runtime.js",
+        "line": 73
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_PASSWORD",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 49
+      },
+      "b": {
+        "component": "admin-console",
+        "file": "admin-console/api/auth.js",
+        "line": 190
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_USERNAME",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 48
+      },
+      "b": {
+        "component": "admin-console",
+        "file": "admin-console/api/auth.js",
+        "line": 189
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AUTH_COOKIE_SECURE",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 67
+      },
+      "b": {
+        "component": "admin-console",
+        "file": "admin-console/api/auth.js",
+        "line": 68
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AUTH_SESSION_SECRET",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 64
+      },
+      "b": {
+        "component": "admin-console",
+        "file": "admin-console/api/auth.test.js",
+        "line": 16
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GITHUB_API_BASE",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.e2e.yml",
+        "line": 34
+      },
+      "b": {
+        "component": "admin-console",
+        "file": "admin-console/api/github-api-base.test.js",
+        "line": 22
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GIT_COMMIT",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.yml",
+        "line": 151
+      },
+      "b": {
+        "component": "admin-console",
+        "file": "admin-console/Dockerfile",
+        "line": 9
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GIT_COMMIT_TIME",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.yml",
+        "line": 156
+      },
+      "b": {
+        "component": "admin-console",
+        "file": "admin-console/Dockerfile",
+        "line": 11
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GIT_CONTRIBUTORS",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.yml",
+        "line": 155
+      },
+      "b": {
+        "component": "admin-console",
+        "file": "admin-console/Dockerfile",
+        "line": 17
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GIT_DIRTY",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.yml",
+        "line": 152
+      },
+      "b": {
+        "component": "admin-console",
+        "file": "admin-console/Dockerfile",
+        "line": 10
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "IAP_AUDIENCE",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 84
+      },
+      "b": {
+        "component": "admin-console",
+        "file": "admin-console/api/auth.js",
+        "line": 118
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 2
+      },
+      "b": {
+        "component": "admin-console",
+        "file": "admin-console/api/matrix.js",
+        "line": 16
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "STT_TIMEOUT_MS",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.yml",
+        "line": 208
+      },
+      "b": {
+        "component": "admin-console",
+        "file": "admin-console/api/transcribe.js",
+        "line": 10
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "STT_URL",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.yml",
+        "line": 204
+      },
+      "b": {
+        "component": "admin-console",
+        "file": "admin-console/api/transcribe.js",
+        "line": 16
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_FAKE_CLAUDE",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.e2e.yml",
+        "line": 29
+      },
+      "b": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 8960
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GITHUB_API_BASE",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.e2e.yml",
+        "line": 34
+      },
+      "b": {
+        "component": "agent-image",
+        "file": "agent-image/e2e/fixtures/playbooks/_lib.sh",
+        "line": 19
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 2
+      },
+      "b": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 8362
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_PASS",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 38
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/gcp/vm-stack-setup.sh",
+        "line": 14
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_PORT",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 134
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/gcp/vm-update.sh",
+        "line": 37
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_USER",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 34
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 177
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_INSTANCE_ID",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.yml",
+        "line": 126
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/40-orchestrator.yaml",
+        "line": 96
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "CONDUWUIT_ADMIN_ROOM",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 12
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 238
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GIT_COMMIT",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.yml",
+        "line": 151
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/k8s/kind-up.sh",
+        "line": 115
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "HOOK_PORT",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 137
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/40-orchestrator.yaml",
+        "line": 107
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 2
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 225
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_PASS",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 38
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/stack-up.sh",
+        "line": 46
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_PASSWORD",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 49
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 79
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_PORT",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 134
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 41
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_USER",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 34
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 77
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_USERNAME",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 48
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 78
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_FAKE_CLAUDE",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.e2e.yml",
+        "line": 29
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 49
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_FAKE_CLAUDE_FIXTURES",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.e2e.yml",
+        "line": 46
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 53
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_FAKE_CLAUDE_PLAYBOOKS",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.e2e.yml",
+        "line": 47
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 54
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_GITHUB_POLL_INTERVAL_MS",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.e2e.yml",
+        "line": 51
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 55
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_INSTANCE_ID",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.yml",
+        "line": 126
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 38
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ANTHROPIC_AUTH_TOKEN",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 21
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 57
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ANTHROPIC_BASE_URL",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 20
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 56
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 23
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 59
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ANTHROPIC_DEFAULT_SONNET_MODEL",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 22
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 58
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AUTH_COOKIE_SECURE",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 67
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 81
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AUTH_SESSION_SECRET",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 64
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 80
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 24
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 60
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "COMPOSE_PROJECT_NAME",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 132
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 37
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "CONDUWUIT_ADMIN_ROOM",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 12
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 88
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "CONDUWUIT_IMAGE",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.e2e.yml",
+        "line": 20
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 72
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "CONDUWUIT_PORT",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 133
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 42
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "FAKE_GITHUB_PORT",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.e2e.yml",
+        "line": 134
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 46
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GITHUB_API_BASE",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.e2e.yml",
+        "line": 34
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 68
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "HOOK_PORT",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 137
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 43
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 2
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 87
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "PODMAN_HOST_SOCKET",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 165
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 84
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_PASS",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 38
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 30
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_PORT",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 134
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 198
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_USER",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 34
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 29
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_AGENT_MEM_LIMIT",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.yml",
+        "line": 131
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/spawn-container.js",
+        "line": 71
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_AGENT_PIDS_LIMIT",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.yml",
+        "line": 77
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/spawn-container.js",
+        "line": 72
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_GITHUB_POLL_INTERVAL_MS",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.e2e.yml",
+        "line": 51
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/github-poller.js",
+        "line": 50
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_INSTANCE_ID",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.yml",
+        "line": 126
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/container-exec.js",
+        "line": 24
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_PER_AGENT_NETWORK_SERVICES",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.e2e.yml",
+        "line": 64
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/spawn-container.js",
+        "line": 130
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "COMPOSE_PROJECT_NAME",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 132
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/container-exec.js",
+        "line": 21
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "CONDUWUIT_PORT",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 133
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 28
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GITHUB_API_BASE",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.e2e.yml",
+        "line": 34
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/github-api-base.test.js",
+        "line": 56
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 2
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 123
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "PODMAN_HOST_SOCKET",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 165
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/plugin-runtime.js",
+        "line": 73
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GITHUB_API_BASE",
+      "a": {
+        "component": "UNKNOWN",
+        "file": "docker-compose.e2e.yml",
+        "line": 34
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/github-issues/broker/server.test.js",
+        "line": 67
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "UNKNOWN",
+        "file": ".env",
+        "line": 2
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 77
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AGENT_ID",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/test-matrix.sh",
+        "line": 21
+      },
+      "b": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 220
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GITHUB_API_BASE",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/github-api-base.test.js",
+        "line": 22
+      },
+      "b": {
+        "component": "agent-image",
+        "file": "agent-image/e2e/fixtures/playbooks/_lib.sh",
+        "line": 19
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/matrix.js",
+        "line": 16
+      },
+      "b": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 8362
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_HOMESERVER",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/matrix.js",
+        "line": 15
+      },
+      "b": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 8363
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "NODE_ENV",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/Dockerfile",
+        "line": 43
+      },
+      "b": {
+        "component": "agent-image",
+        "file": "agent-image/Dockerfile",
+        "line": 177
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/o/n",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/pages/agent-chat/ci-wait-view.test.js",
+        "line": 63
+      },
+      "b": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/test_aee_wait_ci.py",
+        "line": 432
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/o/n/pull/{}",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/pages/agent-chat/ci-wait-view.test.js",
+        "line": 82
+      },
+      "b": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/test_agent_entrypoint.py",
+        "line": 692
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/o/r/issues/{}",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/pages/agent-chat/removed-instance-view.test.js",
+        "line": 31
+      },
+      "b": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/test_agent_entrypoint.py",
+        "line": 846
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/o/r/pull/{}",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/pages/pending-queue-view.test.js",
+        "line": 341
+      },
+      "b": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/test_agent_entrypoint.py",
+        "line": 858
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/v1",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/helper-chat/handler.test.js",
+        "line": 51
+      },
+      "b": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/test_agent_entrypoint.py",
+        "line": 1827
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "this",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/flow-copilot-request.golden.json",
+        "line": 3
+      },
+      "b": {
+        "component": "broker-sdk",
+        "file": "broker-sdk/unexpected-error.test.js",
+        "line": 146
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/chat-write-access.test.js",
+        "line": 127
+      },
+      "b": {
+        "component": "custom_prompts",
+        "file": "custom_prompts/aee-seams.py",
+        "line": 174
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GIT_COMMIT",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/Dockerfile",
+        "line": 9
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/k8s/kind-up.sh",
+        "line": 115
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/matrix.js",
+        "line": 16
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 225
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_HOMESERVER",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/matrix.js",
+        "line": 15
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/40-orchestrator.yaml",
+        "line": 99
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "NODE_ENV",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/Dockerfile",
+        "line": 43
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/50-admin-console.yaml",
+        "line": 38
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ORCHESTRATOR_URL",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/auth.js",
+        "line": 72
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/50-admin-console.yaml",
+        "line": 42
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "it",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/pages/EnvironmentTemplates.jsx",
+        "line": 1321
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/steps-catalog.json",
+        "line": 2905
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "node",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/Dockerfile",
+        "line": 1
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/fake-github/Dockerfile",
+        "line": 3
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_PASSWORD",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/auth.js",
+        "line": 190
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 79
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_USERNAME",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/auth.js",
+        "line": 189
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 78
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AUTH_COOKIE_SECURE",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/auth.js",
+        "line": 68
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 81
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AUTH_SESSION_SECRET",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/auth.test.js",
+        "line": 16
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 80
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GITHUB_API_BASE",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/github-api-base.test.js",
+        "line": 22
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 68
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/matrix.js",
+        "line": 16
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 87
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "executable",
+      "literal": "node",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/Dockerfile",
+        "line": 45
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/journey-runner/bin/lint.js",
+        "line": 14
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/admin/memberships",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/team-room-sync.test.js",
+        "line": 30
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/steps/access.js",
+        "line": 406
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/admin/users",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/pages/Users.jsx",
+        "line": 349
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/steps/identity.js",
+        "line": 103
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/agent-outcomes/suggest",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/outcome-suggest-wake-wiring.test.js",
+        "line": 29
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/steps/flows.js",
+        "line": 631
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/agent-prompt/generate",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/pages/ProcessCanvas.jsx",
+        "line": 1624
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/steps/flows.js",
+        "line": 179
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/agents",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/bp-removal-guard.test.js",
+        "line": 68
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/journey-runner/fixtures.js",
+        "line": 346
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/agents/statuses",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/work-plane-access.test.js",
+        "line": 167
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/steps-catalog.json",
+        "line": 549
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/auth/login",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/auth.js",
+        "line": 335
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/global-setup.js",
+        "line": 45
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/auth/session",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/auth.js",
+        "line": 385
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/steps/users.js",
+        "line": 181
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/environments",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/console-quick-wins-wiring.test.js",
+        "line": 57
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/journey-runner/fixtures.js",
+        "line": 342
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/flows/graph",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/bp-removal-guard.test.js",
+        "line": 120
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/steps/wizard.js",
+        "line": 70
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/github-tokens",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/credential-input.test.js",
+        "line": 170
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/steps/env.js",
+        "line": 58
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/matrix/agents",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/chat-write-access.test.js",
+        "line": 225
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/steps/agents.js",
+        "line": 161
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/process/drafts",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/draft-routes-access.test.js",
+        "line": 36
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/journey-runner/fixtures.js",
+        "line": 253
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/skills",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/skill-copy-origin.test.js",
+        "line": 93
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/steps/knowledge.js",
+        "line": 20
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/ssh-keys",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/credential-input.test.js",
+        "line": 152
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/steps/credentials.js",
+        "line": 75
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/ssh-keys/generate",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/credential-input.test.js",
+        "line": 159
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/steps/credentials.js",
+        "line": 48
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/teams",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/bp-removal-guard.test.js",
+        "line": 67
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/steps/access.js",
+        "line": 154
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/transcribe",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/matrix-agent-roster.test.js",
+        "line": 262
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/tests/stt-transcribe.spec.js",
+        "line": 54
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/users/directory",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/draft-routes-access.test.js",
+        "line": 213
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/steps/access.js",
+        "line": 85
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/e2e/fixture.git",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/repo-identity.test.js",
+        "line": 33
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/journeys/iban-story.yaml",
+        "line": 34
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/v1/messages",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/anthropic-transport.test.js",
+        "line": 26
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/fake-github/server.test.js",
+        "line": 164
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "GitHub",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/flow-copilot-request.golden.json",
+        "line": 3
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/skill-pool/agent-templates/business-analyst.json",
+        "line": 11
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "a",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/flow-copilot-request.golden.json",
+        "line": 3
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/plugin-sync.test.js",
+        "line": 291
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "keeps",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/knowledge-graph.test.js",
+        "line": 410
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/teams-store.test.js",
+        "line": 680
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "node",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/Dockerfile",
+        "line": 1
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/Dockerfile",
+        "line": 1
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AGENT_ID",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/test-matrix.sh",
+        "line": 21
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/scripts/multi-agent-bid.sh",
+        "line": 41
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GITHUB_API_BASE",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/github-api-base.test.js",
+        "line": 22
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/github-api-base.test.js",
+        "line": 56
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GITHUB_EVENT_LOG_DIR",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/github-event-log.js",
+        "line": 18
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/github-event-log.js",
+        "line": 27
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MAINTENANCE_STATE_DIR",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/maintenance-mode.js",
+        "line": 18
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/maintenance-state-reader.js",
+        "line": 19
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/matrix.js",
+        "line": 16
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 123
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "PR_EVENTS_LOG_DIR",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/pr-events-log.js",
+        "line": 15
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/pr-events-log.js",
+        "line": 27
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "USAGE_LOG_DIR",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/pr-events-log.js",
+        "line": 15
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/pr-events-log.js",
+        "line": 27
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/a/b",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/pages/agent-chat/trigger-repo-status.test.js",
+        "line": 17
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/github-repo-status.test.js",
+        "line": 232
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/acme/repo",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/knowledge-links.test.js",
+        "line": 20
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/agent-git-ops.test.js",
+        "line": 21
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/acme/repo.git",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/knowledge-links.test.js",
+        "line": 14
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/agent-git-ops.test.js",
+        "line": 20
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/acme/shared.git",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/pages/agent-chat/trigger-repo-status.test.js",
+        "line": 12
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/github-repo-status.test.js",
+        "line": 26
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/acme/widgets",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/components/repository-url-view.test.js",
+        "line": 65
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/github-poller.test.js",
+        "line": 30
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/chat-write-access.test.js",
+        "line": 127
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/mcp-seed.test.js",
+        "line": 36
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/e2e/fixture.git",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/repo-identity.test.js",
+        "line": 33
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/github-poller.test.js",
+        "line": 37
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/issues/{}",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/pages/process/flow-anomalies-view.test.js",
+        "line": 15
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/flow-anomaly-detector.test.js",
+        "line": 115
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/o/r/issues/{}",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/pages/agent-chat/removed-instance-view.test.js",
+        "line": 31
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/pending-queue.test.js",
+        "line": 207
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/o/r/pull/{}",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/pages/pending-queue-view.test.js",
+        "line": 341
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/github-poller.test.js",
+        "line": 474
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/org/repo",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/components/repository-url-view.test.js",
+        "line": 16
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/pr-events-log.test.js",
+        "line": 20
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/org/repo.git",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/components/repository-fields-view.test.js",
+        "line": 23
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/pr-events-log.test.js",
+        "line": 19
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/org/repo/pull/{}",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/pages/agent-chat/agent-events-view.test.js",
+        "line": 26
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/github-event-log.test.js",
+        "line": 75
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/v1",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/helper-chat/handler.test.js",
+        "line": 51
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/llm-provenance.test.js",
+        "line": 14
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "a",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/flow-copilot-request.golden.json",
+        "line": 3
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/test-mgmt/bin/aee-test.py",
+        "line": 298
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "node",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/Dockerfile",
+        "line": 1
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/github-issues/broker/Dockerfile",
+        "line": 1
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GITHUB_API_BASE",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/github-api-base.test.js",
+        "line": 22
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/github-issues/broker/server.test.js",
+        "line": 67
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/chat-write-access.test.js",
+        "line": 127
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/github-issues/broker/server.js",
+        "line": 300
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/{}/svg",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/image-type.test.js",
+        "line": 40
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/netzplan/broker/ui/app.js",
+        "line": 273
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/matrix.js",
+        "line": 16
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 77
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_HOMESERVER",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/matrix.js",
+        "line": 15
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 76
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ORCHESTRATOR_URL",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/auth.js",
+        "line": 72
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 75
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "executable",
+      "literal": "node",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/Dockerfile",
+        "line": 45
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-wiki-server.js",
+        "line": 58
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/chat-write-access.test.js",
+        "line": 127
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 114
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/environments",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/console-quick-wins-wiring.test.js",
+        "line": 57
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 276
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/github-tokens",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/credential-input.test.js",
+        "line": 170
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-issue-263.mjs",
+        "line": 74
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/llm-endpoints",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/provider-owner-persistence.test.js",
+        "line": 32
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-issue-263.mjs",
+        "line": 132
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/mcp-credentials",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/pages/EnvironmentTemplates.jsx",
+        "line": 102
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-issue-263.mjs",
+        "line": 103
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/mcp-servers",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/outcome-suggest-wake-wiring.test.js",
+        "line": 32
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 104
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/ssh-keys",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/credential-input.test.js",
+        "line": 152
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-issue-263.mjs",
+        "line": 40
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/v1",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/api/helper-chat/handler.test.js",
+        "line": 51
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-issue-263.mjs",
+        "line": 133
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "is",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/pages/toolchain-select-view.test.js",
+        "line": 129
+      },
+      "b": {
+        "component": "toolchains",
+        "file": "toolchains/fullstack/toolchain.json",
+        "line": 6
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "one",
+      "a": {
+        "component": "admin-console",
+        "file": "admin-console/src/pages/KnowledgeFlow.jsx",
+        "line": 2757
+      },
+      "b": {
+        "component": "toolchains",
+        "file": "toolchains/fullstack/toolchain.json",
+        "line": 6
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "python",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/Dockerfile",
+        "line": 14
+      },
+      "b": {
+        "component": "custom_prompts",
+        "file": "custom_prompts/example_outputs/sample_repo/Dockerfile",
+        "line": 1
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GITHUB_TOKEN",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 3401
+      },
+      "b": {
+        "component": "custom_prompts",
+        "file": "custom_prompts/example_outputs/sample_repo/Dockerfile",
+        "line": 3
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 8362
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 225
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_HOMESERVER",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 8363
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/40-orchestrator.yaml",
+        "line": 99
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "NODE_ENV",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/Dockerfile",
+        "line": 177
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/50-admin-console.yaml",
+        "line": 38
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "python",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/Dockerfile",
+        "line": 14
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/git-remote/Dockerfile",
+        "line": 8
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_FAKE_CLAUDE",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 8960
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 49
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "BRANCH",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/e2e/fixtures/playbooks/developer-implement.sh",
+        "line": 23
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/seed-fixture-repo.sh",
+        "line": 21
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GITHUB_API_BASE",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/e2e/fixtures/playbooks/_lib.sh",
+        "line": 19
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 68
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 8362
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 87
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "memory",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 2958
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/prompt-assembly.js",
+        "line": 764
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_PER_AGENT_VOLUME",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 571
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/spawn-container.js",
+        "line": 58
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AGENT_ID",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 220
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/scripts/multi-agent-bid.sh",
+        "line": 41
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "CLAUDE_CODE_VERSION",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/Dockerfile",
+        "line": 58
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/Dockerfile",
+        "line": 40
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GITHUB_API_BASE",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/e2e/fixtures/playbooks/_lib.sh",
+        "line": 19
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/github-api-base.test.js",
+        "line": 56
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 8362
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 123
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "REPO",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/e2e/fixtures/playbooks/ba-create-issue.sh",
+        "line": 12
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/scripts/multi-agent-bid.sh",
+        "line": 40
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "executable",
+      "literal": "python3",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/Dockerfile",
+        "line": 179
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/context-browse.test.js",
+        "line": 113
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/o/r/issues/{}",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/test_agent_entrypoint.py",
+        "line": 846
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/pending-queue.test.js",
+        "line": 207
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/o/r/pull/{}",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/test_agent_entrypoint.py",
+        "line": 858
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/github-poller.test.js",
+        "line": 474
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/v1",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/test_agent_entrypoint.py",
+        "line": 1827
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/llm-provenance.test.js",
+        "line": 14
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_AGENT_CALLER_TOKEN",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 992
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/jira/bin/aee-jira.py",
+        "line": 491
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_WORKSPACE",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 9028
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/dummy-echo/bin/aee-echo.py",
+        "line": 29
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GITHUB_API_BASE",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/e2e/fixtures/playbooks/_lib.sh",
+        "line": 19
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/github-issues/broker/server.test.js",
+        "line": 67
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 8362
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 77
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_HOMESERVER",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/agent-entrypoint.py",
+        "line": 8363
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 76
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/v1",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/scripts/test_agent_entrypoint.py",
+        "line": 1827
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-issue-263.mjs",
+        "line": 133
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "python",
+      "a": {
+        "component": "agent-image",
+        "file": "agent-image/Dockerfile",
+        "line": 14
+      },
+      "b": {
+        "component": "stt",
+        "file": "stt/Dockerfile",
+        "line": 1
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "REPO_ROOT",
+      "a": {
+        "component": "custom_prompts",
+        "file": "custom_prompts/synthesizer_scripts/synthesize_with_llm.sh",
+        "line": 10
+      },
+      "b": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 52
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "python",
+      "a": {
+        "component": "custom_prompts",
+        "file": "custom_prompts/example_outputs/sample_repo/Dockerfile",
+        "line": 1
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/git-remote/Dockerfile",
+        "line": 8
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "REPO_ROOT",
+      "a": {
+        "component": "custom_prompts",
+        "file": "custom_prompts/synthesizer_scripts/synthesize_with_llm.sh",
+        "line": 10
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 15
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MODE",
+      "a": {
+        "component": "custom_prompts",
+        "file": "custom_prompts/synthesizer_scripts/synthesize_with_llm.sh",
+        "line": 817
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/scripts/multi-agent-bid.sh",
+        "line": 43
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api",
+      "a": {
+        "component": "custom_prompts",
+        "file": "custom_prompts/aee-seams.py",
+        "line": 174
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/mcp-seed.test.js",
+        "line": 36
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api",
+      "a": {
+        "component": "custom_prompts",
+        "file": "custom_prompts/aee-seams.py",
+        "line": 174
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/github-issues/broker/server.js",
+        "line": 300
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api",
+      "a": {
+        "component": "custom_prompts",
+        "file": "custom_prompts/aee-seams.py",
+        "line": 174
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 114
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "python",
+      "a": {
+        "component": "custom_prompts",
+        "file": "custom_prompts/example_outputs/sample_repo/Dockerfile",
+        "line": 1
+      },
+      "b": {
+        "component": "stt",
+        "file": "stt/Dockerfile",
+        "line": 1
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "REPO_ROOT",
+      "a": {
+        "component": "custom_prompts",
+        "file": "custom_prompts/synthesizer_scripts/synthesize_with_llm.sh",
+        "line": 10
+      },
+      "b": {
+        "component": "toolchains",
+        "file": "toolchains/_shared/verify-toolchain.sh",
+        "line": 41
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_PASS",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/gcp/vm-stack-setup.sh",
+        "line": 14
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/stack-up.sh",
+        "line": 46
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_PORT",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/gcp/vm-update.sh",
+        "line": 37
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 41
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_USER",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 177
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 77
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_INSTANCE_ID",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/40-orchestrator.yaml",
+        "line": 96
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 38
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "CLUSTER_NAME",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/kind-up.sh",
+        "line": 66
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/kind-stack-down.sh",
+        "line": 13
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "CONDUWUIT_ADMIN_ROOM",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 238
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 88
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ENV_FILE",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 89
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 16
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "HOOK_PORT",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/40-orchestrator.yaml",
+        "line": 107
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 43
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "KIND_EXPERIMENTAL_PROVIDER",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/kind-up.sh",
+        "line": 95
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/kind-stack-down.sh",
+        "line": 20
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 225
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 87
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "NAMESPACE",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 66
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/kind-stack-up.sh",
+        "line": 27
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "PORT",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/e2e/80-e2e-fakes.yaml",
+        "line": 49
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/fake-github/Dockerfile",
+        "line": 6
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "PROJECT",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/gcp/deploy.sh",
+        "line": 12
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/stack-down.sh",
+        "line": 13
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "REPO_ROOT",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 52
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 15
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "SCRIPT_DIR",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/gcp/provision.sh",
+        "line": 34
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/kind-stack-down.sh",
+        "line": 10
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "SOCK",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/gcp/vm-stack-setup.sh",
+        "line": 23
+      },
+      "b": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 29
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_PASS",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/gcp/vm-stack-setup.sh",
+        "line": 14
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 30
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_PORT",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/gcp/vm-update.sh",
+        "line": 37
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 198
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_ROOM",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 230
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 146
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_USER",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 177
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 29
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_AGENT_IMAGE_PULL_POLICY",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/40-orchestrator.yaml",
+        "line": 90
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/spawn-kubernetes-plugin.js",
+        "line": 99
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_AGENT_SERVICE_ACCOUNT",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/40-orchestrator.yaml",
+        "line": 94
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/spawn-kubernetes-pod.js",
+        "line": 93
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_CONTAINER_RUNTIME",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/40-orchestrator.yaml",
+        "line": 50
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/container-exec-runtime.js",
+        "line": 18
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_INSTANCE_ID",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/40-orchestrator.yaml",
+        "line": 96
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/container-exec.js",
+        "line": 24
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_K8S_NAMESPACE",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/40-orchestrator.yaml",
+        "line": 52
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/pod-exec.js",
+        "line": 31
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_WORKSPACE_PVC",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/40-orchestrator.yaml",
+        "line": 92
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/spawn-kubernetes-pod.js",
+        "line": 95
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AGENT_IMAGE",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/40-orchestrator.yaml",
+        "line": 56
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/spawn-container.js",
+        "line": 28
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ENV_FILE",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 89
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 23
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "HOMESERVER",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 178
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 28
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 225
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 123
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "SCRIPT_DIR",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/gcp/provision.sh",
+        "line": 34
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 22
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 225
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 77
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_HOMESERVER",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/40-orchestrator.yaml",
+        "line": 99
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 76
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ORCHESTRATOR_URL",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/base/app/50-admin-console.yaml",
+        "line": 42
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 75
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "FAILED",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/render-check.sh",
+        "line": 19
+      },
+      "b": {
+        "component": "toolchains",
+        "file": "toolchains/_shared/base-contract-check.sh",
+        "line": 33
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "REPO_ROOT",
+      "a": {
+        "component": "deploy",
+        "file": "deploy/k8s/gke-up.sh",
+        "line": 52
+      },
+      "b": {
+        "component": "toolchains",
+        "file": "toolchains/_shared/verify-toolchain.sh",
+        "line": 41
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "node",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/fake-github/Dockerfile",
+        "line": 3
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/Dockerfile",
+        "line": 1
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "their",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/steps-catalog.json",
+        "line": 369
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/knowledge-retrieval.test.js",
+        "line": 36
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_PASS",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/scripts/stack-up.sh",
+        "line": 46
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 30
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_PORT",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 41
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 198
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ADMIN_USER",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 77
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 29
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_GITHUB_POLL_INTERVAL_MS",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 55
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/github-poller.js",
+        "line": 50
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "AEE_INSTANCE_ID",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 38
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/container-exec.js",
+        "line": 24
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "COMPOSE_CMD",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/scripts/stack-up.sh",
+        "line": 45
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 35
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "COMPOSE_PROJECT_NAME",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 37
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/container-exec.js",
+        "line": 21
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "CONDUWUIT_PORT",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 42
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 28
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "ENV_FILE",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 16
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 23
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GITHUB_API_BASE",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 68
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/github-api-base.test.js",
+        "line": 56
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 87
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 123
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "PODMAN_HOST_SOCKET",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 84
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/plugin-runtime.js",
+        "line": 73
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "SCRIPT_DIR",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/scripts/kind-stack-down.sh",
+        "line": 10
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 22
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "executable",
+      "literal": "node",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/journey-runner/bin/lint.js",
+        "line": 14
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/Dockerfile",
+        "line": 75
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/e2e/fixture.git",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/journeys/iban-story.yaml",
+        "line": 34
+      },
+      "b": {
+        "component": "orchestrator",
+        "file": "orchestrator/github-poller.test.js",
+        "line": 37
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "its",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/steps-catalog.json",
+        "line": 3182
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/jira/plugin.json",
+        "line": 113
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "node",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/fake-github/Dockerfile",
+        "line": 3
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/github-issues/broker/Dockerfile",
+        "line": 1
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GITHUB_API_BASE",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 68
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/github-issues/broker/server.test.js",
+        "line": 67
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "executable",
+      "literal": "node",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/journey-runner/bin/lint.js",
+        "line": 14
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/github-issues/broker/Dockerfile",
+        "line": 46
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 87
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 77
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "executable",
+      "literal": "node",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/fake-github/Dockerfile",
+        "line": 8
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-wiki-server.js",
+        "line": 58
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/environments",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/journey-runner/fixtures.js",
+        "line": 342
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 276
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/github-tokens",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/steps/env.js",
+        "line": 58
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-issue-263.mjs",
+        "line": 74
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api/ssh-keys",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/steps/credentials.js",
+        "line": 75
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-issue-263.mjs",
+        "line": 40
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "python",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/git-remote/Dockerfile",
+        "line": 8
+      },
+      "b": {
+        "component": "stt",
+        "file": "stt/Dockerfile",
+        "line": 1
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "REPO_ROOT",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/scripts/gen-env.sh",
+        "line": 15
+      },
+      "b": {
+        "component": "toolchains",
+        "file": "toolchains/_shared/verify-toolchain.sh",
+        "line": 41
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "WORK",
+      "a": {
+        "component": "e2e",
+        "file": "e2e/scripts/seed-fixture-repo.sh",
+        "line": 30
+      },
+      "b": {
+        "component": "toolchains",
+        "file": "toolchains/_shared/verify-toolchain.sh",
+        "line": 45
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "a",
+      "a": {
+        "component": "orchestrator",
+        "file": "orchestrator/plugin-sync.test.js",
+        "line": 291
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/test-mgmt/bin/aee-test.py",
+        "line": 298
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "node",
+      "a": {
+        "component": "orchestrator",
+        "file": "orchestrator/Dockerfile",
+        "line": 1
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/github-issues/broker/Dockerfile",
+        "line": 1
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "db-table",
+      "literal": "your",
+      "a": {
+        "component": "orchestrator",
+        "file": "orchestrator/skill-pool/agent-templates/business-analyst.json",
+        "line": 11
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/jira/plugin.json",
+        "line": 113
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "GITHUB_API_BASE",
+      "a": {
+        "component": "orchestrator",
+        "file": "orchestrator/github-api-base.test.js",
+        "line": 56
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/github-issues/broker/server.test.js",
+        "line": 67
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "PODMAN_SOCK_PATH",
+      "a": {
+        "component": "orchestrator",
+        "file": "orchestrator/container-exec.js",
+        "line": 20
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/podman-sandbox/broker/server.js",
+        "line": 60
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api",
+      "a": {
+        "component": "orchestrator",
+        "file": "orchestrator/mcp-seed.test.js",
+        "line": 36
+      },
+      "b": {
+        "component": "plugins",
+        "file": "plugins/github-issues/broker/server.js",
+        "line": 300
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "env-var",
+      "literal": "MATRIX_ACCESS_TOKEN",
+      "a": {
+        "component": "orchestrator",
+        "file": "orchestrator/setup.sh",
+        "line": 123
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 77
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "executable",
+      "literal": "node",
+      "a": {
+        "component": "orchestrator",
+        "file": "orchestrator/Dockerfile",
+        "line": 75
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-wiki-server.js",
+        "line": 58
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api",
+      "a": {
+        "component": "orchestrator",
+        "file": "orchestrator/mcp-seed.test.js",
+        "line": 36
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 114
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/v1",
+      "a": {
+        "component": "orchestrator",
+        "file": "orchestrator/llm-provenance.test.js",
+        "line": 14
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-issue-263.mjs",
+        "line": 133
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "executable",
+      "literal": "node",
+      "a": {
+        "component": "plugins",
+        "file": "plugins/github-issues/broker/Dockerfile",
+        "line": 46
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-wiki-server.js",
+        "line": 58
+      },
+      "status": "matched"
+    },
+    {
+      "kind": "http-endpoint",
+      "literal": "/api",
+      "a": {
+        "component": "plugins",
+        "file": "plugins/github-issues/broker/server.js",
+        "line": 300
+      },
+      "b": {
+        "component": "scripts",
+        "file": "scripts/test-mcp/test-api-endpoints.js",
+        "line": 114
+      },
+      "status": "matched"
+    }
+  ]
+}

@@ -1,0 +1,182 @@
+{
+  "file": "src/billing/invoice.py",
+  "hash": "f444200ad1d00c0e59b13ea65fccb5bb2e87db25ebfd91990da4bf1a12f85bc4",
+  "language": "Python",
+  "component": "billing",
+  "package": null,
+  "lines": {
+    "total": 11,
+    "code": 8,
+    "comment": 0,
+    "blank": 3
+  },
+  "symbols": [
+    {
+      "name": "Flask",
+      "kind": "import",
+      "scope": "",
+      "lineRange": {
+        "start": 1,
+        "end": 1
+      },
+      "source": "aee-inventory"
+    },
+    {
+      "name": "request",
+      "kind": "import",
+      "scope": "",
+      "lineRange": {
+        "start": 1,
+        "end": 1
+      },
+      "source": "aee-inventory"
+    },
+    {
+      "name": "connect",
+      "kind": "import",
+      "scope": "",
+      "lineRange": {
+        "start": 2,
+        "end": 2
+      },
+      "source": "aee-inventory"
+    },
+    {
+      "name": "fetch_order",
+      "kind": "import",
+      "scope": "",
+      "lineRange": {
+        "start": 2,
+        "end": 2
+      },
+      "source": "aee-inventory"
+    },
+    {
+      "name": "app",
+      "kind": "variable",
+      "scope": "",
+      "lineRange": {
+        "start": 4,
+        "end": 4
+      },
+      "source": "aee-inventory"
+    },
+    {
+      "name": "invoice",
+      "kind": "function",
+      "scope": "",
+      "lineRange": {
+        "start": 7,
+        "end": 11
+      },
+      "parameters": [],
+      "returnType": null,
+      "returns": [
+        {
+          "line": 11,
+          "expr": "\"Invoice %s: %s\" % (row[0], row[1])"
+        }
+      ],
+      "nloc": 4,
+      "ccn": 1,
+      "source": "aee-inventory"
+    }
+  ],
+  "referencedSymbols": [
+    {
+      "name": "Flask",
+      "usage": "call",
+      "via": "flask",
+      "count": 1,
+      "lineRange": {
+        "start": 4,
+        "end": 4
+      }
+    },
+    {
+      "name": "connect",
+      "usage": "call",
+      "via": "billing.db",
+      "count": 1,
+      "lineRange": {
+        "start": 10,
+        "end": 10
+      }
+    },
+    {
+      "name": "fetch_order",
+      "usage": "call",
+      "via": "billing.db",
+      "count": 1,
+      "lineRange": {
+        "start": 10,
+        "end": 10
+      }
+    }
+  ],
+  "dependencies": [
+    {
+      "style": "from",
+      "module": "flask",
+      "names": [
+        {
+          "name": "Flask",
+          "alias": null
+        },
+        {
+          "name": "request",
+          "alias": null
+        }
+      ],
+      "alias": null,
+      "relative": false,
+      "lineRange": {
+        "start": 1,
+        "end": 1
+      }
+    },
+    {
+      "style": "from",
+      "module": "billing.db",
+      "names": [
+        {
+          "name": "connect",
+          "alias": null
+        },
+        {
+          "name": "fetch_order",
+          "alias": null
+        }
+      ],
+      "alias": null,
+      "relative": false,
+      "lineRange": {
+        "start": 2,
+        "end": 2
+      }
+    }
+  ],
+  "sideEffects": [],
+  "securitySurface": [
+    {
+      "kind": "entry-point",
+      "category": "http-param",
+      "description": "Reads query parameter order_id from request.args",
+      "lineRange": {
+        "start": 9,
+        "end": 9
+      }
+    },
+    {
+      "kind": "sink",
+      "category": "http-response",
+      "description": "Returns a string built from database row values as the HTTP response body",
+      "lineRange": {
+        "start": 11,
+        "end": 11
+      }
+    }
+  ],
+  "injection_flags": [],
+  "warnings": []
+}

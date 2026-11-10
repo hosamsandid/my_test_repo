@@ -1,0 +1,4 @@
+{"file":"src/billing/invoice.py","language":"Python","component":"billing","classification":"PRODUCTION","lines":11}
+{"file":"src/billing/db.py","language":"Python","component":"billing","classification":"PRODUCTION","lines":15}
+{"file":"src/billing/__init__.py","language":"Python","component":"billing","classification":"PRODUCTION","lines":1}
+{"file":"src/web/client.ts","language":"TypeScript","component":"web","classification":"PRODUCTION","lines":20}

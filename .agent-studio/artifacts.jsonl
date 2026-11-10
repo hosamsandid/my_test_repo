@@ -1,0 +1,3 @@
+{"artifact": "Extract Log", "path": ".aee/extract-log.jsonl", "by": "unknown", "commit": "e12f00800a", "ts": "2026-11-10T15:50:52Z"}
+{"artifact": "Link Graph", "path": ".aee/link-graph.json", "by": "unknown", "commit": "e12f00800a", "ts": "2026-11-10T15:54:04Z"}
+{"artifact": "Link Summary", "path": ".aee/link-summary.md", "by": "unknown", "commit": "e12f00800a", "ts": "2026-11-10T15:54:04Z"}

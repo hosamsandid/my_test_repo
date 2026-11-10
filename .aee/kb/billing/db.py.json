@@ -1,0 +1,172 @@
+{
+  "file": "src/billing/db.py",
+  "hash": "ead9560daf7251741c0dcaa0b08da57e8b7a0b89ffaba7cd5659278bf48b2118",
+  "language": "Python",
+  "component": "billing",
+  "package": null,
+  "lines": {
+    "total": 12,
+    "code": 9,
+    "comment": 0,
+    "blank": 3
+  },
+  "symbols": [
+    {
+      "name": "os",
+      "kind": "import",
+      "scope": "",
+      "lineRange": {
+        "start": 1,
+        "end": 1
+      },
+      "source": "aee-inventory"
+    },
+    {
+      "name": "sqlite3",
+      "kind": "import",
+      "scope": "",
+      "lineRange": {
+        "start": 2,
+        "end": 2
+      },
+      "source": "aee-inventory"
+    },
+    {
+      "name": "DB_URL",
+      "kind": "constant",
+      "scope": "",
+      "lineRange": {
+        "start": 4,
+        "end": 4
+      },
+      "source": "aee-inventory"
+    },
+    {
+      "name": "connect",
+      "kind": "function",
+      "scope": "",
+      "lineRange": {
+        "start": 6,
+        "end": 7
+      },
+      "parameters": [],
+      "returnType": null,
+      "returns": [
+        {
+          "line": 7,
+          "expr": "sqlite3.connect(DB_URL)"
+        }
+      ],
+      "nloc": 2,
+      "ccn": 1,
+      "source": "aee-inventory"
+    },
+    {
+      "name": "fetch_order",
+      "kind": "function",
+      "scope": "",
+      "lineRange": {
+        "start": 9,
+        "end": 12
+      },
+      "parameters": [
+        {
+          "name": "conn",
+          "type": null,
+          "default": null
+        },
+        {
+          "name": "order_id",
+          "type": null,
+          "default": null
+        }
+      ],
+      "returnType": null,
+      "returns": [
+        {
+          "line": 12,
+          "expr": "cur.fetchone()"
+        }
+      ],
+      "nloc": 4,
+      "ccn": 1,
+      "source": "aee-inventory"
+    }
+  ],
+  "referencedSymbols": [
+    {
+      "name": "sqlite3.connect",
+      "usage": "call",
+      "via": "sqlite3",
+      "count": 1,
+      "lineRange": {
+        "start": 7,
+        "end": 7
+      }
+    }
+  ],
+  "dependencies": [
+    {
+      "style": "import",
+      "module": "os",
+      "names": [],
+      "alias": null,
+      "relative": false,
+      "lineRange": {
+        "start": 1,
+        "end": 1
+      }
+    },
+    {
+      "style": "import",
+      "module": "sqlite3",
+      "names": [],
+      "alias": null,
+      "relative": false,
+      "lineRange": {
+        "start": 2,
+        "end": 2
+      }
+    }
+  ],
+  "sideEffects": [
+    {
+      "kind": "file-io",
+      "target": "SQLite database named by DB_URL",
+      "lineRange": {
+        "start": 7,
+        "end": 7
+      }
+    },
+    {
+      "kind": "file-io",
+      "target": "SQL statement on the orders table",
+      "lineRange": {
+        "start": 11,
+        "end": 11
+      }
+    }
+  ],
+  "securitySurface": [
+    {
+      "kind": "entry-point",
+      "category": "env",
+      "description": "Reads environment variable ORDERS_DB_URL",
+      "lineRange": {
+        "start": 4,
+        "end": 4
+      }
+    },
+    {
+      "kind": "sink",
+      "category": "sql-execution",
+      "description": "Executes a SQL string that includes the order_id parameter",
+      "lineRange": {
+        "start": 11,
+        "end": 11
+      }
+    }
+  ],
+  "injection_flags": [],
+  "warnings": []
+}

@@ -1,0 +1,106 @@
+{
+  "file": "src/web/client.ts",
+  "hash": "4149d286f22986b44baa39afd77493c5e971c2ea86ba800d1f802b6962c4fc10",
+  "language": "JavaScript",
+  "component": "web",
+  "package": null,
+  "lines": {
+    "total": 8,
+    "code": 7,
+    "comment": 0,
+    "blank": 1
+  },
+  "symbols": [
+    {
+      "name": "API",
+      "kind": "constant",
+      "scope": "",
+      "lineRange": {
+        "start": 1,
+        "end": 1
+      },
+      "source": "aee-inventory"
+    },
+    {
+      "name": "loadInvoice",
+      "kind": "function",
+      "scope": "",
+      "lineRange": {
+        "start": 3,
+        "end": 8
+      },
+      "parameters": [
+        {
+          "name": "orderId",
+          "type": "string",
+          "default": null
+        }
+      ],
+      "returnType": "Promise<string>",
+      "returns": [
+        {
+          "line": 7,
+          "expr": "res.text()"
+        }
+      ],
+      "nloc": 6,
+      "ccn": 1,
+      "source": "aee-inventory"
+    }
+  ],
+  "referencedSymbols": [
+    {
+      "name": "URL",
+      "usage": "call",
+      "via": null,
+      "count": 1,
+      "lineRange": {
+        "start": 4,
+        "end": 4
+      }
+    },
+    {
+      "name": "fetch",
+      "usage": "call",
+      "via": null,
+      "count": 1,
+      "lineRange": {
+        "start": 6,
+        "end": 6
+      }
+    }
+  ],
+  "dependencies": [],
+  "sideEffects": [
+    {
+      "kind": "network",
+      "target": "ORDERS_API_URL + /api/v1/invoices",
+      "lineRange": {
+        "start": 6,
+        "end": 6
+      }
+    }
+  ],
+  "securitySurface": [
+    {
+      "kind": "entry-point",
+      "category": "env",
+      "description": "Reads environment variable ORDERS_API_URL",
+      "lineRange": {
+        "start": 1,
+        "end": 1
+      }
+    },
+    {
+      "kind": "sink",
+      "category": "network-send",
+      "description": "Sends an HTTP request to the URL built from ORDERS_API_URL",
+      "lineRange": {
+        "start": 6,
+        "end": 6
+      }
+    }
+  ],
+  "injection_flags": [],
+  "warnings": []
+}
